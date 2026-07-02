@@ -49,6 +49,7 @@ from rlvr.autoresearch.tools.eval_det_avoidance import (
     reward_breakdown_to_det_dict,
 )
 from rlvr.autoresearch.tools.percentile_filter_perturbed import is_scene_eligible
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import (
     draw_scene_base,
@@ -176,9 +177,19 @@ def main() -> None:
             for entry in json.load(f):
                 manifest_by_npz[entry["npz"]] = entry
 
-    out_root = Path(args.output_dir)
+    out_root = Path(args.output_dir) / render_tag(args.model_path, args.lora_path, args.config)
     (out_root / "improve").mkdir(parents=True, exist_ok=True)
     (out_root / "no_improve").mkdir(parents=True, exist_ok=True)
+    write_render_meta(
+        out_root,
+        tool="viz_p4_recovery",
+        model_path=args.model_path,
+        model_label=path_label(args.model_path),
+        lora_path=args.lora_path or "",
+        lora_label=path_label(args.lora_path),
+        config_path=args.config,
+        config_label=path_label(args.config),
+    )
 
     # Determinism
     torch.manual_seed(args.seed)

@@ -239,7 +239,10 @@ def render_ghost_step(
         ax.set_ylim(cy - cfg.view_half_m, cy + cfg.view_half_m)
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.15)
-        ax.set_title(f"{cfg.subtitle}{extra_title}", fontsize=11)
+        title = cfg.subtitle or ""
+        if extra_title:
+            title = f"{title}\n{extra_title}" if title else extra_title
+        ax.set_title(title, fontsize=11)
         fig.tight_layout()
         fig.savefig(output_path, dpi=100)
         fig.clf()
@@ -329,7 +332,7 @@ def render_ghost_step(
 
     title = f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s"
     if cfg.subtitle:
-        title += f"  {cfg.subtitle}"
+        title = f"{cfg.subtitle}\n{title}"
     if extra_title:
         title += f"\n{extra_title}"
     ax.set_title(title, fontsize=10)

@@ -169,6 +169,7 @@ class Encoder(nn.Module):
             ego = torch.zeros_like(ego)
         ego = torch.cat(
             [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
+            # [ego[:, :6], torch.zeros_like(ego[:, 6:])],
             dim=1,
         )  # Only keep the current + first 5 steps of ego history
 

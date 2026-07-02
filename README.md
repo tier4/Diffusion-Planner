@@ -24,6 +24,18 @@ Run all configured hooks manually with:
 uv run pre-commit run --all-files
 ```
 
+## Autoresearch Control Panel
+
+The autoresearch workflows can be launched from a unified Gradio control panel:
+
+```bash
+source .venv/bin/activate
+python -m control_panel
+```
+
+See `control_panel/README.md` for the workspace layout, asset registry, training/eval tabs,
+PRiSM flow, Perception Reproducer route mining, rendering, and Scene Editor integration.
+
 ## 2. Create dataset
 
 ### 2.1. Prepare rosbags

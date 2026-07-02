@@ -1,0 +1,1509 @@
+"""Unified Gradio control panel: one app, a central asset library, one tab per workflow.
+
+Assets (models, guidance policies, datasets, reward configs, maps) are registered ONCE in the
+Workspace tab; every workflow form picks them from dropdowns. The panel adds no domain logic —
+Run shells out to the existing CLI tools and streams their output. The Scene Editor runs
+in-process (a Gradio sub-server in a daemon thread) and is shown in its tab via an iframe.
+
+Launch:  python -m control_panel   (--port / --host / --editor_port / --share)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shlex
+from pathlib import Path
+
+import gradio as gr
+
+from . import presets as P
+from . import runner as R
+from . import workflows as W
+
+NONE = "(none)"
+ADD = "➕ Browse to add…"  # sentinel: selecting it opens the OS picker to register a new asset
+
+_TYPE_ICON = {
+    "models": "🧠",
+    "loras": "🧩",
+    "policies": "🛰",
+    "grpo_configs": "🎛",
+    "reward_configs": "⚙️",
+    "maps": "🗺",
+    "route_datasets": "📁",
+    "scene_datasets": "🎬",
+    "run_dirs": "📦",
+}
+
+_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+# --------------------------------------------------------------------------------------
+# Value coercion + form building
+# --------------------------------------------------------------------------------------
+def _coerce(spec: W.ArgSpec, v):
+    if spec.kind == "bool":
+        return bool(v)
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip() == "":
+        return None
+    if spec.kind == "int":
+        return int(round(float(v)))
+    if spec.kind == "float":
+        return float(v)
+    return v
+
+
+def _field_role(spec: W.ArgSpec) -> str:
+    if spec.hidden:
+        return "hidden"
+    if spec.auto:
+        return "auto"
+    if spec.derive_from:
+        return "derive"
+    if spec.shared == "ego_shape":
+        return "ego"
+    if spec.shared in P.LIST_TYPES:
+        return "list"
+    return "plain"
+
+
+def _browse_button(textbox, mode: str):
+    """Attach a 📂 button that opens the OS picker and fills ``textbox``."""
+    b = gr.Button("📂", scale=1, min_width=44)
+    b.click(lambda cur, _m=mode: _os_pick(_m, cur or "")[0] or cur, textbox, textbox)
+    return b
+
+
+def _list_choices(library: dict, asset_type: str, required: bool, multi: bool = False) -> list[str]:
+    base = P.entry_names(library, asset_type)
+    if multi:  # multi-select: just the registered names (add via Workspace/scan)
+        return base
+    return ([] if required else [NONE]) + base + [ADD]
+
+
+def _plain_widget(spec: W.ArgSpec, default=None):
+    label = spec.label + (" *" if spec.required else "")
+    info = spec.help or None
+    d = spec.default if default is None else default
+    if spec.kind == "bool":
+        return gr.Checkbox(value=bool(spec.default), label=label, info=info)
+    if spec.kind == "choice":
+        return gr.Dropdown(
+            choices=spec.choices or [],
+            value=d or (spec.choices or [None])[0],
+            label=label,
+            info=info,
+        )
+    if spec.kind in ("int", "float"):
+        return gr.Number(
+            value=d if d not in ("", None) else None,
+            label=label,
+            info=info,
+            precision=0 if spec.kind == "int" else None,
+        )
+    return gr.Textbox(value="" if d in (None,) else str(d), label=label, info=info)
+
+
+def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
+    """Render the form. Returns (fields, flat_comps).
+
+    fields: list of {name, spec, role, comps}. Shared-list fields render a dropdown over the
+    library + a custom-path textbox; derive/ego fields render nothing (resolved at Run).
+    asset_dropdowns[type] collects dropdowns for cross-tab refresh.
+    """
+    fields, flat = [], []
+    dev_defaults = P.field_defaults().get(wf.key, {})  # gitignored testing pre-fills
+    # Workflows with auto-derived outputs get a single "Run name" field; everything else
+    # (the run folder + output files) is placed under <workspace output_dir>/<key>/<run>.
+    if any(a.auto for a in wf.args):
+        if wf.creates in ("scenes", "routes"):
+            lbl = f"Dataset name → datasets/{wf.creates}/<name>/"
+        else:
+            lbl = f"Run name → runs/{wf.key}/<name>/"
+        run_tb = gr.Textbox(value=wf.key, label=lbl)
+        fields.append({"name": "__run__", "spec": None, "role": "runname", "comps": [run_tb]})
+        flat.append(run_tb)
+
+    def _list_widget(spec, scale=None):
+        """A dropdown over the library for a shared-list field.
+
+        Multi-select fields (scene datasets) pick several entries (merged at Run); single fields
+        carry an inline '➕ Browse to add'.
+        """
+        multi = spec.multi_select
+        icon = _TYPE_ICON.get(spec.shared, "")
+        names = _list_choices(library, spec.shared, spec.required, multi)
+        label = f"{icon} {spec.label}" + (" *" if spec.required else "")
+        if multi:
+            dd = gr.Dropdown(
+                choices=names,
+                value=[],
+                multiselect=True,
+                label=label,
+                info=spec.help or None,
+                scale=scale,
+            )
+            last = gr.State([])
+        else:
+            base = P.entry_names(library, spec.shared)
+            value = names[0] if (spec.required and base) else (NONE if not spec.required else None)
+            dd = gr.Dropdown(
+                choices=names, value=value, label=label, info=spec.help or None, scale=scale
+            )
+            last = gr.State(value)
+        pick_mode = "dir" if spec.shared in ("policies", "run_dirs", "route_datasets") else "file"
+        asset_dropdowns.setdefault(spec.shared, []).append(
+            (dd, spec.required, last, pick_mode, multi)
+        )
+        return dd
+
+    specs = list(wf.args)
+    # One row per "model side": a models field plus the LoRA and/or guidance-policy fields that
+    # immediately follow it (each at most once). Gives clean "Model / LoRA / Guidance" rows for
+    # the A/B tools without per-tab layout code.
+    _GROUP_SCALE = {"models": 3, "loras": 2, "policies": 2}
+    i = 0
+    while i < len(specs):
+        spec = specs[i]
+        role = _field_role(spec)
+        if role == "list" and spec.shared == "models":
+            group = [spec]
+            seen = {"models"}
+            j = i + 1
+            while j < len(specs):
+                f = specs[j]
+                if (
+                    _field_role(f) == "list"
+                    and f.shared in ("loras", "policies")
+                    and f.shared not in seen
+                ):
+                    group.append(f)
+                    seen.add(f.shared)
+                    j += 1
+                else:
+                    break
+            if len(group) > 1:
+                with gr.Row():
+                    for g in group:
+                        dd = _list_widget(g, scale=_GROUP_SCALE.get(g.shared, 2))
+                        fields.append({"name": g.name, "spec": g, "role": "list", "comps": [dd]})
+                        flat.append(dd)
+                i = j
+                continue
+
+        comps = []
+        if role in ("hidden", "auto", "derive", "ego"):
+            comps = []  # not rendered; resolved at Run
+        elif role == "list":
+            comps = [_list_widget(spec)]
+        elif role == "plain" and spec.kind in ("file", "dir", "path"):
+            with gr.Row():
+                tb = _plain_widget(spec, default=dev_defaults.get(spec.name))
+                _browse_button(tb, "dir" if spec.kind == "dir" else "file")
+            comps = [tb]
+        else:  # plain non-path (str/int/float/bool/choice)
+            comps = [_plain_widget(spec)]
+        fields.append({"name": spec.name, "spec": spec, "role": role, "comps": comps})
+        flat.extend(comps)
+        i += 1
+    return fields, flat
+
+
+def _merge_scene_lists(paths: list[str], dest_dir: Path | None, argname: str) -> str:
+    """Concatenate several scene-list JSONs (dedup, order-preserving) into one combined JSON."""
+    merged: list = []
+    seen: set = set()
+    for p in paths:
+        try:
+            data = json.loads(Path(p).read_text())
+            items = data.get("files", data) if isinstance(data, dict) else data
+        except (json.JSONDecodeError, OSError) as e:
+            raise ValueError(f"{argname}: could not read scene list {p}: {e}") from e
+        if not isinstance(items, list):
+            raise ValueError(f"{argname}: scene list {p} must be a JSON list or {{'files': [...]}}")
+        for it in items:
+            if it not in seen:
+                seen.add(it)
+                merged.append(it)
+    dest = dest_dir or Path.home() / ".diffusion_planner_jobs"
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / f"_merged_{argname}.json"
+    out.write_text(json.dumps(merged, indent=2))
+    return str(out)
+
+
+def _ws_base(library: dict) -> str:
+    """Base dir for auto outputs: the workspace root (fallback: legacy output_dir)."""
+    return library.get("workspace_root") or library.get("output_dir", "")
+
+
+def _merge_scanned_library(current: dict, scanned: dict) -> dict:
+    """Merge a workspace scan into the persisted library without dropping one-off assets."""
+    merged = dict(scanned)
+    for k in P.SCALAR_KEYS:
+        if k == "workspace_root":
+            continue
+        if current.get(k):
+            merged[k] = current[k]
+    for asset_type in P.LIST_TYPES:
+        entries = list(scanned.get(asset_type, []))
+        seen_paths = {str(Path(e.get("path", "")).expanduser()) for e in entries if e.get("path")}
+        seen_names = {e.get("name", "") for e in entries if e.get("name")}
+        for old in current.get(asset_type, []):
+            old_path = old.get("path", "")
+            old_name = old.get("name", "")
+            if old_path and str(Path(old_path).expanduser()) in seen_paths:
+                continue
+            name = old_name
+            if name in seen_names:
+                base, n = name, 2
+                while name in seen_names:
+                    name, n = f"{base}-{n}", n + 1
+                old = {**old, "name": name}
+            if name:
+                seen_names.add(name)
+            entries.append(old)
+        merged[asset_type] = entries
+    return P._normalize(merged)
+
+
+def _run_dir(library: dict, wf: W.Workflow, run: str) -> Path | None:
+    """The folder a run writes into, per wf.creates: datasets/scenes|routes/<run> or runs/<key>/<run>."""
+    base = _ws_base(library)
+    if not base:
+        return None
+    run = run or "run"
+    if wf.creates == "scenes":
+        return Path(base) / "datasets" / "scenes" / run
+    if wf.creates == "routes":
+        return Path(base) / "datasets" / "routes" / run
+    return Path(base) / "runs" / wf.key / run
+
+
+def _safe_run_name(run: str) -> str:
+    run = (run or "run").strip()
+    if not _RUN_NAME_RE.fullmatch(run):
+        raise ValueError(
+            "Run name must start with a letter/number and contain only letters, numbers, '.', '_', '+', or '-'"
+        )
+    return run
+
+
+def _auto_path(library: dict, wf: W.Workflow, run: str, spec: W.ArgSpec) -> str:
+    """Derive an output path under the run folder.
+
+    For creates='scenes', a `file:*.json` (the scene list) is placed at the scenes/ level as
+    <run>.json (sibling of the npz dir) so the workspace scanner picks it up as a dataset.
+    """
+    rd = _run_dir(library, wf, run)
+    if rd is None:
+        return ""
+    kind, _, rest = spec.auto.partition(":")
+    if wf.creates == "scenes" and kind == "file" and rest.endswith(".json"):
+        return str(rd.parent / f"{run or 'run'}.json")
+    if kind == "dir":
+        return str(rd / rest) if rest else str(rd)
+    if kind == "file":
+        return str(rd / rest)
+    raise ValueError(f"{spec.name}: bad auto spec {spec.auto!r}")
+
+
+def resolve_values(
+    wf: W.Workflow, fields: list, library: dict, flat_values: tuple, make_dirs: bool = False
+) -> dict:
+    """Reconstruct the CLI values dict from the flat form values + the live library.
+
+    Auto-output fields are placed under <workspace output_dir>/<wf.key>/<run name>. When
+    make_dirs is True (at Run, not Preview) the run folder is created so file outputs land.
+    """
+    it = iter(flat_values)
+    values: dict = {}
+    model_entries: dict = {}
+    run_name = ""
+    for f in fields:
+        spec, role, name = f["spec"], f["role"], f["name"]
+        vals = [next(it) for _ in f["comps"]]
+        if role == "runname":
+            run_name = _safe_run_name(vals[0] or "run")
+        elif role == "hidden":
+            values[name] = spec.default
+        elif role == "ego":
+            values[name] = library.get("ego_shape", "")
+        elif role in ("auto", "derive"):
+            pass  # filled in the second pass
+        elif role == "list" and spec.multi_select:
+            sels = vals[0] or []
+            if isinstance(sels, str):
+                sels = [sels]
+            paths = [p for p in (P.resolve_path(library, spec.shared, s) for s in sels) if p]
+            if len(paths) <= 1:
+                values[name] = paths[0] if paths else ""
+            elif make_dirs:
+                values[name] = _merge_scene_lists(paths, _run_dir(library, wf, run_name), name)
+            else:
+                values[name] = f"<merge {len(paths)} datasets at Run>"
+        elif role == "list":
+            sel = vals[0]
+            if sel in (NONE, ADD, None, ""):
+                values[name] = ""
+                entry = {}
+            else:
+                entry = P.find_entry(library, spec.shared, sel) or {}
+                values[name] = entry.get("path", "")
+            if spec.shared == "models":
+                model_entries[name] = entry
+        else:
+            values[name] = _coerce(spec, vals[0])
+
+    run_dir = _run_dir(library, wf, run_name)
+    if make_dirs and run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    for f in fields:
+        spec = f["spec"]
+        if f["role"] == "auto":
+            values[f["name"]] = _auto_path(library, wf, run_name, spec)
+        elif f["role"] == "derive":
+            entry = model_entries.get(spec.derive_from, {})
+            if spec.derive_field == "dir":  # the model's folder (deploy dir)
+                p = entry.get("path", "")
+                values[f["name"]] = str(Path(p).parent) if p else ""
+            else:
+                values[f["name"]] = entry.get(spec.derive_field, "") or ""
+    return values
+
+
+# --------------------------------------------------------------------------------------
+# Run / preview / stop / attach handlers
+# --------------------------------------------------------------------------------------
+def _err(msg: str) -> str:
+    return f"<span style='color:#d33'>⚠ {msg}</span>"
+
+
+def _needs_output_dir(wf, library) -> str:
+    """Red error if the workflow auto-derives outputs but no workspace root / output dir is set."""
+    if any(a.auto for a in wf.args) and not _ws_base(library):
+        return _err("Set the Workspace root in the Workspace tab first (outputs go there).")
+    return ""
+
+
+def _run_handler(wf, fields):
+    def run(library, *flat):
+        guard = _needs_output_dir(wf, library)
+        if guard:
+            yield "", "not started", guard, None
+            return
+        try:
+            values = resolve_values(wf, fields, library, flat, make_dirs=True)
+            job = R.launch(wf, values)
+        except ValueError as e:  # missing required asset(s)
+            yield "", "not started", _err(str(e)), None
+            return
+        yield f"Launched PID {job.pid}\n  log: {job.logfile}\n", f"running (PID {job.pid})", "", job
+        for text in R.stream(job):
+            yield text, f"running (PID {job.pid})", "", job
+        yield (
+            R.read_log(job),
+            f"finished (alive={R.is_alive(job.pid, job.proc_starttime)})",
+            "",
+            job,
+        )
+
+    return run
+
+
+def _preview_handler(wf, fields):
+    def preview(library, *flat):
+        guard = _needs_output_dir(wf, library)
+        if guard:
+            return guard
+        try:
+            values = resolve_values(wf, fields, library, flat)
+            return "$ " + shlex.join(R.build_full_command(wf, values))
+        except ValueError as e:
+            return _err(str(e))
+
+    return preview
+
+
+def _stop_handler():
+    def stop(job):
+        if not job:
+            return "no active job to stop"
+        ok = R.stop(job)
+        return f"stopped PID {job.pid}" if ok else f"stop failed for PID {job.pid}"
+
+    return stop
+
+
+def _attach_handler(key):
+    def attach():
+        job = R.latest_job(key)
+        if job is None:
+            yield "No prior job for this workflow.", "none", None
+            return
+        for text in R.stream(job):
+            yield (
+                text,
+                f"attached PID {job.pid} (alive={R.is_alive(job.pid, job.proc_starttime)})",
+                job,
+            )
+        yield R.read_log(job), f"finished PID {job.pid}", job
+
+    return attach
+
+
+_PREVIEW_BATCH = 60  # stills rendered per click; "Load more" appends the next batch
+
+
+def _preview_scenes_handler(more: bool):
+    """Render cached stills for the selected scene dataset, batch by batch (scrollable).
+
+    more=False → (re)start at the top; more=True → render the next batch and append.
+    Returns (gallery_pngs, state). state tracks {ds, npzs, cache, shown, pngs}.
+    """
+
+    def preview(library, sel, state):
+        names = sel if isinstance(sel, list) else [sel]
+        names = [n for n in names if n and n not in (NONE, ADD)]
+        if not names:
+            return [], {}
+        ds = names[0]
+        if (not more) or (state or {}).get("ds") != ds:
+            listp = P.resolve_path(library, "scene_datasets", ds)
+            npzs = []
+            if listp and Path(listp).exists():
+                try:
+                    data = json.loads(Path(listp).read_text())
+                    npzs = data.get("files", data) if isinstance(data, dict) else data
+                except (json.JSONDecodeError, OSError):
+                    npzs = []
+            ws = library.get("workspace_root") or str(Path.home())
+            state = {
+                "ds": ds,
+                "npzs": npzs,
+                "cache": str(Path(ws) / "renders" / ds),
+                "shown": 0,
+                "pngs": [],
+            }
+        npzs = state.get("npzs", [])
+        start = state.get("shown", 0)
+        batch = npzs[start : start + _PREVIEW_BATCH]
+        if batch:
+            try:
+                from scenario_generation.render_npz_dir import render_stills
+
+                new = render_stills(batch, state["cache"])
+                state["pngs"] = state.get("pngs", []) + new
+                state["shown"] = start + len(batch)
+            except Exception:  # noqa: BLE001 - renderer/env issue → keep what we have
+                pass
+        return state.get("pngs", []), state
+
+    return preview
+
+
+def workflow_panel(wf: W.Workflow, library0: dict, library_state, asset_dropdowns: dict):
+    """Standard form + buttons + live log for one workflow. Returns key refs."""
+    gr.Markdown(f"**{wf.title}** — {wf.description}")
+    fields, flat = build_form(wf, library0, asset_dropdowns)
+    job_state = gr.State(None)
+    with gr.Row():
+        run_btn = gr.Button("▶ Run", variant="primary")
+        stop_btn = gr.Button("■ Stop")
+        prev_btn = gr.Button("Preview command")
+        attach_btn = gr.Button("Attach to latest")
+    err = gr.Markdown()
+    status = gr.Textbox(label="Status", interactive=False)
+    log = gr.Textbox(label="Log", lines=20, max_lines=20, autoscroll=True, interactive=False)
+
+    run_evt = run_btn.click(
+        _run_handler(wf, fields), [library_state, *flat], [log, status, err, job_state]
+    )
+    stop_btn.click(_stop_handler(), job_state, status)
+    prev_btn.click(_preview_handler(wf, fields), [library_state, *flat], log)
+    attach_btn.click(_attach_handler(wf.key), None, [log, status, job_state])
+
+    # 👁 Preview: render one cached still per scene of the selected dataset (glance at scenes,
+    # e.g. what PRiSM is about to perturb). Shared cache so other tools show the same renders.
+    scene_fields = [
+        f for f in fields if f["spec"] and f["spec"].shared == "scene_datasets" and f["comps"]
+    ]
+    if scene_fields:
+        scene_dd = scene_fields[0]["comps"][0]
+        prev_state = gr.State({})
+        with gr.Row():
+            prev_scene_btn = gr.Button("👁 Preview scenes (first selected dataset)")
+            prev_more_btn = gr.Button(f"Load more (+{_PREVIEW_BATCH})")
+        prev_gallery = gr.Gallery(label="Scene preview (cached stills)", columns=6, height=620)
+        prev_scene_btn.click(
+            _preview_scenes_handler(more=False),
+            [library_state, scene_dd, prev_state],
+            [prev_gallery, prev_state],
+        )
+        prev_more_btn.click(
+            _preview_scenes_handler(more=True),
+            [library_state, scene_dd, prev_state],
+            [prev_gallery, prev_state],
+        )
+
+    return {
+        "fields": fields,
+        "flat": flat,
+        "log": log,
+        "status": status,
+        "run_evt": run_evt,
+        "wf": wf,
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Tab extras
+# --------------------------------------------------------------------------------------
+_EPOCH_HEADERS = ["epoch", "split", "n", "reward", "rb_cross", "lane_dep", "sc_mean", "cl_mean"]
+
+
+def _epoch_table(key: str):
+    job = R.latest_job(key)
+    if job is None:
+        return [], "No training run found yet."
+    rows = R.parse_epoch_metrics(job.logfile)
+    if not rows:
+        return [], f"No epoch metrics parsed yet (job {job.started_at})."
+    return [
+        [r.get(h, "") for h in _EPOCH_HEADERS] for r in rows
+    ], f"job {job.started_at}: {len(rows)} rows"
+
+
+def _render_filter_texts(path: Path, root: Path) -> tuple[str, str]:
+    fallback = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+    cur = path.parent
+    while True:
+        meta_path = cur / "render_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                model_parts = [
+                    str(v)
+                    for k, v in meta.items()
+                    if "model" in str(k).lower() and v not in (None, "")
+                ]
+                lora_parts = [
+                    str(v)
+                    for k, v in meta.items()
+                    if "lora" in str(k).lower() and v not in (None, "")
+                ]
+                return " ".join(model_parts).lower(), " ".join(lora_parts).lower()
+            except (json.JSONDecodeError, OSError):
+                pass
+            break
+        if cur == root or cur.parent == cur:
+            break
+        cur = cur.parent
+    # Legacy renders have no metadata; fall back to path matching for both filters.
+    fallback = fallback.lower()
+    return fallback, fallback
+
+
+def _matches_render_filters(path: Path, root: Path, model_filter: str = "", lora_filter: str = ""):
+    model_haystack, lora_haystack = _render_filter_texts(path, root)
+    model = (model_filter or "").strip().lower()
+    lora = (lora_filter or "").strip().lower()
+    return (not model or model in model_haystack) and (not lora or lora in lora_haystack)
+
+
+def _scan_outputs(
+    output_dir: str,
+    one_still_per_scene: bool = False,
+    model_filter: str = "",
+    lora_filter: str = "",
+):
+    """Collect rendered outputs under ``output_dir``.
+
+    Returns ``(webm_paths, image_paths, message)``. With ``one_still_per_scene`` (the Render
+    viewer), images collapse to the FIRST png of each scene — one representative still per
+    scene folder (or the first frame of a flat single-scene sim) instead of every frame.
+    Otherwise (the Metrics viewer, where each png already IS a scene) all pngs are returned.
+    """
+    if not output_dir or not Path(output_dir).exists():
+        return [], [], "Output dir not found."
+    root = Path(output_dir)
+    webms = [
+        str(w)
+        for w in sorted(root.rglob("*.webm"))
+        if _matches_render_filters(w, root, model_filter, lora_filter)
+    ]
+    pngs = [
+        p
+        for p in sorted(root.rglob("*.png"))
+        if _matches_render_filters(p, root, model_filter, lora_filter)
+    ]
+    if one_still_per_scene:
+        first_by_dir: dict = {}
+        for p in pngs:
+            first_by_dir.setdefault(p.parent, p)  # sorted → first frame per scene dir wins
+        imgs = [str(p) for p in first_by_dir.values()]
+        note = f"{len(imgs)} scene still(s)"
+    else:
+        imgs = [str(p) for p in pngs[:60]]
+        note = f"{len(pngs)} png"
+    filt = []
+    if (model_filter or "").strip():
+        filt.append(f"model contains {model_filter!r}")
+    if (lora_filter or "").strip():
+        filt.append(f"lora contains {lora_filter!r}")
+    suffix = f" Filter: {', '.join(filt)}." if filt else ""
+    return webms, imgs, f"{len(webms)} webm, {note}.{suffix}"
+
+
+def _resolve_asset(asset_type: str, sel_path: str) -> tuple[dict, str]:
+    """Turn a browsed path into a smart library entry.
+
+    Models: if a dir, pick best_model.pth (else first *.pth); auto-attach a sibling args.json
+    (same dir or parent) and a lora_dir if an adapter is alongside. Maps: find the .osm if a
+    dir was picked. Returns (entry-without-name, note describing what was auto-detected).
+    """
+    p = Path(sel_path)
+    entry: dict = {"path": sel_path}
+    notes: list[str] = []
+    if asset_type == "models":
+        pth = p
+        if p.is_dir():
+            cands = list(p.glob("best_model.pth")) or sorted(p.glob("*.pth"))
+            if cands:
+                pth = cands[0]
+                entry["path"] = str(pth)
+                notes.append(f"model={pth.name}")
+        for cand in (pth.parent / "args.json", pth.parent.parent / "args.json"):
+            if cand.exists():
+                entry["args_json"] = str(cand)
+                notes.append("args.json ✓")
+                break
+        else:
+            notes.append("⚠ no args.json found nearby")
+        if (pth.parent / "adapter_config.json").exists():
+            entry["lora_dir"] = str(pth.parent)
+            notes.append("lora ✓")
+    elif asset_type == "maps" and p.is_dir():
+        osm = sorted(p.glob("*.osm"))
+        if osm:
+            entry["path"] = str(osm[0])
+            notes.append(f"map={osm[0].name}")
+    return entry, (", ".join(notes) if notes else "")
+
+
+_TYPE_COLOR = {
+    "models": "#2563eb",
+    "loras": "#7c3aed",
+    "policies": "#0891b2",
+    "datasets": "#16a34a",
+    "reward_configs": "#d97706",
+    "maps": "#dc2626",
+    "run_dirs": "#475569",
+}
+
+
+def _library_html(library: dict) -> str:
+    """Styled card view of the asset library."""
+    import html as _h
+
+    out = ["<div style='font-family:system-ui,sans-serif;font-size:13px'>"]
+    total = 0
+    for t in P.LIST_TYPES:
+        entries = library.get(t, [])
+        if not entries:
+            continue
+        total += len(entries)
+        c = _TYPE_COLOR.get(t, "#475569")
+        out.append(
+            f"<div style='margin:10px 0 4px'><span style='background:{c};color:#fff;"
+            f"padding:2px 10px;border-radius:12px;font-weight:600'>{t} · {len(entries)}</span></div>"
+        )
+        for e in entries:
+            badges = "".join(
+                f"<span style='background:#eef;color:#334;border-radius:6px;padding:1px 6px;"
+                f"margin-left:6px;font-size:11px'>{k}</span>"
+                for k in ("args_json", "lora_dir", "role")
+                if e.get(k)
+            )
+            path = _h.escape(e.get("path", ""))
+            name = _h.escape(e.get("name", "?"))
+            out.append(
+                f"<div style='border-left:3px solid {c};padding:3px 10px;margin:3px 0 3px 4px'>"
+                f"<b>{name}</b>{badges}<br>"
+                f"<code style='font-size:11px;color:#777'>{path}</code></div>"
+            )
+    es = _h.escape(library.get("ego_shape", ""))
+    od = _h.escape(library.get("output_dir", ""))
+    out.append(
+        f"<div style='margin-top:10px;color:#555'>ego_shape <code>{es}</code> · "
+        f"output_dir <code>{od}</code></div>"
+    )
+    if total == 0:
+        return "<i>Library empty — browse a file and click an <b>Add</b> button.</i>"
+    return "".join(out) + "</div>"
+
+
+_TK_PICK = (
+    "import sys, tkinter as tk\n"
+    "from tkinter import filedialog\n"
+    "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+    "mode, start = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else '')\n"
+    "p = filedialog.askdirectory(initialdir=start or None) if mode == 'dir' "
+    "else filedialog.askopenfilename(initialdir=start or None)\n"
+    "print(p or '')\n"
+)
+
+
+def _os_pick(mode: str, start: str = "") -> tuple[str, str]:
+    """Open the native OS file/folder picker on the server's desktop. Returns (path, note).
+
+    Prefers zenity (GTK), falls back to a tkinter subprocess. Runs the dialog in a short-lived
+    subprocess so it never blocks/wedges the Gradio worker thread. Empty path = cancelled.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    zenity = shutil.which("zenity")
+    try:
+        if zenity:
+            cmd = [zenity, "--file-selection", "--title", f"Select {mode}"]
+            if mode == "dir":
+                cmd.append("--directory")
+            if start:
+                cmd += ["--filename", start.rstrip("/") + "/"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            return (r.stdout.strip(), "") if r.returncode == 0 else ("", "cancelled")
+        r = subprocess.run(
+            [sys.executable, "-c", _TK_PICK, mode, start],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        path = r.stdout.strip()
+        return (path, "") if path else ("", "cancelled")
+    except Exception as e:  # noqa: BLE001 - surface picker/display problems to the UI
+        return "", f"picker unavailable ({e}); paste the path instead"
+
+
+def _scan_run(run_dir: str):
+    """List registerable checkpoints in a training run dir."""
+    if not run_dir or not Path(run_dir).exists():
+        return gr.update(choices=[], value=None), "Run dir not found.", {}
+    root = Path(run_dir)
+    found: dict[str, dict] = {}
+    latest = root / "latest.pth"
+    args_json = root / "args.json"
+    base = str(latest) if latest.exists() else ""
+    aj = str(args_json) if args_json.exists() else ""
+    for d in sorted(root.glob("lora_epoch_*")):
+        if d.is_dir():
+            found[f"LoRA {d.name}"] = {"path": base, "args_json": aj, "lora_dir": str(d)}
+    for f in ("merged.pth", "best_model.pth"):
+        if (root / f).exists():
+            found[f] = {"path": str(root / f), "args_json": aj, "lora_dir": ""}
+    for d in sorted(root.glob("epoch_*")):
+        bm = d / "best_model.pth"
+        if bm.exists():
+            found[f"{d.name}/best_model.pth"] = {"path": str(bm), "args_json": aj, "lora_dir": ""}
+    cfg = {}
+    gc = root / "grpo_config.json"
+    if gc.exists():
+        try:
+            cfg = json.loads(gc.read_text())
+        except (json.JSONDecodeError, OSError):
+            cfg = {"error": "could not read grpo_config.json"}
+    msg = f"{len(found)} checkpoints found." if found else "No checkpoints found."
+    return (
+        gr.update(choices=list(found), value=(next(iter(found), None))),
+        msg,
+        {"found": found, "cfg": cfg},
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Scene Editor (subprocess on its own port + iframe — needs the lanelet env)
+# --------------------------------------------------------------------------------------
+def _open_editor(library, host, editor_port, fields, *flat):
+    sewf = W.get_workflow("scene_branch_editor")
+    values = resolve_values(sewf, fields, library, flat)
+    if not values.get("npz_dir"):
+        return "", "⚠ Select a Replay NPZ dir (route) before opening the editor."
+    values["port"] = int(editor_port)
+    # Pre-point the editor's export/save dirs into the workspace: Export NPZs = contiguous
+    # (→ datasets/routes), Save Scene + Guided Traj = individual scenes (→ datasets/scenes).
+    ws = _ws_base(library)
+    if ws:
+        values["export_dir"] = str(Path(ws) / "datasets" / "routes" / "editor_export")
+        values["rsft_dir"] = str(Path(ws) / "datasets" / "scenes" / "editor_curated")
+    # Stop a previous editor (interactive server, restartable) before relaunching.
+    prev = R.latest_job("scene_branch_editor")
+    if prev is not None and R.is_alive(prev.pid, prev.proc_starttime):
+        R.stop(prev)
+    try:
+        job = R.launch(sewf, values)
+    except ValueError as e:
+        return "", _err(str(e))
+    url = f"http://{host or 'localhost'}:{int(editor_port)}"
+    html = (
+        f'<p><a href="{url}" target="_blank">Open in new tab ↗</a> '
+        f"(PID {job.pid}; give it ~10s to boot, then it appears below)</p>"
+        f'<iframe src="{url}" width="100%" height="900" '
+        'style="border:1px solid #ccc;border-radius:6px"></iframe>'
+    )
+    return html, f"editor launching on {url} (log: {job.logfile})"
+
+
+# --------------------------------------------------------------------------------------
+# App
+# --------------------------------------------------------------------------------------
+def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Blocks:
+    library0 = P.load_library()
+    if library0.get("workspace_root") and Path(library0["workspace_root"]).expanduser().is_dir():
+        scanned0 = _merge_scanned_library(library0, P.scan_workspace(library0["workspace_root"]))
+        library0 = scanned0
+        P.save_library(library0)
+    wf = W.get_workflow
+    asset_dropdowns: dict[str, list] = {}
+
+    with gr.Blocks(title="Autoresearch Control Panel") as demo:
+        gr.Markdown(
+            "# Autoresearch Control Panel\n"
+            "Register assets once in **Workspace**; pick them from dropdowns in each tab. "
+            "Run launches a detached subprocess (survives closing this panel); ■ Stop terminates the selected job."
+        )
+        library_state = gr.State(library0)
+        creating_panels: list = []  # panels whose tool writes a dataset → auto-rescan on finish
+
+        # ---- Workspace -------------------------------------------------------------
+        with gr.Tab("Workspace"):
+            gr.Markdown(
+                "### Workspace — point at your workspace root and **Scan** to load all assets"
+            )
+            with gr.Row():
+                ws_root_box = gr.Textbox(
+                    value=library0.get("workspace_root", ""), label="Workspace root", scale=4
+                )
+                ws_browse_btn = gr.Button("📁", scale=1, min_width=44)
+                ws_create_btn = gr.Button("🆕 Create folders", scale=2)
+                scan_btn2 = gr.Button("🔄 Scan workspace", variant="primary", scale=2)
+
+            gr.Markdown("### Or register a one-off asset outside the workspace")
+            with gr.Row():
+                with gr.Column(scale=2):
+                    with gr.Row():
+                        pick_file_btn = gr.Button("📂 Browse file…")
+                        pick_dir_btn = gr.Button("📁 Browse folder…")
+                    picked = gr.Textbox(label="Selected path (Browse, or paste/type)")
+                with gr.Column(scale=1):
+                    add_name = gr.Textbox(label="Name for the asset")
+                    add_model = gr.Button("Add as Model", variant="primary")
+                    add_lora = gr.Button("Add as LoRA")
+                    add_policy = gr.Button("Add as Guidance policy")
+                    add_scene_ds = gr.Button("Add as Scene dataset")
+                    add_route_ds = gr.Button("Add as Route dataset")
+                    add_reward = gr.Button("Add as Reward config")
+                    add_map = gr.Button("Add as Map")
+                    ws_status = gr.Textbox(label="", interactive=False)
+            with gr.Row():
+                ego_box = gr.Textbox(
+                    value=library0.get("ego_shape", ""), label="Ego shape (WB,L,W) — global"
+                )
+                out_box = gr.Textbox(
+                    value=library0.get("output_dir", ""), label="Default output dir"
+                )
+            remove_dd = gr.Dropdown(label="Remove entry (type/name)", choices=[])
+            remove_btn = gr.Button("Remove selected entry")
+            gr.Markdown("### Loaded assets")
+            lib_view = gr.HTML(value=_library_html(library0))
+
+            # native OS file picker
+            def _pick(mode, current, _start=library0.get("ssd_root") or ""):
+                path, note = _os_pick(mode, _start)
+                return (path, f"selected {path}") if path else (current, note or "cancelled")
+
+            pick_file_btn.click(lambda cur: _pick("file", cur), picked, [picked, ws_status])
+            pick_dir_btn.click(lambda cur: _pick("dir", cur), picked, [picked, ws_status])
+
+            gr.Markdown(
+                "### Load a training run → register a checkpoint\n"
+                "A **run dir** is a `run_experiment` output folder (holds `lora_epoch_NNN/`, "
+                "`latest.pth`, `args.json`, `grpo_config.json`). Scan it and register a checkpoint: "
+                "a `lora_epoch_*` becomes a **LoRA** (pair it with any base model), a "
+                "`merged.pth`/`best_model.pth` becomes a **Model**."
+            )
+            with gr.Row():
+                run_dir_box = gr.Textbox(label="Run dir", scale=3)
+                scan_btn = gr.Button("Scan run")
+            run_scan_state = gr.State({})
+            ckpt_dd = gr.Dropdown(label="Checkpoint", choices=[])
+            with gr.Row():
+                reg_name = gr.Textbox(label="Register as name", scale=3)
+                reg_btn = gr.Button("Register checkpoint")
+            run_status = gr.Textbox(label="", interactive=False)
+            run_cfg = gr.JSON(label="grpo_config.json")
+
+        # ---- workflow tabs ---------------------------------------------------------
+        with gr.Tab("Train (RSFT)") as train_tab:
+            workflow_panel(wf("train_ranked_sft"), library0, library_state, asset_dropdowns)
+            gr.Markdown("### Per-epoch metrics (from the latest train log)")
+            refresh_btn = gr.Button("Refresh epoch table")
+            ep_status = gr.Textbox(label="", interactive=False)
+            ep_table = gr.Dataframe(headers=_EPOCH_HEADERS)
+            refresh_btn.click(lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status])
+
+        with gr.Tab("Evaluate") as eval_tab:
+            with gr.Tab("Metrics"):
+                use_guid = gr.Checkbox(
+                    value=False,
+                    label="Use guidance policy (guided eval) — unchecked = plain deterministic",
+                )
+                with gr.Group(visible=True) as det_grp:
+                    ev = workflow_panel(
+                        wf("eval_full_metrics"), library0, library_state, asset_dropdowns
+                    )
+                    with gr.Row():
+                        load_btn = gr.Button("Load summary.json")
+                        viz_btn = gr.Button("Load scene viz (tick Render first)")
+                    summ = gr.JSON(label="summary.json")
+                    ev_gallery = gr.Gallery(label="Rendered scenes", columns=3, height=520)
+
+                    def _eval_out(library, flat):
+                        v = resolve_values(wf("eval_full_metrics"), ev["fields"], library, flat)
+                        return v.get("output_dir", "")
+
+                    def _load_summary(library, *flat):
+                        out = _eval_out(library, flat)
+                        p = Path(out) / "summary.json" if out else None
+                        if p and p.exists():
+                            return json.loads(p.read_text())
+                        return {"error": f"not found: {p} (run the eval first)"}
+
+                    def _load_viz(library, *flat):
+                        out = _eval_out(library, flat)
+                        return _scan_outputs(out)[1] if out else []
+
+                    load_btn.click(_load_summary, [library_state, *ev["flat"]], summ)
+                    viz_btn.click(_load_viz, [library_state, *ev["flat"]], ev_gallery)
+                with gr.Group(visible=False) as guid_grp:
+                    workflow_panel(
+                        wf("eval_policy_avoidance"), library0, library_state, asset_dropdowns
+                    )
+                use_guid.change(
+                    lambda c: (gr.update(visible=not c), gr.update(visible=c)),
+                    use_guid,
+                    [det_grp, guid_grp],
+                )
+            with gr.Tab("L2 loss"):
+                workflow_panel(wf("eval_l2"), library0, library_state, asset_dropdowns)
+
+        with gr.Tab("Merge + Export") as merge_tab:
+            with gr.Tab("Merge LoRA"):
+                workflow_panel(wf("merge_lora"), library0, library_state, asset_dropdowns)
+            with gr.Tab("Export ONNX"):
+                workflow_panel(wf("torch2onnx"), library0, library_state, asset_dropdowns)
+
+        def _viz_with_viewer(vwf):
+            """A workflow panel plus a 'Load rendered outputs' viewer with WebMs and stills
+            shown in SEPARATE galleries (stills = one representative frame per scene)."""
+            vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
+            with gr.Row():
+                model_filter = gr.Textbox(label="Filter model", placeholder="e.g. j6_base")
+                lora_filter = gr.Textbox(label="Filter LoRA", placeholder="e.g. lowlr-codex")
+            show_btn = gr.Button("Load rendered outputs")
+            webm_gallery = gr.Gallery(label="WebM clips (click to play)", columns=2, height=420)
+            png_gallery = gr.Gallery(label="One still per scene", columns=4, height=420)
+            vmsg = gr.Textbox(label="", interactive=False)
+
+            def _show(library, model_q, lora_q, *flat, _wf=vwf, _vp=vp):
+                v = resolve_values(_wf, _vp["fields"], library, flat)
+                scan_dir = v.get("output_dir", "")
+                if not scan_dir and v.get("out"):
+                    scan_dir = str(Path(v["out"]).with_suffix(".renders"))
+                webms, stills, msg = _scan_outputs(
+                    scan_dir,
+                    one_still_per_scene=True,
+                    model_filter=model_q,
+                    lora_filter=lora_q,
+                )
+                return webms, stills, msg
+
+            show_btn.click(
+                _show,
+                [library_state, model_filter, lora_filter, *vp["flat"]],
+                [webm_gallery, png_gallery, vmsg],
+            )
+            return vp
+
+        def _stills_only_viewer(vwf):
+            """Workflow panel plus a PNG-only output viewer."""
+            vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
+            with gr.Row():
+                model_filter = gr.Textbox(label="Filter model", placeholder="e.g. j6_base")
+                lora_filter = gr.Textbox(label="Filter LoRA", placeholder="e.g. lowlr-codex")
+            show_btn = gr.Button("Load rendered PNGs")
+            png_gallery = gr.Gallery(label="Rendered scenes", columns=4, height=520)
+            vmsg = gr.Textbox(label="", interactive=False)
+
+            def _show(library, model_q, lora_q, *flat, _wf=vwf, _vp=vp):
+                v = resolve_values(_wf, _vp["fields"], library, flat)
+                _, stills, msg = _scan_outputs(
+                    v.get("output_dir", ""),
+                    one_still_per_scene=False,
+                    model_filter=model_q,
+                    lora_filter=lora_q,
+                )
+                return stills, msg
+
+            show_btn.click(
+                _show,
+                [library_state, model_filter, lora_filter, *vp["flat"]],
+                [png_gallery, vmsg],
+            )
+
+        with gr.Tab("Reproducer") as reproducer_tab:
+            with gr.Tab("Route WebM"):
+                gr.Markdown(
+                    "Run closed-loop inference on a selected contiguous route segment with the "
+                    "Perception Reproducer. Outputs PNG frames plus WebM."
+                )
+                _viz_with_viewer(wf("render_reproducer_segment"))
+            with gr.Tab("Scene WebMs"):
+                gr.Markdown(
+                    "Run closed-loop inference from selected workspace scene datasets with "
+                    "model/LoRA/guidance controls. Use this for guidance-model videos."
+                )
+                _viz_with_viewer(wf("compare_models_ghost"))
+            with gr.Tab("Collision mining"):
+                gr.Markdown(
+                    "Run the Perception Reproducer on a registered contiguous route dataset. "
+                    "It writes ranked hits, extracts pre-collision NPZ batches, and can render "
+                    "the top collision/near-miss segments as WebMs in this tab."
+                )
+                mp = _viz_with_viewer(wf("mine_collisions"))
+                if wf("mine_collisions").creates:
+                    creating_panels.append(mp)
+
+        with gr.Tab("Data generation") as datagen_tab:
+            with gr.Tab("PRiSM (self-improvement mining)"):
+                gr.Markdown(
+                    "Perturbation-Recovery Self-Mining — a data-generation pipeline (not training). "
+                    "Run the three steps in order; the final filtered scene set is then used in the "
+                    "Train (RSFT) tab.\n\n"
+                    "1. **Perturb** warm scenes (shift them off-centre).\n"
+                    "2. **Rank** K candidate trajectories per scene by reward.\n"
+                    "3. **Filter** — keep the top percentile by reward and drop scenes no candidate "
+                    "improved."
+                )
+                _PRISM_STEPS = [
+                    ("### Step 1 — Perturb warm scenes", "disturb_and_replay"),
+                    ("### Step 2 — Rank K candidates per scene by reward", "viz_p4_recovery"),
+                    (
+                        "### Step 3 — Filter to the scenes worth training on",
+                        "percentile_filter_perturbed",
+                    ),
+                ]
+                for heading, k in _PRISM_STEPS:
+                    gr.Markdown(heading)
+                    pp = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
+                    if wf(k).creates:
+                        creating_panels.append(pp)
+
+        with gr.Tab("Render") as render_tab:
+            _MODES = [
+                "Selected scenes + predicted trajectories (PNGs only)",
+                "Closed-loop A/B sim (re-infer each step, ~8s)",
+                "Open-loop A/B (perfect-track one plan)",
+                "Open-loop generated candidates (model + GRPO config + guidance)",
+                "Render route / scenes (frames → PNGs)",
+            ]
+            render_mode = gr.Dropdown(_MODES, value=_MODES[0], label="Render mode")
+            with gr.Group(visible=True) as g_closed:
+                gr.Markdown(
+                    "Render one still PNG per selected scene with deterministic predicted "
+                    "trajectory from Model A and optional Model B. No sim loop and no WebM."
+                )
+                _stills_only_viewer(wf("render_det_stills"))
+            with gr.Group(visible=False) as g_loop:
+                gr.Markdown(
+                    "Simulate ~8s closed-loop from each scene (re-inference each step), two models "
+                    "overlaid. PNGs + optional WebM."
+                )
+                _viz_with_viewer(wf("compare_models_ghost"))
+            with gr.Group(visible=False) as g_openpt:
+                gr.Markdown(
+                    "One deterministic plan per scene, perfect-tracked (no re-inference); two models "
+                    "overlaid. Pick a guidance policy to see guided plans. PNG seq + WebM."
+                )
+                _viz_with_viewer(wf("ghost_replay_openloop"))
+            with gr.Group(visible=False) as g_gen:
+                gr.Markdown(
+                    "Generate K candidate trajectories per scene under the chosen model + GRPO "
+                    "config (guidance), and render them — so you can see what a model/guidance "
+                    "produces. (Untick 'No viz' to get the PNGs.)"
+                )
+                _viz_with_viewer(wf("viz_p4_recovery"))
+            with gr.Group(visible=False) as g_route:
+                gr.Markdown(
+                    "Render a route dir, a single-scene dir, or a parent of collision-window "
+                    "subfolders to PNGs. Ego dims + a route pickle in the folder are auto-detected."
+                )
+                _viz_with_viewer(wf("render_npz_dir"))
+
+            def _toggle_mode(m):
+                idx = _MODES.index(m) if m in _MODES else 0
+                return [gr.update(visible=(i == idx)) for i in range(5)]
+
+            render_mode.change(
+                _toggle_mode, render_mode, [g_closed, g_loop, g_openpt, g_gen, g_route]
+            )
+
+        with gr.Tab("Scene Editor"):
+            sewf = wf("scene_branch_editor")
+            gr.Markdown(f"**{sewf.title}** — {sewf.description}")
+            se_fields, se_flat = build_form(sewf, library0, asset_dropdowns)
+            ed_port = gr.Number(value=default_editor_port, precision=0, label="Editor port")
+            open_btn = gr.Button("▶ Open / Reload editor", variant="primary")
+            se_status = gr.Textbox(label="Status", interactive=False)
+            se_frame = gr.HTML()
+            open_btn.click(
+                lambda library, port, *flat: _open_editor(library, host, port, se_fields, *flat),
+                [library_state, ed_port, *se_flat],
+                [se_frame, se_status],
+            )
+
+        # ---- wire Workspace handlers (now that all dropdowns are collected) --------
+        flat_dropdowns: list = []
+        flat_meta: list = []  # (type, required, multi) parallel to flat_dropdowns
+        for t in P.LIST_TYPES:
+            for dd, req, _last, _pm, multi in asset_dropdowns.get(t, []):
+                flat_dropdowns.append(dd)
+                flat_meta.append((t, req, multi))
+
+        def _dropdown_updates(library):
+            return [
+                gr.update(choices=_list_choices(library, t, req, multi))
+                for (t, req, multi) in flat_meta
+            ]
+
+        def _remove_choices(library):
+            out = []
+            for t in P.LIST_TYPES:
+                out += [f"{t}/{n}" for n in P.entry_names(library, t)]
+            return out
+
+        def _add(asset_type, name, selected, library):
+            name = (name or "").strip()
+            sel_path = (selected or "").strip()
+            if not name or not sel_path:
+                return (
+                    library,
+                    _library_html(library),
+                    "⚠ select a path in the browser and enter a name",
+                    gr.update(),
+                    *_dropdown_updates(library),
+                )
+            entry, note = _resolve_asset(asset_type, sel_path)
+            entry["name"] = name
+            library.setdefault(asset_type, []).append(entry)
+            P.save_library(library)
+            msg = f"added {asset_type}: {name}" + (f"  ({note})" if note else "")
+            return (
+                library,
+                _library_html(library),
+                msg,
+                gr.update(choices=_remove_choices(library)),
+                *_dropdown_updates(library),
+            )
+
+        add_outputs = [library_state, lib_view, ws_status, remove_dd, *flat_dropdowns]
+
+        def _rescan_on_switch(library):
+            """Re-scan the workspace when a tab is opened so assets just created by another tab
+            (e.g. a finished RSFT run's lora_epoch dirs) appear in the dropdowns without a manual
+            Scan. Choices-only refresh — selected values are preserved. No-op without a workspace."""
+            root = (library or {}).get("workspace_root")
+            if not root or not Path(root).expanduser().is_dir():
+                return (library, _library_html(library), gr.update(), *_dropdown_updates(library))
+            scanned = _merge_scanned_library(library, P.scan_workspace(root))
+            P.save_library(scanned)
+            return (
+                scanned,
+                _library_html(scanned),
+                gr.update(choices=_remove_choices(scanned)),
+                *_dropdown_updates(scanned),
+            )
+
+        _switch_outputs = [library_state, lib_view, remove_dd, *flat_dropdowns]
+        for _tab in (train_tab, eval_tab, merge_tab, reproducer_tab, datagen_tab, render_tab):
+            _tab.select(_rescan_on_switch, library_state, _switch_outputs)
+
+        for btn, typ in (
+            (add_model, "models"),
+            (add_lora, "loras"),
+            (add_policy, "policies"),
+            (add_scene_ds, "scene_datasets"),
+            (add_route_ds, "route_datasets"),
+            (add_reward, "reward_configs"),
+            (add_map, "maps"),
+        ):
+            btn.click(
+                lambda name, sel, lib, _t=typ: _add(_t, name, sel, lib),
+                [add_name, picked, library_state],
+                add_outputs,
+            )
+
+        # Workspace root + Scan: rebuild the whole library from the folder layout.
+        ws_browse_btn.click(
+            lambda cur: _os_pick("dir", cur or "")[0] or cur, ws_root_box, ws_root_box
+        )
+
+        def _scan_ws(root, library):
+            if not root or not Path(root).is_dir():
+                return (
+                    library,
+                    _library_html(library),
+                    f"⚠ not a folder: {root}",
+                    gr.update(),
+                    *_dropdown_updates(library),
+                )
+            scanned = _merge_scanned_library(library, P.scan_workspace(root))
+            P.save_library(scanned)
+            counts = ", ".join(
+                f"{t}:{len(scanned.get(t, []))}" for t in P.LIST_TYPES if scanned.get(t)
+            )
+            return (
+                scanned,
+                _library_html(scanned),
+                f"scanned {root} → {counts or 'nothing found'}",
+                gr.update(choices=_remove_choices(scanned)),
+                *_dropdown_updates(scanned),
+            )
+
+        scan_btn2.click(_scan_ws, [ws_root_box, library_state], add_outputs)
+        ws_root_box.change(
+            lambda v, lib: _set_scalar("workspace_root", v, lib),
+            [ws_root_box, library_state],
+            [library_state, lib_view],
+        )
+
+        def _create_ws(root):
+            if not (root or "").strip():
+                return "⚠ enter a path for the new workspace first"
+            try:
+                P.create_workspace(root)
+            except OSError as e:
+                return _err(f"could not create workspace: {e}")
+            subs = ", ".join(P.WORKSPACE_DIRS.values())
+            return f"created workspace at {root} ({subs}, runs) — drop assets in & Scan"
+
+        ws_create_btn.click(_create_ws, ws_root_box, ws_status)
+
+        def _remove(sel, library):
+            if sel and "/" in sel:
+                t, n = sel.split("/", 1)
+                library[t] = [e for e in library.get(t, []) if e.get("name") != n]
+                P.save_library(library)
+                msg = f"removed {sel}"
+            else:
+                msg = "nothing selected"
+            return (
+                library,
+                _library_html(library),
+                msg,
+                gr.update(choices=_remove_choices(library)),
+                *_dropdown_updates(library),
+            )
+
+        remove_btn.click(_remove, [remove_dd, library_state], add_outputs)
+
+        def _set_scalar(key, val, library):
+            library[key] = val
+            P.save_library(library)
+            return library, _library_html(library)
+
+        ego_box.change(
+            lambda v, lib: _set_scalar("ego_shape", v, lib),
+            [ego_box, library_state],
+            [library_state, lib_view],
+        )
+        out_box.change(
+            lambda v, lib: _set_scalar("output_dir", v, lib),
+            [out_box, library_state],
+            [library_state, lib_view],
+        )
+
+        scan_btn.click(_scan_run, run_dir_box, [ckpt_dd, run_status, run_scan_state]).then(
+            lambda st: st.get("cfg", {}), run_scan_state, run_cfg
+        )
+
+        def _register_ckpt(name, ckpt_label, scan, library):
+            found = (scan or {}).get("found", {})
+            if not ckpt_label or ckpt_label not in found:
+                return (
+                    library,
+                    _library_html(library),
+                    "⚠ scan a run and pick a checkpoint",
+                    gr.update(),
+                    *_dropdown_updates(library),
+                )
+            info = found[ckpt_label]
+            nm = (name or ckpt_label).strip()
+            # A lora_epoch checkpoint registers as a LoRA (combine with any base model);
+            # a merged/best_model.pth registers as a Model.
+            if info.get("lora_dir"):
+                library.setdefault("loras", []).append({"name": nm, "path": info["lora_dir"]})
+                kind = "LoRA"
+            else:
+                entry = {"name": nm, "path": info["path"]}
+                if info.get("args_json"):
+                    entry["args_json"] = info["args_json"]
+                library.setdefault("models", []).append(entry)
+                kind = "model"
+            P.save_library(library)
+            return (
+                library,
+                _library_html(library),
+                f"registered {kind}: {nm}",
+                gr.update(choices=_remove_choices(library)),
+                *_dropdown_updates(library),
+            )
+
+        reg_btn.click(
+            _register_ckpt, [reg_name, ckpt_dd, run_scan_state, library_state], add_outputs
+        )
+
+        # ---- inline "Browse to add…" on every asset dropdown ----------------------
+        def _auto_name(library, asset_type, path):
+            stem = Path(path.rstrip("/")).stem or Path(path.rstrip("/")).name or asset_type
+            existing = set(P.entry_names(library, asset_type))
+            name, n = stem, 2
+            while name in existing:
+                name, n = f"{stem}-{n}", n + 1
+            return name
+
+        def _make_add_handler(asset_type, my_idx, type_dds, type_reqs, pick_mode):
+            def on_change(sel, last, library):
+                # type choices refresh (no value) for every dropdown of this type
+                def type_ups(value_for_me=None):
+                    ups = []
+                    for i, req in enumerate(type_reqs):
+                        ch = _list_choices(library, asset_type, req)
+                        ups.append(
+                            gr.update(choices=ch, value=value_for_me)
+                            if (i == my_idx and value_for_me is not None)
+                            else gr.update(choices=ch)
+                        )
+                    return ups
+
+                if sel != ADD:  # normal selection (or the revert echo) — just record it
+                    return (library, sel, gr.update(), gr.update(), *type_ups())
+                start = library.get("workspace_root") or library.get("ssd_root") or ""
+                path, _note = _os_pick(pick_mode, start)
+                if not path:  # cancelled → revert this dropdown to its last valid value
+                    ups = type_ups()
+                    ups[my_idx] = gr.update(
+                        choices=_list_choices(library, asset_type, type_reqs[my_idx]), value=last
+                    )
+                    return (library, last, gr.update(), gr.update(), *ups)
+                entry, _n = _resolve_asset(asset_type, path)
+                entry["name"] = _auto_name(library, asset_type, path)
+                library.setdefault(asset_type, []).append(entry)
+                P.save_library(library)
+                new = entry["name"]
+                return (
+                    library,
+                    new,
+                    _library_html(library),
+                    gr.update(choices=_remove_choices(library)),
+                    *type_ups(value_for_me=new),
+                )
+
+            return on_change
+
+        for t in P.LIST_TYPES:
+            entries = asset_dropdowns.get(t, [])
+            # multi-select types (scene datasets) have no inline-add sentinel; they refresh via
+            # Workspace scan / auto-rescan, not a per-dropdown change handler.
+            if entries and entries[0][4]:
+                continue
+            type_dds = [dd for dd, *_ in entries]
+            type_reqs = [req for _, req, *_ in entries]
+            for idx, (dd, _req, last, pick_mode, _multi) in enumerate(entries):
+                dd.change(
+                    _make_add_handler(t, idx, type_dds, type_reqs, pick_mode),
+                    inputs=[dd, last, library_state],
+                    outputs=[library_state, last, lib_view, remove_dd, *type_dds],
+                )
+
+        # ---- auto-rescan: a tool that wrote a dataset → merge new workspace datasets in ----
+        def _merge_workspace_datasets(library):
+            """Add any workspace scene/route datasets not already in the library (keep one-offs)."""
+            root = library.get("workspace_root")
+            if root:
+                scanned = P.scan_workspace(root)
+                for t in ("scene_datasets", "route_datasets"):
+                    have = {e.get("path") for e in library.get(t, [])}
+                    for e in scanned.get(t, []):
+                        if e.get("path") not in have:
+                            library.setdefault(t, []).append(e)
+                P.save_library(library)
+            return (
+                library,
+                _library_html(library),
+                gr.update(choices=_remove_choices(library)),
+                *_dropdown_updates(library),
+            )
+
+        _rescan_outputs = [library_state, lib_view, remove_dd, *flat_dropdowns]
+        for p in creating_panels:
+            p["run_evt"].then(_merge_workspace_datasets, library_state, _rescan_outputs)
+
+        # initialise the remove dropdown choices
+        demo.load(lambda lib: gr.update(choices=_remove_choices(lib)), library_state, remove_dd)
+
+    return demo
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Autoresearch control panel")
+    ap.add_argument("--port", type=int, default=7888)
+    ap.add_argument("--host", type=str, default="127.0.0.1")
+    ap.add_argument(
+        "--public_host",
+        type=str,
+        default=None,
+        help="Hostname/IP browsers should use for embedded links such as the Scene Editor.",
+    )
+    ap.add_argument("--editor_port", type=int, default=7899)
+    ap.add_argument("--share", action="store_true")
+    args = ap.parse_args()
+    link_host = args.public_host or (
+        "localhost" if args.host in ("0.0.0.0", "::", "127.0.0.1") else args.host
+    )
+    demo = build_app(host=link_host, default_editor_port=args.editor_port)
+    # Gradio will only serve files from CWD/tmp unless explicitly allowed. Renders, previews,
+    # and WebMs live under the workspace, jobs dir, /tmp, and commonly the external SSD mount.
+    lib = P.load_library()
+    allowed = {str(R.JOBS_DIR), "/tmp"}
+    if Path("/media").exists():
+        allowed.add("/media")
+    if lib.get("workspace_root"):
+        allowed.add(str(Path(lib["workspace_root"]).expanduser()))
+    if lib.get("output_dir"):
+        allowed.add(str(Path(lib["output_dir"]).expanduser()))
+    demo.launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        inbrowser=True,
+        allowed_paths=sorted(allowed),
+    )
+
+
+if __name__ == "__main__":
+    main()

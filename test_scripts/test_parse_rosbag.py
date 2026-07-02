@@ -3,7 +3,7 @@
 
 Example:
     python3 test_scripts/test_parse_rosbag.py \
-        /mnt/nvme/rosbags_from_label/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/train/2026-01-07/11-06-10/
+        /path/to/rosbag_directory/
 
 The vector map is resolved automatically from ``log_file_info.json``
 (``area_map_version_id``) under the ``map`` directory of the dataset.

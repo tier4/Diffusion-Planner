@@ -31,11 +31,11 @@ from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 
 from preference_optimization.utils import load_npz_data
-from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
+from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched
 from rlvr.autoresearch.tools.ghost_sim_common import (
     _NB_COLOR,
     extract_scene_polylines,
-    extract_stopped_neighbors,
+    load_model,  # LoRA-capable loader (model_path, lora_path, device)
 )
 from rlvr.autoresearch.tools.recovery_sim import (
     _LANE_BORDER_COLOR,
@@ -44,16 +44,75 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _ROUTE_COLOR,
     _draw_agent_box,
 )
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 
 BASELINE_COLOR = "#1f77b4"  # blue
 BEST_COLOR = "#d62728"  # red
 HIST_COLOR = "#555555"  # grey (shared history)
 
 
+def _side_title(
+    label: str, model_path: str | None, lora_path: str | None, policy_path: str | None
+) -> str:
+    if model_path:
+        p = Path(model_path)
+        model_label = f"{p.parent.name}/{p.name}"
+    else:
+        model_label = "baseline model"
+    if lora_path:
+        lp = Path(lora_path)
+        lora_label = f"{lp.parent.name}/{lp.name}"
+    else:
+        lora_label = "none"
+    policy_label = Path(policy_path).name if policy_path else "none"
+    return f"{label}: model={model_label}  lora={lora_label}  guidance={policy_label}"
+
+
 def _heading(row):
     if row.shape[-1] >= 4:
         return math.atan2(float(row[3]), float(row[2]))
     return float(row[2])
+
+
+def _real_neighbors(npz_path):
+    """Real (non-padding) neighbors + their dims. Returns (idx_dims, past[P,Tp,>=4], fut[P,Tf,>=4]).
+
+    idx_dims = list of (slot_index, length, width). Includes BOTH moving and stopped neighbors so
+    the open-loop replay animates every agent along its recorded track, not just parked ones.
+    """
+    d = dict(np.load(npz_path, allow_pickle=True))
+    nb_past = d.get("neighbor_agents_past")
+    nb_fut = d.get("neighbor_agents_future")
+    if nb_past is None or nb_fut is None:
+        return [], None, None
+    if nb_past.ndim == 4:
+        nb_past = nb_past[0]
+    if nb_fut.ndim == 4:
+        nb_fut = nb_fut[0]
+    idx_dims = []
+    for i in range(nb_past.shape[0]):
+        xy0 = nb_past[i, -1, :2]
+        if abs(float(xy0[0])) + abs(float(xy0[1])) < 1e-6:
+            continue  # padding slot
+        width = float(nb_past[i, -1, 6])
+        length = float(nb_past[i, -1, 7])
+        idx_dims.append((i, length, width))
+    return idx_dims, nb_past, nb_fut
+
+
+def _neighbor_boxes_at(nb_arr, step, idx_dims):
+    """OBBs (x, y, heading, length, width) for every present neighbor at time `step`."""
+    boxes = []
+    if nb_arr is None or step < 0 or step >= nb_arr.shape[1]:
+        return boxes
+    for i, length, width in idx_dims:
+        x = float(nb_arr[i, step, 0])
+        y = float(nb_arr[i, step, 1])
+        if abs(x) + abs(y) < 1e-6:
+            continue  # not present this frame
+        h = _heading(nb_arr[i, step])
+        boxes.append((x, y, h, length, width))
+    return boxes
 
 
 def _scene_base(ax, polylines, cx, cy, view_half):
@@ -158,14 +217,26 @@ def _render_frame(
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model_baseline", required=True)
+    p.add_argument("--lora_baseline", default=None, help="optional LoRA adapter dir for baseline")
     p.add_argument(
         "--model_best", default=None, help="second model .pth; omit when using --policy_dir"
+    )
+    p.add_argument("--lora_best", default=None, help="optional LoRA adapter dir for the best model")
+    p.add_argument(
+        "--policy_baseline",
+        default=None,
+        help="exploration-policy dir applied to the BASELINE side (model + guidance).",
+    )
+    p.add_argument(
+        "--policy_best",
+        default=None,
+        help="exploration-policy dir applied to the BEST side. When --model_best is omitted, "
+        "the best side reuses the baseline model so 'model vs model + guidance' works.",
     )
     p.add_argument(
         "--policy_dir",
         default=None,
-        help="exploration-policy dir: 'best' = baseline + guidance "
-        "(same frozen model, policy-chosen etas via composer)",
+        help="[deprecated alias for --policy_best]",
     )
     p.add_argument("--label_baseline", default="baseline")
     p.add_argument("--label_best", default="best")
@@ -175,14 +246,6 @@ def main():
     p.add_argument("--view_half", type=float, default=28.0)
     p.add_argument("--fps", type=int, default=10)
     p.add_argument("--hist_steps", type=int, default=30)
-    p.add_argument(
-        "--ahead_thresh",
-        type=float,
-        default=8.0,
-        help="stopped neighbors with t0 longitudinal x >= this are AHEAD "
-        "(ego approaching) -> appear at t=0; x < this are beside/behind "
-        "(post-avoidance/branch, were visible) -> shown during history too",
-    )
     # Guidance envelope (must match the policy's training labels)
     p.add_argument("--lambda_lat", type=float, default=5.0)
     p.add_argument("--lat_scale", type=float, default=2.0)
@@ -191,30 +254,84 @@ def main():
     p.add_argument("--lambda_spd", type=float, default=0.2)
     p.add_argument("--stretch_scale", type=float, default=1.0)
     p.add_argument("--guidance_scale", type=float, default=0.5)
-    p.add_argument(
-        "--n_candidates",
-        type=int,
-        default=0,
-        help="additionally sample N etas from the policy distribution "
-        "and draw their guided trajectories as a faint candidate fan",
-    )
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ego_shape = [float(x) for x in args.ego_shape.split(",")]
-    m_base, a_base = load_model(args.model_baseline, device)
-    policy = None
-    if args.policy_dir:
+    m_base, a_base = load_model(args.model_baseline, args.lora_baseline, device)
+    policy_best_dir = args.policy_best or args.policy_dir  # back-compat alias
+
+    # Best side: explicit model, or (policy-only) reuse the baseline model.
+    if args.model_best:
+        m_best, a_best = load_model(args.model_best, args.lora_best, device)
+    elif policy_best_dir:
+        m_best, a_best = m_base, a_base
+    else:
+        raise SystemExit("pass --model_best, --policy_best (or the legacy --policy_dir)")
+    effective_best_model = args.model_best or args.model_baseline
+    effective_best_lora = args.lora_best if args.model_best else args.lora_baseline
+    title_meta = "\n".join(
+        [
+            _side_title(
+                args.label_baseline,
+                args.model_baseline,
+                args.lora_baseline,
+                args.policy_baseline,
+            ),
+            _side_title(
+                args.label_best,
+                effective_best_model,
+                effective_best_lora,
+                policy_best_dir,
+            ),
+        ]
+    )
+    output_tag = render_tag(
+        args.model_baseline,
+        args.lora_baseline,
+        args.policy_baseline,
+        effective_best_model,
+        effective_best_lora,
+        policy_best_dir,
+    )
+
+    # Each side independently gets an optional guidance policy.
+    policy_a = policy_b = heads_a = heads_b = None
+    if args.policy_baseline or policy_best_dir:
         from exploration_policy.utils import run_frozen_encoder
         from guidance_gui.generate_samples import generate_samples
         from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
 
-        policy, heads = load_policy(args.policy_dir, a_base, device)
-        m_best, a_best = m_base, a_base
-    elif args.model_best:
-        m_best, a_best = load_model(args.model_best, device)
-    else:
-        raise SystemExit("pass either --model_best or --policy_dir")
+        if args.policy_baseline:
+            policy_a, heads_a = load_policy(args.policy_baseline, a_base, device)
+        if policy_best_dir:
+            policy_b, heads_b = load_policy(policy_best_dir, a_best, device)
+
+    def _plan(model, margs, pol, pheads, data):
+        """Deterministic plan for one side; if a policy is given, return the guidance-composed
+        plan plus an eta label string. Returns (traj [T,4], eta_str)."""
+        det = det_inference_batched(model, margs, [data], device)[0].cpu().numpy()
+        if pol is None:
+            return det, ""
+        norm = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
+        norm = margs.observation_normalizer(norm)
+        x_ref = torch.from_numpy(np.ascontiguousarray(det)).float().unsqueeze(0).to(device)
+        norm["reference_trajectory"] = x_ref
+        enc = run_frozen_encoder(model, norm)
+        pout = pol(enc, x_ref, deterministic=True)
+        etas = {h: (2.0 * pout.dists[h].mean - 1.0).reshape(1) for h in pheads}
+        traj = generate_samples(
+            model=model,
+            model_args=margs,
+            data=norm,
+            noise_scale=0.0,
+            n_samples=1,
+            composer=make_composer(etas, args),
+            device=device,
+        )[0]
+        eta_str = " ".join(f"{h[:3]}={float(v.item()):+.2f}" for h, v in etas.items())
+        return traj, eta_str
+
     scenes = json.load(open(args.scenes))
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -222,83 +339,40 @@ def main():
     for sp in scenes:
         name = Path(sp).stem
         data = load_npz_data(sp, device)
-        traj_base = det_inference_batched(m_base, a_base, [data], device)[0].cpu().numpy()
-        label_best = args.label_best
         cand_lines = []
-        if policy is not None:
-            norm_data = {
-                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-            }
-            norm_data = a_base.observation_normalizer(norm_data)
-            x_ref = torch.from_numpy(np.ascontiguousarray(traj_base)).float()
-            x_ref = x_ref.unsqueeze(0).to(device)
-            norm_data["reference_trajectory"] = x_ref
-            enc = run_frozen_encoder(m_base, norm_data)
-            pout = policy(enc, x_ref, deterministic=True)
-            etas = {h: (2.0 * pout.dists[h].mean - 1.0).reshape(1) for h in heads}
-            composer = make_composer(etas, args)
-            traj_best = generate_samples(
-                model=m_base,
-                model_args=a_base,
-                data=norm_data,
-                noise_scale=0.0,
-                n_samples=1,
-                composer=composer,
-                device=device,
-            )[0]
-            eta_str = " ".join(f"{h[:3]}={float(v.item()):+.2f}" for h, v in etas.items())
-            label_best = f"{args.label_best} ({eta_str})"
-            cand_lines = []
-            if args.n_candidates > 0:
-                from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
-
-                N = args.n_candidates
-                cand = {h: (2.0 * pout.dists[h].rsample((N,)).reshape(-1) - 1.0) for h in heads}
-                N_data = {}
-                for k, v in norm_data.items():
-                    if isinstance(v, torch.Tensor) and v.shape[0] == 1:
-                        N_data[k] = v.expand(N, *v.shape[1:]).contiguous()
-                    else:
-                        N_data[k] = v
-                cand_trajs = (
-                    _batched_generate_varied_noise(
-                        m_base,
-                        a_base,
-                        N_data,
-                        noise_min=0.0,
-                        noise_max=0.0,
-                        first_deterministic=False,
-                        composer=make_composer(cand, args),
-                        device=device,
-                    )
-                    .cpu()
-                    .numpy()
-                )
-                cand_lines = [
-                    (
-                        cand_trajs[i, :, :2],
-                        BEST_COLOR,
-                        0.22,
-                        f"{N} candidates from policy distribution" if i == 0 else None,
-                    )
-                    for i in range(N)
-                ]
-        else:
-            traj_best = det_inference_batched(m_best, a_best, [data], device)[0].cpu().numpy()
+        traj_base, eta_a = _plan(m_base, a_base, policy_a, heads_a, data)
+        traj_best, eta_b = _plan(m_best, a_best, policy_b, heads_b, data)
+        label_baseline = f"{args.label_baseline} ({eta_a})" if eta_a else args.label_baseline
+        label_best = f"{args.label_best} ({eta_b})" if eta_b else args.label_best
         past = np.load(sp, allow_pickle=True)["ego_agent_past"].astype(np.float32)
-        nb_boxes = extract_stopped_neighbors(sp)
         polylines = extract_scene_polylines(data)
-
-        # PER-NEIGHBOR: beside/behind (x < thresh) were visible -> show in history;
-        # ahead (x >= thresh, ego approaching) -> appear at t=0.
-        hist_nb = [b for b in nb_boxes if b[0] < args.ahead_thresh]
-        n_ahead = len(nb_boxes) - len(hist_nb)
-        hidden_note = f" — {n_ahead} neighbor(s) ahead appear at t=0" if n_ahead else ""
+        # ALL real neighbors (moving + stopped), animated along their recorded tracks: past during
+        # the history frames, future during the perfect-track frames.
+        idx_dims, nb_past_arr, nb_fut_arr = _real_neighbors(sp)
 
         H = min(args.hist_steps, past.shape[0])
         hist = past[past.shape[0] - H :]
-        sc_dir = out_root / name
+        # Align ego-history index to the neighbor-past time axis (both end at t=0).
+        nb_past_T = nb_past_arr.shape[1] if nb_past_arr is not None else H
+        sc_dir = out_root / f"{name}__{output_tag}"
         sc_dir.mkdir(parents=True, exist_ok=True)
+        write_render_meta(
+            sc_dir,
+            tool="ghost_replay_openloop",
+            scene=name,
+            model_baseline_path=args.model_baseline,
+            model_baseline_label=path_label(args.model_baseline),
+            lora_baseline_path=args.lora_baseline or "",
+            lora_baseline_label=path_label(args.lora_baseline),
+            policy_baseline_path=args.policy_baseline or "",
+            policy_baseline_label=path_label(args.policy_baseline),
+            model_best_path=effective_best_model,
+            model_best_label=path_label(effective_best_model),
+            lora_best_path=effective_best_lora or "",
+            lora_best_label=path_label(effective_best_lora),
+            policy_best_path=policy_best_dir or "",
+            policy_best_label=path_label(policy_best_dir),
+        )
 
         fi = 0
         hist_trail = []
@@ -316,13 +390,14 @@ def main():
                     lw=2,
                 )
             ]
+            nb_step = nb_past_T - H + i  # aligned neighbor-past time index
             _render_frame(
                 sc_dir / f"f{fi:04d}.png",
                 egos,
                 polylines,
-                hist_nb,
+                _neighbor_boxes_at(nb_past_arr, nb_step, idx_dims),
                 True,
-                f"{name}   t={t:+.1f}s   HISTORY (model context){hidden_note}",
+                f"{name}\n{title_meta}\nt={t:+.1f}s   HISTORY (model context)",
                 args.view_half,
                 ego_shape,
             )
@@ -339,7 +414,7 @@ def main():
                     pose=pb,
                     trail=np.array(tb),
                     color=BASELINE_COLOR,
-                    label=args.label_baseline,
+                    label=label_baseline,
                     lw=2,
                 ),
                 dict(pose=pk, trail=np.array(tk), color=BEST_COLOR, label=label_best, lw=2),
@@ -348,16 +423,16 @@ def main():
                 sc_dir / f"f{fi:04d}.png",
                 egos,
                 polylines,
-                nb_boxes,
+                _neighbor_boxes_at(nb_fut_arr, i, idx_dims),
                 True,
-                f"{name}   t={i * 0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
+                f"{name}\n{title_meta}\nt={i * 0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
                 args.view_half,
                 ego_shape,
                 extra_lines=cand_lines,
             )
             fi += 1
 
-        webm = out_root / f"{name}.webm"
+        webm = sc_dir / "openloop.webm"
         rc = subprocess.run(
             [
                 "ffmpeg",
@@ -382,7 +457,8 @@ def main():
         )
         ok = "OK" if rc.returncode == 0 else f"FAIL {rc.stderr.decode()[-150:]}"
         print(
-            f"{name}: {fi} frames ({H} hist + {traj_base.shape[0]} track), {len(nb_boxes)} nb -> {webm.name} [{ok}]"
+            f"{name}: {fi} frames ({H} hist + {traj_base.shape[0]} track), "
+            f"{len(idx_dims)} nb -> {webm.name} [{ok}]"
         )
 
 

@@ -34,7 +34,6 @@ then review the diff to ``rlvr/reward_golden.json`` carefully before committing.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import sys
@@ -47,7 +46,11 @@ repo_root = Path(__file__).resolve().parent.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from rlvr.reward import RewardConfig, compute_reward_batch  # noqa: E402
+from rlvr.reward import (  # noqa: E402
+    RewardConfig,
+    compute_reward_batch,
+    reward_breakdown_to_json_dict,
+)
 
 GOLDEN_PATH = Path(__file__).with_name("reward_golden.json")
 
@@ -392,7 +395,7 @@ _SCENARIOS = _scenarios()
 
 
 def _breakdown_to_dict(bd) -> dict:
-    return dataclasses.asdict(bd)
+    return reward_breakdown_to_json_dict(bd)
 
 
 def _compute(name: str) -> list:
@@ -407,7 +410,9 @@ def _compute_all() -> dict:
 def _maybe_regenerate() -> bool:
     if not os.environ.get("REGEN_REWARD_GOLDEN"):
         return False
-    GOLDEN_PATH.write_text(json.dumps(_compute_all(), indent=2, sort_keys=True) + "\n")
+    GOLDEN_PATH.write_text(
+        json.dumps(_compute_all(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
     return True
 
 
@@ -466,7 +471,9 @@ def test_golden_covers_all_scenarios() -> None:
 if __name__ == "__main__":
     # Allow `python rlvr/test_reward_golden.py` to (re)generate or verify.
     if os.environ.get("REGEN_REWARD_GOLDEN"):
-        GOLDEN_PATH.write_text(json.dumps(_compute_all(), indent=2, sort_keys=True) + "\n")
+        GOLDEN_PATH.write_text(
+            json.dumps(_compute_all(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+        )
         print(f"Wrote golden file: {GOLDEN_PATH}")
     else:
         golden = json.loads(GOLDEN_PATH.read_text())

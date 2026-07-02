@@ -5,9 +5,11 @@ the correct live-ego-frame coordinate. This is the geometric core of the reprodu
 
 import json
 import math
+from types import SimpleNamespace
 
 import numpy as np
 
+from scenario_generation.replay import _ego_border_distance
 from scenario_generation.reproducer_rollout import _EgoDyn, build_input_np
 from scenario_generation.route_timeline import RouteTimeline
 
@@ -66,3 +68,38 @@ def test_recenter_pure_rotation(tmp_path):
     assert np.allclose(neighbors_live[0, :2], [0.0, -5.0], atol=1e-5)
     # heading (1,0) rotated by R(+90deg)=[[0,1],[-1,0]] -> (0,-1)
     assert np.allclose(neighbors_live[0, 2:4], [0.0, -1.0], atol=1e-5)
+
+
+def test_ego_border_distance_handles_empty_line_strings():
+    ego = SimpleNamespace(
+        current_position=np.array([0.0, 0.0], dtype=np.float32),
+        current_heading=0.0,
+        wheelbase=2.0,
+        length=4.0,
+        width=2.0,
+    )
+    map_data = SimpleNamespace(line_strings=np.zeros((0, 20, 4), dtype=np.float32))
+
+    assert _ego_border_distance(ego, map_data) is None
+
+
+def test_ego_border_distance_keeps_large_real_clearance():
+    far_border_y_m = 150.0
+    ego = SimpleNamespace(
+        current_position=np.array([0.0, 0.0], dtype=np.float32),
+        current_heading=0.0,
+        wheelbase=2.0,
+        length=4.0,
+        width=2.0,
+    )
+    line_strings = np.zeros((1, 20, 4), dtype=np.float32)
+    line_strings[0, 0, :2] = [-10.0, far_border_y_m]
+    line_strings[0, 1, :2] = [10.0, far_border_y_m]
+    line_strings[0, :2, 3] = 1.0
+    map_data = SimpleNamespace(line_strings=line_strings)
+
+    rb_info = _ego_border_distance(ego, map_data)
+
+    assert rb_info is not None
+    expected_clearance_m = far_border_y_m - ego.width / 2
+    assert np.isclose(rb_info[2], expected_clearance_m)

@@ -1,0 +1,8 @@
+{
+  "_comment": "Default thresholds for rlvr.autoresearch.tools.classify_scene_failures scene mining.",
+  "moving_near_thresh": 0.7,
+  "static_near_thresh": 0.5,
+  "rb_near_thresh": 0.2,
+  "sc_cross_thresh": 0.2,
+  "rb_cross_thresh": 0.2
+}

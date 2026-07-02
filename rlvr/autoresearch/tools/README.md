@@ -482,6 +482,34 @@ Select the time-window NPZs around an override moment from a per-session parsed-
 ### ghost_render.py
 Standalone dual-ego ghost-overlay frame renderer (footprints over map lanes/borders/route); rollout primitive shared by the ghost-sim tools.
 
+### materialize_reproducer_routes.py
+Materialize a flat converted NPZ corpus into route datasets for the Perception Reproducer. It matches NPZ files to sidecar JSON files by stem, groups frames by sidecar route directory with a filename-prefix fallback, then symlinks NPZ+JSON pairs into one output directory per contiguous route. Use `--copy` when symlinks are not appropriate and `--overwrite` to refresh existing links. The resulting route directories are the input type expected by `mine_collisions_reproducer` and `render_reproducer_segment`.
+
+```bash
+python -m rlvr.autoresearch.tools.materialize_reproducer_routes \
+  --npz_root <converted_npz_root> \
+  --sidecar_root <sidecar_root> \
+  --output_dir <workspace>/datasets/routes/<name> \
+  [--route_prefix <prefix>] [--copy] [--overwrite]
+```
+
+### render_reproducer_segment.py
+Closed-loop Perception Reproducer route renderer. It runs the same route-timeline and simulation-neighbor path used by collision mining over a selected frame range, dumps one PNG per rendered step, and optionally assembles a VP9 WebM. Use it for route-level audit videos before or after mining. Titles include route/model/LoRA metadata and distance labels where available; each invocation should render into its own output directory.
+
+```bash
+python -m rlvr.autoresearch.tools.render_reproducer_segment \
+  --npz_root <route_dataset_dir> \
+  --model_path <model.pth> \
+  --output_dir <render_dir> \
+  [--lora_path <adapter_dir>] \
+  [--start 0 --steps 120 --end 0 --max_steps 0] \
+  [--goal_reach_m 5.0 --near_miss_thresh 0.5 --search_radius 1.5] \
+  [--unstick_after 300 --view_half_m 50 --make_webm --webm_fps 10]
+```
+
+### render_metadata.py
+Small helper module shared by render tools to build compact labels/titles for WebM and still outputs. It keeps model, LoRA, route, frame range, and distance metadata formatting consistent across open-loop, closed-loop, and reproducer renders.
+
 ### Related tools in other dirs
 - `scenario_generation/tools/select_npz_by_arc_range.py` — select scenes by route arc-range (filters on arc-range + `--speed_thresh`; records signed/abs lateral per scene but does not filter on it), optionally inject `ego_shape`; world pose via `recover_ego_world_pose_from_goal`.
 - `ros_scripts/extract_route_from_chunk0.py` — extract/pickle the latched route message from a session's chunk-0 rosbag (run under ROS env).

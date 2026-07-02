@@ -13,7 +13,8 @@ VALID_SET_LIST=$(readlink -f ${4})
 
 cd $(dirname $0)
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# Number of GPUs to use. Auto-detects all visible GPUs; set NUM_GPUS=1 to force single-GPU.
+NUM_GPUS=$(nvidia-smi -L | wc -l)
 export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_DISABLE=0
 export NCCL_IB_DISABLE=1
@@ -35,18 +36,11 @@ git diff > ${SAVE_PATH}/git_diff.txt
 # (optional) sanity-check the augmentation + sample diversity + reward:
 #   python3 visualize_grpo_samples.py --resume_model_path ${RESUME_MODEL_PATH} --data_list ${TRAIN_SET_LIST} --output_path ${SAVE_PATH}/grpo_samples.png
 #
-python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_grpo_predictor.py \
+python3 -m torch.distributed.run --nnodes 1 --nproc-per-node $NUM_GPUS --standalone train_grpo_predictor.py \
   --exp_name ${exp_name}_grpo \
   --train_set_list ${TRAIN_SET_LIST} \
   --valid_set_list ${VALID_SET_LIST} \
   --resume_model_path ${RESUME_MODEL_PATH} \
-  --diffusion_model_type "x_start" \
   --save_dir ${SAVE_PATH} \
-  --batch_size 64 \
-  --num_generations 8 \
-  --sft_prob 0.5 \
-  --learning_rate 1e-5 \
-  --train_epochs 50 \
-  --save_utd 1 \
-  --use_wandb True \
+  --closed_loop_npz_root ${CLOSED_LOOP_NPZ_ROOT:-""} \
   2>&1 | tee ${SAVE_PATH}/grpo_log.txt

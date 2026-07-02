@@ -1,0 +1,16 @@
+{
+  "ranked_sft_mode": "curated",
+  "sft_velocity_weight": true,
+  "use_lora": true,
+  "lora_rank": 32,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "lora_target": "all",
+  "learning_rate": 0.00003,
+  "kl_coef": 0.1,
+  "neighbor_reg_weight": 1.0,
+  "neighbor_reg_only": false,
+  "train_epochs": 25,
+  "sg_filter_window": 11,
+  "sg_filter_order": 3
+}

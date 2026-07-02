@@ -8,13 +8,15 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.valid_config import ValidConfig
-from diffusion_planner.validate_model import validate_model
+from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
+from tqdm import tqdm
 
 
 def boolean(v):
@@ -132,32 +134,33 @@ def run_validation(valid_cfg: ValidConfig):
 
     valid_dict = validate_model(diffusion_planner, valid_loader, config_obj, return_pred=True)
 
-    # Parse evaluation metrics
+    # Per-rank tensors (this rank's DistributedSampler shard, in loader order).
     loss_ego = valid_dict["loss_ego"]
-    avg_loss_ego = valid_dict["avg_loss_ego"]
-    avg_loss_neighbor = valid_dict["avg_loss_neighbor"]
     predictions = valid_dict["predictions"]
     turn_indicators = valid_dict["turn_indicators"]
-    turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-    turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-    turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
 
-    print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
-    print(f"{predictions.shape=}")
-    print(f"{turn_indicators.shape=}")
-    print(f"{turn_indicator_accuracy=:.4f}")
+    # Aggregate the scalar metrics across all ranks (collective; every rank calls
+    # validate_model above, so every rank reaches here).
+    agg = aggregate_valid_metrics(valid_dict, valid_cfg.device)
+    avg_loss_ego = agg["avg_loss_ego"]
+    avg_loss_neighbor = agg["avg_loss_neighbor"]
+    turn_indicator_accuracy = agg["turn_indicator_accuracy"]
+    turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
+    turn_indicator_change_total = agg["turn_indicator_change_total"]
 
-    if turn_indicator_change_total > 0:
-        print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
-    else:
-        print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
-
-    if "ego_neighbor_margin_loss" in valid_dict:
-        print(
-            f"ego_neighbor_margin_loss_mean={valid_dict['ego_neighbor_margin_loss'].mean().item():.4f}"
-        )
-    if "ego_road_border_loss" in valid_dict:
-        print(f"ego_road_border_loss_mean={valid_dict['ego_road_border_loss'].mean().item():.4f}")
+    if global_rank == 0:
+        print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
+        print(f"{turn_indicator_accuracy=:.4f}")
+        if turn_indicator_change_total > 0:
+            print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
+        else:
+            print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
+        if "ego_neighbor_margin_loss" in agg["ego_means"]:
+            print(
+                f"ego_neighbor_margin_loss_mean={agg['ego_means']['ego_neighbor_margin_loss']:.4f}"
+            )
+        if "ego_road_border_loss" in agg["ego_means"]:
+            print(f"ego_road_border_loss_mean={agg['ego_means']['ego_road_border_loss']:.4f}")
 
     # Save results
     if valid_cfg.save_predictions_dir is None:
@@ -166,23 +169,37 @@ def run_validation(valid_cfg: ValidConfig):
     save_predictions_dir = Path(valid_cfg.save_predictions_dir)
     save_predictions_dir.mkdir(parents=True, exist_ok=True)
 
-    valid_dict_to_save = {
-        "avg_loss_ego": avg_loss_ego,
-        "avg_loss_neighbor": avg_loss_neighbor,
-        "turn_indicator_accuracy": turn_indicator_accuracy,
-        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-        "turn_indicator_change_total": turn_indicator_change_total,
-    }
-    for key, val in valid_dict.items():
-        if key.startswith("ego_"):
-            valid_dict_to_save[f"{key}"] = val.mean().item()
+    # Aggregate metrics JSON is global; write once from rank 0.
+    if global_rank == 0:
+        valid_dict_to_save = {
+            "avg_loss_ego": avg_loss_ego,
+            "avg_loss_neighbor": avg_loss_neighbor,
+            "turn_indicator_accuracy": turn_indicator_accuracy,
+            "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+            "turn_indicator_change_total": turn_indicator_change_total,
+            **agg["ego_means"],
+        }
+        with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
+            json.dump(valid_dict_to_save, f, indent=4)
 
-    with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
-        json.dump(valid_dict_to_save, f, indent=4)
+    # Map each prediction (loader order) back to its source data path, and save under a
+    # path that mirrors the input's directory hierarchy. The relative path is unique per
+    # data point, so ranks never collide and the local index is irrelevant.
+    sampler_indices = list(valid_sampler)
+    assert len(sampler_indices) == predictions.shape[0]
 
-    for i in range(predictions.shape[0]):
+    # Progress is driven by the SLOWEST rank (see validate_model): every `save_sync_every`
+    # files all ranks rendezvous on all-reduce(MIN) and rank 0 displays that minimum, so
+    # the bar reaches 100% only when every rank has finished saving its shard.
+    save_sync_every = 200
+    n_save = predictions.shape[0]
+    pbar = tqdm(total=n_save, desc="save (slowest rank)", disable=global_rank != 0)
+    for i in range(n_save):
+        rel = data_path_to_rel(valid_set.data_list[sampler_indices[i]])
+        out_base = save_predictions_dir / rel
+        out_base.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
-            save_predictions_dir / f"prediction{i:08d}.npz",
+            out_base.with_suffix(".npz"),
             prediction=predictions[i].cpu().numpy(),
             turn_indicator=turn_indicators[i].cpu().numpy(),
         )
@@ -192,12 +209,19 @@ def run_validation(valid_cfg: ValidConfig):
             "loss_ego_5sec": torch.sqrt(loss_ego[i, 50 - 1, :2].sum()).item(),
             "loss_ego_8sec": torch.sqrt(loss_ego[i, 80 - 1, :2].sum()).item(),
         }
-        for key, val in valid_dict.items():
-            if not key.startswith("ego_"):
+        for key_metric, val in valid_dict.items():
+            if not key_metric.startswith("ego_"):
                 continue
-            loss_dict[key] = val[i].mean().item()
-        with open(save_predictions_dir / f"loss{i:08d}.json", "w") as f:
+            loss_dict[key_metric] = val[i].mean().item()
+        with open(out_base.with_suffix(".json"), "w") as f:
             json.dump(loss_dict, f, indent=4)
+
+        if (i + 1) % save_sync_every == 0 or (i + 1) == n_save:
+            min_done = int(ddp.all_reduce_min(i + 1, valid_cfg.device))
+            if global_rank == 0:
+                pbar.n = min_done
+                pbar.refresh()
+    pbar.close()
 
 
 def main():

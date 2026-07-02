@@ -34,9 +34,17 @@ import rlvr.guidance_batched  # noqa: F401
 from exploration_policy.utils import run_frozen_encoder
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.recovery_test import transform_to_new_ego_frame
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 from rlvr.grpo_sft_trainer import _smooth_trajectory
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
+
+
+def _model_policy_title(model_path: str | Path, policy_dir: str | Path | None) -> str:
+    p = Path(model_path)
+    model_label = f"{p.parent.name}/{p.name}"
+    policy_label = Path(policy_dir).name if policy_dir else "none"
+    return f"model: {model_label}  lora: none  guidance: {policy_label}"
 
 
 @torch.no_grad()
@@ -202,7 +210,12 @@ def _render_one(job):
         steps,
         hist_steps,
         webm_fps,
+        view_half_m,
         lambda_spd,
+        title_meta,
+        output_tag,
+        model_path,
+        policy_dir,
     ) = job
     import matplotlib
 
@@ -216,14 +229,27 @@ def _render_one(job):
     # Disambiguate same-basename scenes from different perturbation pools
     # (e.g. train_parallel/ and train_yaw/ both holding scene_0008_var02.npz).
     scene_name = f"{Path(scene_path).parent.name}__{Path(scene_path).stem}"
+    scene_out = Path(out_dir) / f"{scene_name}__{output_tag}"
+    write_render_meta(
+        scene_out,
+        tool="batched_closedloop_videos",
+        scene=scene_name,
+        model_path=model_path,
+        model_label=path_label(model_path),
+        lora_path="",
+        lora_label="none",
+        policy_path=policy_dir,
+        policy_label=path_label(policy_dir),
+    )
     cfg = GhostSimConfig(
         model_a_label=label_a,
         model_b_label=label_b,
         steps=steps,
         hist_steps=hist_steps,
         webm_fps=webm_fps,
+        view_half_m=view_half_m,
     )
-    cfg.subtitle = scene_name
+    cfg.subtitle = f"{scene_name}\n{title_meta}"
     data = load_npz_data(scene_path, "cpu")
 
     def eta_title(step, a_pose, b_pose):
@@ -245,7 +271,7 @@ def _render_one(job):
         model_b=None,
         model_b_args=None,
         scene_data=data,
-        output_dir=Path(out_dir) / scene_name,
+        output_dir=scene_out,
         cfg=cfg,
         neighbor_boxes=extract_stopped_neighbors(scene_path),
         make_webm=True,
@@ -270,10 +296,22 @@ def main():
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--hist_steps", type=int, default=30)
     parser.add_argument("--webm_fps", type=int, default=10)
+    parser.add_argument(
+        "--view_half_m",
+        type=float,
+        default=30.0,
+        help="Half-width of the bird's-eye camera window around ego, in metres",
+    )
     parser.add_argument("--label_a", default="baseline")
     parser.add_argument("--label_b", default="explorer")
     parser.add_argument(
         "--render_only", action="store_true", help="skip phase 1, render from saved rollouts.pkl"
+    )
+    parser.add_argument(
+        "--rollouts_pkl",
+        type=Path,
+        default=None,
+        help="Explicit rollout pickle for --render_only, or save path for phase 1.",
     )
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
@@ -293,7 +331,8 @@ def main():
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    pkl = out_dir / "rollouts.pkl"
+    output_tag = render_tag(args.model_path, args.policy_dir)
+    pkl = args.rollouts_pkl or out_dir / f"rollouts__{output_tag}.pkl"
 
     with open(args.scenes) as f:
         paths = json.load(f)
@@ -328,6 +367,14 @@ def main():
         del model, policy, datas
         torch.cuda.empty_cache()
     else:
+        if args.rollouts_pkl is None and not pkl.exists():
+            candidates = sorted(out_dir.glob("rollouts__*.pkl"), key=lambda p: p.stat().st_mtime)
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No rollout pickle found at {pkl}; pass --rollouts_pkl for --render_only"
+                )
+            pkl = candidates[-1]
+            print(f"[render_only] using latest rollout pickle: {pkl}")
         with open(pkl, "rb") as f:
             saved = pickle.load(f)
         paths, ro_base, ro_gui, eta_logs = (
@@ -349,7 +396,12 @@ def main():
             args.steps,
             args.hist_steps,
             args.webm_fps,
+            args.view_half_m,
             args.lambda_spd,
+            _model_policy_title(args.model_path, args.policy_dir),
+            output_tag,
+            args.model_path,
+            args.policy_dir,
         )
         for i in range(len(paths))
     ]

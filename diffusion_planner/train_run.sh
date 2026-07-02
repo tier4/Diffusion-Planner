@@ -13,7 +13,8 @@ VALID_SET_LIST=$(readlink -f $VALID_SET_LIST)
 
 cd $(dirname $0)
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# Number of GPUs to use. Auto-detects all visible GPUs; set NUM_GPUS=1 to force single-GPU.
+NUM_GPUS=$(nvidia-smi -L | wc -l)
 
 export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_DISABLE=0
@@ -49,7 +50,7 @@ if [ -n "$WANDB_PROJECT_NAME" ]; then
 fi
 
 
-python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
+python3 -m torch.distributed.run --nnodes 1 --nproc-per-node $NUM_GPUS --standalone train_predictor.py \
 --exp_name ${exp_name} \
 --train_set_list $TRAIN_SET_LIST \
 --valid_set_list $VALID_SET_LIST \
@@ -58,6 +59,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --save_dir ${SAVE_PATH} \
 --train_epochs 80 \
 --save_utd 10 \
+--closed_loop_npz_root ${CLOSED_LOOP_NPZ_ROOT:-""} \
 "${OPTIONAL_ARGS[@]}" \
 2>&1 | tee ${SAVE_PATH}/train_log.txt
 
