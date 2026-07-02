@@ -1599,6 +1599,8 @@ def run_segments_batched(
                     )
                 for off, s in enumerate(states):
                     s.credit_window = assigned_credit_windows[c0 + off]
+                    if verify_credit_windows is not None:
+                        s.max_steps = max(1, int(s.end - s.start))
             if save_dir is not None:
                 import shutil
                 from collections import deque
@@ -1631,7 +1633,10 @@ def run_segments_batched(
                         width = max(width, int(s.end - s.start - 1))
                     if danger_credit_windows:
                         width = max(width, max(int(v) for v in danger_credit_windows.values()))
-                    s.save_buf = deque(maxlen=max(width + 1, save_pre_steps + 1))
+                    maxlen = width + 1
+                    if verify_credit_windows is None:
+                        maxlen = max(maxlen, save_pre_steps + 1)
+                    s.save_buf = deque(maxlen=maxlen)
                     s.danger_event_selector = OnlineEventSelector(
                         decluster_steps=danger_decluster_steps
                     )

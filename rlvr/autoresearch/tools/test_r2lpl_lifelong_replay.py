@@ -16,8 +16,8 @@ from rlvr.autoresearch.tools.build_avoiding_target import (
 )
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
-    _collapse_event_windows,
     _resolve_row,
+    _select_event_windows,
     _validate_credit_config,
 )
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
@@ -289,25 +289,55 @@ def test_contiguous_index_runs_group_single_event():
     assert contiguous_index_runs([423, 424, 425, 436], max_gap=9) == [[423, 424, 425], [436]]
 
 
-def test_credit_window_miner_collapses_one_continuous_offense_run_to_one_event():
+def test_credit_window_miner_selects_eta_closest_anchor_within_event(tmp_path):
+    route = [tmp_path / f"bagA_{i:04d}.npz" for i in range(100, 200)]
     windows = [
         {
             "route_key": "bagA",
             "label": "road_border_crossing",
-            "offense_index": step,
-            "offense_frame": 1000 + step,
-            "start_frame": 1000 + step - 15,
+            "frame_index": 120 + i,
+            "source_index": 20 + i,
+            "violation_step": eta,
+            "offense_index": 20 + i + eta,
+            "offense_frame": 120 + i + eta,
             "credit_width": 15,
+            "start_frame": 120 + i,
         }
-        for step in [423, 424, 425, 433, 434]
+        for i, eta in enumerate([27, 30, 25])
     ]
 
-    [event] = _collapse_event_windows(windows, decluster_steps=10)
+    [event] = _select_event_windows({"x": 1} and windows, {"bagA": route}, source_gap_steps=1)
 
-    assert event["offense_index"] == 423
-    assert event["event_offense_start_index"] == 423
-    assert event["event_offense_end_index"] == 434
-    assert event["event_span_steps"] == 12
+    assert event["source_index"] == 22
+    assert event["frame_index"] == 122
+    assert event["violation_step"] == 25
+    assert event["event_source_start_index"] == 20
+    assert event["event_source_end_index"] == 22
+    assert event["event_member_count"] == 3
+    assert event["start_index"] == 22
+    assert event["end_index"] == 36
+
+
+def test_credit_window_miner_respects_source_gap_grouping(tmp_path):
+    route = [tmp_path / f"bagA_{i:04d}.npz" for i in range(100, 200)]
+    windows = [
+        {
+            "route_key": "bagA",
+            "label": "road_border_crossing",
+            "frame_index": frame,
+            "source_index": idx,
+            "violation_step": 15,
+            "offense_index": idx + 15,
+            "offense_frame": frame + 15,
+            "credit_width": 15,
+            "start_frame": frame,
+        }
+        for idx, frame in [(20, 120), (21, 121), (25, 125)]
+    ]
+
+    events = _select_event_windows(windows, {"bagA": route}, source_gap_steps=2)
+    assert len(events) == 2
+    assert [event["source_index"] for event in events] == [20, 25]
 
 
 def test_shared_sustained_runs_returns_whole_qualified_run():
@@ -369,7 +399,7 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
             k=0,
             done=False,
             terminated="max_steps",
-            max_steps=8,
+            max_steps=999,
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
@@ -383,7 +413,7 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
         )
 
     def _fake_pre_step(s, gpu_transform=False):
-        if s.k >= 3:
+        if s.k >= s.max_steps:
             s.done = True
             return None
         return (
@@ -408,8 +438,6 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
 
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
-        if s.k >= 3:
-            s.done = True
 
     def _fake_finalize(s, timers):
         return SimpleNamespace(metrics={"n_steps_run": s.k})

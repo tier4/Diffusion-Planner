@@ -69,29 +69,45 @@ def _route_files(npz_root: Path) -> dict[str, list[Path]]:
     return group_routes(paths)
 
 
-def _collapse_event_windows(
-    windows: list[dict[str, Any]], decluster_steps: int
+def _select_event_windows(
+    windows: list[dict[str, Any]],
+    routes: dict[str, list[Path]],
+    source_gap_steps: int = 1,
 ) -> list[dict[str, Any]]:
-    if decluster_steps < 1:
-        raise ValueError(
-            f"classified_decluster_steps must be >= 1 for event grouping, got {decluster_steps}"
-        )
+    if source_gap_steps < 1:
+        raise ValueError(f"source_gap_steps must be >= 1, got {source_gap_steps}")
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for w in windows:
         grouped.setdefault((str(w["route_key"]), str(w["label"])), []).append(w)
     out: list[dict[str, Any]] = []
-    for group in grouped.values():
-        by_step = {int(w["offense_index"]): w for w in group}
-        for run in contiguous_index_runs(by_step, max_gap=decluster_steps - 1):
-            first = by_step[run[0]]
-            event = dict(first)
-            event["event_offense_start_index"] = int(run[0])
-            event["event_offense_end_index"] = int(run[-1])
-            event["event_span_steps"] = int(run[-1] - run[0] + 1)
+    for (route_key, _label), group in grouped.items():
+        by_source = {int(w["source_index"]): w for w in group}
+        idx_to_frame = {_frame_index(p): i for i, p in enumerate(routes[route_key])}
+        frame_by_idx = {i: frame for frame, i in idx_to_frame.items()}
+        for run in contiguous_index_runs(by_source, max_gap=source_gap_steps):
+            rows = [by_source[idx] for idx in run]
+            anchor = min(
+                rows,
+                key=lambda w: (
+                    abs(int(w["violation_step"]) - int(w["credit_width"])),
+                    int(w["violation_step"]),
+                    int(w["source_index"]),
+                ),
+            )
+            end_index = min(
+                int(anchor["source_index"]) + int(anchor["credit_width"]) - 1,
+                len(routes[route_key]) - 1,
+            )
+            event = dict(anchor)
+            event["event_source_start_index"] = int(run[0])
+            event["event_source_end_index"] = int(run[-1])
+            event["event_member_count"] = len(rows)
+            event["start_index"] = int(anchor["source_index"])
+            event["start_frame"] = int(anchor["frame_index"])
+            event["end_index"] = int(end_index)
+            event["end_frame"] = int(frame_by_idx[end_index])
             out.append(event)
-    return sorted(
-        out, key=lambda w: (str(w["route_key"]), int(w["offense_index"]), str(w["label"]))
-    )
+    return sorted(out, key=lambda w: (str(w["route_key"]), int(w["source_index"]), str(w["label"])))
 
 
 def _resolve_row(
@@ -137,6 +153,8 @@ def _resolve_row(
                 "source_scene_path": str(scene),
                 "label": label,
                 "frame_index": frame,
+                "source_index": frame_to_pos[frame],
+                "violation_step": int(step),
                 "offense_frame": offense,
                 "offense_index": frame_to_pos[offense],
                 "credit_width": width,
@@ -205,7 +223,9 @@ def main() -> None:
     windows: list[dict[str, Any]] = []
     for row in rows:
         windows.extend(_resolve_row(row, routes, credit, allowed_labels))
-    windows = _collapse_event_windows(windows, args.classified_decluster_steps)
+    windows = _select_event_windows(
+        windows, routes, source_gap_steps=args.classified_decluster_steps
+    )
     if not windows:
         raise ValueError("No non-clean credit windows resolved from classified scenes")
 
