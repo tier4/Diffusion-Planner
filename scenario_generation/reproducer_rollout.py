@@ -1367,8 +1367,11 @@ def render_segment(
         json.dumps(
             {
                 "event": "start",
-                "start": int(start),
-                "end": int(end),
+                "start_frame_id": _frame_id(tl, start),
+                "end_frame_id": _frame_id(tl, max(start, end - 1)),
+                "start_route_index": int(start),
+                "end_route_index": int(end),
+                "goal_frame_id": _frame_id(tl, max(start, end - 1)),
                 "goal_idx": int(end - 1),
                 "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
                 "goal_reach_m": float(s.goal_reach_m),
@@ -1409,6 +1412,7 @@ def render_segment(
                     "yaw": round(float(s.live_pose[2]), 4),
                     "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
                     "speed": round(float(s.dyn.speed), 3),
+                    "rec_frame_id": _frame_id(tl, idx),
                     "rec_idx": int(idx),
                     "max_idx_reached": int(s.cursor.max_idx_reached),
                     "stuck": int(s.stuck),
@@ -1942,6 +1946,7 @@ def _dump_credit_window(
     manifest["credit_label"] = label
     manifest["credit_width"] = int(credit_width)
     manifest["offense_step"] = int(offense_step)
+    manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 
@@ -1995,9 +2000,15 @@ def _dump_full_credit_segment(
     manifest["credit_label"] = label
     manifest["credit_width"] = int(last_step - first_step)
     manifest["offense_step"] = int(last_step)
+    manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
     manifest["verified_first_step"] = None if verified_step is None else int(verified_step)
+    manifest["verified_first_frame_id"] = (
+        None if verified_step is None else _frame_id(tl, int(buf[int(verified_step)][1]))
+    )
     manifest["window_first_step"] = int(first_step)
     manifest["window_last_step"] = int(last_step)
+    manifest["window_first_frame_id"] = _frame_id(tl, int(buf[0][1]))
+    manifest["window_last_frame_id"] = _frame_id(tl, int(buf[-1][1]))
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 
@@ -2144,6 +2155,10 @@ def _route_key(tl: RouteTimeline) -> str:
     return route_prefix(Path(tl.npz_paths[0]))
 
 
+def _frame_id(tl: RouteTimeline, idx: int) -> int:
+    return int(tl.frame_indices[int(idx)])
+
+
 def _dump_precollision_window(
     out_dir,
     tl: RouteTimeline,
@@ -2206,6 +2221,7 @@ def _dump_precollision_window(
     poses_by_step = {rec[0]: rec[2] for rec in buf}  # step k -> world pose (for ego_future)
     fut_len = int(model_args.future_len)
     saved: list[int] = []
+    saved_frame_ids: list[int] = []
 
     start_k = _precollision_window_start(
         t_c, pre_steps, last_snap_step, poses_by_step, pre_arc_m, max_scenes
@@ -2351,13 +2367,17 @@ def _dump_precollision_window(
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
         saved.append(int(step_k))
+        saved_frame_ids.append(_frame_id(tl, idx))
 
+    seg_end_inclusive = min(int(seg_end) - 1, len(tl) - 1)
     manifest = {
-        "segment": [int(seg_start), int(seg_end)],
+        "segment": [_frame_id(tl, seg_start), _frame_id(tl, seg_end_inclusive)],
+        "segment_route_indices": [int(seg_start), int(seg_end)],
         "collision_step": int(t_c),
         "collision_thresh": float(collision_thresh),
         "n_scenes": len(saved),
         "steps_saved": saved,
+        "scene_frame_ids_saved": saved_frame_ids,
         "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
