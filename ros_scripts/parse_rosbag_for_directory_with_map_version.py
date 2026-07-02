@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -36,7 +37,7 @@ def parse_args():
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
     parser.add_argument("--write_skipped_npz", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=32)
+    parser.add_argument("--num_workers", type=int, default=os.cpu_count() // 2)
     return parser.parse_args()
 
 
