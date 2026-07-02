@@ -69,6 +69,7 @@ _ALWAYS_WRITE_LISTS = (
     "moving_collision",
     "moving_near_miss",
     "moving_ttc",
+    "expert_disagreement",
 )
 
 _DEFAULT_THRESHOLD_CONFIG = (
@@ -78,6 +79,8 @@ _REQUIRED_THRESHOLD_FIELDS = (
     "moving_near_thresh",
     "static_near_thresh",
     "rb_near_thresh",
+    "expert_disagreement_thresh",
+    "expert_disagreement_sustain_steps",
     "sc_cross_thresh",
     "rb_cross_thresh",
 )
@@ -97,14 +100,16 @@ def _load_scene_thresholds(path: str | Path) -> dict[str, float]:
     missing = [k for k in _REQUIRED_THRESHOLD_FIELDS if k not in raw]
     if missing:
         raise ValueError(f"Threshold config {path} is missing required fields: {missing}")
-    return {k: float(raw[k]) for k in _REQUIRED_THRESHOLD_FIELDS}
+    out = {k: float(raw[k]) for k in _REQUIRED_THRESHOLD_FIELDS}
+    out["expert_disagreement_sustain_steps"] = int(out["expert_disagreement_sustain_steps"])
+    return out
 
 
 def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
     threshold_config = _load_scene_thresholds(args.threshold_config)
 
     def resolve(name: str) -> float:
-        cli_value = getattr(args, name)
+        cli_value = getattr(args, name, None)
         return float(cli_value) if cli_value is not None else threshold_config[name]
 
     args.moving_near_thresh = resolve("moving_near_thresh")
@@ -114,6 +119,8 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
     config.rb_cross_thresh = resolve("rb_cross_thresh")
     config.sc_near_thresh = args.static_near_thresh
     config.rb_near_thresh = args.rb_near_thresh
+    args.expert_disagreement_thresh = resolve("expert_disagreement_thresh")
+    args.expert_disagreement_sustain_steps = int(resolve("expert_disagreement_sustain_steps"))
 
     return {
         "moving_near_thresh": float(args.moving_near_thresh),
@@ -122,6 +129,8 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
         "static_collision_thresh": float(config.sc_cross_thresh),
         "sc_cross_thresh": float(config.sc_cross_thresh),
         "rb_cross_thresh": float(config.rb_cross_thresh),
+        "expert_disagreement_thresh": float(args.expert_disagreement_thresh),
+        "expert_disagreement_sustain_steps": int(args.expert_disagreement_sustain_steps),
     }
 
 
@@ -334,6 +343,37 @@ def _gt_trajectory(data: dict[str, torch.Tensor], device: torch.device) -> torch
         traj = traj[0]
     traj = _future_heading_to_cos_sin(traj)
     return traj[:, :4].to(device).unsqueeze(0)
+
+
+def _conflict_diagnostics(
+    ego_traj: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    args,
+) -> dict[str, Any]:
+    from scenario_generation.conflict_detector import detect_expert_disagreement
+
+    gt = data.get("ego_agent_future")
+    if gt is None:
+        return {
+            "expert_disagreement": False,
+            "expert_disagreement_step": None,
+            "expert_disagreement_max_dev": 0.0,
+        }
+    if gt.dim() == 3:
+        gt = gt[0]
+    gt = _future_heading_to_cos_sin(gt)
+    result = detect_expert_disagreement(
+        ego_traj[0],
+        gt,
+        enabled=bool(args.enable_conflict_detector),
+        threshold_m=float(args.expert_disagreement_thresh),
+        sustain_steps=int(args.expert_disagreement_sustain_steps),
+    )
+    return {
+        "expert_disagreement": result.expert_disagreement,
+        "expert_disagreement_step": result.expert_disagreement_step,
+        "expert_disagreement_max_dev": result.max_deviation,
+    }
 
 
 def _prediction_path_for_scene(
@@ -562,6 +602,7 @@ def classify_loaded_scene(
     static_near_thresh: float,
     rb_near_thresh: float,
     device: torch.device,
+    args=None,
 ) -> dict[str, Any]:
     rows = classify_loaded_scenes_batch(
         [scene_path],
@@ -572,6 +613,7 @@ def classify_loaded_scene(
         static_near_thresh=static_near_thresh,
         rb_near_thresh=rb_near_thresh,
         device=device,
+        args=args,
     )
     return rows[0]
 
@@ -585,6 +627,7 @@ def _build_candidate_row(
     bidx: int,
     static_near_thresh: float,
     rb_near_thresh: float,
+    conflict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     labels: list[str] = []
     rb_crossing = bool(subs["rb_crossing_gate"][bidx, candidate_idx].item() < 0.5)
@@ -616,6 +659,10 @@ def _build_candidate_row(
     if ttc_first_unsafe is not None and moving["moving_collision_step"] is None:
         labels.append("moving_ttc")
 
+    conflict = conflict or {}
+    if conflict.get("expert_disagreement"):
+        labels.append("expert_disagreement")
+
     if not labels:
         labels.append("clean")
 
@@ -643,6 +690,9 @@ def _build_candidate_row(
         "ttc_first_unsafe_step": ttc_first_unsafe,
         "ttc_first_collision_step": subs["ttc_first_collision_steps"][bidx][candidate_idx],
         **moving,
+        "expert_disagreement": bool(conflict.get("expert_disagreement", False)),
+        "expert_disagreement_step": conflict.get("expert_disagreement_step"),
+        "expert_disagreement_max_dev": float(conflict.get("expert_disagreement_max_dev", 0.0)),
     }
 
 
@@ -656,17 +706,40 @@ def classify_loaded_scenes_batch(
     static_near_thresh: float,
     rb_near_thresh: float,
     device: torch.device,
+    args=None,
 ) -> list[dict[str, Any]]:
     """Classify a B-scene batch with one scored trajectory per scene."""
+    rows_per_scene = classify_loaded_scene_candidates_batch(
+        scene_paths,
+        ego_trajs,
+        datas,
+        config,
+        moving_near_thresh=moving_near_thresh,
+        static_near_thresh=static_near_thresh,
+        rb_near_thresh=rb_near_thresh,
+        device=device,
+        args=args,
+    )
+    return [rows[0] for rows in rows_per_scene]
+
+
+def classify_loaded_scene_candidates_batch(
+    scene_paths: list[str],
+    ego_trajs: torch.Tensor,
+    datas: list[dict[str, torch.Tensor]],
+    config: RewardConfig,
+    *,
+    moving_near_thresh: float,
+    static_near_thresh: float,
+    rb_near_thresh: float,
+    device: torch.device,
+    args=None,
+) -> list[list[dict[str, Any]]]:
+    """Classify a B-scene batch with N scored trajectories per scene."""
     if ego_trajs.dim() != 4:
         raise ValueError(
-            "classify_loaded_scenes_batch expects ego_trajs shaped (B,N,T,4); "
+            "classify_loaded_scene_candidates_batch expects ego_trajs shaped (B,N,T,4); "
             f"got {tuple(ego_trajs.shape)}"
-        )
-    if ego_trajs.shape[1] != 1:
-        raise ValueError(
-            "dangerous scene classification expects exactly one trajectory per scene; "
-            f"got N={ego_trajs.shape[1]}"
         )
     if len(scene_paths) != ego_trajs.shape[0] or len(datas) != ego_trajs.shape[0]:
         raise ValueError(
@@ -678,29 +751,35 @@ def classify_loaded_scenes_batch(
     batched_data = _stack_scene_data(prepared_datas)
     subs = compute_subscores_scene_batch(ego_trajs, batched_data, config)
 
-    rows: list[dict[str, Any]] = []
-    B = ego_trajs.shape[0]
+    rows_per_scene: list[list[dict[str, Any]]] = []
+    B, N = ego_trajs.shape[:2]
     for bidx, scene_path in enumerate(scene_paths):
         scene_data = _slice_scene_data(batched_data, bidx, B)
-        moving = _moving_diagnostics(
-            ego_trajs[bidx, 0:1],
-            scene_data,
-            config,
-            moving_near_thresh,
-            device,
-        )
-        rows.append(
-            _build_candidate_row(
+        scene_rows: list[dict[str, Any]] = []
+        for candidate_idx in range(N):
+            traj_1 = ego_trajs[bidx, candidate_idx : candidate_idx + 1]
+            moving = _moving_diagnostics(
+                traj_1,
+                scene_data,
+                config,
+                moving_near_thresh,
+                device,
+            )
+            conflict = _conflict_diagnostics(traj_1, scene_data, args) if args else {}
+            row = _build_candidate_row(
                 scene_path,
-                0,
+                candidate_idx,
                 subs,
                 moving,
                 bidx=bidx,
                 static_near_thresh=static_near_thresh,
                 rb_near_thresh=rb_near_thresh,
+                conflict=conflict,
             )
-        )
-    return rows
+            row["trajectory_source"] = "generated" if N > 1 else row["trajectory_source"]
+            scene_rows.append(row)
+        rows_per_scene.append(scene_rows)
+    return rows_per_scene
 
 
 def _write_json(path: Path, obj: Any) -> None:
@@ -843,6 +922,7 @@ def _classify_gt(
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "gt"
@@ -896,6 +976,7 @@ def _classify_det(
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "det"
@@ -961,6 +1042,7 @@ def _classify_saved_predictions(
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "saved_pred"
@@ -1019,6 +1101,7 @@ def _classify_saved_prediction_pairs(
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "saved_pred"
@@ -1156,6 +1239,13 @@ def main() -> None:
     parser.add_argument("--moving_near_thresh", type=float, default=None)
     parser.add_argument("--static_near_thresh", type=float, default=None)
     parser.add_argument("--rb_near_thresh", type=float, default=None)
+    parser.add_argument("--expert_disagreement_thresh", type=float, default=None)
+    parser.add_argument("--expert_disagreement_sustain_steps", type=int, default=None)
+    parser.add_argument(
+        "--enable_conflict_detector",
+        action="store_true",
+        help="Enable sustained model-vs-GT disagreement labeling.",
+    )
     parser.add_argument("--sc_cross_thresh", type=float, default=None)
     parser.add_argument("--rb_cross_thresh", type=float, default=None)
     parser.add_argument("--max_scenes", type=int, default=None)

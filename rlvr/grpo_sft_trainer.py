@@ -139,6 +139,10 @@ def _compute_sft_diffusion_loss(
     kl_coef: float = 0.0,
     base_model: nn.Module | None = None,
     prefer_external_base: bool = False,
+    replay_der_coef: float = 0.0,
+    replay_anchor_model: nn.Module | None = None,
+    scene_loss_weights: torch.Tensor | None = None,
+    replay_der_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -254,7 +258,17 @@ def _compute_sft_diffusion_loss(
     total_neighbor_reg_loss = 0.0
     total_ego_il_loss = 0.0
     total_kl_loss = 0.0
+    total_der_loss = 0.0
     use_kl = kl_coef > 0.0
+    if scene_loss_weights is None:
+        scene_loss_weights = torch.ones(B, device=device, dtype=torch.float32)
+    else:
+        scene_loss_weights = scene_loss_weights.to(device=device, dtype=torch.float32).reshape(B)
+    if replay_der_mask is None:
+        replay_der_mask = torch.zeros(B, device=device, dtype=torch.bool)
+    else:
+        replay_der_mask = replay_der_mask.to(device=device, dtype=torch.bool).reshape(B)
+    use_der = replay_der_coef > 0.0 and bool(replay_der_mask.any().item())
     # Combine future padding mask with current-timestep validity:
     # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
@@ -317,12 +331,12 @@ def _compute_sft_diffusion_loss(
             ego_speed = data["ego_current_state"][:, 4:5].abs().clamp(min=1.0)  # [B, 1]
             lon_err = lon_err / ego_speed
         heading_err = torch.sum((ego_pred[..., 2:] - ego_gt[..., 2:]) ** 2, dim=-1)
-        ego_loss = (lat_err + lon_err + heading_err).mean()
-        total_ego_loss += ego_loss
+        ego_loss_per_scene = (lat_err + lon_err + heading_err).mean(dim=1)
+        total_ego_loss += ego_loss_per_scene
 
         # Ego IL loss (GT mode): MSE against real GT ego trajectory
         if use_ego_il and ego_il_mode == "gt":
-            ego_il_loss = F.mse_loss(model_output[:, 0], ego_gt_real_norm)
+            ego_il_loss = ((model_output[:, 0] - ego_gt_real_norm) ** 2).mean(dim=(1, 2))
             total_ego_il_loss += ego_il_loss
 
         # Neighbor loss: MSE over valid timesteps only.
@@ -333,18 +347,27 @@ def _compute_sft_diffusion_loss(
             neighbor_target = gt_target[:, 1:]  # [B, Pn, T, 4]
             # Per-element MSE, then mask
             neighbor_mse = ((neighbor_pred - neighbor_target) ** 2).mean(dim=-1)  # [B, Pn, T]
-            masked_loss = neighbor_mse[neighbors_future_valid]
-            if masked_loss.numel() > 0:
-                total_neighbor_loss += masked_loss.mean()
+            valid_f = neighbors_future_valid.to(neighbor_mse.dtype)
+            denom = valid_f.sum(dim=(1, 2)).clamp(min=1.0)
+            neighbor_loss_per_scene = (neighbor_mse * valid_f).sum(dim=(1, 2)) / denom
+            neighbor_loss_per_scene = torch.where(
+                valid_f.sum(dim=(1, 2)) > 0,
+                neighbor_loss_per_scene,
+                torch.zeros_like(neighbor_loss_per_scene),
+            )
+            total_neighbor_loss += neighbor_loss_per_scene
 
-        # Base model forward pass: needed for neighbor_reg, baseline ego IL, or KL
+        # Base model forward pass: needed for neighbor_reg, baseline ego IL, or KL.
+        # Replay DER uses its own previous-round anchor below so it cannot
+        # accidentally change the neighbor/KL reference.
         need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline") or use_kl
         has_lora = hasattr(inner, "disable_adapter")
-        if need_base_pass and prefer_external_base and base_model is None:
+        base_ref_model = base_model
+        if need_base_pass and prefer_external_base and base_ref_model is None:
             raise ValueError(
                 "neighbor_reg_anchor='baseline' requires an external base_model; got None"
             )
-        if need_base_pass and not has_lora and base_model is None:
+        if need_base_pass and not has_lora and base_ref_model is None:
             active = []
             if use_kl:
                 active.append("kl_coef")
@@ -358,7 +381,7 @@ def _compute_sft_diffusion_loss(
                 "Note: neighbor_reg only works with LoRA's disable_adapter."
             )
         if need_base_pass:
-            use_external = prefer_external_base and (base_model is not None)
+            use_external = prefer_external_base and (base_ref_model is not None)
             if has_lora and not use_external:
                 with inner.disable_adapter(), torch.no_grad():
                     _, base_outputs = model(merged_inputs)
@@ -371,13 +394,13 @@ def _compute_sft_diffusion_loss(
                 # loop), so the external base_model must also forward in train mode to
                 # return "model_output" identically. Params stay frozen via
                 # requires_grad_(False) + no_grad; only the forward mode is toggled.
-                base_was_training = base_model.training
-                base_model.train()
+                base_was_training = base_ref_model.training
+                base_ref_model.train()
                 try:
                     with torch.no_grad():
-                        _, base_outputs = base_model(merged_inputs)
+                        _, base_outputs = base_ref_model(merged_inputs)
                 finally:
-                    base_model.train(base_was_training)
+                    base_ref_model.train(base_was_training)
             base_output = base_outputs["model_output"][:, :, 1:, :]  # [B, P, T, 4]
 
             # Neighbor reg
@@ -385,65 +408,108 @@ def _compute_sft_diffusion_loss(
                 base_neighbor = base_output[:, 1:]  # [B, Pn, T, 4]
                 lora_neighbor = model_output[:, 1:]  # [B, Pn, T, 4]
                 reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)
-                masked_reg = reg_mse[neighbors_future_valid]
-                if masked_reg.numel() > 0:
-                    total_neighbor_reg_loss += masked_reg.mean()
+                valid_f = neighbors_future_valid.to(reg_mse.dtype)
+                denom = valid_f.sum(dim=(1, 2)).clamp(min=1.0)
+                reg_loss_per_scene = (reg_mse * valid_f).sum(dim=(1, 2)) / denom
+                reg_loss_per_scene = torch.where(
+                    valid_f.sum(dim=(1, 2)) > 0,
+                    reg_loss_per_scene,
+                    torch.zeros_like(reg_loss_per_scene),
+                )
+                total_neighbor_reg_loss += reg_loss_per_scene
 
             # Ego IL (baseline mode): MSE(lora_ego, base_ego)
             if use_ego_il and ego_il_mode == "baseline":
                 base_ego = base_output[:, 0]  # [B, T, 4]
-                ego_il_loss = F.mse_loss(model_output[:, 0], base_ego.detach())
+                ego_il_loss = ((model_output[:, 0] - base_ego.detach()) ** 2).mean(dim=(1, 2))
                 total_ego_il_loss += ego_il_loss
 
             # Output regularization (called "KL" by convention): MSE between
             # trained and base model denoiser outputs at the same (noise, t).
             if use_kl:
-                kl_loss = F.mse_loss(model_output, base_output.detach())
+                kl_loss = ((model_output - base_output.detach()) ** 2).mean(dim=(1, 2, 3))
                 total_kl_loss += kl_loss
+        if use_der:
+            if replay_anchor_model is None:
+                raise ValueError("replay_der_coef > 0 requires replay_anchor_model")
+            anchor_was_training = replay_anchor_model.training
+            replay_anchor_model.train()
+            try:
+                with torch.no_grad():
+                    _, der_outputs = replay_anchor_model(merged_inputs)
+            finally:
+                replay_anchor_model.train(anchor_was_training)
+            der_output = der_outputs["model_output"][:, :, 1:, :]
+            der_loss = ((model_output[:, 0] - der_output[:, 0].detach()) ** 2).mean(dim=(1, 2))
+            der_loss = torch.where(replay_der_mask, der_loss, torch.zeros_like(der_loss))
+            total_der_loss += der_loss
 
-    ego_loss_avg = total_ego_loss / K
+    def _avg_per_scene(value) -> torch.Tensor:
+        if isinstance(value, torch.Tensor):
+            return value / K
+        return torch.zeros(B, device=device)
+
+    def _weighted(value: torch.Tensor) -> torch.Tensor:
+        return (value * scene_loss_weights).sum() / max(B, 1)
+
+    ego_loss_avg = _avg_per_scene(total_ego_loss)
     neighbor_loss_avg = (
         total_neighbor_loss / K
         if isinstance(total_neighbor_loss, torch.Tensor)
-        else torch.tensor(0.0, device=device)
+        else torch.zeros(B, device=device)
     )
     neighbor_reg_avg = (
         total_neighbor_reg_loss / K
         if isinstance(total_neighbor_reg_loss, torch.Tensor)
-        else torch.tensor(0.0, device=device)
+        else torch.zeros(B, device=device)
     )
     ego_il_avg = (
         total_ego_il_loss / K
         if isinstance(total_ego_il_loss, torch.Tensor)
-        else torch.tensor(0.0, device=device)
+        else torch.zeros(B, device=device)
     )
     kl_loss_avg = (
         total_kl_loss / K
         if isinstance(total_kl_loss, torch.Tensor)
-        else torch.tensor(0.0, device=device)
+        else torch.zeros(B, device=device)
+    )
+    der_loss_avg = (
+        total_der_loss / K
+        if isinstance(total_der_loss, torch.Tensor)
+        else torch.zeros(B, device=device)
     )
 
     # Combined loss: ego + neighbor (weight from config.neighbor_loss_weight,
     # default 0.1 to match original SFT alpha_neighbor_loss; set to 0 to disable)
-    loss = ego_loss_avg + neighbor_loss_weight * neighbor_loss_avg
+    per_scene_loss = ego_loss_avg + neighbor_loss_weight * neighbor_loss_avg
     if use_neighbor_reg:
-        loss = loss + neighbor_reg_weight * neighbor_reg_avg
+        per_scene_loss = per_scene_loss + neighbor_reg_weight * neighbor_reg_avg
     if use_ego_il:
-        loss = loss + ego_il_weight * ego_il_avg
+        per_scene_loss = per_scene_loss + ego_il_weight * ego_il_avg
     if use_kl:
-        loss = loss + kl_coef * kl_loss_avg
+        per_scene_loss = per_scene_loss + kl_coef * kl_loss_avg
+    if use_der:
+        per_scene_loss = per_scene_loss + replay_der_coef * der_loss_avg
+    loss = _weighted(per_scene_loss)
 
     metrics = {
-        "sft_ego_loss": ego_loss_avg.item(),
-        "sft_neighbor_loss": neighbor_loss_avg.item()
+        "sft_ego_loss": ego_loss_avg.mean().item(),
+        "sft_neighbor_loss": neighbor_loss_avg.mean().item()
         if isinstance(neighbor_loss_avg, torch.Tensor)
         else 0.0,
         "sft_total_loss": loss.item(),
-        "sft_neighbor_reg_loss": neighbor_reg_avg.item()
+        "sft_neighbor_reg_loss": neighbor_reg_avg.mean().item()
         if isinstance(neighbor_reg_avg, torch.Tensor)
         else 0.0,
-        "sft_ego_il_loss": ego_il_avg.item() if isinstance(ego_il_avg, torch.Tensor) else 0.0,
-        "sft_kl_loss": kl_loss_avg.item() if isinstance(kl_loss_avg, torch.Tensor) else 0.0,
+        "sft_ego_il_loss": ego_il_avg.mean().item()
+        if isinstance(ego_il_avg, torch.Tensor)
+        else 0.0,
+        "sft_kl_loss": kl_loss_avg.mean().item() if isinstance(kl_loss_avg, torch.Tensor) else 0.0,
+        "sft_replay_der_loss": der_loss_avg[replay_der_mask].mean().item()
+        if isinstance(der_loss_avg, torch.Tensor) and bool(replay_der_mask.any().item())
+        else 0.0,
+        "sft_scene_weight_mean": scene_loss_weights.mean().item(),
+        "sft_replay_count": float(replay_der_mask.sum().item()),
     }
     return loss, metrics
 
@@ -461,6 +527,8 @@ def train_epoch_ranked_sft(
     exploration_optimizer=None,
     run_dir=None,
     base_model: nn.Module | None = None,
+    scene_roles: list[str] | None = None,
+    replay_anchor_model: nn.Module | None = None,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -518,6 +586,15 @@ def train_epoch_ranked_sft(
     N = len(all_data)
     if N == 0:
         return {}
+    if scene_roles is not None:
+        if len(scene_roles) != len(scene_paths):
+            raise ValueError(
+                f"scene_roles must align with scene_paths: {len(scene_roles)} vs {len(scene_paths)}"
+            )
+        role_by_path = {str(p): str(r) for p, r in zip(scene_paths, scene_roles)}
+        valid_roles = [role_by_path[str(p)] for p in valid_paths]
+    else:
+        valid_roles = ["current"] * N
 
     # Optional: load per-scene baseline path lengths from epoch1_baselines.npz
     # for use as the underprogress reference. Only loaded if the config asks
@@ -1322,11 +1399,6 @@ def train_epoch_ranked_sft(
     scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
     # Compute per-scene advantage weights for loss scaling
     use_advantage = getattr(config, "selective_mode", "threshold") == "advantage"
-    if use_advantage and sft_bs != 1:
-        raise ValueError(
-            f"selective_mode='advantage' requires sft_batch_size=1 for exact per-scene "
-            f"weighting, got sft_batch_size={sft_bs}."
-        )
     improvements_arr = np.array(scene_improvements)
     max_imp = improvements_arr.max() if improvements_arr.max() > 0 else 1.0
     scene_weight_arr = improvements_arr / max_imp  # [N], in [0, 1]
@@ -1387,6 +1459,25 @@ def train_epoch_ranked_sft(
         mini_neighbor_gt = neighbor_gt_all[batch_idx]  # [bs, Pn, T, 4]
         mini_neighbor_mask = neighbor_mask_all[batch_idx]  # [bs, Pn, T]
         mini_ego_gt_real = ego_gt_real_all[batch_idx] if ego_gt_real_all is not None else None
+        mini_is_replay = torch.tensor(
+            [valid_roles[i] == "replay" for i in batch_idx],
+            dtype=torch.bool,
+            device=device,
+        )
+        if use_advantage:
+            mini_scene_weights = torch.tensor(
+                [float(scene_weight_arr[i]) for i in batch_idx],
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            mini_scene_weights = torch.ones(bs, dtype=torch.float32, device=device)
+        if config.replay_loss_weight != 1.0:
+            mini_scene_weights = torch.where(
+                mini_is_replay,
+                mini_scene_weights * float(config.replay_loss_weight),
+                mini_scene_weights,
+            )
 
         loss, metrics = _compute_sft_diffusion_loss(
             model=model,
@@ -1411,18 +1502,20 @@ def train_epoch_ranked_sft(
             kl_coef=config.get_kl_coef(epoch, config.train_epochs),
             base_model=_base_model_ref,
             prefer_external_base=(config.neighbor_reg_anchor == "baseline"),
+            replay_der_coef=config.replay_der_coef,
+            replay_anchor_model=replay_anchor_model,
+            scene_loss_weights=mini_scene_weights,
+            replay_der_mask=mini_is_replay,
         )
 
         # Scale loss to preserve per-scene gradient magnitude:
         # loss is a batch-mean over bs scenes; we want the gradient contribution
         # proportional to bs/scenes_per_step so the optimizer step averages over
         # scenes_per_step scenes total.
-        # In advantage mode, weight by the scene's improvement ratio (exact for bs=1).
-        if use_advantage:
-            adv_weight = float(scene_weight_arr[batch_idx[0]])
-        else:
-            adv_weight = 1.0
-        scaled_loss = loss * (bs / scenes_per_step) * adv_weight
+        # Per-scene selective/replay weights are already applied inside the
+        # batch loss. This factor preserves the original gradient magnitude
+        # across gradient accumulation.
+        scaled_loss = loss * (bs / scenes_per_step)
         scaled_loss.backward()
         accum_count += 1
 

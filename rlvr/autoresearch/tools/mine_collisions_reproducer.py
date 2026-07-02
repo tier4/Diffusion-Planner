@@ -31,6 +31,10 @@ from pathlib import Path
 import torch
 
 from rlvr.autoresearch.tools.render_metadata import render_tag, write_render_meta
+from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    build_reproducer_danger_scorer,
+    load_credit_windows,
+)
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline, group_routes
@@ -132,6 +136,38 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--render_webm", action="store_true", help="assemble dumped hit PNGs into WebM")
     p.add_argument("--webm_fps", type=int, default=10)
+    p.add_argument(
+        "--danger_save_dir",
+        type=Path,
+        default=None,
+        help="if set, save R2LPL credit windows for any classifier dangerous label, "
+        "not just neighbor collisions",
+    )
+    p.add_argument(
+        "--danger_reward_config",
+        type=Path,
+        default=None,
+        help="reward config for --danger_save_dir scoring",
+    )
+    p.add_argument(
+        "--danger_threshold_config",
+        type=Path,
+        default=None,
+        help="scene failure threshold config for --danger_save_dir scoring",
+    )
+    p.add_argument(
+        "--danger_credit_window_config",
+        type=Path,
+        default=None,
+        help="label->window width JSON for --danger_save_dir",
+    )
+    p.add_argument(
+        "--danger_decluster_steps",
+        type=int,
+        default=10,
+        help="minimum sim steps between saved events of the same dangerous label",
+    )
+    p.add_argument("--enable_conflict_detector", action="store_true")
     # One-pass collision-scene save (no second extract pass). When --save_dir is set,
     # each segment buffers its last --save_pre_steps scenes during THIS rollout and dumps
     # them to <save_dir>/<route>_<start>_<end>/ on the first step within --save_thresh of a
@@ -223,6 +259,24 @@ def _model_lora_title(model_path: Path, lora_path: Path | None) -> str:
     return f"model: {model_label}  lora: {lora_label}"
 
 
+def _build_danger_scorer(args, device: str):
+    if args.danger_save_dir is None:
+        return None, None
+    if args.danger_reward_config is None or args.danger_threshold_config is None:
+        raise ValueError(
+            "--danger_save_dir requires --danger_reward_config and --danger_threshold_config"
+        )
+    return (
+        build_reproducer_danger_scorer(
+            reward_config=args.danger_reward_config,
+            threshold_config=args.danger_threshold_config,
+            device=device,
+            enable_conflict_detector=bool(args.enable_conflict_detector),
+        ),
+        load_credit_windows(args.danger_credit_window_config),
+    )
+
+
 def _enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
     # OPT-OUT of skip-filtering on purpose: the reproducer is the ONE consumer that needs
     # the converter's skip_for_training frames (red-light dwell etc.) so the timeline is
@@ -247,6 +301,7 @@ def main() -> None:
         print(f"loading LoRA: {args.lora_path}")
         model = load_lora_checkpoint(model, str(args.lora_path))
         model.eval()
+    danger_scorer, danger_credit_windows = _build_danger_scorer(args, device)
 
     routes = _enumerate_routes(args.npz_root)
     route_keys = sorted(routes)
@@ -307,6 +362,10 @@ def main() -> None:
             route_keys=buf_keys,
             gpu_transform=args.gpu_transform,
             neighbor_history_mode="sim",  # always sim (recorded mode removed)
+            danger_save_dir=args.danger_save_dir,
+            danger_scorer=danger_scorer,
+            danger_credit_windows=danger_credit_windows,
+            danger_decluster_steps=args.danger_decluster_steps,
         )
         for key, res in zip(buf_keys, res_list):
             row = {"route": key, **res.metrics}

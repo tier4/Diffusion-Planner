@@ -486,6 +486,8 @@ def run(
     train_scenes_override: Path | None = None,
     train_epochs_override: int | None = None,
     sft_batch_size_override: int | None = None,
+    replay_scenes_path: Path | None = None,
+    scene_roles_json: Path | None = None,
 ):
     # Load baseline cache (precomputed baseline/GT paths per scene)
     # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
@@ -592,12 +594,33 @@ def run(
         train_paths = create_training_set(prob_100, curated_pool, n_prob, n_normal)
     else:
         train_paths = create_training_set(prob_100, normal_pool, n_prob, n_normal)
+    role_by_path: dict[str, str] = {}
+    if scene_roles_json is not None:
+        with open(scene_roles_json) as f:
+            raw_roles = json.load(f)
+        if isinstance(raw_roles, dict):
+            role_by_path.update({str(k): str(v) for k, v in raw_roles.items()})
+        elif isinstance(raw_roles, list):
+            for item in raw_roles:
+                role_by_path[str(item["scene_path"])] = str(item["role"])
+        else:
+            raise ValueError("--scene_roles_json must contain a dict or list of role records")
+    if replay_scenes_path is not None:
+        with open(replay_scenes_path) as f:
+            replay_paths = json.load(f)
+        if not isinstance(replay_paths, list):
+            raise ValueError(f"{replay_scenes_path} must contain a JSON list")
+        train_paths = list(train_paths) + [str(p) for p in replay_paths]
+        for path in replay_paths:
+            role_by_path.setdefault(str(path), "replay")
+        print(f"Added replay scenes: {len(replay_paths)} from {replay_scenes_path}")
     # Drop converter-flagged skip_for_training frames from everything we train/eval on
     # (default on; reproducer-only frames are not valid supervision). Single chokepoint
     # so every scene source above is covered.
     _sk = grpo_config.skip_filtered_scenes
     _sr = grpo_config.sidecar_root
     train_paths = filter_scene_list(train_paths, sidecar_root=_sr, enabled=_sk, label="train")
+    train_roles = [role_by_path.get(str(path), "current") for path in train_paths]
     prob_eval = filter_scene_list(prob_eval, sidecar_root=_sr, enabled=_sk, label="prob_eval")
     val_50 = filter_scene_list(val_50, sidecar_root=_sr, enabled=_sk, label="val")
     prob_100 = filter_scene_list(prob_100, sidecar_root=_sr, enabled=_sk, label="prob_viz")
@@ -622,6 +645,12 @@ def run(
     grpo_config.to_json(run_dir / "grpo_config.json")
     with open(run_dir / "train_scenes.json", "w") as f:
         json.dump(train_paths, f)
+    with open(run_dir / "scene_roles.json", "w") as f:
+        json.dump(
+            [{"scene_path": p, "role": r} for p, r in zip(train_paths, train_roles)],
+            f,
+            indent=2,
+        )
 
     # Initialize wandb logging (no-op if disabled in config)
     from rlvr.wandb_logger import WandbLogger
@@ -743,6 +772,20 @@ def run(
             _frozen_base_model, _ = load_model(checkpoint_path, DEVICE)
             _frozen_base_model.eval()
             for p in _frozen_base_model.parameters():
+                p.requires_grad_(False)
+        _replay_anchor_model = None
+        if grpo_config.replay_der_coef > 0.0:
+            if not grpo_config.replay_anchor_model_path:
+                raise ValueError(
+                    "replay_der_coef > 0 requires replay_anchor_model_path in the config"
+                )
+            anchor = Path(grpo_config.replay_anchor_model_path)
+            if not anchor.is_file():
+                raise ValueError(f"replay_anchor_model_path does not exist: {anchor}")
+            print(f"Loading replay DER anchor from {anchor}...")
+            _replay_anchor_model, _ = load_model(anchor, DEVICE)
+            _replay_anchor_model.eval()
+            for p in _replay_anchor_model.parameters():
                 p.requires_grad_(False)
 
         # Training reward config uses the configured weights (may boost w_progress
@@ -941,6 +984,8 @@ def run(
                         exploration_optimizer=_explorer_opt,
                         run_dir=run_dir,
                         base_model=_frozen_base_model,
+                        scene_roles=train_roles,
+                        replay_anchor_model=_replay_anchor_model,
                     )
                 else:
                     # Fully batched training: all scenes in ~5 forward passes
@@ -1140,6 +1185,18 @@ def main():
         help="Scenes per forward pass in ranked/curated SFT (speed knob; config default is 1 = "
         "sequential). grad_accum_groups is auto-bumped to a multiple if needed.",
     )
+    parser.add_argument(
+        "--replay_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of replay scene NPZ paths to append to the current training set.",
+    )
+    parser.add_argument(
+        "--scene_roles_json",
+        type=Path,
+        default=None,
+        help="Optional scene_path->role metadata. Replay scenes are marked automatically.",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -1172,6 +1229,8 @@ def main():
             train_scenes_override=args.train_scenes,
             train_epochs_override=args.train_epochs,
             sft_batch_size_override=args.sft_batch_size,
+            replay_scenes_path=args.replay_scenes,
+            scene_roles_json=args.scene_roles_json,
         )
     except Exception as e:
         print(f"\n---")

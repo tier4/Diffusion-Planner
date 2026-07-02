@@ -253,6 +253,11 @@ class GRPOConfig:
     neighbor_reg_anchor: str = "warmstart"
     # Path to the external baseline .pth. REQUIRED when neighbor_reg_anchor=="baseline".
     neighbor_reg_anchor_path: str | None = None
+    # Lifelong replay controls. Applied only by ranked-SFT when scene role metadata
+    # marks a scene as "replay".
+    replay_loss_weight: float = 1.0
+    replay_der_coef: float = 0.0
+    replay_anchor_model_path: str | None = None
 
     # Ranked SFT mode: generate N trajectories, pick best by reward, SFT on it.
     # "none": standard GRPO training (default).
@@ -299,7 +304,7 @@ class GRPOConfig:
     # full SFT loss per scene by normalized improvement — smooth version of selective).
     # In advantage mode, all scenes are kept but each scene's loss is multiplied by
     # improvement/max_improvement. Scenes below selective_threshold get weight 0 via
-    # scene_train_mask. Requires sft_batch_size=1 for exact per-scene weighting.
+    # per-scene loss weights.
     selective_mode: str = "threshold"
     # selective_frozen: if True, scene selection is computed once (first epoch) and reused
     # for all subsequent epochs in the same run. Prevents oscillation where improved scenes

@@ -3,6 +3,8 @@
   "moving_near_thresh": 0.7,
   "static_near_thresh": 0.5,
   "rb_near_thresh": 0.2,
+  "expert_disagreement_thresh": 1.0,
+  "expert_disagreement_sustain_steps": 10,
   "sc_cross_thresh": 0.2,
   "rb_cross_thresh": 0.2
 }

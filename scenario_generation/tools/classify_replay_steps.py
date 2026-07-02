@@ -46,6 +46,8 @@ from pathlib import Path
 
 import numpy as np
 
+from scenario_generation.danger_event_selection import decluster_indices, sustained_true_indices
+
 
 def _load_metrics(run_dir: Path) -> list[dict]:
     p = run_dir / "metrics_log.json"
@@ -82,32 +84,12 @@ def _detect_lane_change_runs(
 ) -> set[int]:
     """Return the set of step indices that fall inside a saturated-CL run
     of at least ``min_steps`` consecutive samples."""
-    sat = cl_scores <= saturated_thresh
-    out: set[int] = set()
-    i = 0
-    n = len(sat)
-    while i < n:
-        if sat[i]:
-            j = i
-            while j < n and sat[j]:
-                j += 1
-            if j - i >= min_steps:
-                out.update(range(i, j))
-            i = j
-        else:
-            i += 1
-    return out
+    return sustained_true_indices(cl_scores <= saturated_thresh, min_steps)
 
 
 def _decluster(idx: list[int], window: int) -> list[int]:
     """Keep the first of any cluster of indices closer than ``window`` apart."""
-    if not idx:
-        return []
-    kept = [idx[0]]
-    for k in idx[1:]:
-        if k - kept[-1] >= window:
-            kept.append(k)
-    return kept
+    return decluster_indices(idx, window)
 
 
 def main():

@@ -1,0 +1,12 @@
+{
+  "_comment": "R2LPL-short credit-window widths at 10 Hz. Failure labels use 15 frames; risk/conflict labels use 10 frames.",
+  "road_border_crossing": 15,
+  "lane_crossing": 15,
+  "static_collision": 15,
+  "moving_collision": 15,
+  "road_border_near": 10,
+  "static_near_miss": 10,
+  "moving_near_miss": 10,
+  "moving_ttc": 10,
+  "expert_disagreement": 10
+}

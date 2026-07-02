@@ -35,6 +35,7 @@ from planner_metrics.geometry import (
     _build_ego_bbox_corners,
     _closest_points_between_rects,
 )
+from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
@@ -518,6 +519,9 @@ class _SegState:
     saved_collision: bool = False  # recorded-mode latch: at most one saved window per segment
     last_snap_step: int | None = None
     save_out_dir: object = None
+    credit_window: dict | None = None
+    credit_saved: bool = False
+    danger_event_selector: OnlineEventSelector | None = None
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
@@ -1505,6 +1509,12 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
+    credit_save_dir=None,
+    credit_windows: list[dict] | None = None,
+    danger_save_dir=None,
+    danger_scorer=None,
+    danger_credit_windows: dict[str, int] | None = None,
+    danger_decluster_steps: int = 10,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1575,6 +1585,14 @@ def run_segments_batched(
                 )
                 for (tl, start, end) in chunk
             ]
+            if credit_windows is not None:
+                if len(credit_windows) != len(work_units):
+                    raise ValueError(
+                        "credit_windows must align one-for-one with work_units: "
+                        f"{len(credit_windows)} vs {len(work_units)}"
+                    )
+                for off, s in enumerate(states):
+                    s.credit_window = credit_windows[c0 + off]
             if save_dir is not None:
                 import shutil
                 from collections import deque
@@ -1597,6 +1615,18 @@ def run_segments_batched(
                         for stale in save_root.iterdir():
                             if stale.is_dir() and stale.name.startswith(stale_prefix):
                                 shutil.rmtree(stale, ignore_errors=True)
+            if credit_save_dir is not None or danger_save_dir is not None:
+                from collections import deque
+                from pathlib import Path
+
+                for s in states:
+                    width = int((s.credit_window or {}).get("credit_width", save_pre_steps))
+                    if danger_credit_windows:
+                        width = max(width, max(int(v) for v in danger_credit_windows.values()))
+                    s.save_buf = deque(maxlen=max(width + 1, save_pre_steps + 1))
+                    s.danger_event_selector = OnlineEventSelector(
+                        decluster_steps=danger_decluster_steps
+                    )
             active = list(states)
             while active:
                 with timers("input_build"):
@@ -1608,7 +1638,14 @@ def run_segments_batched(
                         raw_payloads = [pre for _s, pre in live]
                         with timers("to_torch"):
                             data, nb_list, npd_list = _to_torch_batch_gpu(
-                                raw_payloads, model_args, device, want_np_dicts=save_dir is not None
+                                raw_payloads,
+                                model_args,
+                                device,
+                                want_np_dicts=(
+                                    save_dir is not None
+                                    or credit_save_dir is not None
+                                    or danger_save_dir is not None
+                                ),
                             )
                         built = [
                             (
@@ -1652,15 +1689,74 @@ def run_segments_batched(
                         score_list = score_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
+                    danger_rows = (
+                        danger_scorer(built, preds, data, device)
+                        if danger_scorer is not None
+                        else [None] * len(built)
+                    )
                     for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
                         built, score_list
                     ):
+                        danger_row = danger_rows.pop(0) if danger_rows else None
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
                         # One-pass save: buffer this step, then dump the window on the
                         # FIRST collision — from THIS run, so the scenes match the hit.
                         if s.save_buf is not None:
                             s.save_buf.append((s.k, idx, s.live_pose.copy(), _np, suuid, wbu))
+                        if (
+                            credit_save_dir is not None
+                            and s.credit_window is not None
+                            and not s.credit_saved
+                            and idx >= int(s.credit_window["offense_index"])
+                        ):
+                            _dump_credit_window(
+                                Path(credit_save_dir)
+                                / (
+                                    f"{s.credit_window['route_key']}_"
+                                    f"{s.credit_window['start_frame']}_"
+                                    f"{s.credit_window['offense_frame']}_credit_"
+                                    f"{s.credit_window['label']}"
+                                ),
+                                s.tl,
+                                model_args,
+                                s.k,
+                                list(s.save_buf),
+                                s.last_snap_step,
+                                int(s.credit_window["credit_width"]),
+                                s.start,
+                                s.end,
+                                str(s.credit_window["label"]),
+                            )
+                            s.credit_saved = True
+                            s.done = True
+                        if (
+                            danger_save_dir is not None
+                            and danger_row is not None
+                            and s.save_buf is not None
+                        ):
+                            selector = s.danger_event_selector or OnlineEventSelector(
+                                decluster_steps=danger_decluster_steps
+                            )
+                            s.danger_event_selector = selector
+                            for label in selector.update(s.k, danger_row.get("labels", [])):
+                                width = int(
+                                    (danger_credit_windows or {}).get(label, save_pre_steps)
+                                )
+                                _dump_credit_window(
+                                    Path(danger_save_dir)
+                                    / f"{_route_key(s.tl)}_{s.start}_{idx}_danger_{label}",
+                                    s.tl,
+                                    model_args,
+                                    s.k,
+                                    list(s.save_buf),
+                                    s.last_snap_step,
+                                    width,
+                                    s.start,
+                                    s.end,
+                                    label,
+                                )
+                        if save_dir is not None and s.save_buf is not None:
                             # Per-EPISODE saving. A contact EPISODE runs while clearance <= thresh
                             # and ends when it clears (> thresh) — so a NEW distinct collision needs
                             # collided -> NOT collided -> collided (the clear gap). An episode is
@@ -1751,6 +1847,58 @@ def run_segments_batched(
     finally:
         pool.shutdown(wait=True)
     return results
+
+
+def _dump_credit_window(
+    out_dir,
+    tl: RouteTimeline,
+    model_args,
+    offense_step: int,
+    buf,
+    last_snap_step: int | None,
+    credit_width: int,
+    seg_start: int,
+    seg_end: int,
+    label: str,
+) -> dict | None:
+    """Write an inclusive R2LPL credit window ending at the offense step.
+
+    This is explicitly separate from collision extraction. It saves
+    ``[offense_step - credit_width, offense_step]`` and the generated futures
+    are truncated at ``offense_step`` by ``_dump_precollision_window``.
+    """
+    import json
+    from pathlib import Path
+
+    if credit_width < 0:
+        raise ValueError(f"credit_width must be >= 0, got {credit_width}")
+    out_dir = Path(out_dir)
+    manifest = _dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        offense_step,
+        buf,
+        last_snap_step,
+        credit_width,
+        float("-inf"),
+        seg_start,
+        seg_end,
+        pre_arc_m=0.0,
+        max_scenes=credit_width + 1,
+        min_post_snap_frames=0,
+        min_pre_frames=0,
+        min_ego_speed=0.0,
+    )
+    if manifest is None:
+        return None
+    for path in out_dir.glob("collision*.npz"):
+        path.rename(out_dir / path.name.replace("collision", "credit", 1))
+    manifest["credit_label"] = label
+    manifest["credit_width"] = int(credit_width)
+    manifest["offense_step"] = int(offense_step)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 # --------------------------------------------------------------------------- #
