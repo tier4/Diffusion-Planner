@@ -121,8 +121,8 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.write_skipped_npz = false;
   // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
   options.sidecar_only = false;
-  // Pack sequence by default (write one npz per sequence)
-  options.pack_sequence = true;
+  // One file per frame by default; --pack_sequence packs a whole sequence into one npz/json.
+  options.pack_sequence = false;
   options.use_interpolation = static_cast<bool>(options.interpolation);
   return options;
 }
