@@ -14,7 +14,7 @@ from rlvr.autoresearch.tools.reproducer_danger_scorer import (
     build_reproducer_danger_scorer,
     load_credit_windows,
 )
-from scenario_generation.danger_event_selection import decluster_indices
+from scenario_generation.danger_event_selection import contiguous_index_runs
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline, group_routes, route_prefix
 
@@ -69,17 +69,26 @@ def _route_files(npz_root: Path) -> dict[str, list[Path]]:
     return group_routes(paths)
 
 
-def _decluster_windows(windows: list[dict[str, Any]], decluster_steps: int) -> list[dict[str, Any]]:
-    if decluster_steps <= 1:
-        return windows
+def _collapse_event_windows(
+    windows: list[dict[str, Any]], decluster_steps: int
+) -> list[dict[str, Any]]:
+    if decluster_steps < 1:
+        raise ValueError(
+            f"classified_decluster_steps must be >= 1 for event grouping, got {decluster_steps}"
+        )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for w in windows:
         grouped.setdefault((str(w["route_key"]), str(w["label"])), []).append(w)
     out: list[dict[str, Any]] = []
     for group in grouped.values():
         by_step = {int(w["offense_index"]): w for w in group}
-        for step in decluster_indices(by_step, decluster_steps):
-            out.append(by_step[step])
+        for run in contiguous_index_runs(by_step, max_gap=decluster_steps - 1):
+            first = by_step[run[0]]
+            event = dict(first)
+            event["event_offense_start_index"] = int(run[0])
+            event["event_offense_end_index"] = int(run[-1])
+            event["event_span_steps"] = int(run[-1] - run[0] + 1)
+            out.append(event)
     return sorted(
         out, key=lambda w: (str(w["route_key"]), int(w["offense_index"]), str(w["label"]))
     )
@@ -196,7 +205,7 @@ def main() -> None:
     windows: list[dict[str, Any]] = []
     for row in rows:
         windows.extend(_resolve_row(row, routes, credit, allowed_labels))
-    windows = _decluster_windows(windows, args.classified_decluster_steps)
+    windows = _collapse_event_windows(windows, args.classified_decluster_steps)
     if not windows:
         raise ValueError("No non-clean credit windows resolved from classified scenes")
 
@@ -233,6 +242,7 @@ def main() -> None:
         neighbor_history_mode=args.neighbor_history_mode,
         credit_save_dir=None if args.verify_reproduced_issue else args.out_dir,
         credit_windows=None if args.verify_reproduced_issue else windows,
+        verify_credit_windows=windows if args.verify_reproduced_issue else None,
         danger_save_dir=args.out_dir if args.verify_reproduced_issue else None,
         danger_scorer=danger_scorer,
         danger_credit_windows=danger_credit_windows,

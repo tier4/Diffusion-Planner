@@ -40,6 +40,22 @@ def decluster_indices(indices: Iterable[int], window: int) -> list[int]:
     return kept
 
 
+def contiguous_index_runs(indices: Iterable[int], max_gap: int = 1) -> list[list[int]]:
+    """Group sorted indices into contiguous runs separated by gaps > ``max_gap``."""
+    if max_gap < 0:
+        raise ValueError(f"max_gap must be >= 0, got {max_gap}")
+    idx = sorted(int(i) for i in indices)
+    if not idx:
+        return []
+    runs: list[list[int]] = [[idx[0]]]
+    for k in idx[1:]:
+        if k - runs[-1][-1] <= max_gap:
+            runs[-1].append(k)
+        else:
+            runs.append([k])
+    return runs
+
+
 class OnlineEventSelector:
     """Stateful rising-edge selector for online closed-loop mining.
 

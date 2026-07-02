@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from torch import nn
 
+import scenario_generation.reproducer_rollout as reproducer_rollout
 from rlvr.autoresearch.tools.build_avoiding_target import (
     _best_safe_candidate,
     _filtered_npz_payload,
@@ -15,6 +16,7 @@ from rlvr.autoresearch.tools.build_avoiding_target import (
 )
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
+    _collapse_event_windows,
     _resolve_row,
     _validate_credit_config,
 )
@@ -30,6 +32,7 @@ from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
 from scenario_generation.conflict_detector import detect_expert_disagreement
 from scenario_generation.danger_event_selection import (
     OnlineEventSelector,
+    contiguous_index_runs,
     decluster_indices,
     sustained_true_indices,
 )
@@ -279,6 +282,34 @@ def test_shared_declustering_matches_replay_step_semantics():
     assert decluster_indices([1, 2, 4, 12, 13], window=10) == [1, 12]
 
 
+def test_contiguous_index_runs_group_single_event():
+    assert contiguous_index_runs([423, 424, 425, 433, 434], max_gap=9) == [
+        [423, 424, 425, 433, 434]
+    ]
+    assert contiguous_index_runs([423, 424, 425, 436], max_gap=9) == [[423, 424, 425], [436]]
+
+
+def test_credit_window_miner_collapses_one_continuous_offense_run_to_one_event():
+    windows = [
+        {
+            "route_key": "bagA",
+            "label": "road_border_crossing",
+            "offense_index": step,
+            "offense_frame": 1000 + step,
+            "start_frame": 1000 + step - 15,
+            "credit_width": 15,
+        }
+        for step in [423, 424, 425, 433, 434]
+    ]
+
+    [event] = _collapse_event_windows(windows, decluster_steps=10)
+
+    assert event["offense_index"] == 423
+    assert event["event_offense_start_index"] == 423
+    assert event["event_offense_end_index"] == 434
+    assert event["event_span_steps"] == 12
+
+
 def test_shared_sustained_runs_returns_whole_qualified_run():
     mask = torch.tensor([False, True, True, False, True, True, True]).numpy()
     assert sustained_true_indices(mask, min_steps=3) == {4, 5, 6}
@@ -311,6 +342,122 @@ def test_online_event_selector_tracks_labels_independently():
     assert selector.update(1, ["road_border_crossing", "moving_ttc"]) == ["moving_ttc"]
     assert selector.update(2, ["moving_ttc"]) == []
     assert selector.update(3, ["lane_crossing", "moving_ttc"]) == ["lane_crossing"]
+
+
+def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
+    calls = []
+
+    class _FakeModel:
+        def __call__(self, data):
+            pred = torch.zeros((1, 1, 2, 4), dtype=torch.float32)
+            return None, {
+                "prediction": pred,
+                "turn_indicator_logit": torch.zeros((1, 3), dtype=torch.float32),
+            }
+
+    class _FakeTimeline:
+        pass
+
+    def _fake_seed_state(*args, **kwargs):
+        return SimpleNamespace(
+            tl=_FakeTimeline(),
+            start=100,
+            end=103,
+            ego_shape=np.ones(3, dtype=np.float32),
+            clearances=np.full(8, np.inf, dtype=np.float32),
+            collisions=np.zeros(8, dtype=bool),
+            k=0,
+            done=False,
+            terminated="max_steps",
+            max_steps=8,
+            live_pose=np.zeros(3, dtype=np.float32),
+            save_buf=None,
+            last_snap_step=None,
+            n_snaps=0,
+            turn_hist=None,
+            credit_window=None,
+            credit_saved=False,
+            verified_credit_labels=set(),
+            verified_credit_first_step={},
+            danger_event_selector=None,
+        )
+
+    def _fake_pre_step(s, gpu_transform=False):
+        if s.k >= 3:
+            s.done = True
+            return None
+        return (
+            {"ego_shape": np.ones((1, 3), dtype=np.float32)},
+            np.zeros((320, 11), dtype=np.float32),
+            s.start + s.k,
+            None,
+            None,
+        )
+
+    def _fake_to_torch_batch(np_dicts, model_args, device):
+        return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
+
+    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+        return [(1.0, False, 0, -1) for _ in neighbors_list]
+
+    def _fake_danger_scorer(built, preds, data, device):
+        rows = []
+        for s, *_ in built:
+            rows.append({"labels": ["road_border_crossing"] if s.k == 1 else []})
+        return rows
+
+    def _fake_advance_step(s, pred, idx, device, timers):
+        s.k += 1
+        if s.k >= 3:
+            s.done = True
+
+    def _fake_finalize(s, timers):
+        return SimpleNamespace(metrics={"n_steps_run": s.k})
+
+    def _fake_dump_full_credit_segment(*args, **kwargs):
+        calls.append(
+            {
+                "out_dir": args[0],
+                "saved_steps": [rec[0] for rec in args[3]],
+                "verified_step": kwargs["verified_step"],
+            }
+        )
+        return {"n_scenes": len(args[3])}
+
+    monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
+    monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
+    monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
+    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
+    monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
+    monkeypatch.setattr(
+        reproducer_rollout, "_dump_full_credit_segment", _fake_dump_full_credit_segment
+    )
+
+    reproducer_rollout.run_segments_batched(
+        _FakeModel(),
+        SimpleNamespace(predicted_neighbor_num=0, future_len=2, observation_normalizer=lambda x: x),
+        [(_FakeTimeline(), 100, 103)],
+        device="cpu",
+        batch_size=1,
+        n_build_threads=1,
+        prefetch_ahead=0,
+        verify_credit_windows=[
+            {
+                "route_key": "bagA",
+                "label": "road_border_crossing",
+                "start_frame": 423,
+                "offense_frame": 438,
+                "credit_width": 15,
+            }
+        ],
+        danger_save_dir=tmp_path,
+        danger_scorer=_fake_danger_scorer,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["saved_steps"] == [0, 1, 2]
+    assert calls[0]["verified_step"] == 1
 
 
 def test_repair_candidate_selector_requires_safe_fix():
