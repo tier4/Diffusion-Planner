@@ -698,6 +698,17 @@ def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
     credit_cfg.write_text(json.dumps({"moving_collision": 15}))
     out_dir = tmp_path / "out"
     out_jsonl = tmp_path / "out.jsonl"
+    stale_dir = out_dir / "bagA_100_099_event_road_border_crossing"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    (stale_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "scene_frame_ids_saved": [99],
+                "realized_label": "road_border_crossing",
+            }
+        )
+    )
+    np.savez(stale_dir / "credit+00000.npz", ego_agent_future=np.zeros((80, 4), np.float32))
 
     captured: dict[str, object] = {}
 
@@ -782,6 +793,7 @@ def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
     mine_credit_window_scenes_tool.main()
 
     assert captured["allowed_labels"] == {"moving_collision"}
+    assert not stale_dir.exists()
     rows = [json.loads(line) for line in out_jsonl.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["label"] == "moving_collision"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -323,6 +324,10 @@ def main() -> None:
             raise ValueError(
                 "--verify_reproduced_issue requires --reward_config and --threshold_config"
             )
+        if args.out_dir.exists():
+            for stale in args.out_dir.glob("*_event_*"):
+                if stale.is_dir():
+                    shutil.rmtree(stale)
         realized_event_scorer = build_realized_event_scorer(
             reward_config=args.reward_config,
             threshold_config=args.threshold_config,
