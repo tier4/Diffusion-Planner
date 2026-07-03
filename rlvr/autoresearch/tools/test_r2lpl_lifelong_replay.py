@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import torch
 from torch import nn
 
 import scenario_generation.reproducer_rollout as reproducer_rollout
+from rlvr.autoresearch.tools import mine_credit_window_scenes as mine_credit_window_scenes_tool
 from rlvr.autoresearch.tools import reproducer_danger_scorer
 from rlvr.autoresearch.tools.build_avoiding_target import (
     _best_safe_candidate,
@@ -672,6 +674,117 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     assert calls[0]["label"] == "road_border_crossing"
     assert calls[0]["source_label"] == "road_border_crossing"
     assert calls[0]["realized_frame"] == 101
+
+
+def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
+    monkeypatch, tmp_path
+):
+    route_path = tmp_path / "bagA_0100.npz"
+    np.savez(route_path, dummy=np.zeros((1,), dtype=np.float32))
+    route_scene_list = tmp_path / "route_scene_list.json"
+    route_scene_list.write_text(json.dumps([str(route_path)]))
+    classified = tmp_path / "classified.jsonl"
+    classified.write_text(
+        json.dumps(
+            {
+                "scene_path": str(route_path),
+                "labels": ["moving_collision"],
+                "moving_collision_step": 0,
+            }
+        )
+        + "\n"
+    )
+    credit_cfg = tmp_path / "credit.json"
+    credit_cfg.write_text(json.dumps({"moving_collision": 15}))
+    out_dir = tmp_path / "out"
+    out_jsonl = tmp_path / "out.jsonl"
+
+    captured: dict[str, object] = {}
+
+    class _FakeModel:
+        def eval(self):
+            return None
+
+    def _fake_build_realized_event_scorer(**kwargs):
+        captured["allowed_labels"] = kwargs.get("allowed_labels")
+        return lambda _np_dict, *, collided=False: {
+            "labels": ["moving_collision"],
+            "label": "moving_collision",
+            "realized_collision": bool(collided),
+        }
+
+    def _fake_run_segments_batched(*args, **kwargs):
+        saved_dir = Path(kwargs["danger_save_dir"]) / "bagA_100_100_event_moving_collision"
+        saved_dir.mkdir(parents=True, exist_ok=True)
+        (saved_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "scene_frame_ids_saved": [100],
+                    "realized_label": "moving_collision",
+                }
+            )
+        )
+        np.savez(saved_dir / "credit+00000.npz", ego_agent_future=np.zeros((80, 4), np.float32))
+        return []
+
+    monkeypatch.setattr(
+        mine_credit_window_scenes_tool,
+        "RouteTimeline",
+        lambda paths, _sidecar=None: paths,
+    )
+    monkeypatch.setattr(
+        mine_credit_window_scenes_tool,
+        "load_model",
+        lambda _model_path, _device: (_FakeModel(), SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        mine_credit_window_scenes_tool,
+        "build_realized_event_scorer",
+        _fake_build_realized_event_scorer,
+    )
+    monkeypatch.setattr(
+        mine_credit_window_scenes_tool,
+        "run_segments_batched",
+        _fake_run_segments_batched,
+    )
+    monkeypatch.setattr(
+        mine_credit_window_scenes_tool,
+        "load_credit_windows",
+        lambda _path: {"moving_collision": 15},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mine_credit_window_scenes.py",
+            "--classified_scenes_jsonl",
+            str(classified),
+            "--credit_window_config",
+            str(credit_cfg),
+            "--route_scene_list",
+            str(route_scene_list),
+            "--model_path",
+            str(tmp_path / "model.pth"),
+            "--out_dir",
+            str(out_dir),
+            "--out_jsonl",
+            str(out_jsonl),
+            "--reward_config",
+            str(tmp_path / "reward.json"),
+            "--threshold_config",
+            str(tmp_path / "thresholds.json"),
+            "--verify_reproduced_issue",
+            "--labels",
+            "moving_collision",
+        ],
+    )
+
+    mine_credit_window_scenes_tool.main()
+
+    assert captured["allowed_labels"] == {"moving_collision"}
+    rows = [json.loads(line) for line in out_jsonl.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["label"] == "moving_collision"
 
 
 def test_repair_candidate_selector_requires_safe_fix():

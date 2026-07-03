@@ -327,6 +327,7 @@ def main() -> None:
             reward_config=args.reward_config,
             threshold_config=args.threshold_config,
             device=args.device,
+            allowed_labels=allowed_labels,
         )
         danger_credit_windows = load_credit_windows(args.credit_window_config)
     else:
