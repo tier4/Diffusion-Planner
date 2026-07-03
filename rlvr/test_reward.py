@@ -205,6 +205,33 @@ def test_proximity_penalty():
     print(f"  PASS  proximity_penalty: score={scores[0]:.3f}")
 
 
+def test_rear_end_collision_can_be_counted_when_enabled():
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    npc = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    npc[:, :, 0] -= 3.0
+    npc_valid = torch.ones(1, T, dtype=torch.bool)
+    cfg = RewardConfig(ignore_rear_end_collisions=False)
+    scores, steps = compute_safety_score_batch(
+        ego, _default_ego_shape(), npc, _default_neighbor_shapes(1), npc_valid, cfg
+    )
+    assert steps[0] == 0
+    assert scores[0].item() <= cfg.collision_penalty
+    print("  PASS  rear_end_collision_counted_when_enabled")
+
+
+def test_rear_end_collision_is_ignored_by_legacy_default():
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    npc = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    npc[:, :, 0] -= 3.0
+    npc_valid = torch.ones(1, T, dtype=torch.bool)
+    scores, steps = compute_safety_score_batch(
+        ego, _default_ego_shape(), npc, _default_neighbor_shapes(1), npc_valid, CONFIG
+    )
+    assert steps[0] is None
+    assert scores[0].item() >= CONFIG.collision_penalty
+    print("  PASS  rear_end_collision_ignored_by_default")
+
+
 # -------------------------------------------------------------------------
 # Progress score tests
 # -------------------------------------------------------------------------

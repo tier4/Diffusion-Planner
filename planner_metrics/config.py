@@ -33,6 +33,10 @@ class RewardConfig:
     red_light_penalty: float = -10.0
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
+    # Historical avoidance reward behavior ignores moving collisions where a
+    # following vehicle hits the ego from behind. Keep that as the generic
+    # default, but allow workflows like R2LPL mining/repair to count them.
+    ignore_rear_end_collisions: bool = True
 
     # Road border penalty scales and thresholds
     rb_near_scale: float = 3.0

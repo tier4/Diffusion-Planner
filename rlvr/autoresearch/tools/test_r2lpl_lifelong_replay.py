@@ -9,10 +9,12 @@ import torch
 from torch import nn
 
 import scenario_generation.reproducer_rollout as reproducer_rollout
+from rlvr.autoresearch.tools import reproducer_danger_scorer
 from rlvr.autoresearch.tools.build_avoiding_target import (
     _best_safe_candidate,
     _filtered_npz_payload,
     _future4_to_3col,
+    _source_scene_t0_moving_overlap,
 )
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
@@ -20,16 +22,19 @@ from rlvr.autoresearch.tools.mine_credit_window_scenes import (
     _select_event_windows,
     _validate_credit_config,
 )
+from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _base_train_invocation,
     _classify_cmd,
     _load_config,
     _lora_for_policy,
     _perception_mining_cmd,
+    _repair_cmd,
     _union_scene_lists,
 )
 from rlvr.deviation import rollout_gt_deviation
 from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+from rlvr.reward import RewardConfig
 from scenario_generation.conflict_detector import detect_expert_disagreement
 from scenario_generation.danger_event_selection import (
     OnlineEventSelector,
@@ -258,6 +263,63 @@ def test_round_runner_requires_scene_pool_without_perception_mining(tmp_path):
         raise AssertionError("scene_pool fields should be required without perception_mining")
 
 
+def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "inference": {
+                    "mode": "saved_predictions",
+                    "prediction_scene_root": "/tmp/dataset_root",
+                },
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "perception_reproducer": {
+                    "anchor_horizon_steps": 40,
+                    "max_rollout_steps": 80,
+                    "batch_size": 4,
+                },
+                "repair_generation": {
+                    "ego_shape": "4.76,7.24,2.29",
+                    "min_margin": 0.3,
+                },
+                "replay_memory": {"capacity": 32, "alpha": 0.7, "beta": 0.2},
+                "rounds": {"rounds": 2, "epochs_per_round": 3},
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"train_args": {"valid_set_list": "/tmp/val.json"}}))
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "model_path": "/tmp/model.pth",
+                "scene_list": "/tmp/scenes.json",
+                "saved_predictions_dir": "/tmp/predictions",
+                "workflow_config": str(workflow),
+                "training_config": str(training),
+                "output_dir": str(tmp_path / "auto_research" / "run"),
+            }
+        )
+    )
+
+    cfg = _load_config(contract)
+
+    assert cfg["trajectory"] == "saved_pred"
+    assert cfg["classify_predictions_dir"] == "/tmp/predictions"
+    assert cfg["classify_prediction_scene_root"] == "/tmp/dataset_root"
+    assert cfg["route_scene_list"] == "/tmp/scenes.json"
+    assert cfg["anchor_horizon_steps"] == 40
+    assert cfg["max_rollout_steps"] == 80
+    assert cfg["timeline_progress_mode"] == "clock"
+    assert cfg["training_backend"] == "base_sft"
+
+
 def test_round_runner_perception_mining_defaults_video_off(tmp_path):
     cfg = {
         "reward_config": "/tmp/reward.json",
@@ -297,6 +359,8 @@ def test_round_runner_classify_cmd_can_save_det_predictions(tmp_path):
     assert "--model_path" in cmd
     assert "--save_predictions_dir" in cmd
     assert cmd[cmd.index("--save_predictions_dir") + 1] == str(tmp_path / "saved_predictions")
+    assert cmd[cmd.index("--batch_size") + 1] == "32"
+    assert cmd[cmd.index("--device") + 1] == "cuda"
 
 
 def test_round_runner_classify_cmd_can_reuse_saved_predictions(tmp_path):
@@ -319,6 +383,7 @@ def test_round_runner_classify_cmd_can_reuse_saved_predictions(tmp_path):
     assert cmd[cmd.index("--predictions_dir") + 1] == str(tmp_path / "predictions")
     assert "--prediction_scene_root" in cmd
     assert "--model_path" not in cmd
+    assert cmd[cmd.index("--batch_size") + 1] == "32"
 
 
 def test_shared_declustering_matches_replay_step_semantics():
@@ -349,7 +414,13 @@ def test_credit_window_miner_selects_eta_closest_anchor_within_event(tmp_path):
         for i, eta in enumerate([27, 30, 25])
     ]
 
-    [event] = _select_event_windows({"x": 1} and windows, {"bagA": route}, source_gap_steps=1)
+    [event] = _select_event_windows(
+        windows,
+        {"bagA": route},
+        source_gap_steps=1,
+        anchor_horizon_steps=26,
+        max_rollout_steps=15,
+    )
 
     assert event["source_index"] == 22
     assert event["frame_index"] == 122
@@ -359,6 +430,37 @@ def test_credit_window_miner_selects_eta_closest_anchor_within_event(tmp_path):
     assert event["event_member_count"] == 3
     assert event["start_index"] == 22
     assert event["end_index"] == 36
+
+
+def test_credit_window_miner_anchor_uses_anchor_horizon_not_window_width(tmp_path):
+    route = [tmp_path / f"bagA_{i:04d}.npz" for i in range(100, 200)]
+    windows = [
+        {
+            "route_key": "bagA",
+            "label": "road_border_crossing",
+            "frame_index": 120 + i,
+            "source_index": 20 + i,
+            "violation_step": eta,
+            "offense_index": 20 + i + eta,
+            "offense_frame": 120 + i + eta,
+            "credit_width": 40,
+            "start_frame": 120 + i,
+        }
+        for i, eta in enumerate([14, 19, 25])
+    ]
+
+    [event] = _select_event_windows(
+        windows,
+        {"bagA": route},
+        source_gap_steps=1,
+        anchor_horizon_steps=20,
+        max_rollout_steps=15,
+    )
+
+    assert event["source_index"] == 21
+    assert event["anchor_horizon_steps"] == 20
+    assert event["max_rollout_steps"] == 15
+    assert event["end_index"] == 35
 
 
 def test_credit_window_miner_respects_source_gap_grouping(tmp_path):
@@ -417,7 +519,7 @@ def test_online_event_selector_tracks_labels_independently():
     assert selector.update(3, ["lane_crossing", "moving_ttc"]) == ["lane_crossing"]
 
 
-def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
+def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tmp_path):
     calls = []
 
     class _FakeModel:
@@ -429,7 +531,7 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
             }
 
     class _FakeTimeline:
-        pass
+        frame_indices = np.arange(300, dtype=np.int64)
 
     def _fake_seed_state(*args, **kwargs):
         return SimpleNamespace(
@@ -460,7 +562,7 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
             s.done = True
             return None
         return (
-            {"ego_shape": np.ones((1, 3), dtype=np.float32)},
+            {"ego_shape": np.ones((1, 3), dtype=np.float32), "k": s.k},
             np.zeros((320, 11), dtype=np.float32),
             s.start + s.k,
             None,
@@ -473,11 +575,12 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
     def _fake_score_step_batched(neighbors_list, ego_shapes, device):
         return [(1.0, False, 0, -1) for _ in neighbors_list]
 
-    def _fake_danger_scorer(built, preds, data, device):
-        rows = []
-        for s, *_ in built:
-            rows.append({"labels": ["road_border_crossing"] if s.k == 1 else []})
-        return rows
+    def _fake_realized_event_scorer(np_dict, *, collided):
+        return (
+            {"labels": ["road_border_crossing"], "label": "road_border_crossing"}
+            if np_dict["k"] == 1
+            else {"labels": ["clean"], "label": "clean"}
+        )
 
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
@@ -485,15 +588,17 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
     def _fake_finalize(s, timers):
         return SimpleNamespace(metrics={"n_steps_run": s.k})
 
-    def _fake_dump_full_credit_segment(*args, **kwargs):
+    def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
             {
                 "out_dir": args[0],
-                "saved_steps": [rec[0] for rec in args[3]],
-                "verified_step": kwargs["verified_step"],
+                "saved_steps": [rec[0] for rec in args[4]],
+                "label": args[9],
+                "realized_frame": kwargs["extra_manifest"]["realized_frame"],
+                "source_label": kwargs["extra_manifest"]["source_label"],
             }
         )
-        return {"n_scenes": len(args[3])}
+        return {"n_scenes": len(args[4])}
 
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
@@ -501,9 +606,7 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
     monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
-    monkeypatch.setattr(
-        reproducer_rollout, "_dump_full_credit_segment", _fake_dump_full_credit_segment
-    )
+    monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
 
     reproducer_rollout.run_segments_batched(
         _FakeModel(),
@@ -520,15 +623,23 @@ def test_verify_credit_rollout_saves_full_event_window(monkeypatch, tmp_path):
                 "start_frame": 423,
                 "offense_frame": 438,
                 "credit_width": 15,
+                "frame_index": 423,
+                "source_index": 100,
+                "event_source_start_index": 100,
+                "event_source_end_index": 101,
+                "event_member_count": 2,
             }
         ],
         danger_save_dir=tmp_path,
-        danger_scorer=_fake_danger_scorer,
+        realized_event_scorer=_fake_realized_event_scorer,
+        danger_credit_windows={"road_border_crossing": 15},
     )
 
     assert len(calls) == 1
-    assert calls[0]["saved_steps"] == [0, 1, 2]
-    assert calls[0]["verified_step"] == 1
+    assert calls[0]["saved_steps"] == [0, 1]
+    assert calls[0]["label"] == "road_border_crossing"
+    assert calls[0]["source_label"] == "road_border_crossing"
+    assert calls[0]["realized_frame"] == 101
 
 
 def test_repair_candidate_selector_requires_safe_fix():
@@ -574,6 +685,194 @@ def test_repair_candidate_selector_requires_safe_fix():
 
     assert idx == 1
     assert meta["selected_total"] == 5.0
+
+
+def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
+    source_row = {"repair_labels": ["road_border_crossing"]}
+    candidate_rows = [
+        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+    ]
+    reward_rows = [
+        SimpleNamespace(
+            total=1.0,
+            collision_step=None,
+            rb_crossing=False,
+            lane_crossing=False,
+            static_crossing=False,
+            kinematic_violated=False,
+            sc_min_dist=1.0,
+            rb_min_dist=1.0,
+        ),
+        SimpleNamespace(
+            total=10.0,
+            collision_step=None,
+            rb_crossing=False,
+            lane_crossing=False,
+            static_crossing=False,
+            kinematic_violated=False,
+            sc_min_dist=1.0,
+            rb_min_dist=1.0,
+        ),
+    ]
+    candidate_trajs = [
+        torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+        torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+    ]
+    reference_traj = torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        require_conflict_clear=True,
+        candidate_trajs=candidate_trajs,
+        reference_traj=reference_traj,
+    )
+
+    assert idx == 0
+    assert meta["selected_deviation_penalty"] < 1.0
+
+
+def test_source_scene_t0_moving_overlap_rejects_already_collided_scene():
+    data = {
+        "ego_shape": torch.tensor([[4.76, 7.24, 2.29]], dtype=torch.float32),
+        "neighbor_agents_future": torch.tensor(
+            [[[[-2.0, 0.0, 1.0, 0.0]]]],
+            dtype=torch.float32,
+        ),
+        "neighbor_agents_past": torch.tensor(
+            [[[[0.0] * 11 for _ in range(31)]]],
+            dtype=torch.float32,
+        ),
+    }
+    data["neighbor_agents_past"][0, 0, -1, 0] = -2.0
+    data["neighbor_agents_past"][0, 0, -1, 2] = 1.0
+    data["neighbor_agents_past"][0, 0, -1, 6] = 2.0
+    data["neighbor_agents_past"][0, 0, -1, 7] = 4.5
+
+    collided, min_clearance = _source_scene_t0_moving_overlap(
+        data,
+        RewardConfig(ignore_rear_end_collisions=False),
+        device=torch.device("cpu"),
+        moving_collision_thresh=0.2,
+    )
+
+    assert collided is True
+    assert min_clearance < 0.0
+
+
+def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
+    cfg = {
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/threshold.json",
+        "trajectory": "det",
+        "classify_batch_size": 4,
+        "classify_device": "cpu",
+        "repair_config": {
+            "ego_shape": "4.76,7.24,2.29",
+            "min_margin": 0.3,
+        },
+        "count_rear_end_collisions": True,
+    }
+
+    classify_cmd = _classify_cmd(
+        cfg,
+        scene_pool=tmp_path / "scenes.json",
+        classify_dir=tmp_path / "classified",
+        model_path=tmp_path / "model.pth",
+    )
+    repair_cmd = _repair_cmd(
+        cfg,
+        model_path=tmp_path / "model.pth",
+        credit_jsonl=tmp_path / "credit.jsonl",
+        rdir=tmp_path,
+    )
+
+    assert "--count_rear_end_collisions" in classify_cmd
+    assert "--count_rear_end_collisions" in repair_cmd
+
+
+def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
+    reward_cfg = tmp_path / "reward.json"
+    threshold_cfg = tmp_path / "thresholds.json"
+    reward_cfg.write_text(
+        json.dumps(
+            {
+                "reward_mode": "gate",
+                "w_progress": 2.0,
+                "w_centerline": 5.0,
+                "w_safety": 5.0,
+                "w_smooth": 0.5,
+                "w_feasibility": 5.0,
+                "stopped_penalty": 50.0,
+                "rb_gate_enabled": True,
+                "rb_penalty_mode": "frac",
+                "rb_cross_thresh": 0.2,
+                "rb_near_thresh": 0.2,
+                "rb_wide_thresh": 0.6,
+                "rb_cont_thresh": 1.0,
+                "rb_near_scale": 3.0,
+                "rb_wide_scale": 0.2,
+                "rb_cont_scale": 0.0,
+                "enable_lane_departure": False,
+                "lane_gate_enabled": False,
+                "lane_cross_thresh": 0.2,
+                "lane_near_thresh": 0.25,
+                "lane_wide_thresh": 0.4,
+                "lane_cont_thresh": 0.8,
+                "lane_near_scale": 3.0,
+                "lane_wide_scale": 0.2,
+                "lane_cont_scale": 0.0,
+                "centerline_usage_mode": "baselink",
+                "enable_overprogress": False,
+                "overprogress_margin": 1.1,
+                "overprogress_penalty": 0.3,
+                "progress_norm_scale": 20.0,
+                "underprogress_penalty": 0.0,
+                "underprogress_threshold": 0.5,
+                "underprogress_reference": "baseline",
+            }
+        )
+    )
+    threshold_cfg.write_text(
+        json.dumps(
+            {
+                "moving_collision_thresh": 0.2,
+                "moving_near_thresh": 0.7,
+                "static_near_thresh": 0.5,
+                "rb_near_thresh": 0.2,
+                "expert_disagreement_thresh": 1.0,
+                "expert_disagreement_sustain_steps": 10,
+                "sc_cross_thresh": 0.2,
+                "rb_cross_thresh": 0.2,
+            }
+        )
+    )
+
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"moving_collision"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+    np_dict["neighbor_agents_past"][0, -1, 0] = 4.52
+    np_dict["neighbor_agents_past"][0, -1, 2] = 1.0
+    np_dict["neighbor_agents_past"][0, -1, 6] = 2.0
+    np_dict["neighbor_agents_past"][0, -1, 7] = 4.5
+    np_dict["neighbor_agents_future"][0, :, 0] = 4.52
+    np_dict["neighbor_agents_future"][0, :, 2] = 1.0
+
+    row = scorer(np_dict, collided=False)
+
+    assert "moving_collision" in row["labels"]
+    assert row["moving_collision_step"] == 0
 
 
 def test_union_scene_lists_dedupes_current_and_replay(tmp_path):

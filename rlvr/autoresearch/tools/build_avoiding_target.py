@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,12 @@ from typing import Any
 import numpy as np
 import torch
 
+from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 from rlvr.autoresearch.tools.classify_scene_failures import (
+    _ego_shape_from_data,
     _load_scene_thresholds,
+    _neighbor_inputs,
+    _stopped_neighbor_mask,
     classify_loaded_scene_candidates_batch,
 )
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model, load_npz_data
@@ -37,6 +42,14 @@ from rlvr.grpo_trainer_batched import (
 from rlvr.reward import compute_reward_batch
 
 _REPAIRABLE_LABELS = {"road_border_crossing", "static_collision", "moving_collision"}
+_VALIDITY_LABEL_WEIGHTS = {
+    "moving_ttc": 4.0,
+    "moving_near_miss": 3.0,
+    "static_near_miss": 2.0,
+    "road_border_near": 1.0,
+    "expert_disagreement": 0.5,
+}
+_NEIGHBOR_COORD_EPS_M = 1e-6
 
 
 def _parse_ego_shape(text: str) -> np.ndarray:
@@ -67,6 +80,110 @@ def _future4_to_3col(traj: np.ndarray) -> np.ndarray:
         raise ValueError(f"expected (T,4) future, got {traj.shape}")
     yaw = np.arctan2(traj[:, 3], traj[:, 2])
     return np.column_stack([traj[:, 0], traj[:, 1], yaw]).astype(np.float32)
+
+
+def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
+    arr = np.asarray(traj, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"expected future shaped (T,C) or (1,T,C), got {arr.shape}")
+    if arr.shape[1] >= 4:
+        return arr[:, :4].astype(np.float32)
+    if arr.shape[1] != 3:
+        raise ValueError(f"expected 3 or 4 future channels, got {arr.shape}")
+    yaw = arr[:, 2]
+    return np.column_stack([arr[:, 0], arr[:, 1], np.cos(yaw), np.sin(yaw)]).astype(np.float32)
+
+
+def _candidate_violation_score(label_row: dict[str, Any], reward_row) -> float:
+    labels = {str(label) for label in label_row.get("labels", []) if str(label) != "clean"}
+    score = sum(_VALIDITY_LABEL_WEIGHTS.get(label, 1.0) for label in labels)
+    if bool(label_row.get("expert_disagreement", False)):
+        score += _VALIDITY_LABEL_WEIGHTS["expert_disagreement"]
+    moving_step = label_row.get("moving_collision_step")
+    if moving_step is not None:
+        score += 10.0
+    if getattr(reward_row, "lane_crossing", False):
+        score += 10.0
+    if getattr(reward_row, "kinematic_violated", False):
+        score += 10.0
+    return float(score)
+
+
+def _candidate_deviation_penalty(
+    candidate_traj: torch.Tensor | np.ndarray,
+    reference_traj: torch.Tensor | np.ndarray | None,
+) -> float:
+    if reference_traj is None or candidate_traj is None:
+        return 0.0
+    if isinstance(candidate_traj, torch.Tensor):
+        cand = candidate_traj.detach().cpu().numpy().astype(np.float32, copy=False)
+    else:
+        cand = np.asarray(candidate_traj, dtype=np.float32)
+    ref = _future_to_4col(reference_traj)
+    if cand.ndim != 2 or cand.shape[1] < 2:
+        raise ValueError(f"candidate trajectory must be shaped (T,C), got {cand.shape}")
+    T = min(cand.shape[0], ref.shape[0])
+    if T < 1:
+        return 0.0
+    return float(np.linalg.norm(cand[:T, :2] - ref[:T, :2], axis=1).mean())
+
+
+def _apply_rear_end_collision_mode(rcfg, *, count_rear_end_collisions: bool) -> None:
+    if count_rear_end_collisions:
+        rcfg.ignore_rear_end_collisions = False
+
+
+def _source_scene_t0_moving_overlap(
+    data: dict[str, torch.Tensor],
+    rcfg,
+    *,
+    device: torch.device,
+    moving_collision_thresh: float,
+) -> tuple[bool, float]:
+    ego_shape = _ego_shape_from_data(data, device)
+    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, 1, device)
+    stopped_mask = _stopped_neighbor_mask(neighbor_futures, neighbor_valid, rcfg)
+    moving_mask = ~stopped_mask
+    if not bool(moving_mask.any().item()):
+        return False, math.inf
+
+    current_neighbors = neighbor_futures[moving_mask, :1, :4].clone()
+    current_valid = neighbor_valid[moving_mask, :1].clone()
+    neighbor_past = data.get("neighbor_agents_past")
+    if neighbor_past is not None:
+        if neighbor_past.dim() == 4:
+            neighbor_past = neighbor_past[0]
+        future_all = data.get("neighbor_agents_future")
+        if future_all is not None and future_all.dim() == 4:
+            future_all = future_all[0]
+        if future_all is not None and future_all.shape[1] >= 1:
+            slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
+            filtered_past = neighbor_past[slot_valid]
+        else:
+            filtered_past = neighbor_past
+        current_pose = filtered_past[moving_mask, -1, :]
+        if current_pose.shape[-1] >= 4:
+            current_neighbors[:, 0, :4] = current_pose[:, :4].to(device)
+            current_valid = (
+                (current_pose[:, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M)
+                .unsqueeze(1)
+                .to(device)
+            )
+
+    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_now,
+        ego_shape,
+        current_neighbors,
+        neighbor_shapes[moving_mask],
+        current_valid,
+    )
+    if distances.numel() == 0:
+        return False, math.inf
+    min_clearance = float(distances.min().item())
+    return min_clearance <= moving_collision_thresh, min_clearance
 
 
 def _load_rows(
@@ -164,8 +281,13 @@ def _best_safe_candidate(
     *,
     min_static_margin: float,
     require_conflict_clear: bool,
+    candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
+    reference_traj: torch.Tensor | np.ndarray | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
-    accepted: list[tuple[float, int]] = []
+    accepted: list[tuple[float, float, int]] = []
+    candidate_traj_list = None
+    if candidate_trajs is not None:
+        candidate_traj_list = list(candidate_trajs)
     for idx, (label_row, reward_row) in enumerate(zip(candidate_rows, reward_rows, strict=True)):
         if _repairs_source_labels(
             source_row["repair_labels"],
@@ -174,7 +296,12 @@ def _best_safe_candidate(
             min_static_margin=min_static_margin,
             require_conflict_clear=require_conflict_clear,
         ):
-            accepted.append((float(reward_row.total), idx))
+            violation_score = _candidate_violation_score(label_row, reward_row)
+            deviation_penalty = _candidate_deviation_penalty(
+                candidate_traj_list[idx] if candidate_traj_list is not None else None,
+                reference_traj,
+            )
+            accepted.append((violation_score, deviation_penalty, idx))
 
     if not accepted:
         best_total = max(float(r.total) for r in reward_rows)
@@ -185,8 +312,8 @@ def _best_safe_candidate(
             "best_sc_min_dist": best_sc,
         }
 
-    accepted.sort(reverse=True)
-    _, idx = accepted[0]
+    accepted.sort(key=lambda item: (item[0], item[1], item[2]))
+    violation_score, deviation_penalty, idx = accepted[0]
     reward_row = reward_rows[idx]
     label_row = candidate_rows[idx]
     return idx, {
@@ -194,6 +321,8 @@ def _best_safe_candidate(
         "selected_sc_min_dist": float(getattr(reward_row, "sc_min_dist", 99.0)),
         "selected_rb_min_dist": float(getattr(reward_row, "rb_min_dist", 99.0)),
         "selected_labels": list(label_row["labels"]),
+        "selected_violation_score": float(violation_score),
+        "selected_deviation_penalty": float(deviation_penalty),
         "selected_candidate_index": int(idx),
     }
 
@@ -220,8 +349,13 @@ def build_repaired_targets(
     require_conflict_clear: bool,
     enable_conflict_detector: bool,
     use_route_cl_guidance: bool,
+    count_rear_end_collisions: bool,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
+    _apply_rear_end_collision_mode(
+        rcfg,
+        count_rear_end_collisions=count_rear_end_collisions,
+    )
     thresholds = _load_scene_thresholds(threshold_config_path)
     model, model_args = load_model(model_path, device)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -249,6 +383,27 @@ def build_repaired_targets(
                     f"{p}: --ego_shape {ego_shape.tolist()} != NPZ ego_shape "
                     f"{npz_es.tolist()} (platform mismatch)"
                 )
+            t0_collided, t0_min_clearance = _source_scene_t0_moving_overlap(
+                data,
+                rcfg,
+                device=device,
+                moving_collision_thresh=float(thresholds["moving_collision_thresh"]),
+            )
+            if t0_collided:
+                unrepaired_rows.append(
+                    {
+                        **row,
+                        "reason": "t0_already_collided",
+                        "t0_moving_min_dist": float(t0_min_clearance),
+                    }
+                )
+                print(
+                    f"  UNREPAIRED {_output_name_for_scene(p)}: "
+                    f"labels={','.join(row['repair_labels'])} "
+                    f"reason=t0_already_collided "
+                    f"t0_moving_min_dist={t0_min_clearance:+.3f}"
+                )
+                continue
             datas.append(data)
             kept_rows.append(row)
 
@@ -274,6 +429,7 @@ def build_repaired_targets(
             trajs,
             datas,
             rcfg,
+            moving_collision_thresh=thresholds["moving_collision_thresh"],
             moving_near_thresh=thresholds["moving_near_thresh"],
             static_near_thresh=thresholds["static_near_thresh"],
             rb_near_thresh=thresholds["rb_near_thresh"],
@@ -285,12 +441,15 @@ def build_repaired_targets(
             kept_rows, datas, trajs, candidate_rows_per_scene, strict=True
         ):
             reward_rows = compute_reward_batch(scene_trajs, data, rcfg)
+            reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
             best_idx, meta = _best_safe_candidate(
                 row,
                 candidate_rows,
                 reward_rows,
                 min_static_margin=min_static_margin,
                 require_conflict_clear=require_conflict_clear,
+                candidate_trajs=scene_trajs,
+                reference_traj=reference_traj,
             )
             name = _output_name_for_scene(row["scene_path"])
             if best_idx is None:
@@ -365,6 +524,11 @@ def main() -> None:
     ap.add_argument("--allow_conflict_candidates", action="store_true")
     ap.add_argument("--enable_conflict_detector", action="store_true")
     ap.add_argument("--disable_route_cl_guidance", action="store_true")
+    ap.add_argument(
+        "--count_rear_end_collisions",
+        action="store_true",
+        help="Count moving collisions where the ego is struck from behind.",
+    )
     args = ap.parse_args()
 
     if not args.scene_rows_jsonl and not args.scenes:
@@ -409,6 +573,7 @@ def main() -> None:
         require_conflict_clear=not bool(args.allow_conflict_candidates),
         enable_conflict_detector=bool(args.enable_conflict_detector),
         use_route_cl_guidance=not bool(args.disable_route_cl_guidance),
+        count_rear_end_collisions=bool(args.count_rear_end_collisions),
     )
 
 

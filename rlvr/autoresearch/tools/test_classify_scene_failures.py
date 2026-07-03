@@ -68,6 +68,29 @@ def _clone_data(data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {k: v.clone() for k, v in data.items()}
 
 
+def _rear_end_collision_data_3col() -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    ego = torch.zeros(1, T, 4, dtype=torch.float32)
+    ego[0, :, 0] = torch.arange(T, dtype=torch.float32) * 0.5
+    ego[0, :, 2] = 1.0
+
+    neighbor = torch.zeros(1, 1, T, 3)
+    neighbor[0, 0, :, 0] = ego[0, :, 0] - 3.0
+    neighbor[0, 0, :, 2] = 0.0
+
+    past = torch.zeros(1, 1, 21, 11)
+    past[0, 0, -1, 0] = -3.0
+    past[0, 0, -1, 2] = 1.0
+    past[0, 0, -1, 6] = 2.0
+    past[0, 0, -1, 7] = 4.5
+
+    data = {
+        "ego_shape": _ego_shape(),
+        "neighbor_agents_future": neighbor,
+        "neighbor_agents_past": past,
+    }
+    return ego, data
+
+
 def test_classify_scene_failures_converts_3col_future_and_flags_moving_collision():
     ego, data = _moving_collision_data_3col()
 
@@ -76,6 +99,7 @@ def test_classify_scene_failures_converts_3col_future_and_flags_moving_collision
         ego,
         data,
         RewardConfig(),
+        moving_collision_thresh=0.2,
         moving_near_thresh=1.0,
         static_near_thresh=0.4,
         rb_near_thresh=0.45,
@@ -125,6 +149,7 @@ def test_classify_loaded_scenes_batch_handles_multiple_scenes_one_trajectory_eac
         ego_trajs,
         [_clone_data(data), _clone_data(data)],
         RewardConfig(),
+        moving_collision_thresh=0.2,
         moving_near_thresh=1.0,
         static_near_thresh=0.4,
         rb_near_thresh=0.45,
@@ -136,6 +161,44 @@ def test_classify_loaded_scenes_batch_handles_multiple_scenes_one_trajectory_eac
     assert "moving_collision" in rows[0]["labels"]
     assert rows[0]["moving_collision_step"] == 30
     assert rows[1]["labels"] == ["clean"]
+
+
+def test_classify_scene_failures_counts_rear_end_collision_when_enabled():
+    ego, data = _rear_end_collision_data_3col()
+
+    row = classify_loaded_scene(
+        "/tmp/rear_end_collision.npz",
+        ego,
+        data,
+        RewardConfig(ignore_rear_end_collisions=False),
+        moving_collision_thresh=0.2,
+        moving_near_thresh=1.0,
+        static_near_thresh=0.4,
+        rb_near_thresh=0.45,
+        device=torch.device("cpu"),
+    )
+
+    assert "moving_collision" in row["labels"]
+    assert row["moving_collision_step"] == 0
+
+
+def test_classify_scene_failures_counts_rear_end_collision_under_shared_rule():
+    ego, data = _rear_end_collision_data_3col()
+
+    row = classify_loaded_scene(
+        "/tmp/rear_end_collision.npz",
+        ego,
+        data,
+        RewardConfig(),
+        moving_collision_thresh=0.2,
+        moving_near_thresh=1.0,
+        static_near_thresh=0.4,
+        rb_near_thresh=0.45,
+        device=torch.device("cpu"),
+    )
+
+    assert "moving_collision" in row["labels"]
+    assert row["moving_collision_step"] == 0
 
 
 def test_classify_scene_failures_writes_null_rb_min_dist_without_borders(tmp_path):
@@ -151,12 +214,18 @@ def test_classify_scene_failures_writes_null_rb_min_dist_without_borders(tmp_pat
         ego,
         data,
         RewardConfig(),
+        moving_collision_thresh=0.2,
         moving_near_thresh=1.0,
         static_near_thresh=0.4,
         rb_near_thresh=0.45,
         device=torch.device("cpu"),
     )
-    _write_outputs([row], [], tmp_path, {"moving_near_thresh": 1.0})
+    _write_outputs(
+        [row],
+        [],
+        tmp_path,
+        {"moving_collision_thresh": 0.2, "moving_near_thresh": 1.0},
+    )
 
     written = (tmp_path / "classified_scenes.jsonl").read_text()
     assert "Infinity" not in written
@@ -178,7 +247,12 @@ def test_classify_scene_failures_writes_training_path_lists(tmp_path):
         {"scene_path": "/tmp/c.npz", "labels": ["moving_collision"]},
     ]
 
-    _write_outputs(rows, [], tmp_path, {"moving_near_thresh": 1.0})
+    _write_outputs(
+        rows,
+        [],
+        tmp_path,
+        {"moving_collision_thresh": 0.2, "moving_near_thresh": 1.0},
+    )
 
     assert json.loads((tmp_path / "lists" / "moving_collision.json").read_text()) == [
         "/tmp/a.npz",
@@ -200,6 +274,7 @@ def test_scene_failure_threshold_config_uses_requested_defaults():
     thresholds = _load_scene_thresholds(_DEFAULT_THRESHOLD_CONFIG)
 
     assert thresholds == {
+        "moving_collision_thresh": 0.2,
         "moving_near_thresh": 0.7,
         "static_near_thresh": 0.5,
         "rb_near_thresh": 0.2,
@@ -213,6 +288,7 @@ def test_scene_failure_threshold_config_uses_requested_defaults():
 def test_scene_failure_thresholds_override_reward_config():
     class Args:
         threshold_config = _DEFAULT_THRESHOLD_CONFIG
+        moving_collision_thresh = None
         moving_near_thresh = None
         static_near_thresh = None
         rb_near_thresh = None
@@ -224,6 +300,7 @@ def test_scene_failure_thresholds_override_reward_config():
     config = RewardConfig(rb_cross_thresh=0.45, rb_near_thresh=0.45, sc_near_thresh=0.4)
     thresholds = _apply_scene_thresholds(config, Args())
 
+    assert thresholds["moving_collision_thresh"] == 0.2
     assert thresholds["moving_near_thresh"] == 0.7
     assert thresholds["static_near_thresh"] == 0.5
     assert thresholds["rb_near_thresh"] == 0.2
@@ -240,11 +317,15 @@ def test_merge_output_dirs_rejects_threshold_mismatch(tmp_path):
         [{"scene_path": "/tmp/a.npz", "labels": ["moving_near_miss"]}],
         [],
         shard,
-        {"moving_near_thresh": 1.0},
+        {"moving_collision_thresh": 0.2, "moving_near_thresh": 1.0},
     )
 
     try:
-        _merge_output_dirs([shard], tmp_path / "merged", {"moving_near_thresh": 0.7})
+        _merge_output_dirs(
+            [shard],
+            tmp_path / "merged",
+            {"moving_collision_thresh": 0.2, "moving_near_thresh": 0.7},
+        )
     except ValueError as exc:
         assert "do not match requested merge thresholds" in str(exc)
     else:
@@ -349,6 +430,7 @@ def test_classify_det_can_save_compatible_predictions(monkeypatch, tmp_path):
     args = SimpleNamespace(
         model_path="/tmp/model.pth",
         batch_size=4,
+        moving_collision_thresh=0.2,
         moving_near_thresh=1.0,
         static_near_thresh=0.4,
         rb_near_thresh=0.45,
@@ -366,3 +448,39 @@ def test_classify_det_can_save_compatible_predictions(monkeypatch, tmp_path):
         assert saved["prediction"].shape == (2, T, 4)
         assert np.allclose(saved["prediction"][0, :, 0], 3.0)
         assert int(saved["turn_indicator"]) == 1
+
+
+def test_classify_scene_flags_moving_collision_at_clearance_threshold():
+    t = torch.arange(T, dtype=torch.float32)
+    ego = torch.stack([0.5 * t, torch.zeros(T), torch.ones(T), torch.zeros(T)], dim=-1).unsqueeze(0)
+
+    neighbor = torch.zeros(1, 1, T, 3)
+    neighbor[0, 0, :, 0] = ego[0, :, 0] + 4.52
+    neighbor[0, 0, :, 2] = 0.0
+
+    past = torch.zeros(1, 1, 21, 11)
+    past[0, 0, -1, 0] = 4.52
+    past[0, 0, -1, 2] = 1.0
+    past[0, 0, -1, 6] = 2.0
+    past[0, 0, -1, 7] = 4.5
+
+    data = {
+        "ego_shape": torch.tensor([[2.79, 4.34, 1.70]], dtype=torch.float32),
+        "neighbor_agents_future": neighbor,
+        "neighbor_agents_past": past,
+    }
+
+    row = classify_loaded_scene(
+        "/tmp/threshold_collision.npz",
+        ego,
+        data,
+        RewardConfig(ignore_rear_end_collisions=False),
+        moving_collision_thresh=0.2,
+        moving_near_thresh=0.7,
+        static_near_thresh=0.4,
+        rb_near_thresh=0.45,
+        device=torch.device("cpu"),
+    )
+
+    assert "moving_collision" in row["labels"]
+    assert row["moving_collision_step"] == 0

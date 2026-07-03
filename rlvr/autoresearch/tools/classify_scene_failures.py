@@ -52,10 +52,7 @@ import torch
 from diffusion_planner.utils.path_key import data_path_to_rel
 
 from planner_metrics.aggregate import compute_subscores_scene_batch
-from planner_metrics.subscores import (
-    compute_ego_neighbor_signed_clearance,
-    compute_safety_score_batch,
-)
+from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig
 
@@ -77,6 +74,7 @@ _DEFAULT_THRESHOLD_CONFIG = (
     Path(__file__).resolve().parents[2] / "configs" / "scene_failure_thresholds.json"
 )
 _REQUIRED_THRESHOLD_FIELDS = (
+    "moving_collision_thresh",
     "moving_near_thresh",
     "static_near_thresh",
     "rb_near_thresh",
@@ -93,6 +91,11 @@ _NEIGHBOR_SHAPE_EPS_M = 1e-3
 _NO_MOVING_NEIGHBOR_DISTANCE_M = float("inf")
 _THRESHOLD_MATCH_TOL = 1e-9
 _MISSING_SOURCE_SAMPLE_LIMIT = 5
+
+
+def _apply_rear_end_collision_mode(config: RewardConfig, args) -> None:
+    if bool(getattr(args, "count_rear_end_collisions", False)):
+        config.ignore_rear_end_collisions = False
 
 
 def _load_scene_thresholds(path: str | Path) -> dict[str, float]:
@@ -113,6 +116,7 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
         cli_value = getattr(args, name, None)
         return float(cli_value) if cli_value is not None else threshold_config[name]
 
+    args.moving_collision_thresh = resolve("moving_collision_thresh")
     args.moving_near_thresh = resolve("moving_near_thresh")
     args.static_near_thresh = resolve("static_near_thresh")
     args.rb_near_thresh = resolve("rb_near_thresh")
@@ -124,6 +128,7 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
     args.expert_disagreement_sustain_steps = int(resolve("expert_disagreement_sustain_steps"))
 
     return {
+        "moving_collision_thresh": float(args.moving_collision_thresh),
         "moving_near_thresh": float(args.moving_near_thresh),
         "static_near_thresh": float(args.static_near_thresh),
         "rb_near_thresh": float(args.rb_near_thresh),
@@ -570,10 +575,24 @@ def _first_step(steps: list[int | None]) -> int | None:
     return min(values) if values else None
 
 
+def _first_moving_collision_step(
+    distances: torch.Tensor,
+    *,
+    moving_collision_thresh: float,
+) -> int | None:
+    if distances.numel() == 0:
+        return None
+    collision_by_t = (distances <= moving_collision_thresh).any(dim=1).any(dim=0)
+    if not bool(collision_by_t.any().item()):
+        return None
+    return int(collision_by_t.float().argmax().item())
+
+
 def _moving_diagnostics(
     ego_traj: torch.Tensor,
     data: dict[str, torch.Tensor],
     config: RewardConfig,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     device: torch.device,
 ) -> dict[str, Any]:
@@ -607,16 +626,10 @@ def _moving_diagnostics(
     argmin_m = (flat_idx // T) % M
     argmin_t = flat_idx % T
     min_dist = float(distances.reshape(-1)[flat_idx].item())
-
-    _, moving_collision_steps = compute_safety_score_batch(
-        ego_traj,
-        ego_shape,
-        mf,
-        ms,
-        mv,
-        config,
+    moving_collision_step = _first_moving_collision_step(
+        distances,
+        moving_collision_thresh=moving_collision_thresh,
     )
-    moving_collision_step = _first_step(moving_collision_steps)
 
     return {
         "moving_neighbor_count": moving_count,
@@ -635,6 +648,7 @@ def classify_loaded_scene(
     data: dict[str, torch.Tensor],
     config: RewardConfig,
     *,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     static_near_thresh: float,
     rb_near_thresh: float,
@@ -646,6 +660,7 @@ def classify_loaded_scene(
         ego_traj.unsqueeze(0),
         [_prepare_scoring_data(data)],
         config,
+        moving_collision_thresh=moving_collision_thresh,
         moving_near_thresh=moving_near_thresh,
         static_near_thresh=static_near_thresh,
         rb_near_thresh=rb_near_thresh,
@@ -739,6 +754,7 @@ def classify_loaded_scenes_batch(
     datas: list[dict[str, torch.Tensor]],
     config: RewardConfig,
     *,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     static_near_thresh: float,
     rb_near_thresh: float,
@@ -751,6 +767,7 @@ def classify_loaded_scenes_batch(
         ego_trajs,
         datas,
         config,
+        moving_collision_thresh=moving_collision_thresh,
         moving_near_thresh=moving_near_thresh,
         static_near_thresh=static_near_thresh,
         rb_near_thresh=rb_near_thresh,
@@ -766,6 +783,7 @@ def classify_loaded_scene_candidates_batch(
     datas: list[dict[str, torch.Tensor]],
     config: RewardConfig,
     *,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     static_near_thresh: float,
     rb_near_thresh: float,
@@ -799,6 +817,7 @@ def classify_loaded_scene_candidates_batch(
                 traj_1,
                 scene_data,
                 config,
+                moving_collision_thresh,
                 moving_near_thresh,
                 device,
             )
@@ -955,6 +974,7 @@ def _classify_gt(
                 torch.stack(ego_trajs, dim=0),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
@@ -1030,6 +1050,7 @@ def _classify_det(
                 det_trajs.unsqueeze(1),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
@@ -1098,6 +1119,7 @@ def _classify_saved_predictions(
                 torch.stack(ego_trajs, dim=0),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
@@ -1157,6 +1179,7 @@ def _classify_saved_prediction_pairs(
                 torch.stack(ego_trajs, dim=0),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
@@ -1304,6 +1327,7 @@ def main() -> None:
             f"{_DEFAULT_THRESHOLD_CONFIG}. CLI threshold flags override values in this file."
         ),
     )
+    parser.add_argument("--moving_collision_thresh", type=float, default=None)
     parser.add_argument("--moving_near_thresh", type=float, default=None)
     parser.add_argument("--static_near_thresh", type=float, default=None)
     parser.add_argument("--rb_near_thresh", type=float, default=None)
@@ -1316,9 +1340,19 @@ def main() -> None:
     )
     parser.add_argument("--sc_cross_thresh", type=float, default=None)
     parser.add_argument("--rb_cross_thresh", type=float, default=None)
+    parser.add_argument(
+        "--count_rear_end_collisions",
+        action="store_true",
+        help="Count moving collisions where the ego is struck from behind.",
+    )
     parser.add_argument("--max_scenes", type=int, default=None)
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--shard_index", type=int, default=0)
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="torch device for model inference / saved-prediction scoring",
+    )
     parser.add_argument(
         "--merge_output_dirs",
         nargs="+",
@@ -1328,9 +1362,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.save_predictions_dir is not None and args.trajectory != "det":
         raise ValueError("--save_predictions_dir is only supported with --trajectory det")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)
     config = load_reward_config(args.config)
+    _apply_rear_end_collision_mode(config, args)
     thresholds = _apply_scene_thresholds(config, args)
     if args.merge_output_dirs is not None:
         _merge_output_dirs(
