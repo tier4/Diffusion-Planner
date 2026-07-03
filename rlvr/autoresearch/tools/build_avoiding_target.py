@@ -99,7 +99,7 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
 def _candidate_violation_score(label_row: dict[str, Any], reward_row) -> float:
     labels = {str(label) for label in label_row.get("labels", []) if str(label) != "clean"}
     score = sum(_VALIDITY_LABEL_WEIGHTS.get(label, 1.0) for label in labels)
-    if bool(label_row.get("expert_disagreement", False)):
+    if bool(label_row.get("expert_disagreement", False)) and "expert_disagreement" not in labels:
         score += _VALIDITY_LABEL_WEIGHTS["expert_disagreement"]
     moving_step = label_row.get("moving_collision_step")
     if moving_step is not None:

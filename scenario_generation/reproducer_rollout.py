@@ -2088,8 +2088,14 @@ def _dump_full_credit_segment(
     manifest["offense_step"] = int(last_step)
     manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
     manifest["verified_first_step"] = None if verified_step is None else int(verified_step)
+    verified_idx = None
+    if verified_step is not None:
+        verified_idx = next(
+            (i for i, (step, *_rest) in enumerate(buf) if int(step) == int(verified_step)),
+            None,
+        )
     manifest["verified_first_frame_id"] = (
-        None if verified_step is None else _frame_id(tl, int(buf[int(verified_step)][1]))
+        None if verified_idx is None else _frame_id(tl, int(buf[verified_idx][1]))
     )
     manifest["window_first_step"] = int(first_step)
     manifest["window_last_step"] = int(last_step)

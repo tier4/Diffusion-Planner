@@ -14,6 +14,7 @@ from rlvr.autoresearch.tools import mine_credit_window_scenes as mine_credit_win
 from rlvr.autoresearch.tools import reproducer_danger_scorer
 from rlvr.autoresearch.tools.build_avoiding_target import (
     _best_safe_candidate,
+    _candidate_violation_score,
     _filtered_npz_payload,
     _future4_to_3col,
     _source_scene_t0_moving_overlap,
@@ -676,6 +677,57 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     assert calls[0]["realized_frame"] == 101
 
 
+def test_dump_full_credit_segment_uses_step_key_for_verified_frame(monkeypatch, tmp_path):
+    def _fake_dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        offense_step,
+        buf,
+        last_snap_step,
+        credit_width,
+        save_thresh,
+        seg_start,
+        seg_end,
+        **kwargs,
+    ):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "collision00000.npz").write_bytes(b"npz")
+        return {}
+
+    def _fake_frame_id(_tl, idx):
+        return 1000 + int(idx)
+
+    monkeypatch.setattr(
+        reproducer_rollout, "_dump_precollision_window", _fake_dump_precollision_window
+    )
+    monkeypatch.setattr(reproducer_rollout, "_frame_id", _fake_frame_id)
+
+    out_dir = tmp_path / "credit_segment"
+    buf = [
+        (5, 20, {}, None, np.zeros((0, 11), dtype=np.float32), np.zeros(3, dtype=np.float32)),
+        (6, 21, {}, None, np.zeros((0, 11), dtype=np.float32), np.zeros(3, dtype=np.float32)),
+        (7, 22, {}, None, np.zeros((0, 11), dtype=np.float32), np.zeros(3, dtype=np.float32)),
+    ]
+
+    manifest = reproducer_rollout._dump_full_credit_segment(
+        out_dir,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        buf,
+        last_snap_step=None,
+        seg_start=0,
+        seg_end=3,
+        label="moving_collision",
+        verified_step=6,
+    )
+
+    assert manifest is not None
+    saved = json.loads((out_dir / "manifest.json").read_text())
+    assert saved["verified_first_step"] == 6
+    assert saved["verified_first_frame_id"] == 1021
+
+
 def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
     monkeypatch, tmp_path
 ):
@@ -842,6 +894,18 @@ def test_repair_candidate_selector_requires_safe_fix():
 
     assert idx == 1
     assert meta["selected_total"] == 5.0
+
+
+def test_candidate_violation_score_does_not_double_count_expert_disagreement():
+    row = {
+        "labels": ["expert_disagreement", "road_border_near"],
+        "expert_disagreement": True,
+        "moving_collision_step": None,
+    }
+
+    score = _candidate_violation_score(row, SimpleNamespace())
+
+    assert score == 1.5
 
 
 def test_seed_state_tracker_mode_selects_mpc():
