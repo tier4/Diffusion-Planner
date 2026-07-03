@@ -503,9 +503,16 @@ python -m rlvr.autoresearch.tools.render_reproducer_segment \
   --output_dir <render_dir> \
   [--lora_path <adapter_dir>] \
   [--start 0 --steps 120 --end 0 --max_steps 0] \
-  [--goal_reach_m 5.0 --near_miss_thresh 0.5 --search_radius 1.5] \
+  [--goal_mode segment --goal_reach_m 0.0 --timeline_progress_mode pose] \
+  [--tracker_mode mpc] \
+  [--near_miss_thresh 0.5 --search_radius 1.5] \
   [--unstick_after 300 --view_half_m 50 --make_webm --webm_fps 10]
 ```
+
+Default behavior renders exactly the requested segment length. Use
+`--goal_mode route` plus an explicit `--max_steps` if you want a longer clip that
+continues beyond the requested route-frame window. The default ego tracker is MPC;
+pass `--tracker_mode perfect` to recover the old perfect-tracking behavior.
 
 ### render_metadata.py
 Small helper module shared by render tools to build compact labels/titles for WebM and still outputs. It keeps model, LoRA, route, frame range, and distance metadata formatting consistent across open-loop, closed-loop, and reproducer renders.

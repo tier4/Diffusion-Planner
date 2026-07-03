@@ -4,6 +4,37 @@ Canonical entrypoint: `python -m rlvr.autoresearch.tools.run_lifelong_r2lpl_roun
 
 This workflow is the repo's intended single-command R2LPL-style loop for route-based replay mining, repair-target generation, replay-memory update, and training.
 
+## Where To Look
+
+When the autoresearch skill needs to recover this workflow quickly, start here:
+
+- orchestration entrypoint:
+  `rlvr/autoresearch/tools/run_lifelong_r2lpl_rounds.py`
+- open-loop classification and saved-prediction reuse:
+  `rlvr/autoresearch/tools/classify_scene_failures.py`
+- event mining and closed-loop reproduction:
+  `rlvr/autoresearch/tools/mine_credit_window_scenes.py`
+- reproducer mechanics:
+  `scenario_generation/reproducer_rollout.py`
+
+For manual event inspection renders, `python -m rlvr.autoresearch.tools.render_reproducer_segment`
+now supports both `--tracker_mode perfect` and `--tracker_mode mpc`. The R2LPL mining workflow
+also accepts `perception_reproducer.tracker_mode`, and now defaults to MPC tracking unless
+explicitly changed.
+
+## Single-Entry Contract
+
+Normal usage should go through the single orchestrator and provide:
+
+- `model_path`
+- one route source: `scene_list` or `route_root`
+- optional `saved_predictions_dir`
+- `workflow_config`
+- `training_config`
+- `output_dir`
+
+The orchestrator owns classify -> event mining -> reproduction -> repair -> replay -> train.
+
 ## Intent
 
 The workflow is deliberately split into four distinct semantics:
@@ -20,6 +51,7 @@ These are separate on purpose. The open-loop planner prediction is used only to 
 - A classified route can contain many violating timestamps for the same event.
 - Those timestamps are collapsed into distinct events before reproduction.
 - One event triggers exactly one reproducer rollout.
+- A scene is one NPZ. Generated scene count is the number of exported NPZs, so it should be a multiple of reproduced event count when every event exports the same repair-window length.
 - Reporting should distinguish:
   - violating timestamps
   - selected open-loop events
@@ -46,6 +78,21 @@ There are three different horizons and they must not be coupled:
 
 The key design choice is: do not anchor at the repair window itself. Anchor earlier, reproduce forward, then cut the repair window back from the realized offense point.
 
+## Saved Prediction Reuse
+
+Two inference modes are supported:
+
+- `inference.mode="det"`
+  - runs deterministic inference during classification
+  - if `saved_predictions_dir` is provided, predictions are saved in the `valid_predictor.py` NPZ format
+- `inference.mode="saved_predictions"`
+  - reuses an existing `saved_predictions_dir`
+  - the prediction directory is the only prediction input the workflow needs
+  - the workflow still needs the route source (`scene_list` or `route_root`) for event mining, reproduction, and source-scene accounting
+
+Saved prediction NPZs are written in a source-path-mirrored layout, so later reuse can resolve the original route NPZs directly from the prediction path. For standalone `classify_scene_failures.py` runs without a scene list, pass `--source_scene_root` so the classifier can map prediction NPZs back to route NPZs.
+That root must sit above the mirrored relative path stored under `saved_predictions_dir`. For example, if predictions are saved under `saved_predictions/<dataset>/<session>/...`, then `--source_scene_root` should be the parent dataset root such as `.../validation`, not the deeper `.../validation/<dataset>/<session>` subfolder.
+
 ## Realized-Event Judgement
 
 The reproducer verification stage is judged on realized rollout state, not by re-running the open-loop future-trajectory classifier at each step.
@@ -64,6 +111,14 @@ Current intended realized labels:
   - Triggered from the realized current-pose road-border distance at that rollout step.
 
 This means the realized violation label is allowed to differ from the source open-loop label.
+
+For this workflow, the intended default reproducer progression is fixed clock time:
+
+- `timeline_progress_mode="clock"` for R2LPL runs
+- `neighbor_history_mode="sim"`
+- `tracker_mode="mpc"`
+
+That keeps neighbor motion advancing even when the ego does not make enough spatial progress to trigger the pose-based cursor.
 
 ## Saved Scene Semantics
 

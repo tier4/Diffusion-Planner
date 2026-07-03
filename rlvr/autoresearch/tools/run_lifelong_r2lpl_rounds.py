@@ -320,6 +320,7 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "timeline_progress_mode": str(
             _first_non_null(reproducer.get("timeline_progress_mode"), "clock")
         ),
+        "tracker_mode": str(_first_non_null(reproducer.get("tracker_mode"), "mpc")),
         "mine_gpu_transform": bool(_first_non_null(reproducer.get("gpu_transform"), False)),
         "mine_goal_reach_m": float(_first_non_null(reproducer.get("goal_reach_m"), 0.0)),
         "mine_render_webm": bool(_first_non_null(reproducer.get("render_webm"), False)),
@@ -765,6 +766,8 @@ def _mine_credit_cmd(
         str(cfg.get("neighbor_history_mode", "sim")),
         "--timeline_progress_mode",
         str(cfg.get("timeline_progress_mode", "clock")),
+        "--tracker_mode",
+        str(cfg.get("tracker_mode", "mpc")),
         "--goal_reach_m",
         str(cfg.get("mine_goal_reach_m", 0.0)),
         "--classified_decluster_steps",

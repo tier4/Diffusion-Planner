@@ -28,6 +28,7 @@ from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _classify_cmd,
     _load_config,
     _lora_for_policy,
+    _mine_credit_cmd,
     _perception_mining_cmd,
     _repair_cmd,
     _union_scene_lists,
@@ -317,6 +318,7 @@ def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
     assert cfg["anchor_horizon_steps"] == 40
     assert cfg["max_rollout_steps"] == 80
     assert cfg["timeline_progress_mode"] == "clock"
+    assert cfg["tracker_mode"] == "mpc"
     assert cfg["training_backend"] == "base_sft"
 
 
@@ -361,6 +363,36 @@ def test_round_runner_classify_cmd_can_save_det_predictions(tmp_path):
     assert cmd[cmd.index("--save_predictions_dir") + 1] == str(tmp_path / "saved_predictions")
     assert cmd[cmd.index("--batch_size") + 1] == "32"
     assert cmd[cmd.index("--device") + 1] == "cuda"
+
+
+def test_round_runner_mine_credit_cmd_forwards_tracker_mode(tmp_path):
+    cfg = {
+        "credit_window_config": "/tmp/credit.json",
+        "mine_batch_size": 8,
+        "mine_device": "cuda",
+        "neighbor_history_mode": "sim",
+        "timeline_progress_mode": "clock",
+        "tracker_mode": "mpc",
+        "mine_goal_reach_m": 0.0,
+        "classified_decluster_steps": 10,
+        "anchor_horizon_steps": 40,
+        "max_rollout_steps": 80,
+        "verify_reproduced_issue": False,
+    }
+
+    cmd = _mine_credit_cmd(
+        cfg,
+        scene_pool_root=tmp_path / "route_root",
+        route_scene_list=None,
+        classify_dir=tmp_path / "classified",
+        model_path=tmp_path / "model.pth",
+        credit_dir=tmp_path / "credit",
+        credit_jsonl=tmp_path / "credit.jsonl",
+        events_json=tmp_path / "events.json",
+    )
+
+    assert "--tracker_mode" in cmd
+    assert cmd[cmd.index("--tracker_mode") + 1] == "mpc"
 
 
 def test_round_runner_classify_cmd_can_reuse_saved_predictions(tmp_path):
@@ -685,6 +717,43 @@ def test_repair_candidate_selector_requires_safe_fix():
 
     assert idx == 1
     assert meta["selected_total"] == 5.0
+
+
+def test_seed_state_tracker_mode_selects_mpc():
+    class _MiniTimeline:
+        def __init__(self):
+            self.poses = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64)
+            self.speeds = np.array([0.0, 1.0], dtype=np.float32)
+            self._npz = {
+                "ego_agent_past": np.zeros((31, 3), dtype=np.float32),
+                "ego_shape": np.array([4.76, 7.24, 2.29], dtype=np.float32),
+                "neighbor_agents_past": np.zeros((320, 31, 11), dtype=np.float32),
+                "turn_indicators": np.zeros((31,), dtype=np.int64),
+            }
+
+        def __len__(self):
+            return len(self.poses)
+
+        def npz(self, idx):
+            return self._npz
+
+    tl = _MiniTimeline()
+    timers = reproducer_rollout.Timers()
+
+    state = reproducer_rollout._seed_state(
+        tl,
+        0,
+        2,
+        search_radius=1.5,
+        warmup_steps=0,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        tracker_mode="mpc",
+    )
+
+    assert state.tracker.__class__.__name__ == "MPCTracker"
 
 
 def test_repair_candidate_selector_breaks_ties_by_lower_deviation():

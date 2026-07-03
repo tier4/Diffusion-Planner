@@ -524,6 +524,7 @@ class _SegState:
     verified_credit_labels: set[str] = field(default_factory=set)
     verified_credit_first_step: dict[str, int] = field(default_factory=dict)
     danger_event_selector: OnlineEventSelector | None = None
+    replay_mode: str = "pose"
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
@@ -579,8 +580,10 @@ def _seed_state(
     unstick_teleport_after=300,
     neighbor_history_mode="recorded",
     goal_mode="segment",
+    replay_mode="pose",
+    tracker_mode="mpc",
 ) -> _SegState:
-    from scenario_generation.mpc_tracker import PerfectTracker
+    from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
     # Step cap: defaults to the segment length, but can exceed it so a slow ego
     # (e.g. one that waited out a long red light) can still drive to the segment end.
@@ -602,6 +605,14 @@ def _seed_state(
         goal_xy = _goal_xy_from_npz_goal(tl, start, end - 1)
     else:
         raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
+    ego_shape = np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    wheelbase = float(ego_shape[0])
+    if tracker_mode == "perfect":
+        tracker = PerfectTracker(dt=DT)
+    elif tracker_mode == "mpc":
+        tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
+    else:
+        raise ValueError(f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect' or 'mpc'")
     return _SegState(
         tl=tl,
         start=start,
@@ -611,7 +622,7 @@ def _seed_state(
         goal_reach_m=goal_reach_m,
         max_stuck_steps=max_stuck_steps,
         cursor=cursor,
-        tracker=PerfectTracker(dt=DT),
+        tracker=tracker,
         live_pose=live_pose,
         ego_hist=ego_hist,
         dyn=dyn,
@@ -624,7 +635,7 @@ def _seed_state(
             if neighbor_history_mode == "sim"
             else None
         ),
-        ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
+        ego_shape=ego_shape,
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
@@ -634,6 +645,7 @@ def _seed_state(
         unstick_advance_m=float(unstick_advance_m),
         unstick_radius_mult=float(unstick_radius_mult),
         unstick_teleport_after=int(unstick_teleport_after),
+        replay_mode=str(replay_mode),
         nbr_tracker=nbr_tracker,
     )
 
@@ -653,11 +665,17 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)) < s.goal_reach_m:
         s.terminated, s.done = "goal", True
         return None
-    idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
-    if s.cursor.max_idx_reached > s.prev_max_idx:
-        s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
+    if s.replay_mode == "clock":
+        idx = min(int(s.start + s.k), int(s.end - 1))
+        s.cursor.max_idx_reached = idx
+        s.prev_max_idx = idx
+        s.stuck = 0
     else:
-        s.stuck += 1
+        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
+        if s.cursor.max_idx_reached > s.prev_max_idx:
+            s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
+        else:
+            s.stuck += 1
     if s.max_stuck_steps > 0 and s.stuck >= s.max_stuck_steps:
         s.terminated, s.done = "stuck", True
         return None
@@ -860,6 +878,7 @@ def run_segment(
     unstick_radius_mult: float = 3.0,
     unstick_teleport_after: int = 300,
     neighbor_history_mode: str = "recorded",
+    tracker_mode: str = "mpc",
     timers: Timers | None = None,
 ) -> SegmentResult:
     """Single-segment closed-loop reproducer rollout over recorded frames [start, end).
@@ -885,6 +904,7 @@ def run_segment(
         unstick_radius_mult=unstick_radius_mult,
         unstick_teleport_after=unstick_teleport_after,
         neighbor_history_mode=neighbor_history_mode,
+        tracker_mode=tracker_mode,
     )
     while not s.done:
         with timers("input_build"):
@@ -1290,6 +1310,8 @@ def render_segment(
     unstick_teleport_after: int = 300,
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
+    timeline_progress_mode: str = "pose",
+    tracker_mode: str = "mpc",
     goal_mode: str = "segment",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
@@ -1323,6 +1345,9 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
+    ``tracker_mode="mpc"`` uses the bicycle-model MPC tracker for ego advance while
+    keeping the same reproduced perception inputs. This is the default reproducer
+    tracker mode.
     Returns the SegmentResult metrics.
     """
     from pathlib import Path
@@ -1347,6 +1372,8 @@ def render_segment(
         unstick_radius_mult=unstick_radius_mult,
         unstick_teleport_after=unstick_teleport_after,
         neighbor_history_mode=neighbor_history_mode,
+        tracker_mode=tracker_mode,
+        replay_mode=timeline_progress_mode,
         goal_mode=goal_mode,
     )
     # Build per-track interpolation anchors over the frames this render visits.
@@ -1515,11 +1542,14 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
+    tracker_mode: str = "mpc",
+    timeline_progress_mode: str = "pose",
     credit_save_dir=None,
     credit_windows: list[dict] | None = None,
     verify_credit_windows: list[dict] | None = None,
     danger_save_dir=None,
     danger_scorer=None,
+    realized_event_scorer=None,
     danger_credit_windows: dict[str, int] | None = None,
     danger_decluster_steps: int = 10,
 ) -> list[SegmentResult]:
@@ -1589,6 +1619,8 @@ def run_segments_batched(
                     unstick_radius_mult=unstick_radius_mult,
                     unstick_teleport_after=unstick_teleport_after,
                     neighbor_history_mode=neighbor_history_mode,
+                    tracker_mode=tracker_mode,
+                    replay_mode=timeline_progress_mode,
                 )
                 for (tl, start, end) in chunk
             ]
@@ -1633,8 +1665,6 @@ def run_segments_batched(
 
                 for s in states:
                     width = int((s.credit_window or {}).get("credit_width", save_pre_steps))
-                    if verify_credit_windows is not None and s.credit_window is not None:
-                        width = max(width, int(s.end - s.start - 1))
                     if danger_credit_windows:
                         width = max(width, max(int(v) for v in danger_credit_windows.values()))
                     maxlen = width + 1
@@ -1687,7 +1717,10 @@ def run_segments_batched(
                             # Only the segments actually running this tick (built); ones
                             # that terminated in _pre_step won't consume more frames.
                             for s, *_ in built:
-                                nxt = s.cursor.max_idx_reached + 1
+                                if s.replay_mode == "clock":
+                                    nxt = min(int(s.start + s.k + 1), int(s.end - 1))
+                                else:
+                                    nxt = s.cursor.max_idx_reached + 1
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
@@ -1711,10 +1744,23 @@ def run_segments_batched(
                         if danger_scorer is not None
                         else [None] * len(built)
                     )
-                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
-                        built, score_list
-                    ):
-                        danger_row = danger_rows.pop(0) if danger_rows else None
+                    realized_rows = [
+                        realized_event_scorer(np_dict, collided=bool(col))
+                        if realized_event_scorer is not None
+                        else None
+                        for (_s, np_dict, _nb, _idx, _suuid, _wbu), (
+                            _cl,
+                            col,
+                            _M,
+                            _collider_slot,
+                        ) in zip(built, score_list)
+                    ]
+                    for row_idx, (
+                        (s, _np, nb, idx, suuid, wbu),
+                        (cl, col, _M, collider_slot),
+                    ) in enumerate(zip(built, score_list)):
+                        danger_row = danger_rows[row_idx] if danger_rows else None
+                        realized_row = realized_rows[row_idx] if realized_rows else None
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
                         # One-pass save: buffer this step, then dump the window on the
@@ -1747,28 +1793,27 @@ def run_segments_batched(
                             )
                             s.credit_saved = True
                             s.done = True
-                        if (
-                            danger_save_dir is not None
-                            and danger_row is not None
-                            and s.save_buf is not None
-                        ):
+                        if danger_save_dir is not None and s.save_buf is not None:
                             if verify_credit_windows is not None and s.credit_window is not None:
-                                label = str(s.credit_window["label"])
-                                if label in set(danger_row.get("labels", [])):
-                                    s.verified_credit_labels.add(label)
-                                    s.verified_credit_first_step.setdefault(label, int(s.k))
-                            else:
-                                selector = s.danger_event_selector or OnlineEventSelector(
-                                    decluster_steps=danger_decluster_steps
-                                )
-                                s.danger_event_selector = selector
-                                for label in selector.update(s.k, danger_row.get("labels", [])):
+                                event_row = realized_row or {"labels": ["clean"], "label": "clean"}
+                                labels = list(event_row.get("labels", []))
+                                if labels and labels != ["clean"]:
+                                    realized_label = str(event_row.get("label") or labels[0])
                                     width = int(
-                                        (danger_credit_windows or {}).get(label, save_pre_steps)
+                                        (danger_credit_windows or {}).get(
+                                            realized_label,
+                                            (s.credit_window or {}).get(
+                                                "credit_width", save_pre_steps
+                                            ),
+                                        )
                                     )
-                                    _dump_credit_window(
+                                    manifest = _dump_credit_window(
                                         Path(danger_save_dir)
-                                        / f"{_route_key(s.tl)}_{s.start}_{idx}_danger_{label}",
+                                        / (
+                                            f"{s.credit_window['route_key']}_"
+                                            f"{s.credit_window['start_frame']}_"
+                                            f"{_frame_id(s.tl, idx)}_event_{realized_label}"
+                                        ),
                                         s.tl,
                                         model_args,
                                         s.k,
@@ -1777,8 +1822,72 @@ def run_segments_batched(
                                         width,
                                         s.start,
                                         s.end,
-                                        label,
+                                        realized_label,
+                                        extra_manifest={
+                                            "source_label": str(s.credit_window["label"]),
+                                            "source_anchor_frame": int(
+                                                s.credit_window["frame_index"]
+                                            ),
+                                            "source_anchor_index": int(
+                                                s.credit_window["source_index"]
+                                            ),
+                                            "source_event_start_frame": _frame_id(
+                                                s.tl,
+                                                int(s.credit_window["event_source_start_index"]),
+                                            ),
+                                            "source_event_end_frame": _frame_id(
+                                                s.tl,
+                                                int(s.credit_window["event_source_end_index"]),
+                                            ),
+                                            "source_event_member_count": int(
+                                                s.credit_window["event_member_count"]
+                                            ),
+                                            "source_offense_frame": int(
+                                                s.credit_window["offense_frame"]
+                                            ),
+                                            "realized_label": realized_label,
+                                            "realized_step": int(s.k),
+                                            "realized_frame": _frame_id(s.tl, idx),
+                                            "anchor_horizon_steps": int(
+                                                s.credit_window.get("anchor_horizon_steps", 0)
+                                            ),
+                                            "max_rollout_steps": int(
+                                                s.credit_window.get(
+                                                    "max_rollout_steps",
+                                                    max(1, s.end - s.start),
+                                                )
+                                            ),
+                                        },
                                     )
+                                    if manifest is not None:
+                                        s.credit_saved = True
+                                        s.done = True
+                            else:
+                                if danger_row is not None:
+                                    selector = s.danger_event_selector or OnlineEventSelector(
+                                        decluster_steps=danger_decluster_steps
+                                    )
+                                    s.danger_event_selector = selector
+                                    for label in selector.update(s.k, danger_row.get("labels", [])):
+                                        width = int(
+                                            (danger_credit_windows or {}).get(
+                                                label,
+                                                save_pre_steps,
+                                            )
+                                        )
+                                        _dump_credit_window(
+                                            Path(danger_save_dir)
+                                            / f"{_route_key(s.tl)}_{s.start}_{idx}_danger_{label}",
+                                            s.tl,
+                                            model_args,
+                                            s.k,
+                                            list(s.save_buf),
+                                            s.last_snap_step,
+                                            width,
+                                            s.start,
+                                            s.end,
+                                            label,
+                                        )
                         if save_dir is not None and s.save_buf is not None:
                             # Per-EPISODE saving. A contact EPISODE runs while clearance <= thresh
                             # and ends when it clears (> thresh) — so a NEW distinct collision needs
@@ -1866,32 +1975,6 @@ def run_segments_batched(
                             s.save_buf.clear()
                             s.last_snap_step = s.k
                 active = [s for s in active if not s.done]
-            if verify_credit_windows is not None and danger_save_dir is not None:
-                from pathlib import Path
-
-                for s in states:
-                    if s.credit_window is None or s.credit_saved or s.save_buf is None:
-                        continue
-                    label = str(s.credit_window["label"])
-                    if label not in s.verified_credit_labels:
-                        continue
-                    _dump_full_credit_segment(
-                        Path(danger_save_dir)
-                        / (
-                            f"{s.credit_window['route_key']}_"
-                            f"{s.credit_window['start_frame']}_"
-                            f"{s.credit_window['offense_frame']}_danger_{label}"
-                        ),
-                        s.tl,
-                        model_args,
-                        list(s.save_buf),
-                        s.last_snap_step,
-                        s.start,
-                        s.end,
-                        label,
-                        verified_step=s.verified_credit_first_step.get(label),
-                    )
-                    s.credit_saved = True
             results.extend(_finalize(s, timers) for s in states)
     finally:
         pool.shutdown(wait=True)
@@ -1909,6 +1992,7 @@ def _dump_credit_window(
     seg_start: int,
     seg_end: int,
     label: str,
+    extra_manifest: dict | None = None,
 ) -> dict | None:
     """Write an inclusive R2LPL credit window ending at the offense step.
 
@@ -1947,6 +2031,8 @@ def _dump_credit_window(
     manifest["credit_width"] = int(credit_width)
     manifest["offense_step"] = int(offense_step)
     manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    if extra_manifest:
+        manifest.update(extra_manifest)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 
@@ -2299,11 +2385,14 @@ def _dump_precollision_window(
         ).astype(np.float32)
         g = scene["goal_pose"]
         scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
-        # neighbor_agents_future: read out of the SIMULATION's own shown future (the realized
+        # neighbor_agents_future: use the SIMULATION's own shown future first (the realized
         # neighbor world poses at the subsequent rollout steps), UUID-matched and slot-aligned
         # with neighbor_agents_past, expressed in this frame's live-ego frame. This keeps the
         # target consistent with the (sim) past — a held-static neighbor stays static instead
-        # of teleporting to its recorded log. Recorded mode (no tracker) keeps the recorded GT.
+        # of teleporting to its recorded log. When the remaining closed-loop horizon is shorter
+        # than the model's full future horizon, fill ONLY the unsimulated tail from the recorded
+        # future, UUID-matched into the live slot order. Recorded mode (no tracker) keeps the
+        # recorded GT for the full horizon.
         if slot_uuids is not None:
             naf_sim = np.zeros((320, fut_len, 4), dtype=np.float32)
             ex0, ey0, eh0 = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
@@ -2348,6 +2437,30 @@ def _dump_precollision_window(
                         traj[j] = last
                 if present[0] > 0:  # leading gap before the first shown pose
                     traj[: present[0]] = traj[present[0]]
+            recorded_ids = tl.neighbor_ids(idx)
+            if recorded_ids:
+                with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+                    naf_rec = (
+                        z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
+                    )
+                if naf_rec is not None:
+                    dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+                    naf_rec_live = _recenter_neighbor_future(naf_rec, dx, dy, dyaw)
+                    rec_slot_by_uuid = {
+                        str(u): slot for slot, u in enumerate(recorded_ids[: naf_rec_live.shape[0]])
+                    }
+                    for slot, u in uuid_slots:
+                        rec_slot = rec_slot_by_uuid.get(str(u))
+                        if rec_slot is None:
+                            continue
+                        traj = naf_sim[slot]
+                        rec_traj = naf_rec_live[rec_slot, :fut_len, :4]
+                        if rec_traj.shape[0] < fut_len:
+                            padded = np.zeros((fut_len, 4), dtype=np.float32)
+                            padded[: rec_traj.shape[0]] = rec_traj
+                            rec_traj = padded
+                        missing = np.abs(traj).sum(axis=1) == 0
+                        traj[missing] = rec_traj[missing]
             scene["neighbor_agents_future"] = naf_sim
         else:
             with np.load(tl.npz_paths[idx], allow_pickle=True) as z:

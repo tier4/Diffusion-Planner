@@ -57,12 +57,12 @@ def parse_args() -> argparse.Namespace:
         "--max_steps",
         type=int,
         default=0,
-        help="Maximum simulated/rendered frames; 0 = default 3x route-frame count",
+        help="Maximum simulated/rendered frames; 0 = segment length for goal_mode=segment",
     )
     p.add_argument(
         "--goal_reach_m",
         type=float,
-        default=5.0,
+        default=0.0,
         help="Stop early when within this distance of the rendered route goal",
     )
     p.add_argument("--near_miss_thresh", type=float, default=0.5)
@@ -85,6 +85,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--make_webm", action="store_true")
     p.add_argument("--webm_fps", type=int, default=10)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--tracker_mode",
+        default="mpc",
+        choices=["perfect", "mpc"],
+        help="ego tracker used inside the closed-loop reproducer render",
+    )
+    p.add_argument(
+        "--timeline_progress_mode",
+        default="pose",
+        choices=["pose", "clock"],
+        help="how recorded frames advance during reproduction",
+    )
+    p.add_argument(
+        "--goal_mode",
+        default="segment",
+        choices=["segment", "route"],
+        help="termination target for the render",
+    )
     return p.parse_args()
 
 
@@ -110,7 +128,13 @@ def main() -> None:
     end = min(end, len(paths))
     if end <= start:
         raise SystemExit(f"Invalid segment start/end: {start}/{end} for {len(paths)} frames")
-    max_steps = args.max_steps if args.max_steps > 0 else None
+    segment_steps = end - start
+    if args.max_steps > 0:
+        max_steps = args.max_steps
+    elif args.goal_mode == "segment":
+        max_steps = segment_steps
+    else:
+        max_steps = None
 
     tag = render_tag(args.model_path, args.lora_path)
     out_dir = args.output_dir / f"{route_key}_{start:05d}_{end:05d}__{tag}"
@@ -124,6 +148,9 @@ def main() -> None:
         end=end,
         max_steps=max_steps if max_steps is not None else 0,
         goal_reach_m=args.goal_reach_m,
+        goal_mode=args.goal_mode,
+        tracker_mode=args.tracker_mode,
+        timeline_progress_mode=args.timeline_progress_mode,
         model_path=str(args.model_path),
         model_label=f"{args.model_path.parent.name}/{args.model_path.name}",
         lora_path=str(args.lora_path) if args.lora_path else "",
@@ -146,7 +173,10 @@ def main() -> None:
         goal_reach_m=args.goal_reach_m,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
-        goal_mode="route",
+        neighbor_history_mode="sim",
+        tracker_mode=args.tracker_mode,
+        timeline_progress_mode=args.timeline_progress_mode,
+        goal_mode=args.goal_mode,
         title_prefix=title_prefix,
         distance_label_offset_m=args.distance_label_offset_m,
         view_half_m=args.view_half_m,

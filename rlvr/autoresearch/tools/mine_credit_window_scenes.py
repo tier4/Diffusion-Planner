@@ -11,6 +11,7 @@ from typing import Any
 
 from preference_optimization.model_utils import load_model
 from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    build_realized_event_scorer,
     build_reproducer_danger_scorer,
     load_credit_windows,
 )
@@ -44,6 +45,16 @@ def _load_json(path: Path) -> Any:
         return json.load(f)
 
 
+def _load_scene_list(path: Path) -> list[Path]:
+    raw = _load_json(path)
+    if not isinstance(raw, list):
+        raise ValueError(f"{path} must contain a JSON list of NPZ paths")
+    paths = [Path(str(p)) for p in raw]
+    if not paths:
+        raise ValueError(f"{path} is empty")
+    return paths
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     with open(path) as f:
@@ -69,13 +80,24 @@ def _route_files(npz_root: Path) -> dict[str, list[Path]]:
     return group_routes(paths)
 
 
+def _route_files_from_scene_list(scene_list: Path) -> dict[str, list[Path]]:
+    return group_routes(_load_scene_list(scene_list))
+
+
 def _select_event_windows(
     windows: list[dict[str, Any]],
     routes: dict[str, list[Path]],
     source_gap_steps: int = 1,
+    *,
+    anchor_horizon_steps: int = 40,
+    max_rollout_steps: int = 80,
 ) -> list[dict[str, Any]]:
     if source_gap_steps < 1:
         raise ValueError(f"source_gap_steps must be >= 1, got {source_gap_steps}")
+    if anchor_horizon_steps < 1:
+        raise ValueError(f"anchor_horizon_steps must be >= 1, got {anchor_horizon_steps}")
+    if max_rollout_steps < 1:
+        raise ValueError(f"max_rollout_steps must be >= 1, got {max_rollout_steps}")
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for w in windows:
         grouped.setdefault((str(w["route_key"]), str(w["label"])), []).append(w)
@@ -89,13 +111,13 @@ def _select_event_windows(
             anchor = min(
                 rows,
                 key=lambda w: (
-                    abs(int(w["violation_step"]) - int(w["credit_width"])),
+                    abs(int(w["violation_step"]) - int(anchor_horizon_steps)),
                     int(w["violation_step"]),
                     int(w["source_index"]),
                 ),
             )
             end_index = min(
-                int(anchor["source_index"]) + int(anchor["credit_width"]) - 1,
+                int(anchor["source_index"]) + int(max_rollout_steps) - 1,
                 len(routes[route_key]) - 1,
             )
             event = dict(anchor)
@@ -106,6 +128,8 @@ def _select_event_windows(
             event["start_frame"] = int(anchor["frame_index"])
             event["end_index"] = int(end_index)
             event["end_frame"] = int(frame_by_idx[end_index])
+            event["anchor_horizon_steps"] = int(anchor_horizon_steps)
+            event["max_rollout_steps"] = int(max_rollout_steps)
             out.append(event)
     return sorted(out, key=lambda w: (str(w["route_key"]), int(w["source_index"]), str(w["label"])))
 
@@ -171,15 +195,52 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--classified_scenes_jsonl", type=Path, required=True)
     parser.add_argument("--credit_window_config", type=Path, required=True)
-    parser.add_argument("--route_npz_root", type=Path, required=True)
+    parser.add_argument("--route_npz_root", type=Path, default=None)
+    parser.add_argument(
+        "--route_scene_list",
+        type=Path,
+        default=None,
+        help="JSON list of route-lineage NPZs to use when a route root is not provided",
+    )
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--out_dir", type=Path, required=True)
     parser.add_argument("--out_jsonl", type=Path, required=True)
+    parser.add_argument("--out_events_json", type=Path, default=None)
     parser.add_argument("--sidecar_dir", type=Path, default=None)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--anchor_horizon_steps",
+        type=int,
+        default=40,
+        help="pick the open-loop source scene whose violation ETA is closest to this many steps",
+    )
+    parser.add_argument(
+        "--max_rollout_steps",
+        type=int,
+        default=80,
+        help="simulate closed loop for at most this many route steps from the chosen anchor",
+    )
+    parser.add_argument(
+        "--rollout_length",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--neighbor_history_mode", default="sim", choices=["recorded", "interpolate", "sim"]
+    )
+    parser.add_argument(
+        "--timeline_progress_mode",
+        default="clock",
+        choices=["pose", "clock"],
+        help="how reproduced frames advance during rollout; R2LPL defaults to fixed clock time",
+    )
+    parser.add_argument(
+        "--tracker_mode",
+        default="mpc",
+        choices=["perfect", "mpc"],
+        help="ego tracker used during closed-loop reproduction",
     )
     parser.add_argument(
         "--goal_reach_m",
@@ -209,6 +270,14 @@ def main() -> None:
     )
     parser.add_argument("--enable_conflict_detector", action="store_true")
     args = parser.parse_args()
+    if (args.route_npz_root is None) == (args.route_scene_list is None):
+        raise ValueError("exactly one of --route_npz_root or --route_scene_list is required")
+    if args.rollout_length is not None:
+        args.max_rollout_steps = int(args.rollout_length)
+    if args.anchor_horizon_steps < 1:
+        raise ValueError("--anchor_horizon_steps must be >= 1")
+    if args.max_rollout_steps < 1:
+        raise ValueError("--max_rollout_steps must be >= 1")
 
     rows = _load_jsonl(args.classified_scenes_jsonl)
     allowed_labels = {label.strip() for label in args.labels.split(",") if label.strip()} or None
@@ -219,15 +288,26 @@ def main() -> None:
         if allowed_labels is None or label in allowed_labels
     }
     credit = _validate_credit_config(args.credit_window_config, observed)
-    routes = _route_files(args.route_npz_root)
+    routes = (
+        _route_files(args.route_npz_root)
+        if args.route_npz_root is not None
+        else _route_files_from_scene_list(args.route_scene_list)
+    )
     windows: list[dict[str, Any]] = []
     for row in rows:
         windows.extend(_resolve_row(row, routes, credit, allowed_labels))
     windows = _select_event_windows(
-        windows, routes, source_gap_steps=args.classified_decluster_steps
+        windows,
+        routes,
+        source_gap_steps=args.classified_decluster_steps,
+        anchor_horizon_steps=args.anchor_horizon_steps,
+        max_rollout_steps=args.max_rollout_steps,
     )
     if not windows:
         raise ValueError("No non-clean credit windows resolved from classified scenes")
+    if args.out_events_json is not None:
+        args.out_events_json.parent.mkdir(parents=True, exist_ok=True)
+        args.out_events_json.write_text(json.dumps(windows, indent=2))
 
     timelines = {key: RouteTimeline(paths, args.sidecar_dir) for key, paths in routes.items()}
     work_units = [
@@ -236,20 +316,31 @@ def main() -> None:
     model, model_args = load_model(args.model_path, args.device)
     model.eval()
     danger_scorer = None
+    realized_event_scorer = None
     danger_credit_windows = None
     if args.verify_reproduced_issue:
         if args.reward_config is None or args.threshold_config is None:
             raise ValueError(
                 "--verify_reproduced_issue requires --reward_config and --threshold_config"
             )
-        danger_scorer = build_reproducer_danger_scorer(
+        realized_event_scorer = build_realized_event_scorer(
             reward_config=args.reward_config,
             threshold_config=args.threshold_config,
             device=args.device,
-            enable_conflict_detector=bool(args.enable_conflict_detector),
-            allowed_labels=allowed_labels,
         )
         danger_credit_windows = load_credit_windows(args.credit_window_config)
+    else:
+        danger_scorer = (
+            build_reproducer_danger_scorer(
+                reward_config=args.reward_config,
+                threshold_config=args.threshold_config,
+                device=args.device,
+                enable_conflict_detector=bool(args.enable_conflict_detector),
+                allowed_labels=allowed_labels,
+            )
+            if args.reward_config is not None and args.threshold_config is not None
+            else None
+        )
     run_segments_batched(
         model,
         model_args,
@@ -260,11 +351,14 @@ def main() -> None:
         route_keys=[w["route_key"] for w in windows],
         gpu_transform=args.gpu_transform,
         neighbor_history_mode=args.neighbor_history_mode,
+        tracker_mode=args.tracker_mode,
+        timeline_progress_mode=args.timeline_progress_mode,
         credit_save_dir=None if args.verify_reproduced_issue else args.out_dir,
         credit_windows=None if args.verify_reproduced_issue else windows,
         verify_credit_windows=windows if args.verify_reproduced_issue else None,
         danger_save_dir=args.out_dir if args.verify_reproduced_issue else None,
         danger_scorer=danger_scorer,
+        realized_event_scorer=realized_event_scorer,
         danger_credit_windows=danger_credit_windows,
         danger_decluster_steps=args.danger_decluster_steps,
     )
@@ -272,16 +366,34 @@ def main() -> None:
     with open(args.out_jsonl, "w") as f:
         n_rows = 0
         if args.verify_reproduced_issue:
-            for saved_dir in sorted(args.out_dir.glob("*_danger_*")):
-                label = saved_dir.name.rsplit("_danger_", 1)[-1]
-                for scene_path in sorted(saved_dir.glob("credit*.npz")):
+            for saved_dir in sorted(args.out_dir.glob("*_event_*")):
+                manifest = _load_json(saved_dir / "manifest.json")
+                saved_frames = [int(v) for v in manifest.get("scene_frame_ids_saved", [])]
+                realized_label = str(
+                    manifest.get("realized_label") or manifest.get("credit_label") or "unknown"
+                )
+                for scene_idx, scene_path in enumerate(sorted(saved_dir.glob("credit*.npz"))):
                     row = {
                         "scene_path": str(scene_path),
                         "window_dir": str(saved_dir),
+                        "event_key": str(saved_dir),
                         "credit_scene_stem": scene_path.stem,
-                        "label": label,
-                        "labels": [label],
-                        "variant_kind": "reproduced_credit",
+                        "label": realized_label,
+                        "labels": [realized_label],
+                        "source_label": manifest.get("source_label"),
+                        "source_anchor_frame": manifest.get("source_anchor_frame"),
+                        "source_anchor_index": manifest.get("source_anchor_index"),
+                        "source_event_start_frame": manifest.get("source_event_start_frame"),
+                        "source_event_end_frame": manifest.get("source_event_end_frame"),
+                        "source_event_member_count": manifest.get("source_event_member_count"),
+                        "source_offense_frame": manifest.get("source_offense_frame"),
+                        "realized_label": manifest.get("realized_label", realized_label),
+                        "realized_step": manifest.get("realized_step"),
+                        "realized_frame": manifest.get("realized_frame"),
+                        "scene_frame_id": saved_frames[scene_idx]
+                        if scene_idx < len(saved_frames)
+                        else None,
+                        "variant_kind": "reproduced_event_window",
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
                     n_rows += 1
@@ -297,7 +409,9 @@ def main() -> None:
                     row = dict(w)
                     row["scene_path"] = str(scene_path)
                     row["window_dir"] = str(saved_dir)
+                    row["event_key"] = str(saved_dir)
                     row["credit_scene_stem"] = scene_path.stem
+                    row["variant_kind"] = "event_window"
                     f.write(json.dumps(row, sort_keys=True) + "\n")
                     n_rows += 1
         if n_rows == 0:
