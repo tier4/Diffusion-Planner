@@ -329,6 +329,7 @@ def _credit_row_from_saved_scene(scene_path: Path, manifest: dict, label: str) -
         "offense_frame_id": manifest.get("offense_frame_id"),
         "segment": manifest.get("segment"),
         "segment_route_indices": manifest.get("segment_route_indices"),
+        "segment_frame_ids": manifest.get("segment_frame_ids"),
     }
 
 

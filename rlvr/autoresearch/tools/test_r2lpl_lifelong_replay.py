@@ -387,6 +387,31 @@ def test_perception_mining_cmd_supports_direct_chunk_manifest(tmp_path):
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 
+def test_direct_reproducer_credit_row_propagates_frame_segment(tmp_path):
+    from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
+        _credit_row_from_saved_scene,
+    )
+
+    scene_path = tmp_path / "window" / "credit+00000.npz"
+    scene_path.parent.mkdir()
+    scene_path.write_bytes(b"npz")
+    row = _credit_row_from_saved_scene(
+        scene_path,
+        {
+            "offense_step": 12,
+            "offense_frame_id": 112,
+            "segment": [10, 90],
+            "segment_route_indices": [10, 90],
+            "segment_frame_ids": [110, 190],
+        },
+        "moving_collision",
+    )
+
+    assert row["segment"] == [10, 90]
+    assert row["segment_route_indices"] == [10, 90]
+    assert row["segment_frame_ids"] == [110, 190]
+
+
 def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, tmp_path):
     scene_list = tmp_path / "scenes.json"
     scene_list.write_text(json.dumps(["/data/scene_0.npz"]))

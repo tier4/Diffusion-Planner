@@ -2522,8 +2522,9 @@ def _dump_precollision_window(
 
     seg_end_inclusive = min(int(seg_end) - 1, len(tl) - 1)
     manifest = {
-        "segment": [_frame_id(tl, seg_start), _frame_id(tl, seg_end_inclusive)],
+        "segment": [int(seg_start), int(seg_end)],
         "segment_route_indices": [int(seg_start), int(seg_end)],
+        "segment_frame_ids": [_frame_id(tl, seg_start), _frame_id(tl, seg_end_inclusive)],
         "collision_step": int(t_c),
         "collision_thresh": float(collision_thresh),
         "n_scenes": len(saved),
