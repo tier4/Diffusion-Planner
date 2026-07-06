@@ -724,6 +724,8 @@ def _perception_mining_cmd(
         "danger_decluster_steps",
     )
     for key in optional_keys:
+        if chunk_manifest is not None and key == "max_scenes":
+            continue
         if key in mining and mining[key] is not None:
             cmd.extend([f"--{key}", str(mining[key])])
     if mining.get("sidecar_root"):
@@ -739,6 +741,47 @@ def _perception_mining_cmd(
     if bool(mining.get("allow_existing_out_dir", False)):
         cmd.append("--allow_existing_out_dir")
     return cmd, danger_save_dir
+
+
+def _materialize_chunk_manifest_for_shards(
+    cfg: dict[str, Any],
+    rdir: Path,
+) -> dict[str, Any]:
+    mining = dict(cfg.get("perception_mining") or {})
+    if mining.get("chunk_manifest") is not None:
+        return cfg
+    scene_list = _first_non_null(
+        mining.get("scene_list"),
+        cfg.get("route_scene_list"),
+        cfg.get("scene_pool"),
+    )
+    if scene_list is None:
+        return cfg
+
+    manifest = rdir / "planned_chunks.jsonl"
+    cmd = [
+        sys.executable,
+        "-m",
+        "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
+        "--scene_list",
+        str(scene_list),
+        "--segments_jsonl",
+        str(manifest),
+        "--plan_only",
+        "--chunk_len",
+        str(mining.get("chunk_len", 80)),
+        "--start_stride",
+        str(mining.get("start_stride", mining.get("chunk_len", 80))),
+    ]
+    for key in ("expected_frame_step", "min_chunk_len", "max_scenes"):
+        if key in mining and mining[key] is not None:
+            cmd.extend([f"--{key}", str(mining[key])])
+    _run(cmd, rdir / "plan_chunks.log")
+
+    updated = dict(cfg)
+    mining["chunk_manifest"] = str(manifest)
+    updated["perception_mining"] = mining
+    return updated
 
 
 def _args_json_for_model(model_path: Path) -> Path:
@@ -1121,6 +1164,7 @@ def _run_mining_phase(
         _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
         return elapsed
 
+    cfg = _materialize_chunk_manifest_for_shards(cfg, rdir)
     shard_root = rdir / "perception_mine_shards"
     jobs = []
     credit_parts = []

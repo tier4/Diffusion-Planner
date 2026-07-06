@@ -374,6 +374,7 @@ def test_perception_mining_cmd_supports_direct_chunk_manifest(tmp_path):
             "tool": "direct_reproducer_chunks",
             "chunk_manifest": str(manifest),
             "batch_size": 32,
+            "max_scenes": 1000,
         },
     }
 
@@ -382,6 +383,7 @@ def test_perception_mining_cmd_supports_direct_chunk_manifest(tmp_path):
     assert "--chunk_manifest" in cmd
     assert str(manifest) in cmd
     assert "--scene_list" not in cmd
+    assert "--max_scenes" not in cmd
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 
@@ -401,6 +403,7 @@ def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, t
     }
     rdir = tmp_path / "round"
     seen_jobs = []
+    seen_plan_cmds = []
 
     def _arg(cmd, flag):
         return Path(cmd[cmd.index(flag) + 1])
@@ -422,6 +425,9 @@ def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, t
             assert env["CUDA_VISIBLE_DEVICES"] == str(expected_idx)
             assert cmd[cmd.index("--num_shards") + 1] == "2"
             assert cmd[cmd.index("--shard_index") + 1] == str(expected_idx)
+            assert "--chunk_manifest" in cmd
+            assert cmd[cmd.index("--chunk_manifest") + 1] == str(rdir / "planned_chunks.jsonl")
+            assert "--scene_list" not in cmd
             _arg(cmd, "--out_jsonl").parent.mkdir(parents=True, exist_ok=True)
             _arg(cmd, "--out_jsonl").write_text(
                 json.dumps(
@@ -446,11 +452,43 @@ def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, t
             )
         return 12.0
 
+    def _fake_run(cmd, log_path, *, cwd=None, env=None):
+        assert cwd is None
+        assert env is None
+        seen_plan_cmds.append(cmd)
+        assert "--plan_only" in cmd
+        assert "--scene_list" in cmd
+        assert cmd[cmd.index("--scene_list") + 1] == str(scene_list)
+        assert "--segments_jsonl" in cmd
+        Path(cmd[cmd.index("--segments_jsonl") + 1]).parent.mkdir(parents=True, exist_ok=True)
+        Path(cmd[cmd.index("--segments_jsonl") + 1]).write_text(
+            json.dumps(
+                {
+                    "chunk_key": "chunk0",
+                    "global_start_index": 0,
+                    "global_end_index": 80,
+                    "n_frames": 80,
+                    "start_frame": 0,
+                    "end_frame": 79,
+                    "end_reason": "chunk_len",
+                    "is_full_length": True,
+                    "start_scene_path": "/data/scene_0.npz",
+                    "end_scene_path": "/data/scene_79.npz",
+                }
+            )
+            + "\n"
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("planned\n")
+        return 1.0
+
+    monkeypatch.setattr(round_runner, "_run", _fake_run)
     monkeypatch.setattr(round_runner, "_run_parallel", _fake_run_parallel)
 
     elapsed = _run_mining_phase(cfg, tmp_path / "model.pth", rdir, [0, 1])
 
     assert elapsed == 12.0
+    assert len(seen_plan_cmds) == 1
     assert len(seen_jobs) == 2
     assert [row["scene_path"] for row in _read_test_jsonl(rdir / "credit_windows.jsonl")] == [
         "/data/repaired_source_0.npz",
