@@ -40,6 +40,12 @@ static ConverterOptions make_default_opts()
   o.offlane_time_stride = 1;
   o.red_light_run_radius_m = 5.0f;
   o.red_light_run_heading_tol_deg = 30.0f;
+  o.green_stop_heading_tol_deg = 45.0f;
+  o.green_stop_stay_radius_m = 2.0f;
+  o.green_stop_speed_max_mps = 1.0f;
+  o.green_stop_ahead_m = 40.0f;
+  o.green_stop_lead_fwd_m = 30.0f;
+  o.green_stop_lead_lat_m = 2.0f;
   o.write_skipped_npz = false;
   o.sidecar_only = false;
   o.pack_sequence = false;
@@ -63,6 +69,12 @@ TEST(DefaultConverterOptionsTest, UsesSharedDefaults)
   EXPECT_TRUE(opts.use_interpolation);
   EXPECT_FLOAT_EQ(opts.red_light_run_radius_m, 5.0f);
   EXPECT_FLOAT_EQ(opts.red_light_run_heading_tol_deg, 30.0f);
+  EXPECT_FLOAT_EQ(opts.green_stop_heading_tol_deg, 45.0f);
+  EXPECT_FLOAT_EQ(opts.green_stop_stay_radius_m, 2.0f);
+  EXPECT_FLOAT_EQ(opts.green_stop_speed_max_mps, 1.0f);
+  EXPECT_FLOAT_EQ(opts.green_stop_ahead_m, 40.0f);
+  EXPECT_FLOAT_EQ(opts.green_stop_lead_fwd_m, 30.0f);
+  EXPECT_FLOAT_EQ(opts.green_stop_lead_lat_m, 2.0f);
   EXPECT_FALSE(opts.write_skipped_npz);
   EXPECT_FALSE(opts.sidecar_only);   // full conversion (writes npz) by default
   EXPECT_FALSE(opts.pack_sequence);  // one file per frame by default
@@ -144,5 +156,47 @@ TEST(ValidateOptionsTest, NegativeRedLightRunHeadingToleranceReturnsError)
 {
   ConverterOptions opts = make_default_opts();
   opts.red_light_run_heading_tol_deg = -1.0f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeGreenStopHeadingToleranceReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.green_stop_heading_tol_deg = -1.0f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeGreenStopStayRadiusReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.green_stop_stay_radius_m = -0.1f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeGreenStopSpeedMaxReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.green_stop_speed_max_mps = -0.1f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeGreenStopAheadReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.green_stop_ahead_m = -0.1f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeGreenStopLeadForwardReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.green_stop_lead_fwd_m = -0.1f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeGreenStopLeadLateralReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.green_stop_lead_lat_m = -0.1f;
   EXPECT_TRUE(validate_options(opts).has_value());
 }

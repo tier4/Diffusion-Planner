@@ -94,6 +94,7 @@ enum class SkippingLabel {
                                // (linear.x >= 0.1). Complements RedOrYellowLight, which only
                                // covers the fully-stopped case; counted separately so the
                                // extra coverage of this trigger is measurable.
+  GreenStop,                   // Stopped at a heading-aligned green light with no lead neighbor.
 };
 
 // Structure to hold detailed skipping information
@@ -171,6 +172,11 @@ struct SkippingInfo
       "Accelerating into red/yellow light while moving (linear.x >= 0.1)",
       {},
       {}};
+  }
+
+  static SkippingInfo green_stop()
+  {
+    return {SkippingLabel::GreenStop, "Stopped at green light with no lead neighbor", {}, {}};
   }
 
   // reasons: any of "static_object", "neighbor", "road_border"

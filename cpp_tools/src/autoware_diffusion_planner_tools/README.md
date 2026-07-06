@@ -125,6 +125,12 @@ Both converter commands accept these options:
 | `--offlane_time_stride N` | Time stride for the off-lane filter | `1` |
 | `--red_light_run_radius_m M` | Maximum distance from a stop-line crossing to a heading-aligned red route-lane entry | `5.0` |
 | `--red_light_run_heading_tol_deg D` | Maximum heading difference used to match the ego's own red route lane | `30.0` |
+| `--green_stop_heading_tol_deg D` | Maximum heading difference used to match ego's green route lane | `45.0` |
+| `--green_stop_stay_radius_m M` | Maximum future spatial extent for stopped-on-green detection | `2.0` |
+| `--green_stop_speed_max_mps MPS` | Maximum current speed for stopped-on-green detection | `1.0` |
+| `--green_stop_ahead_m M` | Maximum forward distance to a heading-aligned green route-lane entry | `40.0` |
+| `--green_stop_lead_fwd_m M` | Forward extent of the lead-neighbor exclusion corridor | `30.0` |
+| `--green_stop_lead_lat_m M` | Half-width of the lead-neighbor exclusion corridor | `2.0` |
 | `--write_skipped_npz 0/1` | Also write `.npz` files for skipped frames | `0` |
 
 ## Per-frame JSON sidecar (data converter)
@@ -134,7 +140,7 @@ absolute map ego pose plus two fields used by downstream tooling:
 
 | field | meaning |
 | --- | --- |
-| `is_skipped` (bool) | `true` if the production filter would have dropped this frame (stopped at a red/yellow light, no future progress, GT collision, off-lane, stale data). See also `skipping_info.label`. |
+| `is_skipped` (bool) | `true` if the production filter would have dropped this frame (stale data, invalid covariance, red/yellow-light run, stopped at red/yellow, greenstop, no future progress, GT collision, or off-lane). See also `skipping_info.label`. |
 | `neighbor_ids` (list[str]) | perception track UUIDs of the kept neighbors, aligned 1:1 with the `neighbor_past` slots (sorted by ego distance, trimmed). Lets a consumer associate the same agent across frames. |
 
 By default the converter **drops** flagged frames (writes only accepted ones). Pass

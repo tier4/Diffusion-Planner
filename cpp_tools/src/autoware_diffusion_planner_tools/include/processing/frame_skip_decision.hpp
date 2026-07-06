@@ -51,16 +51,23 @@ struct FrameFilterParams
   int64_t offlane_time_stride;
   float red_light_run_radius_m;
   float red_light_run_heading_tol_deg;
+  float green_stop_heading_tol_deg;
+  float green_stop_stay_radius_m;
+  float green_stop_speed_max_mps;
+  float green_stop_ahead_m;
+  float green_stop_lead_fwd_m;
+  float green_stop_lead_lat_m;
 };
 
 // Pure skip-reason computation — no I/O, no ROS time, no file system.
 // Returns the first matching SkippingInfo in priority order, or accepted().
 SkippingInfo decide_frame_skip(
   const FrameSkipInputs & inputs, const std::vector<float> & ego_future,
-  const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
-  const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
-  const std::vector<float> & line_strings, const std::vector<float> & lanes,
-  const std::vector<float> & route_lanes, const FrameFilterParams & filter_params);
+  const std::vector<float> & ego_current, const std::vector<float> & ego_shape,
+  const std::vector<float> & static_objects, const std::vector<float> & neighbor_future,
+  const std::vector<float> & neighbor_past, const std::vector<float> & line_strings,
+  const std::vector<float> & lanes, const std::vector<float> & route_lanes,
+  const FrameFilterParams & filter_params);
 
 }  // namespace frame_processor
 
