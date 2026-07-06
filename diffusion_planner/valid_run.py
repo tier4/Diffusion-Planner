@@ -7,15 +7,11 @@ the prediction PNGs + per-clip MP4s on rank 0 when --save_predictions_dir is set
 """
 
 import argparse
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
-
-def gpu_count() -> int:
-    out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout
-    return len([ln for ln in out.splitlines() if ln.strip()])
+from run_utils import gpu_count, tee_run
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +51,8 @@ def main() -> None:
         "--save_predictions_dir",
         str(save_dir),
     ]
-    sys.exit(subprocess.run(cmd, cwd=here).returncode)
+    rc = tee_run(cmd, cwd=here, log_path=save_dir.parent / "valid_log.txt")
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
