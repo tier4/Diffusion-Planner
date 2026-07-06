@@ -1827,6 +1827,28 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
     assert cmd[cmd.index("--batch_size") + 1] == "2"
 
 
+def test_torchrun_subprocess_cleanup_removes_stale_file_store(tmp_path, monkeypatch):
+    stale_store = tmp_path / "tmp_dist_init"
+    stale_store.write_text("stale")
+    monkeypatch.setattr(round_runner, "_TORCH_DDP_FILE_STORE", stale_store)
+
+    round_runner._cleanup_torch_dist_file_store(
+        [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node", "1"]
+    )
+
+    assert not stale_store.exists()
+
+
+def test_non_torchrun_subprocess_cleanup_leaves_file_store(tmp_path, monkeypatch):
+    stale_store = tmp_path / "tmp_dist_init"
+    stale_store.write_text("stale")
+    monkeypatch.setattr(round_runner, "_TORCH_DDP_FILE_STORE", stale_store)
+
+    round_runner._cleanup_torch_dist_file_store([sys.executable, "-m", "json.tool"])
+
+    assert stale_store.read_text() == "stale"
+
+
 def test_sft_replay_weights_apply_per_scene_in_mixed_batch():
     device, model_args, data, neighbor_gt, neighbor_mask = _minimal_sft_batch()
     ego_gt = torch.zeros(2, 3, 4, device=device)

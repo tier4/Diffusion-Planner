@@ -45,6 +45,7 @@ _RSFT_TRAINING_KEYS = {
     "replay_der_coef",
 }
 _MINING_TOOL = "direct_reproducer_chunks"
+_TORCH_DDP_FILE_STORE = Path("/tmp/tmp_dist_init")
 
 
 def _load_any_json(path: Path) -> Any:
@@ -426,10 +427,29 @@ def _config_from_cli_args(args: argparse.Namespace) -> dict[str, Any]:
     return _config_from_workflow_contract(contract)
 
 
+def _uses_torch_distributed_run(cmd: list[str]) -> bool:
+    if any(Path(part).name == "torchrun" for part in cmd):
+        return True
+    return any(
+        part == "-m" and idx + 1 < len(cmd) and cmd[idx + 1] == "torch.distributed.run"
+        for idx, part in enumerate(cmd)
+    )
+
+
+def _cleanup_torch_dist_file_store(cmd: list[str]) -> None:
+    if not _uses_torch_distributed_run(cmd):
+        return
+    try:
+        _TORCH_DDP_FILE_STORE.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _run(
     cmd: list[str], log_path: Path, *, cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> float:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_torch_dist_file_store(cmd)
     t0 = time.perf_counter()
     with open(log_path, "w") as log:
         proc = subprocess.run(
