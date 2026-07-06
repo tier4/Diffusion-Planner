@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 import scenario_generation.reproducer_rollout as reproducer_rollout
+from rlvr.autoresearch.tools import build_avoiding_target as build_avoiding_target_tool
 from rlvr.autoresearch.tools import mine_credit_window_scenes as mine_credit_window_scenes_tool
 from rlvr.autoresearch.tools import reproducer_danger_scorer
 from rlvr.autoresearch.tools import run_lifelong_r2lpl_rounds as round_runner
@@ -21,6 +22,7 @@ from rlvr.autoresearch.tools.build_avoiding_target import (
     _candidate_violation_score,
     _filtered_npz_payload,
     _future4_to_3col,
+    _parse_ego_shape,
     _source_scene_t0_moving_overlap,
 )
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
@@ -1616,6 +1618,152 @@ def test_future4_to_3col_restores_yaw():
     assert out.shape == (2, 3)
     assert np.allclose(out[:, :2], traj[:, :2])
     assert np.allclose(out[:, 2], np.array([np.pi / 2, 0.0], dtype=np.float32))
+
+
+def test_build_avoiding_target_accepts_scene_local_ego_shape():
+    assert _parse_ego_shape("from_npz") is None
+    assert _parse_ego_shape("npz") is None
+    assert np.allclose(_parse_ego_shape("4.76,7.24,2.29"), [4.76, 7.24, 2.29])
+
+
+def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_path):
+    source = tmp_path / "sim_windows" / "credit+00000.npz"
+    source.parent.mkdir()
+    sim_ego_past = np.arange(31 * 3, dtype=np.float32).reshape(31, 3) + 10.0
+    sim_current = np.linspace(0.0, 9.0, 10, dtype=np.float32) + 20.0
+    sim_neighbors = np.full((2, 31, 11), 3.5, dtype=np.float32)
+    sim_ego_shape = np.array([4.99, 10.74, 2.56], dtype=np.float32)
+    np.savez(
+        source,
+        ego_shape=sim_ego_shape,
+        ego_agent_past=sim_ego_past,
+        ego_current_state=sim_current,
+        neighbor_agents_past=sim_neighbors,
+        ego_agent_future=np.full((80, 4), -5.0, dtype=np.float32),
+        origin=np.asarray("sim"),
+    )
+
+    data = {
+        "ego_shape": torch.tensor(sim_ego_shape[None], dtype=torch.float32),
+        "ego_agent_future": torch.zeros((80, 4), dtype=torch.float32),
+    }
+    selected = torch.zeros((80, 4), dtype=torch.float32)
+    selected[:, 0] = torch.arange(80, dtype=torch.float32)
+    selected[:, 2] = 1.0
+
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "load_reward_config",
+        lambda _path: RewardConfig(ignore_rear_end_collisions=False),
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_load_scene_thresholds",
+        lambda _path: {
+            "moving_collision_thresh": 0.2,
+            "moving_near_thresh": 0.7,
+            "static_near_thresh": 0.5,
+            "rb_near_thresh": 0.2,
+            "expert_disagreement_thresh": 1.0,
+            "expert_disagreement_sustain_steps": 10,
+        },
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "load_model",
+        lambda _model_path, _device: (object(), SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "load_npz_data",
+        lambda _path, _device: data,
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_source_scene_t0_moving_overlap",
+        lambda *_args, **_kwargs: (False, 99.0),
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_stack_scene_data",
+        lambda _datas, _device: {},
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_normalize_batch",
+        lambda _batch, _model_args: {},
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "generate_all_scenes_batched",
+        lambda *_args, **_kwargs: [torch.stack([selected])],
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "classify_loaded_scene_candidates_batch",
+        lambda *_args, **_kwargs: [[{"labels": ["clean"]}]],
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "compute_reward_batch",
+        lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_best_safe_candidate",
+        lambda *_args, **_kwargs: (
+            0,
+            {
+                "selected_candidate_index": 0,
+                "selected_total": 1.0,
+                "selected_labels": ["clean"],
+            },
+        ),
+    )
+
+    rows_jsonl = tmp_path / "repaired.jsonl"
+    paths, unrepaired = build_avoiding_target_tool.build_repaired_targets(
+        model_path="model.pth",
+        rows=[
+            {
+                "scene_path": str(source),
+                "labels": ["moving_collision"],
+                "repair_labels": ["moving_collision"],
+            }
+        ],
+        reward_config_path="reward.json",
+        threshold_config_path="thresholds.json",
+        ego_shape=None,
+        out_dir=tmp_path / "repaired",
+        out_rows_jsonl=rows_jsonl,
+        out_list=tmp_path / "repaired.json",
+        min_static_margin=0.3,
+        K=1,
+        variant="rl_cl_soft_sweep_stretch",
+        gt_max_speed=9.0,
+        scene_batch_size=1,
+        noise_low=0.5,
+        noise_high=2.0,
+        device=torch.device("cpu"),
+        require_conflict_clear=True,
+        enable_conflict_detector=True,
+        use_route_cl_guidance=False,
+        count_rear_end_collisions=True,
+    )
+
+    assert len(paths) == 1
+    assert unrepaired == []
+    repaired_rows = _read_test_jsonl(rows_jsonl)
+    assert repaired_rows[0]["source_scene_path"] == str(source)
+    assert np.allclose(repaired_rows[0]["ego_shape"], sim_ego_shape)
+    with np.load(paths[0]) as repaired:
+        assert np.allclose(repaired["ego_shape"], sim_ego_shape)
+        assert np.allclose(repaired["ego_agent_past"], sim_ego_past)
+        assert np.allclose(repaired["ego_current_state"], sim_current)
+        assert np.allclose(repaired["neighbor_agents_past"], sim_neighbors)
+        assert repaired["ego_agent_future"].shape == (80, 3)
+        assert np.allclose(repaired["ego_agent_future"][:, 0], np.arange(80))
+        assert "origin" not in repaired.files
 
 
 def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_path):

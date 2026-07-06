@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Build repaired curated targets for dangerous scenes.
-
-Takes either:
-  * a JSON list of NPZ paths (legacy static-collision mode), or
-  * a JSONL of mined/classified scene rows with explicit labels.
+"""Build repaired curated targets for mined dangerous scenes.
 
 For each scene, generate K guided candidates under the source model, classify
 every candidate with the same dangerous-scene logic used in the mining step,
@@ -52,7 +48,9 @@ _VALIDITY_LABEL_WEIGHTS = {
 _NEIGHBOR_COORD_EPS_M = 1e-6
 
 
-def _parse_ego_shape(text: str) -> np.ndarray:
+def _parse_ego_shape(text: str) -> np.ndarray | None:
+    if text.strip().lower() in {"from_npz", "npz", "scene"}:
+        return None
     vals = np.array([float(x) for x in text.split(",")], dtype=np.float32)
     if vals.shape != (3,):
         raise ValueError(f"--ego_shape must be WB,L,W, got {text!r}")
@@ -334,7 +332,7 @@ def build_repaired_targets(
     rows: list[dict[str, Any]],
     reward_config_path: str,
     threshold_config_path: str,
-    ego_shape: np.ndarray,
+    ego_shape: np.ndarray | None,
     out_dir: Path,
     out_rows_jsonl: Path | None,
     out_list: Path,
@@ -379,7 +377,7 @@ def build_repaired_targets(
             p = row["scene_path"]
             data = load_npz_data(p, device)
             npz_es = data["ego_shape"].detach().cpu().numpy().reshape(-1)[:3]
-            if not np.allclose(npz_es, ego_shape, atol=1e-2):
+            if ego_shape is not None and not np.allclose(npz_es, ego_shape, atol=1e-2):
                 raise ValueError(
                     f"{p}: --ego_shape {ego_shape.tolist()} != NPZ ego_shape "
                     f"{npz_es.tolist()} (platform mismatch)"
@@ -472,6 +470,7 @@ def build_repaired_targets(
             repaired = dict(row)
             repaired["source_scene_path"] = str(row["scene_path"])
             repaired["scene_path"] = str(out_path)
+            repaired["ego_shape"] = [float(x) for x in npz_es.tolist()]
             repaired.update(meta)
             repaired_rows.append(repaired)
             print(
@@ -507,9 +506,13 @@ def main() -> None:
     ap.add_argument("--model", required=True, help="generation source model")
     ap.add_argument("--config", required=True, help="reward config JSON")
     ap.add_argument("--threshold_config", help="scene threshold config JSON")
-    ap.add_argument("--ego_shape", required=True, help="WB,L,W — validated against each NPZ")
+    ap.add_argument(
+        "--ego_shape",
+        required=True,
+        help="WB,L,W to validate every NPZ, or 'from_npz' for mixed-platform scene lists",
+    )
     ap.add_argument("--scene_rows_jsonl", help="JSONL with mined scene rows and labels")
-    ap.add_argument("--scenes", help="JSON list of NPZs to repair (legacy static-collision mode)")
+    ap.add_argument("--scenes", help="JSON list of NPZs to repair")
     ap.add_argument("--labels", help="comma-separated subset of labels to repair")
     ap.add_argument("--min_margin", type=float, required=True, help="required static clearance")
     ap.add_argument("--out_dir", required=True)

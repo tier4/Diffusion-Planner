@@ -105,6 +105,10 @@ For each mined scene:
 Scenes already overlapped with a moving neighbor at the current frame are
 discarded as unrecoverable repair rows.
 
+For mixed-platform corpora, set repair `ego_shape` to `from_npz`. Repair scoring
+then uses each scene's own required `ego_shape` field instead of enforcing one
+global vehicle shape across the whole run.
+
 Default winner rule:
 
 - safest valid candidate first
