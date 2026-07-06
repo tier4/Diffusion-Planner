@@ -1675,7 +1675,14 @@ def run_segments_batched(
                     maxlen = width + 1
                     if verify_credit_windows is None:
                         maxlen = max(maxlen, save_pre_steps + 1)
-                    s.save_buf = deque(maxlen=maxlen)
+                    existing_maxlen = getattr(s.save_buf, "maxlen", None)
+                    if s.save_buf is None or (
+                        existing_maxlen is not None and existing_maxlen < maxlen
+                    ):
+                        s.save_buf = deque(
+                            list(s.save_buf) if s.save_buf is not None else [],
+                            maxlen=maxlen,
+                        )
                     s.danger_event_selector = OnlineEventSelector(
                         decluster_steps=danger_decluster_steps
                     )
@@ -1797,6 +1804,7 @@ def run_segments_batched(
                                 str(s.credit_window["label"]),
                             )
                             s.credit_saved = True
+                            s.terminated = "credit_window_saved"
                             s.done = True
                         if danger_save_dir is not None and s.save_buf is not None:
                             if verify_credit_windows is not None and s.credit_window is not None:
@@ -1870,6 +1878,7 @@ def run_segments_batched(
                                                 event_dir, manifest, realized_label
                                             )
                                         s.credit_saved = True
+                                        s.terminated = "verified_danger_window_saved"
                                         s.done = True
                             else:
                                 if danger_row is not None:

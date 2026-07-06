@@ -62,6 +62,7 @@ from scenario_generation.danger_event_selection import (
     decluster_indices,
     sustained_true_indices,
 )
+from scenario_generation.tools.classify_replay_steps import _decluster as _decluster_replay_steps
 
 
 class _IdentityObservationNormalizer:
@@ -892,6 +893,10 @@ def test_round_runner_perception_mining_writes_credit_rows_directly(tmp_path):
 
 def test_shared_declustering_matches_replay_step_semantics():
     assert decluster_indices([1, 2, 4, 12, 13], window=10) == [1, 12]
+
+
+def test_replay_step_declustering_zero_window_is_noop():
+    assert _decluster_replay_steps([4, 1, 2], window=0) == [1, 2, 4]
 
 
 def test_contiguous_index_runs_group_single_event():
