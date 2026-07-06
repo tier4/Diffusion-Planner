@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
 import scenario_generation.reproducer_rollout as reproducer_rollout
 from rlvr.autoresearch.tools import mine_credit_window_scenes as mine_credit_window_scenes_tool
 from rlvr.autoresearch.tools import reproducer_danger_scorer
+from rlvr.autoresearch.tools import run_lifelong_r2lpl_rounds as round_runner
 from rlvr.autoresearch.tools.build_avoiding_target import (
     _best_safe_candidate,
     _candidate_violation_score,
@@ -37,12 +41,13 @@ from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
 from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _base_train_invocation,
-    _classify_cmd,
+    _gpu_ids_from_config,
     _load_config,
     _lora_for_policy,
-    _mine_credit_cmd,
     _perception_mining_cmd,
     _repair_cmd,
+    _run_mining_phase,
+    _run_repair_phase,
     _union_scene_lists,
 )
 from rlvr.deviation import rollout_gt_deviation
@@ -112,6 +117,31 @@ def _write_direct_chunk_scene_list(tmp_path, stems):
     path = tmp_path / "scenes.json"
     path.write_text(json.dumps([str(p) for p in paths]))
     return path
+
+
+def _read_test_jsonl(path):
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _visible_gpu_count_for_test() -> int:
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return sum(1 for line in proc.stdout.splitlines() if line.startswith("GPU "))
+    return torch.cuda.device_count()
 
 
 def test_direct_reproducer_chunks_sample_every_80th_scene(tmp_path):
@@ -352,6 +382,176 @@ def test_perception_mining_cmd_supports_direct_chunk_manifest(tmp_path):
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 
+def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, tmp_path):
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text(json.dumps(["/data/scene_0.npz"]))
+    cfg = {
+        "reward_config": str(tmp_path / "reward.json"),
+        "threshold_config": str(tmp_path / "thresholds.json"),
+        "credit_window_config": str(tmp_path / "credit.json"),
+        "mine_labels": ["moving_collision"],
+        "perception_mining": {
+            "tool": "direct_reproducer_chunks",
+            "scene_list": str(scene_list),
+            "batch_size": 4,
+        },
+    }
+    rdir = tmp_path / "round"
+    seen_jobs = []
+
+    def _arg(cmd, flag):
+        return Path(cmd[cmd.index(flag) + 1])
+
+    def _fake_run_parallel(jobs, *, cwd=None):
+        assert cwd is None
+        seen_jobs.extend(jobs)
+        out_jsonls = [_arg(cmd, "--out_jsonl") for _, cmd, _, _ in jobs]
+        segments = [_arg(cmd, "--segments_jsonl") for _, cmd, _, _ in jobs]
+        summaries = [_arg(cmd, "--summary_json") for _, cmd, _, _ in jobs]
+        logs = [log for _, _, log, _ in jobs]
+        private_paths = [*out_jsonls, *segments, *summaries, *logs]
+        assert len({path.resolve(strict=False) for path in private_paths}) == len(private_paths)
+        assert (rdir / "credit_windows.jsonl") not in out_jsonls
+        assert (rdir / "perception_reproducer_hits.jsonl") not in segments
+        assert (rdir / "perception_direct_summary.json") not in summaries
+        for expected_idx, (label, cmd, _log, env) in enumerate(jobs):
+            assert label == f"perception_mine[{expected_idx}]"
+            assert env["CUDA_VISIBLE_DEVICES"] == str(expected_idx)
+            assert cmd[cmd.index("--num_shards") + 1] == "2"
+            assert cmd[cmd.index("--shard_index") + 1] == str(expected_idx)
+            _arg(cmd, "--out_jsonl").parent.mkdir(parents=True, exist_ok=True)
+            _arg(cmd, "--out_jsonl").write_text(
+                json.dumps(
+                    {
+                        "scene_path": f"/data/repaired_source_{expected_idx}.npz",
+                        "label": "moving_collision",
+                    }
+                )
+                + "\n"
+            )
+            _arg(cmd, "--segments_jsonl").write_text(json.dumps({"segment": expected_idx}) + "\n")
+            _arg(cmd, "--summary_json").write_text(
+                json.dumps(
+                    {
+                        "planned_chunks": 3,
+                        "simulated_chunks": 2,
+                        "skipped_chunks": 1,
+                        "credit_rows": 1,
+                        "elapsed_sec": float(expected_idx + 1),
+                    }
+                )
+            )
+        return 12.0
+
+    monkeypatch.setattr(round_runner, "_run_parallel", _fake_run_parallel)
+
+    elapsed = _run_mining_phase(cfg, tmp_path / "model.pth", rdir, [0, 1])
+
+    assert elapsed == 12.0
+    assert len(seen_jobs) == 2
+    assert [row["scene_path"] for row in _read_test_jsonl(rdir / "credit_windows.jsonl")] == [
+        "/data/repaired_source_0.npz",
+        "/data/repaired_source_1.npz",
+    ]
+    assert _read_test_jsonl(rdir / "perception_reproducer_hits.jsonl") == [
+        {"segment": 0},
+        {"segment": 1},
+    ]
+    summary = json.loads((rdir / "perception_direct_summary.json").read_text())
+    assert summary["planned_chunks"] == 6
+    assert summary["simulated_chunks"] == 4
+    assert summary["skipped_chunks"] == 2
+    assert summary["credit_rows"] == 2
+    assert json.loads((rdir / "credit_windows_paths.json").read_text()) == [
+        "/data/repaired_source_0.npz",
+        "/data/repaired_source_1.npz",
+    ]
+
+
+def test_round_runner_repair_shards_use_private_inputs_outputs_and_merge(monkeypatch, tmp_path):
+    rdir = tmp_path / "round"
+    rows = [
+        {"scene_path": f"/data/source_{idx}.npz", "label": "moving_collision"} for idx in range(4)
+    ]
+    (rdir / "credit_windows.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (rdir / "credit_windows.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    cfg = {
+        "reward_config": str(tmp_path / "reward.json"),
+        "threshold_config": str(tmp_path / "thresholds.json"),
+        "mine_labels": ["moving_collision"],
+        "repair_config": {
+            "ego_shape": "4.76,7.24,2.29",
+            "min_margin": 0.3,
+            "K": 8,
+        },
+        "count_rear_end_collisions": True,
+    }
+    seen_jobs = []
+
+    def _arg(cmd, flag):
+        return Path(cmd[cmd.index(flag) + 1])
+
+    def _fake_run_parallel(jobs, *, cwd=None):
+        assert cwd is None
+        seen_jobs.extend(jobs)
+        shard_inputs = [_arg(cmd, "--scene_rows_jsonl") for _, cmd, _, _ in jobs]
+        out_lists = [_arg(cmd, "--out_list") for _, cmd, _, _ in jobs]
+        out_rows = [_arg(cmd, "--out_rows_jsonl") for _, cmd, _, _ in jobs]
+        out_dirs = [_arg(cmd, "--out_dir") for _, cmd, _, _ in jobs]
+        logs = [log for _, _, log, _ in jobs]
+        private_paths = [*shard_inputs, *out_lists, *out_rows, *out_dirs, *logs]
+        assert len({path.resolve(strict=False) for path in private_paths}) == len(private_paths)
+        assert (rdir / "credit_windows.jsonl") not in shard_inputs
+        assert (rdir / "repaired_targets.json") not in out_lists
+        assert (rdir / "repaired_targets.jsonl") not in out_rows
+        for expected_idx, (label, cmd, _log, env) in enumerate(jobs):
+            assert label == f"repair[{expected_idx}]"
+            assert env["CUDA_VISIBLE_DEVICES"] == str(expected_idx)
+            assert cmd[cmd.index("--device") + 1] == "cuda"
+            assert "--allow_empty" in cmd
+            shard_rows = _read_test_jsonl(_arg(cmd, "--scene_rows_jsonl"))
+            assert shard_rows
+            _arg(cmd, "--out_list").parent.mkdir(parents=True, exist_ok=True)
+            repaired_paths = [
+                f"/data/repaired_{expected_idx}_{row_idx}.npz"
+                for row_idx, _row in enumerate(shard_rows)
+            ]
+            _arg(cmd, "--out_list").write_text(json.dumps(repaired_paths))
+            _arg(cmd, "--out_rows_jsonl").write_text(
+                "".join(
+                    json.dumps({"scene_path": path, "label": "moving_collision"}) + "\n"
+                    for path in repaired_paths
+                )
+            )
+            (_arg(cmd, "--out_list").parent / "repaired_targets_unrepaired.json").write_text(
+                json.dumps([{"shard": expected_idx, "count": 0}])
+            )
+        return 8.0
+
+    monkeypatch.setattr(round_runner, "_run_parallel", _fake_run_parallel)
+
+    elapsed = _run_repair_phase(cfg, tmp_path / "model.pth", rdir, [0, 1])
+
+    assert elapsed == 8.0
+    assert len(seen_jobs) == 2
+    assert json.loads((rdir / "repaired_targets.json").read_text()) == [
+        "/data/repaired_0_0.npz",
+        "/data/repaired_0_1.npz",
+        "/data/repaired_1_0.npz",
+        "/data/repaired_1_1.npz",
+    ]
+    assert [row["scene_path"] for row in _read_test_jsonl(rdir / "repaired_targets.jsonl")] == [
+        "/data/repaired_0_0.npz",
+        "/data/repaired_0_1.npz",
+        "/data/repaired_1_0.npz",
+        "/data/repaired_1_1.npz",
+    ]
+    assert json.loads((rdir / "repaired_targets_unrepaired.json").read_text()) == [
+        {"shard": 0, "count": 0},
+        {"shard": 1, "count": 0},
+    ]
+
+
 def test_lineage_resolver_maps_route_frame_and_step(tmp_path):
     route = [tmp_path / f"bagA_{i:04d}.npz" for i in range(100, 121)]
     row = {
@@ -492,7 +692,7 @@ def test_round_runner_checkpoint_policy_resolves_epoch_lora(tmp_path):
     assert _lora_for_policy(run_dir, "epoch:2") is None
 
 
-def test_round_runner_requires_scene_pool_without_perception_mining(tmp_path):
+def test_round_runner_requires_perception_mining_source(tmp_path):
     cfg = tmp_path / "cfg.json"
     cfg.write_text(
         json.dumps(
@@ -507,6 +707,7 @@ def test_round_runner_requires_scene_pool_without_perception_mining(tmp_path):
                 "replay_memory": {},
                 "training_config": "/tmp/train.json",
                 "repair_config": {"ego_shape": "4.76,7.24,2.29", "min_margin": 0.3},
+                "perception_mining": {"tool": "direct_reproducer_chunks"},
                 "output_dir": str(tmp_path / "auto_research" / "run"),
             }
         )
@@ -515,10 +716,10 @@ def test_round_runner_requires_scene_pool_without_perception_mining(tmp_path):
     try:
         _load_config(cfg)
     except ValueError as exc:
-        assert "scene_pool" in str(exc)
-        assert "scene_pool_root" in str(exc)
+        assert "chunk_manifest" in str(exc)
+        assert "scene_list" in str(exc)
     else:
-        raise AssertionError("scene_pool fields should be required without perception_mining")
+        raise AssertionError("a mining source should be required")
 
 
 def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
@@ -526,20 +727,19 @@ def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
     workflow.write_text(
         json.dumps(
             {
-                "inference": {
-                    "mode": "saved_predictions",
-                    "prediction_scene_root": "/tmp/dataset_root",
-                },
                 "judgement": {
                     "reward_config": "/tmp/reward.json",
                     "threshold_config": "/tmp/thresholds.json",
                     "credit_window_config": "/tmp/credit.json",
                     "enabled_labels": ["moving_collision"],
                 },
+                "resources": {"gpu_ids": [0, 1]},
                 "perception_reproducer": {
-                    "anchor_horizon_steps": 40,
-                    "max_rollout_steps": 80,
+                    "chunk_len": 80,
+                    "start_stride": 80,
                     "batch_size": 4,
+                    "max_pose_step_m": 10.0,
+                    "max_pose_speed_mps": 20.0,
                 },
                 "repair_generation": {
                     "ego_shape": "4.76,7.24,2.29",
@@ -558,7 +758,6 @@ def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
             {
                 "model_path": "/tmp/model.pth",
                 "scene_list": "/tmp/scenes.json",
-                "saved_predictions_dir": "/tmp/predictions",
                 "workflow_config": str(workflow),
                 "training_config": str(training),
                 "output_dir": str(tmp_path / "auto_research" / "run"),
@@ -568,111 +767,125 @@ def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
 
     cfg = _load_config(contract)
 
-    assert cfg["trajectory"] == "saved_pred"
-    assert cfg["classify_predictions_dir"] == "/tmp/predictions"
-    assert cfg["classify_prediction_scene_root"] == "/tmp/dataset_root"
     assert cfg["route_scene_list"] == "/tmp/scenes.json"
-    assert cfg["anchor_horizon_steps"] == 40
-    assert cfg["max_rollout_steps"] == 80
-    assert cfg["timeline_progress_mode"] == "clock"
-    assert cfg["tracker_mode"] == "mpc"
+    assert cfg["perception_mining"]["tool"] == "direct_reproducer_chunks"
+    assert cfg["perception_mining"]["scene_list"] == "/tmp/scenes.json"
+    assert cfg["perception_mining"]["chunk_len"] == 80
+    assert cfg["perception_mining"]["start_stride"] == 80
+    assert cfg["perception_mining"]["timeline_progress_mode"] == "clock"
+    assert cfg["perception_mining"]["tracker_mode"] == "mpc"
+    assert cfg["perception_mining"]["max_pose_step_m"] == 10.0
+    assert cfg["perception_mining"]["max_pose_speed_mps"] == 20.0
     assert cfg["training_backend"] == "base_sft"
+    assert cfg["gpu_ids"] == [0, 1]
 
 
-def test_round_runner_perception_mining_defaults_video_off(tmp_path):
+def test_round_runner_parses_gpu_ids_from_string():
+    assert _gpu_ids_from_config({"resources": {"gpu_ids": "0, 2,3"}}) == [0, 2, 3]
+
+
+def test_round_runner_cli_dry_run_uses_multiple_visible_gpus_or_skips(tmp_path):
+    visible_gpus = _visible_gpu_count_for_test()
+    if visible_gpus < 2:
+        pytest.skip("multi-GPU runner smoke requires at least two visible CUDA devices")
+    gpu_ids = list(range(min(2, visible_gpus)))
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text(json.dumps([str(tmp_path / "scene_00000000.npz")]))
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": str(tmp_path / "reward.json"),
+                    "threshold_config": str(tmp_path / "thresholds.json"),
+                    "credit_window_config": str(tmp_path / "credit.json"),
+                    "enabled_labels": ["moving_collision"],
+                },
+                "resources": {"gpu_ids": gpu_ids},
+                "event_mining": {
+                    "max_scenes": 1,
+                    "chunk_len": 80,
+                    "start_stride": 80,
+                },
+                "repair_generation": {
+                    "ego_shape": "4.76,7.24,2.29",
+                    "min_margin": 0.3,
+                    "candidate_count_per_scene": 2,
+                },
+                "training": {"val_scenes": str(tmp_path / "val.json")},
+                "rounds": {"rounds": 1, "epochs_per_round": 1},
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"train_args": {"valid_set_list": str(tmp_path / "val.json")}}))
+    repo_root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(repo_root),
+            str(repo_root / "diffusion_planner"),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds",
+            "--model_path",
+            str(tmp_path / "model.pth"),
+            "--scene_list",
+            str(scene_list),
+            "--workflow_config",
+            str(workflow),
+            "--training_config",
+            str(training),
+            "--output_dir",
+            str(tmp_path / "auto_research" / "runner_smoke"),
+            "--dry_run",
+        ],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    for shard_index, gpu_id in enumerate(gpu_ids):
+        assert f"perception_mine[{shard_index}]" in proc.stdout
+        assert f"repair[{shard_index}]" in proc.stdout
+        assert f"CUDA_VISIBLE_DEVICES={gpu_id}" in proc.stdout
+        assert f"--shard_index {shard_index}" in proc.stdout
+    assert f"--num_shards {len(gpu_ids)}" in proc.stdout
+    assert "--allow_empty" in proc.stdout
+
+
+def test_round_runner_perception_mining_writes_credit_rows_directly(tmp_path):
     cfg = {
         "reward_config": "/tmp/reward.json",
         "threshold_config": "/tmp/thresholds.json",
         "credit_window_config": "/tmp/credit.json",
+        "mine_labels": ["moving_collision"],
         "perception_mining": {
-            "npz_root": "/data/route",
-            "seg_len": 600,
-            "max_segments": 1,
+            "tool": "direct_reproducer_chunks",
+            "scene_list": "/data/scenes.json",
+            "batch_size": 4,
         },
     }
 
     cmd, save_dir = _perception_mining_cmd(cfg, tmp_path / "model.pth", tmp_path / "round")
 
-    assert "--dump_hits" in cmd
-    assert cmd[cmd.index("--dump_hits") + 1] == "0"
-    assert "--render_webm" not in cmd
-    assert "--danger_save_dir" in cmd
+    assert "rlvr.autoresearch.tools.mine_direct_reproducer_chunks" in cmd
+    assert "--out_jsonl" in cmd
+    assert cmd[cmd.index("--out_jsonl") + 1] == str(tmp_path / "round" / "credit_windows.jsonl")
+    assert "--scene_list" in cmd
+    assert cmd[cmd.index("--scene_list") + 1] == "/data/scenes.json"
+    assert "--labels" in cmd
+    assert cmd[cmd.index("--labels") + 1] == "moving_collision"
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
-
-
-def test_round_runner_classify_cmd_can_save_det_predictions(tmp_path):
-    cfg = {
-        "reward_config": "/tmp/reward.json",
-        "threshold_config": "/tmp/thresholds.json",
-        "trajectory": "det",
-        "classify_save_predictions_dir": str(tmp_path / "saved_predictions"),
-    }
-
-    cmd = _classify_cmd(
-        cfg,
-        scene_pool=tmp_path / "scenes.json",
-        classify_dir=tmp_path / "classified",
-        model_path=tmp_path / "model.pth",
-    )
-
-    assert "--model_path" in cmd
-    assert "--save_predictions_dir" in cmd
-    assert cmd[cmd.index("--save_predictions_dir") + 1] == str(tmp_path / "saved_predictions")
-    assert cmd[cmd.index("--batch_size") + 1] == "32"
-    assert cmd[cmd.index("--device") + 1] == "cuda"
-
-
-def test_round_runner_mine_credit_cmd_forwards_tracker_mode(tmp_path):
-    cfg = {
-        "credit_window_config": "/tmp/credit.json",
-        "mine_batch_size": 8,
-        "mine_device": "cuda",
-        "neighbor_history_mode": "sim",
-        "timeline_progress_mode": "clock",
-        "tracker_mode": "mpc",
-        "mine_goal_reach_m": 0.0,
-        "classified_decluster_steps": 10,
-        "anchor_horizon_steps": 40,
-        "max_rollout_steps": 80,
-        "verify_reproduced_issue": False,
-    }
-
-    cmd = _mine_credit_cmd(
-        cfg,
-        scene_pool_root=tmp_path / "route_root",
-        route_scene_list=None,
-        classify_dir=tmp_path / "classified",
-        model_path=tmp_path / "model.pth",
-        credit_dir=tmp_path / "credit",
-        credit_jsonl=tmp_path / "credit.jsonl",
-        events_json=tmp_path / "events.json",
-    )
-
-    assert "--tracker_mode" in cmd
-    assert cmd[cmd.index("--tracker_mode") + 1] == "mpc"
-
-
-def test_round_runner_classify_cmd_can_reuse_saved_predictions(tmp_path):
-    cfg = {
-        "reward_config": "/tmp/reward.json",
-        "threshold_config": "/tmp/thresholds.json",
-        "trajectory": "saved_pred",
-        "classify_predictions_dir": str(tmp_path / "predictions"),
-        "classify_prediction_scene_root": str(tmp_path / "dataset_root"),
-    }
-
-    cmd = _classify_cmd(
-        cfg,
-        scene_pool=tmp_path / "scenes.json",
-        classify_dir=tmp_path / "classified",
-        model_path=tmp_path / "model.pth",
-    )
-
-    assert "--predictions_dir" in cmd
-    assert cmd[cmd.index("--predictions_dir") + 1] == str(tmp_path / "predictions")
-    assert "--prediction_scene_root" in cmd
-    assert "--model_path" not in cmd
-    assert cmd[cmd.index("--batch_size") + 1] == "32"
 
 
 def test_shared_declustering_matches_replay_step_semantics():
@@ -1279,9 +1492,6 @@ def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
     cfg = {
         "reward_config": "/tmp/reward.json",
         "threshold_config": "/tmp/threshold.json",
-        "trajectory": "det",
-        "classify_batch_size": 4,
-        "classify_device": "cpu",
         "repair_config": {
             "ego_shape": "4.76,7.24,2.29",
             "min_margin": 0.3,
@@ -1289,12 +1499,6 @@ def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
         "count_rear_end_collisions": True,
     }
 
-    classify_cmd = _classify_cmd(
-        cfg,
-        scene_pool=tmp_path / "scenes.json",
-        classify_dir=tmp_path / "classified",
-        model_path=tmp_path / "model.pth",
-    )
     repair_cmd = _repair_cmd(
         cfg,
         model_path=tmp_path / "model.pth",
@@ -1302,7 +1506,6 @@ def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
         rdir=tmp_path,
     )
 
-    assert "--count_rear_end_collisions" in classify_cmd
     assert "--count_rear_end_collisions" in repair_cmd
 
 
@@ -1466,7 +1669,10 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
 
     assert next_model == tmp_path / "round" / "base_train" / "latest.pth"
     assert cwd == Path(__file__).resolve().parents[3] / "diffusion_planner"
-    assert env["PYTHONPATH"].endswith("/diffusion_planner")
+    assert str(Path(__file__).resolve().parents[3]) in env["PYTHONPATH"].split(":")
+    assert str(Path(__file__).resolve().parents[3] / "diffusion_planner") in env[
+        "PYTHONPATH"
+    ].split(":")
     assert "-m" in cmd
     assert "train_predictor" in cmd
     assert cmd[cmd.index("--train_epochs") + 1] == "7"

@@ -9,13 +9,13 @@ import os
 import subprocess
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import torch
 
-_LEGACY_REQUIRED = {
+_CONFIG_REQUIRED = {
     "rounds",
     "epochs_per_round",
     "model_path",
@@ -44,6 +44,7 @@ _RSFT_TRAINING_KEYS = {
     "replay_loss_weight",
     "replay_der_coef",
 }
+_MINING_TOOL = "direct_reproducer_chunks"
 
 
 def _load_any_json(path: Path) -> Any:
@@ -80,13 +81,39 @@ def _workflow_count_rear_end_collisions(judgement: dict[str, Any]) -> bool:
     return True
 
 
-def _parse_route_source(contract: dict[str, Any]) -> tuple[str | None, str | None]:
-    scene_list = _first_non_null(contract.get("scene_list"), contract.get("scene_pool"))
-    route_root = _first_non_null(
-        contract.get("route_root"),
-        contract.get("scene_pool_root"),
+def _gpu_ids_from_config(config: dict[str, Any]) -> list[int]:
+    raw = _first_non_null(config.get("gpu_ids"), config.get("gpus"))
+    if raw is None:
+        resources = config.get("resources")
+        if isinstance(resources, dict):
+            raw = _first_non_null(resources.get("gpu_ids"), resources.get("gpus"))
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("resources.gpu_ids must be a non-empty list or comma-separated string")
+    return [int(gpu) for gpu in raw]
+
+
+def _contract_scene_list(contract: dict[str, Any]) -> str | None:
+    return _first_non_null(contract.get("scene_list"), contract.get("scene_pool"))
+
+
+def _validate_mining_tool(mining: dict[str, Any]) -> None:
+    tool = mining.get("tool", mining.get("mode"))
+    if tool is not None and str(tool) != _MINING_TOOL:
+        raise ValueError("perception_mining.tool must be 'direct_reproducer_chunks'")
+
+
+def _has_mining_source(cfg: dict[str, Any]) -> bool:
+    mining = dict(cfg.get("perception_mining") or {})
+    return (
+        mining.get("chunk_manifest") is not None
+        or mining.get("scene_list") is not None
+        or cfg.get("route_scene_list") is not None
+        or cfg.get("scene_pool") is not None
     )
-    return scene_list, route_root
 
 
 def _training_config_payload(path_or_dict: Any) -> dict[str, Any]:
@@ -123,7 +150,7 @@ def _infer_training_backend(training_cfg: dict[str, Any]) -> str:
     return "base_sft"
 
 
-def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
+def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     workflow_source = contract.get("workflow_config")
     if workflow_source is None:
         raise ValueError("workflow_config is required for the single-entry orchestrator contract")
@@ -137,8 +164,8 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("training_config is required for the single-entry orchestrator contract")
     training_cfg = _training_config_payload(training_source)
 
-    inference = dict(workflow.get("inference") or {})
     judgement = dict(workflow.get("judgement") or {})
+    resources = dict(workflow.get("resources") or {})
     event_mining = dict(workflow.get("event_mining") or {})
     reproducer = dict(workflow.get("perception_reproducer") or {})
     repair = dict(workflow.get("repair_generation") or {})
@@ -146,9 +173,14 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     rounds = dict(workflow.get("rounds") or {})
     training_section = dict(workflow.get("training") or {})
 
-    scene_list, route_root = _parse_route_source(contract)
-    if scene_list is None and route_root is None:
-        raise ValueError("one of scene_list or route_root is required")
+    scene_list = _contract_scene_list(contract)
+    chunk_manifest = _first_non_null(
+        contract.get("chunk_manifest"),
+        event_mining.get("chunk_manifest"),
+        reproducer.get("chunk_manifest"),
+    )
+    if scene_list is None and chunk_manifest is None:
+        raise ValueError("one of scene_list or chunk_manifest is required")
 
     reward_config = _first_non_null(
         judgement.get("reward_config"),
@@ -170,11 +202,6 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "workflow_config.judgement must define reward_config, threshold_config, "
             "and credit_window_config"
         )
-
-    mode = str(_first_non_null(inference.get("mode"), "det"))
-    if mode not in {"det", "saved_predictions"}:
-        raise ValueError(f"inference.mode must be 'det' or 'saved_predictions', got {mode!r}")
-    trajectory = "saved_pred" if mode == "saved_predictions" else "det"
 
     enabled_labels = judgement.get("enabled_labels") or list(_DEFAULT_ENABLED_LABELS)
     if not isinstance(enabled_labels, list) or not enabled_labels:
@@ -227,17 +254,76 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "workflow_config.training.val_scenes, or training_config"
         )
 
-    saved_predictions_dir = contract.get("saved_predictions_dir")
-    if saved_predictions_dir is None:
-        saved_predictions_dir = _first_non_null(
-            inference.get("saved_predictions_dir"),
-            inference.get("predictions_dir"),
-            inference.get("save_predictions_dir"),
-        )
-
     training_backend = str(
         _first_non_null(training_section.get("backend"), _infer_training_backend(training_cfg))
     )
+    gpu_ids = _gpu_ids_from_config({"resources": resources})
+    chunk_len = int(
+        _first_non_null(
+            event_mining.get("chunk_len"),
+            reproducer.get("chunk_len"),
+            reproducer.get("max_rollout_steps"),
+            reproducer.get("rollout_length_frames"),
+            reproducer.get("rollout_length"),
+            80,
+        )
+    )
+    perception_mining = {
+        "tool": _MINING_TOOL,
+        "chunk_len": chunk_len,
+        "start_stride": int(
+            _first_non_null(
+                event_mining.get("start_stride"),
+                reproducer.get("start_stride"),
+                chunk_len,
+            )
+        ),
+        "batch_size": int(_first_non_null(reproducer.get("batch_size"), 64)),
+        "timeline_build_workers": int(_first_non_null(reproducer.get("timeline_build_workers"), 8)),
+        "n_build_threads": int(_first_non_null(reproducer.get("n_build_threads"), 16)),
+        "prefetch_ahead": int(_first_non_null(reproducer.get("prefetch_ahead"), 2)),
+        "gpu_transform": bool(_first_non_null(reproducer.get("gpu_transform"), True)),
+        "neighbor_history_mode": str(
+            _first_non_null(reproducer.get("neighbor_history_mode"), "sim")
+        ),
+        "timeline_progress_mode": str(
+            _first_non_null(reproducer.get("timeline_progress_mode"), "clock")
+        ),
+        "tracker_mode": str(_first_non_null(reproducer.get("tracker_mode"), "mpc")),
+        "goal_reach_m": float(_first_non_null(reproducer.get("goal_reach_m"), 0.0)),
+        "danger_decluster_steps": int(
+            _first_non_null(event_mining.get("danger_decluster_steps"), 10)
+        ),
+    }
+    if scene_list is not None:
+        perception_mining["scene_list"] = str(scene_list)
+    if chunk_manifest is not None:
+        perception_mining["chunk_manifest"] = str(chunk_manifest)
+    for key in (
+        "max_scenes",
+        "max_chunks",
+        "num_shards",
+        "shard_index",
+        "sample_fraction",
+        "sample_seed",
+        "expected_frame_step",
+        "min_chunk_len",
+        "max_pose_step_m",
+        "max_pose_speed_mps",
+        "max_yaw_step_rad",
+        "near_miss_thresh",
+        "search_radius",
+        "warmup_steps",
+        "max_steps_mult",
+        "unstick_after",
+        "unstick_advance_m",
+        "device",
+        "sidecar_root",
+        "prebuild_neighbor_tracks",
+    ):
+        value = _first_non_null(event_mining.get(key), reproducer.get(key))
+        if value is not None:
+            perception_mining[key] = value
 
     cfg = {
         "rounds": int(_first_non_null(rounds.get("rounds"), 1)),
@@ -259,7 +345,6 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "training_backend": training_backend,
         "output_dir": str(output_dir),
         "repair_config": repair_cfg,
-        "trajectory": trajectory,
         "mine_labels": [str(label) for label in enabled_labels],
         "enable_conflict_detector": bool(
             _first_non_null(
@@ -271,31 +356,6 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "danger_decluster_steps": int(
             _first_non_null(event_mining.get("danger_decluster_steps"), 10)
         ),
-        "classified_decluster_steps": int(
-            _first_non_null(
-                event_mining.get("source_gap_steps"),
-                event_mining.get("classified_decluster_steps"),
-                10,
-            )
-        ),
-        "verify_reproduced_issue": bool(
-            _first_non_null(reproducer.get("verify_reproduced_issue"), True)
-        ),
-        "anchor_horizon_steps": int(
-            _first_non_null(
-                reproducer.get("anchor_horizon_steps"),
-                reproducer.get("source_anchor_horizon_steps"),
-                40,
-            )
-        ),
-        "max_rollout_steps": int(
-            _first_non_null(
-                reproducer.get("max_rollout_steps"),
-                reproducer.get("rollout_length_frames"),
-                reproducer.get("rollout_length"),
-                80,
-            )
-        ),
         "repair_window_scene_count": int(
             _first_non_null(
                 reproducer.get("repair_window_scene_count"),
@@ -303,49 +363,17 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
                 15,
             )
         ),
-        "classify_batch_size": int(_first_non_null(inference.get("batch_size"), 32)),
-        "classify_device": str(_first_non_null(inference.get("device"), "cuda")),
-        "classify_prediction_scene_root": _first_non_null(
-            inference.get("prediction_scene_root"),
-            inference.get("source_scene_root"),
-        ),
         "checkpoint_policy": str(
             _first_non_null(rounds.get("checkpoint_selection_rule"), "latest")
         ),
-        "mine_batch_size": int(_first_non_null(reproducer.get("batch_size"), 16)),
-        "mine_device": str(_first_non_null(reproducer.get("device"), "cuda")),
-        "neighbor_history_mode": str(
-            _first_non_null(reproducer.get("neighbor_history_mode"), "sim")
-        ),
-        "timeline_progress_mode": str(
-            _first_non_null(reproducer.get("timeline_progress_mode"), "clock")
-        ),
-        "tracker_mode": str(_first_non_null(reproducer.get("tracker_mode"), "mpc")),
-        "mine_gpu_transform": bool(_first_non_null(reproducer.get("gpu_transform"), False)),
-        "mine_goal_reach_m": float(_first_non_null(reproducer.get("goal_reach_m"), 0.0)),
-        "mine_render_webm": bool(_first_non_null(reproducer.get("render_webm"), False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
+        "perception_mining": perception_mining,
     }
+    if gpu_ids:
+        cfg["gpu_ids"] = gpu_ids
     if scene_list is not None:
         cfg["scene_pool"] = str(scene_list)
         cfg["route_scene_list"] = str(scene_list)
-    if route_root is not None:
-        cfg["scene_pool_root"] = str(route_root)
-
-    if trajectory == "saved_pred":
-        predictions_dir = _first_non_null(
-            contract.get("saved_predictions_dir"),
-            inference.get("saved_predictions_dir"),
-            inference.get("predictions_dir"),
-        )
-        if predictions_dir is None:
-            raise ValueError(
-                "saved_predictions_dir is required when inference.mode is saved_predictions"
-            )
-        cfg["classify_predictions_dir"] = str(predictions_dir)
-    else:
-        if saved_predictions_dir is not None:
-            cfg["classify_save_predictions_dir"] = str(saved_predictions_dir)
 
     return cfg
 
@@ -353,18 +381,22 @@ def _legacy_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
 def _load_config(path: Path) -> dict[str, Any]:
     cfg = _load_json(path)
     if "workflow_config" in cfg:
-        return _legacy_from_workflow_contract(cfg)
+        return _config_from_workflow_contract(cfg)
 
-    missing = sorted(_LEGACY_REQUIRED - set(cfg))
-    if not cfg.get("perception_mining") and not any(
-        key in cfg for key in ("scene_pool", "scene_pool_root", "route_scene_list")
-    ):
-        missing.extend(k for k in ("scene_pool", "scene_pool_root") if k not in cfg)
+    missing = sorted(_CONFIG_REQUIRED - set(cfg))
+    if not cfg.get("perception_mining"):
+        missing.append("perception_mining")
     if "repair_config" not in cfg:
         missing.append("repair_config")
     if missing:
         raise ValueError(f"{path} is missing required fields: {missing}")
     _validate_output_dir(cfg["output_dir"])
+    mining = dict(cfg.get("perception_mining") or {})
+    _validate_mining_tool(mining)
+    if not _has_mining_source(cfg):
+        raise ValueError(
+            "perception_mining requires chunk_manifest, scene_list, route_scene_list, or scene_pool"
+        )
     return cfg
 
 
@@ -381,20 +413,17 @@ def _config_from_cli_args(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if missing:
         raise ValueError(f"missing required CLI arguments: {missing}")
-    if args.scene_list is None and args.route_root is None:
-        raise ValueError("one of --scene_list or --route_root is required")
+    if args.scene_list is None and args.chunk_manifest is None:
+        raise ValueError("one of --scene_list or --chunk_manifest is required")
     contract = {
         "model_path": str(args.model_path),
         "scene_list": str(args.scene_list) if args.scene_list else None,
-        "route_root": str(args.route_root) if args.route_root else None,
-        "saved_predictions_dir": str(args.saved_predictions_dir)
-        if args.saved_predictions_dir
-        else None,
+        "chunk_manifest": str(args.chunk_manifest) if args.chunk_manifest else None,
         "workflow_config": str(args.workflow_config),
         "training_config": str(args.training_config),
         "output_dir": str(args.output_dir),
     }
-    return _legacy_from_workflow_contract(contract)
+    return _config_from_workflow_contract(contract)
 
 
 def _run(
@@ -416,6 +445,62 @@ def _run(
     return elapsed
 
 
+def _env_for_gpu(gpu_id: int | None) -> dict[str, str]:
+    env = dict(os.environ)
+    repo_root = Path(__file__).resolve().parents[3]
+    pythonpath_entries = [str(repo_root), str(repo_root / "diffusion_planner")]
+    if env.get("PYTHONPATH"):
+        pythonpath_entries.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    return env
+
+
+def _run_parallel(
+    jobs: list[tuple[str, list[str], Path, dict[str, str] | None]],
+    *,
+    cwd: Path | None = None,
+) -> float:
+    if not jobs:
+        return 0.0
+    t0 = time.perf_counter()
+    running = []
+    logs = []
+    for label, cmd, log_path, env in jobs:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = open(log_path, "w")
+        logs.append(log)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd,
+            env=env,
+        )
+        running.append((label, cmd, log_path, proc))
+        print(f"  started {label}: {' '.join(cmd)}; log: {log_path}")
+    failures = []
+    try:
+        for label, cmd, log_path, proc in running:
+            rc = proc.wait()
+            if rc != 0:
+                failures.append((label, rc, cmd, log_path))
+    finally:
+        for log in logs:
+            log.close()
+    elapsed = time.perf_counter() - t0
+    if failures:
+        details = "; ".join(
+            f"{label} failed ({rc}), see {log_path}: {' '.join(cmd)}"
+            for label, rc, cmd, log_path in failures
+        )
+        raise RuntimeError(f"Parallel stage failed after {elapsed:.1f}s: {details}")
+    print(f"  parallel stage completed in {elapsed:.1f}s")
+    return elapsed
+
+
 def _read_json_list(path: Path) -> list[Any]:
     raw = _load_any_json(path)
     if not isinstance(raw, list):
@@ -433,6 +518,44 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _split_jsonl_round_robin(rows: list[dict[str, Any]], paths: list[Path]) -> None:
+    shards = [[] for _ in paths]
+    for idx, row in enumerate(rows):
+        shards[idx % len(paths)].append(row)
+    for path, shard_rows in zip(paths, shards, strict=True):
+        _write_jsonl(path, shard_rows)
+
+
+def _canonical_path(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _require_unique_paths(paths: list[Path], context: str) -> None:
+    seen: dict[Path, Path] = {}
+    duplicates = []
+    for path in paths:
+        canonical = _canonical_path(path)
+        if canonical in seen:
+            duplicates.append(f"{seen[canonical]} and {path}")
+        seen[canonical] = path
+    if duplicates:
+        raise ValueError(f"{context} has duplicate paths: {duplicates}")
+
+
+def _require_disjoint_paths(left: list[Path], right: list[Path], context: str) -> None:
+    right_set = {_canonical_path(path) for path in right}
+    overlap = [str(path) for path in left if _canonical_path(path) in right_set]
+    if overlap:
+        raise ValueError(f"{context} paths overlap with merged outputs: {overlap}")
 
 
 def _latest_run_dir(output_dir: Path, name: str) -> Path:
@@ -489,238 +612,113 @@ def _checkpoint_for(run_dir: Path, policy: str, current_model_path: Path) -> Pat
 
 
 def _perception_mining_cmd(
-    cfg: dict[str, Any], model_path: Path, rdir: Path
+    cfg: dict[str, Any],
+    model_path: Path,
+    rdir: Path,
+    *,
+    out_dir: Path | None = None,
+    out_jsonl: Path | None = None,
+    segments_jsonl: Path | None = None,
+    summary_json: Path | None = None,
+    mining_overrides: dict[str, Any] | None = None,
 ) -> tuple[list[str], Path]:
     mining = dict(cfg.get("perception_mining") or {})
-    tool = str(mining.get("tool", mining.get("mode", "mine_collisions_reproducer")))
-    hits_jsonl = rdir / "perception_reproducer_hits.jsonl"
-    save_dir = rdir / "perception_reproducer_scenes"
-    danger_save_dir = rdir / "perception_danger_windows"
-    if tool in {"direct_reproducer_chunks", "direct_chunks"}:
-        chunk_manifest = mining.get("chunk_manifest")
-        scene_list = _first_non_null(
-            mining.get("scene_list"),
-            cfg.get("route_scene_list"),
-            cfg.get("scene_pool"),
+    if mining_overrides:
+        mining.update(mining_overrides)
+    hits_jsonl = segments_jsonl or rdir / "perception_reproducer_hits.jsonl"
+    danger_save_dir = out_dir or rdir / "perception_danger_windows"
+    _validate_mining_tool(mining)
+    chunk_manifest = mining.get("chunk_manifest")
+    scene_list = _first_non_null(
+        mining.get("scene_list"),
+        cfg.get("route_scene_list"),
+        cfg.get("scene_pool"),
+    )
+    if scene_list is None and chunk_manifest is None:
+        raise ValueError(
+            "perception_mining requires chunk_manifest, scene_list, route_scene_list, or scene_pool"
         )
-        if scene_list is None and chunk_manifest is None:
-            raise ValueError(
-                "perception_mining.tool=direct_reproducer_chunks requires chunk_manifest, "
-                "scene_list, route_scene_list, or scene_pool"
-            )
-        cmd = [
-            sys.executable,
-            "-m",
-            "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
-            "--model_path",
-            str(model_path),
-            "--out_dir",
-            str(danger_save_dir),
-            "--out_jsonl",
-            str(rdir / "perception_direct_credit_windows.jsonl"),
-            "--segments_jsonl",
-            str(hits_jsonl),
-            "--summary_json",
-            str(rdir / "perception_direct_summary.json"),
-            "--chunk_len",
-            str(mining.get("chunk_len", 80)),
-            "--start_stride",
-            str(mining.get("start_stride", mining.get("chunk_len", 80))),
-            "--batch_size",
-            str(mining.get("batch_size", 64)),
-            "--timeline_build_workers",
-            str(mining.get("timeline_build_workers", 8)),
-            "--n_build_threads",
-            str(mining.get("n_build_threads", 16)),
-            "--prefetch_ahead",
-            str(mining.get("prefetch_ahead", 2)),
-            "--danger_reward_config",
-            str(cfg["reward_config"]),
-            "--danger_threshold_config",
-            str(cfg["threshold_config"]),
-            "--danger_credit_window_config",
-            str(cfg["credit_window_config"]),
-            "--labels",
-            ",".join(cfg.get("mine_labels") or []),
-            "--skip_bad_chunks",
-        ]
-        if chunk_manifest is not None:
-            cmd.extend(["--chunk_manifest", str(chunk_manifest)])
-        else:
-            cmd.extend(["--scene_list", str(scene_list)])
-        optional_keys = (
-            "max_scenes",
-            "max_chunks",
-            "num_shards",
-            "shard_index",
-            "sample_fraction",
-            "sample_seed",
-            "expected_frame_step",
-            "min_chunk_len",
-            "max_pose_step_m",
-            "max_pose_speed_mps",
-            "max_yaw_step_rad",
-            "near_miss_thresh",
-            "search_radius",
-            "warmup_steps",
-            "max_steps_mult",
-            "goal_reach_m",
-            "unstick_after",
-            "unstick_advance_m",
-            "device",
-            "tracker_mode",
-            "timeline_progress_mode",
-            "neighbor_history_mode",
-            "danger_decluster_steps",
-        )
-        for key in optional_keys:
-            if key in mining and mining[key] is not None:
-                cmd.extend([f"--{key}", str(mining[key])])
-        if mining.get("sidecar_root"):
-            cmd.extend(["--sidecar_root", str(mining["sidecar_root"])])
-        if bool(mining.get("gpu_transform", True)):
-            cmd.append("--gpu_transform")
-        if bool(cfg.get("enable_conflict_detector", False)) or bool(
-            mining.get("enable_conflict_detector", False)
-        ):
-            cmd.append("--enable_conflict_detector")
-        if bool(mining.get("prebuild_neighbor_tracks", True)) is False:
-            cmd.append("--no_prebuild_neighbor_tracks")
-        if bool(mining.get("allow_existing_out_dir", False)):
-            cmd.append("--allow_existing_out_dir")
-        return cmd, danger_save_dir
-
-    missing = [k for k in ("npz_root",) if k not in mining]
-    if missing:
-        raise ValueError(f"perception_mining is missing required fields: {missing}")
     cmd = [
         sys.executable,
         "-m",
-        "rlvr.autoresearch.tools.mine_collisions_reproducer",
-        "--npz_root",
-        str(mining["npz_root"]),
+        "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
         "--model_path",
         str(model_path),
-        "--out",
+        "--out_dir",
+        str(danger_save_dir),
+        "--out_jsonl",
+        str(out_jsonl or rdir / "credit_windows.jsonl"),
+        "--segments_jsonl",
         str(hits_jsonl),
-        "--seg_len",
-        str(mining.get("seg_len", 600)),
-        "--max_segments",
-        str(mining.get("max_segments", 1)),
+        "--summary_json",
+        str(summary_json or rdir / "perception_direct_summary.json"),
+        "--chunk_len",
+        str(mining.get("chunk_len", 80)),
+        "--start_stride",
+        str(mining.get("start_stride", mining.get("chunk_len", 80))),
         "--batch_size",
-        str(mining.get("batch_size", 1)),
-        "--save_dir",
-        str(save_dir),
-        "--save_thresh",
-        str(mining.get("save_thresh", 0.5)),
-        "--save_pre_steps",
-        str(mining.get("save_pre_steps", 80)),
-        "--save_max_scenes",
-        str(mining.get("save_max_scenes", 160)),
-        "--save_min_pre_frames",
-        str(mining.get("save_min_pre_frames", 30)),
-        "--save_min_ego_speed",
-        str(mining.get("save_min_ego_speed", 0.5)),
-        "--dump_hits",
-        str(mining.get("dump_hits", 0)),
+        str(mining.get("batch_size", 64)),
+        "--timeline_build_workers",
+        str(mining.get("timeline_build_workers", 8)),
+        "--n_build_threads",
+        str(mining.get("n_build_threads", 16)),
+        "--prefetch_ahead",
+        str(mining.get("prefetch_ahead", 2)),
+        "--danger_reward_config",
+        str(cfg["reward_config"]),
+        "--danger_threshold_config",
+        str(cfg["threshold_config"]),
+        "--danger_credit_window_config",
+        str(cfg["credit_window_config"]),
+        "--labels",
+        ",".join(cfg.get("mine_labels") or []),
+        "--skip_bad_chunks",
     ]
-    if bool(mining.get("danger_search", True)):
-        cmd.extend(
-            [
-                "--danger_save_dir",
-                str(danger_save_dir),
-                "--danger_reward_config",
-                str(cfg["reward_config"]),
-                "--danger_threshold_config",
-                str(cfg["threshold_config"]),
-                "--danger_credit_window_config",
-                str(cfg["credit_window_config"]),
-                "--danger_decluster_steps",
-                str(mining.get("danger_decluster_steps", 10)),
-            ]
-        )
-    if mining.get("sidecar_root"):
-        cmd.extend(["--sidecar_root", str(mining["sidecar_root"])])
-    for key in (
+    if chunk_manifest is not None:
+        cmd.extend(["--chunk_manifest", str(chunk_manifest)])
+    else:
+        cmd.extend(["--scene_list", str(scene_list)])
+    optional_keys = (
+        "max_scenes",
+        "max_chunks",
+        "num_shards",
+        "shard_index",
+        "sample_fraction",
+        "sample_seed",
+        "expected_frame_step",
+        "min_chunk_len",
+        "max_pose_step_m",
+        "max_pose_speed_mps",
+        "max_yaw_step_rad",
         "near_miss_thresh",
         "search_radius",
         "warmup_steps",
-        "device",
-        "max_routes",
-        "n_build_threads",
-        "prefetch_ahead",
         "max_steps_mult",
+        "goal_reach_m",
         "unstick_after",
         "unstick_advance_m",
-        "save_pre_arc_m",
-        "save_min_post_snap_s",
-    ):
-        if key in mining:
+        "device",
+        "tracker_mode",
+        "timeline_progress_mode",
+        "neighbor_history_mode",
+        "danger_decluster_steps",
+    )
+    for key in optional_keys:
+        if key in mining and mining[key] is not None:
             cmd.extend([f"--{key}", str(mining[key])])
-    if bool(mining.get("preload", False)):
-        cmd.append("--preload")
-    if bool(mining.get("gpu_transform", False)):
+    if mining.get("sidecar_root"):
+        cmd.extend(["--sidecar_root", str(mining["sidecar_root"])])
+    if bool(mining.get("gpu_transform", True)):
         cmd.append("--gpu_transform")
     if bool(cfg.get("enable_conflict_detector", False)) or bool(
         mining.get("enable_conflict_detector", False)
     ):
         cmd.append("--enable_conflict_detector")
-    if bool(mining.get("render_webm", False)):
-        if int(mining.get("dump_hits", 0)) <= 0:
-            raise ValueError("perception_mining.render_webm requires dump_hits > 0")
-        cmd.append("--render_webm")
-    if "webm_fps" in mining:
-        cmd.extend(["--webm_fps", str(mining["webm_fps"])])
-    return cmd, danger_save_dir if bool(mining.get("danger_search", True)) else save_dir
-
-
-def _event_metadata_from_path(scene_path: str) -> dict[str, Any]:
-    parent = Path(scene_path).parent.name
-    meta: dict[str, Any] = {"event_key": parent, "window_dir": str(Path(scene_path).parent)}
-    if "_danger_" in parent:
-        stem, label = parent.rsplit("_danger_", 1)
-        meta["label"] = label
-    elif "_credit_" in parent:
-        stem, label = parent.rsplit("_credit_", 1)
-        meta["label"] = label
-    else:
-        return meta
-    parts = stem.rsplit("_", 2)
-    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
-        meta["route_key"] = parts[0]
-        meta["start_frame"] = int(parts[1])
-        meta["event_frame"] = int(parts[2])
-    return meta
-
-
-def _write_scene_list_from_saved_batches(save_dir: Path, out_path: Path) -> list[str]:
-    scenes = sorted(str(p) for p in save_dir.rglob("credit*.npz"))
-    if not scenes:
-        scenes = sorted(str(p) for p in save_dir.rglob("collision*.npz"))
-    if not scenes:
-        raise FileNotFoundError(f"Perception mining saved no scenes under {save_dir}")
-    out_path.write_text(json.dumps(scenes, indent=2))
-    return scenes
-
-
-def _write_credit_rows_from_scene_list(scene_list: list[str], out_jsonl: Path) -> None:
-    out_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_jsonl, "w") as f:
-        for scene in scene_list:
-            meta = _event_metadata_from_path(scene)
-            label = str(meta.get("label", "perception_reproducer"))
-            row = {
-                "scene_path": scene,
-                "label": label,
-                "labels": [label],
-                "variant_kind": "perception_reproducer",
-                "window_dir": meta.get("window_dir"),
-                "event_key": meta.get("event_key"),
-            }
-            for key in ("route_key", "start_frame", "event_frame"):
-                if key in meta:
-                    row[key] = meta[key]
-            f.write(json.dumps(row, sort_keys=True) + "\n")
+    if bool(mining.get("prebuild_neighbor_tracks", True)) is False:
+        cmd.append("--no_prebuild_neighbor_tracks")
+    if bool(mining.get("allow_existing_out_dir", False)):
+        cmd.append("--allow_existing_out_dir")
+    return cmd, danger_save_dir
 
 
 def _args_json_for_model(model_path: Path) -> Path:
@@ -775,139 +773,27 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
     _write_json(out_path, merged)
 
 
-def _classify_cmd(
+def _repair_cmd(
     cfg: dict[str, Any],
-    *,
-    scene_pool: Path,
-    classify_dir: Path,
     model_path: Path,
-) -> list[str]:
-    trajectory = str(cfg.get("trajectory", "det"))
-    cmd = [
-        sys.executable,
-        "-m",
-        "rlvr.autoresearch.tools.classify_scene_failures",
-        "--scenes",
-        str(scene_pool),
-        "--config",
-        str(cfg["reward_config"]),
-        "--threshold_config",
-        str(cfg["threshold_config"]),
-        "--output_dir",
-        str(classify_dir),
-        "--trajectory",
-        trajectory,
-        "--batch_size",
-        str(cfg.get("classify_batch_size", 32)),
-        "--device",
-        str(cfg.get("classify_device", "cuda")),
-    ]
-    if trajectory == "det":
-        cmd.extend(["--model_path", str(model_path)])
-        if cfg.get("classify_save_predictions_dir"):
-            cmd.extend(["--save_predictions_dir", str(Path(cfg["classify_save_predictions_dir"]))])
-    elif trajectory == "saved_pred":
-        predictions_dir = cfg.get("classify_predictions_dir")
-        if not predictions_dir:
-            raise ValueError(
-                "trajectory=saved_pred requires classify_predictions_dir in the round config"
-            )
-        cmd.extend(["--predictions_dir", str(Path(predictions_dir))])
-        if cfg.get("classify_prediction_scene_root"):
-            cmd.extend(
-                ["--prediction_scene_root", str(Path(cfg["classify_prediction_scene_root"]))]
-            )
-    else:
-        raise ValueError(f"Unsupported trajectory mode {trajectory!r}")
-    if bool(cfg.get("enable_conflict_detector", False)):
-        cmd.append("--enable_conflict_detector")
-    if bool(cfg.get("count_rear_end_collisions", False)):
-        cmd.append("--count_rear_end_collisions")
-    return cmd
-
-
-def _mine_credit_cmd(
-    cfg: dict[str, Any],
-    *,
-    scene_pool_root: Path | None,
-    route_scene_list: Path | None,
-    classify_dir: Path,
-    model_path: Path,
-    credit_dir: Path,
     credit_jsonl: Path,
-    events_json: Path,
+    rdir: Path,
+    *,
+    out_dir: Path | None = None,
+    out_list: Path | None = None,
+    out_rows_jsonl: Path | None = None,
+    repair_overrides: dict[str, Any] | None = None,
+    allow_empty: bool = False,
 ) -> list[str]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "rlvr.autoresearch.tools.mine_credit_window_scenes",
-        "--classified_scenes_jsonl",
-        str(classify_dir / "classified_scenes.jsonl"),
-        "--credit_window_config",
-        str(cfg["credit_window_config"]),
-        "--model_path",
-        str(model_path),
-        "--out_dir",
-        str(credit_dir),
-        "--out_jsonl",
-        str(credit_jsonl),
-        "--out_events_json",
-        str(events_json),
-        "--batch_size",
-        str(cfg.get("mine_batch_size", 16)),
-        "--device",
-        str(cfg.get("mine_device", "cuda")),
-        "--neighbor_history_mode",
-        str(cfg.get("neighbor_history_mode", "sim")),
-        "--timeline_progress_mode",
-        str(cfg.get("timeline_progress_mode", "clock")),
-        "--tracker_mode",
-        str(cfg.get("tracker_mode", "mpc")),
-        "--goal_reach_m",
-        str(cfg.get("mine_goal_reach_m", 0.0)),
-        "--classified_decluster_steps",
-        str(cfg.get("classified_decluster_steps", 10)),
-        "--anchor_horizon_steps",
-        str(cfg.get("anchor_horizon_steps", 40)),
-        "--max_rollout_steps",
-        str(cfg.get("max_rollout_steps", 80)),
-    ]
-    if scene_pool_root is not None:
-        cmd.extend(["--route_npz_root", str(scene_pool_root)])
-    elif route_scene_list is not None:
-        cmd.extend(["--route_scene_list", str(route_scene_list)])
-    else:
-        raise ValueError("either scene_pool_root or route_scene_list is required for event mining")
-    mine_labels = cfg.get("mine_labels")
-    if mine_labels:
-        cmd.extend(["--labels", ",".join(mine_labels)])
-    if bool(cfg.get("mine_gpu_transform", False)):
-        cmd.append("--gpu_transform")
-    if bool(cfg.get("verify_reproduced_issue", True)):
-        cmd.extend(
-            [
-                "--verify_reproduced_issue",
-                "--reward_config",
-                str(cfg["reward_config"]),
-                "--threshold_config",
-                str(cfg["threshold_config"]),
-                "--danger_decluster_steps",
-                str(cfg.get("danger_decluster_steps", 10)),
-            ]
-        )
-        if bool(cfg.get("enable_conflict_detector", False)):
-            cmd.append("--enable_conflict_detector")
-    return cmd
-
-
-def _repair_cmd(cfg: dict[str, Any], model_path: Path, credit_jsonl: Path, rdir: Path) -> list[str]:
     repair_cfg = dict(cfg.get("repair_config") or {})
+    if repair_overrides:
+        repair_cfg.update(repair_overrides)
     missing = [k for k in ("ego_shape", "min_margin") if k not in repair_cfg]
     if missing:
         raise ValueError(f"repair_config is missing required fields: {missing}")
-    repaired_dir = rdir / "repaired_targets"
-    repaired_list = rdir / "repaired_targets.json"
-    repaired_rows = rdir / "repaired_targets.jsonl"
+    repaired_dir = out_dir or rdir / "repaired_targets"
+    repaired_list = out_list or rdir / "repaired_targets.json"
+    repaired_rows = out_rows_jsonl or rdir / "repaired_targets.jsonl"
     cmd = [
         sys.executable,
         "-m",
@@ -955,6 +841,8 @@ def _repair_cmd(cfg: dict[str, Any], model_path: Path, credit_jsonl: Path, rdir:
         cmd.append("--disable_route_cl_guidance")
     if bool(cfg.get("count_rear_end_collisions", False)):
         cmd.append("--count_rear_end_collisions")
+    if allow_empty:
+        cmd.append("--allow_empty")
     return cmd
 
 
@@ -1008,7 +896,9 @@ def _base_train_invocation(
     save_dir = rdir / "base_train"
     save_dir.mkdir(parents=True, exist_ok=True)
     total_epochs = _checkpoint_epoch(model_path) + int(cfg["epochs_per_round"])
-    nproc = int(train_cfg.get("nproc_per_node", overrides.pop("nproc_per_node", 1)))
+    gpu_ids = _gpu_ids_from_config(cfg)
+    default_nproc = len(gpu_ids) if gpu_ids else 1
+    nproc = int(train_cfg.get("nproc_per_node", overrides.pop("nproc_per_node", default_nproc)))
     master_port = str(train_cfg.get("master_port", overrides.pop("master_port", 29531 + round_idx)))
     train_scene_count = len(_read_json_list(train_list))
     if train_scene_count < 1:
@@ -1124,28 +1014,303 @@ def _base_train_invocation(
     if env.get("PYTHONPATH"):
         pythonpath_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    if gpu_ids:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in gpu_ids)
     return cmd, save_dir / "latest.pth", repo_root / "diffusion_planner", env
 
 
-def _prepare_scene_pool(cfg: dict[str, Any], rdir: Path) -> Path:
-    scene_pool = cfg.get("scene_pool")
-    if scene_pool:
-        path = Path(scene_pool)
-        if not path.exists():
-            raise FileNotFoundError(f"scene pool list does not exist: {path}")
-        return path
-    scene_pool_root = cfg.get("scene_pool_root")
-    if scene_pool_root is None:
-        raise ValueError("scene_pool or scene_pool_root is required")
-    paths = sorted(str(p) for p in Path(scene_pool_root).rglob("*.npz"))
-    if not paths:
-        raise FileNotFoundError(f"No route NPZ files under {scene_pool_root}")
-    scene_pool_path = rdir / "route_scene_pool.json"
-    _write_json(scene_pool_path, paths)
-    cfg["scene_pool"] = str(scene_pool_path)
-    if "route_scene_list" not in cfg:
-        cfg["route_scene_list"] = str(scene_pool_path)
-    return scene_pool_path
+def _source_scene_list(cfg: dict[str, Any]) -> Path | None:
+    mining = dict(cfg.get("perception_mining") or {})
+    source = _first_non_null(
+        mining.get("scene_list"),
+        cfg.get("route_scene_list"),
+        cfg.get("scene_pool"),
+    )
+    if source is None:
+        return None
+    path = Path(source)
+    if not path.exists():
+        raise FileNotFoundError(f"scene list does not exist: {path}")
+    cfg["scene_pool"] = str(path)
+    cfg["route_scene_list"] = str(path)
+    mining["scene_list"] = str(path)
+    cfg["perception_mining"] = mining
+    return path
+
+
+def _merge_jsonl_files(inputs: list[Path], output: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in inputs:
+        rows.extend(_read_jsonl(path))
+    _write_jsonl(output, rows)
+    return rows
+
+
+def _merge_json_lists(inputs: list[Path], output: Path) -> list[str]:
+    merged: list[str] = []
+    for path in inputs:
+        if path.exists():
+            merged.extend(str(p) for p in _read_json_list(path))
+    _write_json(output, merged)
+    return merged
+
+
+def _merge_unrepaired_lists(inputs: list[Path], output: Path) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for path in inputs:
+        if path.exists():
+            merged.extend(dict(row) for row in _read_json_list(path))
+    if merged:
+        _write_json(output, merged)
+    return merged
+
+
+def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
+    summaries = [_load_json(path) for path in inputs if path.exists()]
+    aggregate = {
+        "planned_chunks": sum(int(s.get("planned_chunks", 0)) for s in summaries),
+        "simulated_chunks": sum(int(s.get("simulated_chunks", 0)) for s in summaries),
+        "skipped_chunks": sum(int(s.get("skipped_chunks", 0)) for s in summaries),
+        "credit_rows": sum(int(s.get("credit_rows", 0)) for s in summaries),
+        "elapsed_sec": max((float(s.get("elapsed_sec", 0.0)) for s in summaries), default=0.0),
+        "shards": summaries,
+    }
+    _write_json(output, aggregate)
+    return aggregate
+
+
+def _run_mining_phase(
+    cfg: dict[str, Any],
+    model_path: Path,
+    rdir: Path,
+    gpu_ids: list[int],
+) -> float:
+    credit_jsonl = rdir / "credit_windows.jsonl"
+    segments_jsonl = rdir / "perception_reproducer_hits.jsonl"
+    summary_json = rdir / "perception_direct_summary.json"
+    if len(gpu_ids) <= 1:
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        cmd, _ = _perception_mining_cmd(
+            cfg,
+            model_path,
+            rdir,
+            mining_overrides={"device": "cuda"} if gpu_id is not None else None,
+        )
+        elapsed = _run(cmd, rdir / "perception_mine.log", env=_env_for_gpu(gpu_id))
+        rows = _read_jsonl(credit_jsonl)
+        _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
+        return elapsed
+
+    shard_root = rdir / "perception_mine_shards"
+    jobs = []
+    credit_parts = []
+    segment_parts = []
+    summary_parts = []
+    window_dirs = []
+    for shard_index, gpu_id in enumerate(gpu_ids):
+        shard_dir = shard_root / f"shard_{shard_index:02d}"
+        credit_part = shard_dir / "credit_windows.jsonl"
+        segment_part = shard_dir / "segments.jsonl"
+        summary_part = shard_dir / "summary.json"
+        window_dir = shard_dir / "windows"
+        credit_parts.append(credit_part)
+        segment_parts.append(segment_part)
+        summary_parts.append(summary_part)
+        window_dirs.append(window_dir)
+        cmd, _ = _perception_mining_cmd(
+            cfg,
+            model_path,
+            rdir,
+            out_dir=window_dir,
+            out_jsonl=credit_part,
+            segments_jsonl=segment_part,
+            summary_json=summary_part,
+            mining_overrides={
+                "num_shards": len(gpu_ids),
+                "shard_index": shard_index,
+                "device": "cuda",
+            },
+        )
+        jobs.append(
+            (
+                f"perception_mine[{shard_index}]",
+                cmd,
+                shard_dir / "perception_mine.log",
+                _env_for_gpu(gpu_id),
+            )
+        )
+    _require_unique_paths(
+        [*credit_parts, *segment_parts, *summary_parts, *window_dirs, *[job[2] for job in jobs]],
+        "perception mining shards",
+    )
+    _require_disjoint_paths(
+        [*credit_parts, *segment_parts, *summary_parts],
+        [credit_jsonl, segments_jsonl, summary_json],
+        "perception mining shard outputs",
+    )
+    elapsed = _run_parallel(jobs)
+    rows = _merge_jsonl_files(credit_parts, credit_jsonl)
+    _merge_jsonl_files(segment_parts, segments_jsonl)
+    _merge_mining_summaries(summary_parts, summary_json)
+    _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
+    return elapsed
+
+
+def _run_repair_phase(
+    cfg: dict[str, Any],
+    model_path: Path,
+    rdir: Path,
+    gpu_ids: list[int],
+) -> float:
+    credit_jsonl = rdir / "credit_windows.jsonl"
+    rows = _read_jsonl(credit_jsonl)
+    if not rows:
+        raise RuntimeError(f"{credit_jsonl} is empty; no mined scenes to repair")
+    if len(gpu_ids) <= 1:
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        overrides = {"device": "cuda"} if gpu_id is not None else None
+        cmd = _repair_cmd(
+            cfg,
+            model_path,
+            credit_jsonl,
+            rdir,
+            repair_overrides=overrides,
+        )
+        return _run(cmd, rdir / "repair.log", env=_env_for_gpu(gpu_id))
+
+    shard_root = rdir / "repair_shards"
+    shard_inputs = [
+        shard_root / f"shard_{idx:02d}" / "credit_windows.jsonl" for idx in range(len(gpu_ids))
+    ]
+    _split_jsonl_round_robin(rows, shard_inputs)
+    jobs = []
+    repaired_lists = []
+    repaired_rows_jsonls = []
+    unrepaired_lists = []
+    repaired_dirs = []
+    for shard_index, (gpu_id, shard_input) in enumerate(zip(gpu_ids, shard_inputs, strict=True)):
+        shard_dir = shard_input.parent
+        out_list = shard_dir / "repaired_targets.json"
+        out_rows = shard_dir / "repaired_targets.jsonl"
+        out_dir = shard_dir / "repaired_targets"
+        repaired_lists.append(out_list)
+        repaired_rows_jsonls.append(out_rows)
+        unrepaired_lists.append(shard_dir / "repaired_targets_unrepaired.json")
+        repaired_dirs.append(out_dir)
+        cmd = _repair_cmd(
+            cfg,
+            model_path,
+            shard_input,
+            rdir,
+            out_dir=out_dir,
+            out_list=out_list,
+            out_rows_jsonl=out_rows,
+            repair_overrides={"device": "cuda"},
+            allow_empty=True,
+        )
+        jobs.append(
+            (
+                f"repair[{shard_index}]",
+                cmd,
+                shard_dir / "repair.log",
+                _env_for_gpu(gpu_id),
+            )
+        )
+    _require_unique_paths(
+        [
+            *shard_inputs,
+            *repaired_lists,
+            *repaired_rows_jsonls,
+            *unrepaired_lists,
+            *repaired_dirs,
+            *[job[2] for job in jobs],
+        ],
+        "repair shards",
+    )
+    _require_disjoint_paths(
+        [*shard_inputs, *repaired_lists, *repaired_rows_jsonls, *unrepaired_lists],
+        [
+            credit_jsonl,
+            rdir / "repaired_targets.json",
+            rdir / "repaired_targets.jsonl",
+            rdir / "repaired_targets_unrepaired.json",
+        ],
+        "repair shard outputs",
+    )
+    elapsed = _run_parallel(jobs)
+    repaired_paths = _merge_json_lists(repaired_lists, rdir / "repaired_targets.json")
+    _merge_jsonl_files(repaired_rows_jsonls, rdir / "repaired_targets.jsonl")
+    _merge_unrepaired_lists(unrepaired_lists, rdir / "repaired_targets_unrepaired.json")
+    if not repaired_paths:
+        raise RuntimeError("No repaired targets were produced across repair shards")
+    return elapsed
+
+
+def _print_dry_run_plan(
+    cfg: dict[str, Any],
+    model_path: Path,
+    rdir: Path,
+    gpu_ids: list[int],
+    memory_cmd: list[str],
+    round_idx: int,
+) -> None:
+    if len(gpu_ids) <= 1:
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        mining_cmd, _ = _perception_mining_cmd(
+            cfg,
+            model_path,
+            rdir,
+            mining_overrides={"device": "cuda"} if gpu_id is not None else None,
+        )
+        repair_cmd = _repair_cmd(
+            cfg,
+            model_path,
+            rdir / "credit_windows.jsonl",
+            rdir,
+            repair_overrides={"device": "cuda"} if gpu_id is not None else None,
+        )
+        prefix = f"CUDA_VISIBLE_DEVICES={gpu_id} " if gpu_id is not None else ""
+        print(f"[round {round_idx}] perception_mine: {prefix}{' '.join(mining_cmd)}")
+        print(f"[round {round_idx}] repair: {prefix}{' '.join(repair_cmd)}")
+    else:
+        for shard_index, gpu_id in enumerate(gpu_ids):
+            shard_dir = rdir / "perception_mine_shards" / f"shard_{shard_index:02d}"
+            mining_cmd, _ = _perception_mining_cmd(
+                cfg,
+                model_path,
+                rdir,
+                out_dir=shard_dir / "windows",
+                out_jsonl=shard_dir / "credit_windows.jsonl",
+                segments_jsonl=shard_dir / "segments.jsonl",
+                summary_json=shard_dir / "summary.json",
+                mining_overrides={
+                    "num_shards": len(gpu_ids),
+                    "shard_index": shard_index,
+                    "device": "cuda",
+                },
+            )
+            print(
+                f"[round {round_idx}] perception_mine[{shard_index}]: "
+                f"CUDA_VISIBLE_DEVICES={gpu_id} {' '.join(mining_cmd)}"
+            )
+        for shard_index, gpu_id in enumerate(gpu_ids):
+            shard_dir = rdir / "repair_shards" / f"shard_{shard_index:02d}"
+            repair_cmd = _repair_cmd(
+                cfg,
+                model_path,
+                shard_dir / "credit_windows.jsonl",
+                rdir,
+                out_dir=shard_dir / "repaired_targets",
+                out_list=shard_dir / "repaired_targets.json",
+                out_rows_jsonl=shard_dir / "repaired_targets.jsonl",
+                repair_overrides={"device": "cuda"},
+                allow_empty=True,
+            )
+            print(
+                f"[round {round_idx}] repair[{shard_index}]: "
+                f"CUDA_VISIBLE_DEVICES={gpu_id} {' '.join(repair_cmd)}"
+            )
+    print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
 
 
 def _derive_event_counts_from_credit_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -1164,56 +1329,30 @@ def _summarize_round(
     cfg: dict[str, Any],
     round_idx: int,
     rdir: Path,
-    scene_pool: Path,
+    scene_list: Path | None,
     train_input_list: Path,
     phase_times: dict[str, float],
     next_model_path: Path,
 ) -> None:
-    classify_summary = _load_json(rdir / "classified" / "summary.json")
+    mining_summary = _load_json(rdir / "perception_direct_summary.json")
     credit_rows = _read_jsonl(rdir / "credit_windows.jsonl")
     repaired_rows = _read_jsonl(rdir / "repaired_targets.jsonl")
-    events_json = rdir / "selected_events.json"
-    events = _read_json_list(events_json) if events_json.exists() else []
     memory = _load_json(rdir / f"round_{round_idx}_memory.json")
     unrepaired_path = rdir / "repaired_targets_unrepaired.json"
     unrepaired_rows = _read_json_list(unrepaired_path) if unrepaired_path.exists() else []
-    route_scene_count = len(_read_json_list(scene_pool))
+    route_scene_count = len(_read_json_list(scene_list)) if scene_list is not None else None
     train_scene_count = len(_read_json_list(train_input_list))
 
-    label_counts = {
-        label: int(count)
-        for label, count in sorted(classify_summary.get("label_counts", {}).items())
-        if label != "clean"
-    }
-    if events:
-        event_counts = dict(sorted(Counter(str(event["label"]) for event in events).items()))
-        timestamp_counts: dict[str, int] = defaultdict(int)
-        for event in events:
-            timestamp_counts[str(event["label"])] += int(event.get("event_member_count", 1))
-        timestamp_counts = dict(sorted(timestamp_counts.items()))
-    else:
-        event_counts = _derive_event_counts_from_credit_rows(credit_rows)
-        timestamp_counts = label_counts
-    reproduced_event_counts = _derive_event_counts_from_credit_rows(credit_rows)
+    event_counts = _derive_event_counts_from_credit_rows(credit_rows)
 
     summary = {
         "round_idx": int(round_idx),
         "route_scene_count": route_scene_count,
-        "deterministic_predictions": {
-            "loaded": int(classify_summary["n_classified"])
-            if str(cfg.get("trajectory", "det")) == "saved_pred"
-            else 0,
-            "computed": int(classify_summary["n_classified"])
-            if str(cfg.get("trajectory", "det")) == "det"
-            else 0,
-        },
-        "violating_timestamps_by_label": timestamp_counts,
-        "judged_label_counts": label_counts,
-        "open_loop_event_count_by_label": event_counts,
-        "distinct_events_by_label": event_counts,
+        "planned_chunks": int(mining_summary.get("planned_chunks", 0)),
+        "simulated_chunks": int(mining_summary.get("simulated_chunks", 0)),
+        "skipped_chunks": int(mining_summary.get("skipped_chunks", 0)),
+        "mined_event_count_by_label": event_counts,
         "simulated_event_count": int(sum(event_counts.values())),
-        "reproduced_event_count_by_label": reproduced_event_counts,
-        "reproduced_event_count": int(sum(reproduced_event_counts.values())),
         "generated_scene_count": len(credit_rows),
         "accepted_repaired_scene_count": len(repaired_rows),
         "discarded_unrepaired_scene_count": len(unrepaired_rows),
@@ -1231,8 +1370,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--model_path", type=Path)
     parser.add_argument("--scene_list", type=Path)
-    parser.add_argument("--route_root", type=Path)
-    parser.add_argument("--saved_predictions_dir", type=Path)
+    parser.add_argument("--chunk_manifest", type=Path)
     parser.add_argument("--workflow_config", type=Path)
     parser.add_argument("--training_config", type=Path)
     parser.add_argument("--output_dir", type=Path)
@@ -1258,45 +1396,15 @@ def main() -> None:
     for round_idx in range(1, int(cfg["rounds"]) + 1):
         rdir = out / f"r2lpl_round_{round_idx:03d}"
         rdir.mkdir(parents=True, exist_ok=True)
-        classify_dir = rdir / "classified"
-        credit_dir = rdir / "credit_windows"
         credit_jsonl = rdir / "credit_windows.jsonl"
         repaired_rows_jsonl = rdir / "repaired_targets.jsonl"
         repaired_list_json = rdir / "repaired_targets.json"
         memory_json = rdir / f"round_{round_idx}_memory.json"
         replay_json = rdir / f"round_{round_idx}_replay_scenes.json"
-        events_json = rdir / "selected_events.json"
         train_input_list = rdir / "train_scenes.json"
         name = f"r2lpl_round_{round_idx:03d}"
-        scene_pool = _prepare_scene_pool(cfg, rdir)
-        scene_pool_root = Path(cfg["scene_pool_root"]) if "scene_pool_root" in cfg else None
-        route_scene_list = Path(cfg["route_scene_list"]) if "route_scene_list" in cfg else None
-        use_perception_as_credit = (
-            bool(
-                (cfg.get("perception_mining") or {}).get("use_saved_scenes_as_credit_windows", True)
-            )
-            if cfg.get("perception_mining") is not None
-            else False
-        )
-
-        classify_cmd = _classify_cmd(
-            cfg,
-            scene_pool=scene_pool,
-            classify_dir=classify_dir,
-            model_path=model_path,
-        )
-        mine_cmd = None
-        if not use_perception_as_credit:
-            mine_cmd = _mine_credit_cmd(
-                cfg,
-                scene_pool_root=scene_pool_root,
-                route_scene_list=route_scene_list,
-                classify_dir=classify_dir,
-                model_path=model_path,
-                credit_dir=credit_dir,
-                credit_jsonl=credit_jsonl,
-                events_json=events_json,
-            )
+        scene_list = _source_scene_list(cfg)
+        gpu_ids = _gpu_ids_from_config(cfg)
 
         mem_cfg = dict(cfg["replay_memory"])
         memory_cmd = [
@@ -1322,36 +1430,17 @@ def main() -> None:
             memory_cmd.extend(["--previous_memory", str(previous_memory)])
 
         phase_times: dict[str, float] = {}
-        cmds: list[tuple[str, list[str]]] = []
-        perception_save_dir = None
-        if cfg.get("perception_mining"):
-            perception_cmd, perception_save_dir = _perception_mining_cmd(cfg, model_path, rdir)
-            cmds.append(("perception_mine", perception_cmd))
-        cmds.append(("classify", classify_cmd))
-        if mine_cmd is not None:
-            cmds.append(("mine", mine_cmd))
-        cmds.append(("repair", _repair_cmd(cfg, model_path, credit_jsonl, rdir)))
-        cmds.append(("memory", memory_cmd))
-
-        for label, cmd in cmds:
-            print(f"[round {round_idx}] {label}: {' '.join(cmd)}")
-            if args.dry_run:
-                continue
-            phase_times[label] = _run(cmd, rdir / f"{label}.log")
-            if label == "perception_mine":
-                assert perception_save_dir is not None
-                scenes = _write_scene_list_from_saved_batches(perception_save_dir, scene_pool)
-                if use_perception_as_credit:
-                    _write_credit_rows_from_scene_list(scenes, credit_jsonl)
-            if label == "mine":
-                rows = _read_jsonl(credit_jsonl)
-                _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
-            if label == "classify" and use_perception_as_credit and not credit_jsonl.exists():
-                scenes = [str(p) for p in _read_json_list(scene_pool)]
-                _write_credit_rows_from_scene_list(scenes, credit_jsonl)
 
         if args.dry_run:
+            _print_dry_run_plan(cfg, model_path, rdir, gpu_ids, memory_cmd, round_idx)
             continue
+
+        print(f"[round {round_idx}] perception_mine")
+        phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
+        print(f"[round {round_idx}] repair")
+        phase_times["repair"] = _run_repair_phase(cfg, model_path, rdir, gpu_ids)
+        print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
+        phase_times["memory"] = _run(memory_cmd, rdir / "memory.log")
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
@@ -1405,7 +1494,7 @@ def main() -> None:
             cfg=cfg,
             round_idx=round_idx,
             rdir=rdir,
-            scene_pool=scene_pool,
+            scene_list=scene_list,
             train_input_list=train_input_list,
             phase_times=phase_times,
             next_model_path=model_path,

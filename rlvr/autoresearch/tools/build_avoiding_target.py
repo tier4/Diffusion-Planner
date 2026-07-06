@@ -350,6 +350,7 @@ def build_repaired_targets(
     enable_conflict_detector: bool,
     use_route_cl_guidance: bool,
     count_rear_end_collisions: bool,
+    allow_empty: bool = False,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -478,7 +479,7 @@ def build_repaired_targets(
                 f"slot={meta['selected_candidate_index']} total={meta['selected_total']:+.1f}"
             )
 
-    if not repaired_rows:
+    if not repaired_rows and not allow_empty:
         raise RuntimeError(
             "No repaired targets were produced; refusing to emit an empty training set"
         )
@@ -529,6 +530,11 @@ def main() -> None:
         action="store_true",
         help="Count moving collisions where the ego is struck from behind.",
     )
+    ap.add_argument(
+        "--allow_empty",
+        action="store_true",
+        help="Write empty outputs instead of failing when this shard has no accepted targets.",
+    )
     args = ap.parse_args()
 
     if not args.scene_rows_jsonl and not args.scenes:
@@ -551,6 +557,15 @@ def main() -> None:
         allowed_labels=allowed_labels,
     )
     if not rows:
+        if args.allow_empty:
+            out_list = Path(args.out_list)
+            out_list.parent.mkdir(parents=True, exist_ok=True)
+            out_list.write_text("[]")
+            if args.out_rows_jsonl:
+                out_rows = Path(args.out_rows_jsonl)
+                out_rows.parent.mkdir(parents=True, exist_ok=True)
+                out_rows.write_text("")
+            return
         raise RuntimeError("No repairable scene rows remained after label filtering")
 
     build_repaired_targets(
@@ -574,6 +589,7 @@ def main() -> None:
         enable_conflict_detector=bool(args.enable_conflict_detector),
         use_route_cl_guidance=not bool(args.disable_route_cl_guidance),
         count_rear_end_collisions=bool(args.count_rear_end_collisions),
+        allow_empty=bool(args.allow_empty),
     )
 
 
