@@ -2,7 +2,7 @@
 
 valid_predictor.py writes one ``loss{i:08d}.json`` per sample (loss_ego_total,
 loss_ego_3sec/5sec/8sec = FDE in metres, and various ego_* metrics). The mapping is
-positional: valid_run.sh runs single-GPU with ``shuffle=False``, so the i-th loss file
+positional: valid_predictor.py saves with ``shuffle=False``, so the i-th loss file
 corresponds to the i-th entry of the valid data list — the same convention
 visualize_prediction.py relies on. The sidecar json sits next to the npz (``<npz>.json``,
 written by the converter with is_skipped / skipping_info / pose).
@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
         "--valid_data_list",
         type=Path,
         required=True,
-        help="The exact path_list.json passed to valid_run.sh (defines sample order).",
+        help="The exact path_list.json passed to valid_run.py (defines sample order).",
     )
     parser.add_argument(
         "--predictions_dir",
@@ -58,7 +58,7 @@ def main() -> None:
     if len(npz_list) != len(loss_files):
         raise SystemExit(
             f"count mismatch: {len(npz_list)} npz in list vs {len(loss_files)} loss files.\n"
-            "The --valid_data_list must be exactly the one passed to valid_run.sh "
+            "The --valid_data_list must be exactly the one passed to valid_run.py "
             "(single-GPU, shuffle=False) so the positional mapping holds."
         )
 

@@ -88,9 +88,13 @@ python3 ./diffusion_planner/util_scripts/create_train_set_path.py <root_dir_list
 
 ## 3. Train
 
-Edit `train_run.sh` and run
+Run (launches train_predictor.py across all visible GPUs):
 
 ```bash
 cd ./diffusion_planner
-./train_run.sh
+python3 train_run.py \
+    --exp_name <exp_name> \
+    --train_set_list <train.json> \
+    --valid_set_list <valid.json>
+    # optional: --resume_model_path <.pth> --wandb_run_id <id> --wandb_project_name <name>
 ```

@@ -15,7 +15,7 @@
 """Sample an equal number of NPZ files from each cluster produced by cluster.py.
 
 The number of samples per cluster equals the size of the smallest cluster.
-The output JSON can be passed directly to train_run.sh as TRAIN_SET_LIST.
+The output JSON can be passed directly to train_run.py as the train_set_list positional arg.
 
 Usage:
     # Specify seed directly
