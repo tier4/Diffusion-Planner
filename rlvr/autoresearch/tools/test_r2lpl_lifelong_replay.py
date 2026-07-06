@@ -27,6 +27,8 @@ from rlvr.autoresearch.tools.mine_credit_window_scenes import (
 )
 from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
     Chunk,
+    _iter_scene_list,
+    _sample_value,
     _validate_timeline_continuity,
     iter_direct_chunks,
 )
@@ -124,6 +126,14 @@ def test_direct_reproducer_chunks_sample_every_80th_scene(tmp_path):
     assert chunks[0].end_frame == 110
 
 
+def test_direct_reproducer_scene_list_parser_handles_pretty_json(tmp_path):
+    paths = [tmp_path / f"bagA_00000001_{i:08d}.npz" for i in range(31, 34)]
+    scene_list = tmp_path / "pretty_scenes.json"
+    scene_list.write_text("[\n" + ",\n".join(f'  "{p}"' for p in paths) + "\n]\n")
+
+    assert list(_iter_scene_list(scene_list)) == paths
+
+
 def test_direct_reproducer_chunks_discard_short_jump_by_default(tmp_path):
     stems = [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 80)]
     stems += [f"bagA_00000001_{i:08d}" for i in range(200, 200 + 20)]
@@ -150,6 +160,21 @@ def test_direct_reproducer_chunks_shard_by_global_start(tmp_path):
 
     assert [chunk.global_start_index for chunk in shard0] == [0, 160]
     assert [chunk.global_start_index for chunk in shard1] == [80, 240]
+
+
+def test_direct_reproducer_chunks_sample_fraction_is_deterministic(tmp_path):
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 800)],
+    )
+
+    chunks = list(iter_direct_chunks(scene_list, sample_fraction=0.5, sample_seed=17))
+    repeated = list(iter_direct_chunks(scene_list, sample_fraction=0.5, sample_seed=17))
+    expected_starts = [start for start in range(0, 800, 80) if _sample_value(start, 17) < 0.5]
+
+    assert [chunk.global_start_index for chunk in chunks] == expected_starts
+    assert [chunk.global_start_index for chunk in repeated] == expected_starts
+    assert 0 < len(chunks) < 10
 
 
 def test_direct_reproducer_timeline_guard_rejects_pose_jump(tmp_path):
@@ -257,6 +282,9 @@ def test_perception_mining_cmd_supports_direct_reproducer_chunks(tmp_path):
             "batch_size": 32,
             "max_pose_step_m": 10.0,
             "max_pose_speed_mps": 20.0,
+            "sample_fraction": 0.25,
+            "sample_seed": 123,
+            "allow_existing_out_dir": True,
         },
     }
 
@@ -269,6 +297,11 @@ def test_perception_mining_cmd_supports_direct_reproducer_chunks(tmp_path):
     assert "10.0" in cmd
     assert "--max_pose_speed_mps" in cmd
     assert "20.0" in cmd
+    assert "--sample_fraction" in cmd
+    assert "0.25" in cmd
+    assert "--sample_seed" in cmd
+    assert "123" in cmd
+    assert "--allow_existing_out_dir" in cmd
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 

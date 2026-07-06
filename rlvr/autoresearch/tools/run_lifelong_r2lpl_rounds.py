@@ -550,6 +550,8 @@ def _perception_mining_cmd(
             "max_chunks",
             "num_shards",
             "shard_index",
+            "sample_fraction",
+            "sample_seed",
             "expected_frame_step",
             "min_chunk_len",
             "max_pose_step_m",
@@ -581,6 +583,8 @@ def _perception_mining_cmd(
             cmd.append("--enable_conflict_detector")
         if bool(mining.get("prebuild_neighbor_tracks", True)) is False:
             cmd.append("--no_prebuild_neighbor_tracks")
+        if bool(mining.get("allow_existing_out_dir", False)):
+            cmd.append("--allow_existing_out_dir")
         return cmd, danger_save_dir
 
     missing = [k for k in ("npz_root",) if k not in mining]

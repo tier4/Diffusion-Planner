@@ -78,6 +78,21 @@ def _is_next_contiguous(prev_path: Path, next_path: Path, *, expected_frame_step
     return _frame_index(next_path) - _frame_index(prev_path) == expected_frame_step
 
 
+def _parse_scene_list_line(item: str) -> Path | None:
+    item = item.strip()
+    if not item or item in {"[", "]"}:
+        return None
+    if item.endswith(","):
+        item = item[:-1].rstrip()
+    if item.startswith("["):
+        raise json.JSONDecodeError("compact JSON list", item, 0)
+    if len(item) >= 2 and item[0] == '"' and item[-1] == '"':
+        raw = item[1:-1] if "\\" not in item else json.loads(item)
+    else:
+        raw = json.loads(item)
+    return Path(str(raw))
+
+
 def _iter_scene_list(path: Path) -> Iterator[Path]:
     """Yield string entries from a JSON scene-list without materializing it.
 
@@ -86,13 +101,8 @@ def _iter_scene_list(path: Path) -> Iterator[Path]:
     """
     with open(path) as f:
         for line in f:
-            item = line.strip()
-            if not item or item in {"[", "]"}:
-                continue
-            if item.endswith(","):
-                item = item[:-1].rstrip()
             try:
-                raw = json.loads(item)
+                parsed = _parse_scene_list_line(line)
             except json.JSONDecodeError:
                 f.seek(0)
                 loaded = json.load(f)
@@ -101,11 +111,13 @@ def _iter_scene_list(path: Path) -> Iterator[Path]:
                 for value in loaded:
                     yield Path(str(value))
                 return
-            if isinstance(raw, list):
-                for value in raw:
-                    yield Path(str(value))
-                return
-            yield Path(str(raw))
+            if parsed is not None:
+                yield parsed
+
+
+def _sample_value(global_start: int, sample_seed: int) -> float:
+    digest = hashlib.blake2b(f"{sample_seed}:{global_start}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / float(1 << 64)
 
 
 def iter_direct_chunks(
@@ -119,6 +131,8 @@ def iter_direct_chunks(
     max_chunks: int | None = None,
     num_shards: int = 1,
     shard_index: int = 0,
+    sample_fraction: float = 1.0,
+    sample_seed: int = 0,
 ) -> Iterator[Chunk]:
     if chunk_len < 2:
         raise ValueError(f"chunk_len must be >= 2, got {chunk_len}")
@@ -139,6 +153,8 @@ def iter_direct_chunks(
         raise ValueError(f"num_shards must be >= 1, got {num_shards}")
     if shard_index < 0 or shard_index >= num_shards:
         raise ValueError(f"shard_index must be in [0, {num_shards}), got {shard_index}")
+    if sample_fraction <= 0.0 or sample_fraction > 1.0:
+        raise ValueError(f"sample_fraction must be in (0, 1], got {sample_fraction}")
 
     paths = _iter_scene_list(scene_list)
     candidate_idx = 0
@@ -160,6 +176,8 @@ def iter_direct_chunks(
         global_start = candidate_idx * start_stride
         candidate_idx += 1
         if (global_start // start_stride) % num_shards != shard_index:
+            continue
+        if sample_fraction < 1.0 and _sample_value(global_start, sample_seed) >= sample_fraction:
             continue
 
         window = block[:chunk_len]
@@ -374,6 +392,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_chunks", type=int, default=None)
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--shard_index", type=int, default=0)
+    parser.add_argument(
+        "--sample_fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "deterministically keep this fraction of every-80 candidate chunks before timeline "
+            "construction. Sampling is by hash of global_start and --sample_seed, so shards are "
+            "reproducible and non-overlapping."
+        ),
+    )
+    parser.add_argument("--sample_seed", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--device", default=None)
     parser.add_argument("--timeline_build_workers", type=int, default=8)
@@ -397,6 +426,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable_conflict_detector", action="store_true")
     parser.add_argument("--labels", default="")
     parser.add_argument("--skip_bad_chunks", action="store_true")
+    parser.add_argument(
+        "--allow_existing_out_dir",
+        action="store_true",
+        help="allow appending/scanning an existing non-empty --out_dir; disabled by default to avoid stale credit rows",
+    )
     parser.add_argument("--prebuild_neighbor_tracks", action="store_true", default=True)
     parser.add_argument(
         "--no_prebuild_neighbor_tracks",
@@ -424,6 +458,16 @@ def main() -> None:
         ]
         if missing:
             raise ValueError(f"direct reproducer mining is missing required args: {missing}")
+        if (
+            args.out_dir is not None
+            and args.out_dir.exists()
+            and any(args.out_dir.iterdir())
+            and not args.allow_existing_out_dir
+        ):
+            raise ValueError(
+                f"--out_dir is not empty: {args.out_dir}. Use a fresh directory or pass "
+                "--allow_existing_out_dir to intentionally rescan existing saved windows."
+            )
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     allowed_labels = {label.strip() for label in args.labels.split(",") if label.strip()} or None
@@ -543,6 +587,8 @@ def main() -> None:
             max_chunks=args.max_chunks,
             num_shards=args.num_shards,
             shard_index=args.shard_index,
+            sample_fraction=args.sample_fraction,
+            sample_seed=args.sample_seed,
         ):
             n_chunks += 1
             if args.plan_only:
@@ -573,6 +619,8 @@ def main() -> None:
         "max_yaw_step_rad": float(args.max_yaw_step_rad),
         "num_shards": int(args.num_shards),
         "shard_index": int(args.shard_index),
+        "sample_fraction": float(args.sample_fraction),
+        "sample_seed": int(args.sample_seed),
         "planned_chunks": int(n_chunks),
         "simulated_chunks": int(n_simulated),
         "skipped_chunks": int(n_skipped),
