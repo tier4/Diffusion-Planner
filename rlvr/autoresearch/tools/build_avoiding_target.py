@@ -50,15 +50,20 @@ _TRAINING_NPZ_KEYS = {
     "ego_agent_past",
     "ego_agent_future",
     "ego_current_state",
+    "goal_pose",
     "neighbor_agents_past",
     "neighbor_agents_future",
     "static_objects",
+    "lanes",
+    "lanes_speed_limit",
+    "lanes_has_speed_limit",
     "route_lanes",
     "route_lanes_speed_limit",
     "route_lanes_has_speed_limit",
     "polygons",
     "line_strings",
     "ego_shape",
+    "turn_indicators",
 }
 
 

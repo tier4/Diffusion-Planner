@@ -1705,12 +1705,22 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     sim_current = np.linspace(0.0, 9.0, 10, dtype=np.float32) + 20.0
     sim_neighbors = np.full((2, 31, 11), 3.5, dtype=np.float32)
     sim_ego_shape = np.array([4.99, 10.74, 2.56], dtype=np.float32)
+    sim_goal_pose = np.array([42.0, 24.0, 0.5], dtype=np.float32)
+    sim_lanes = np.full((70, 20, 13), 1.25, dtype=np.float32)
+    sim_lanes_speed_limit = np.ones((70, 1), dtype=np.float32)
+    sim_lanes_has_speed_limit = np.ones((70, 1), dtype=np.bool_)
+    sim_turn_indicators = np.zeros((31,), dtype=np.int64)
     np.savez(
         source,
         ego_shape=sim_ego_shape,
         ego_agent_past=sim_ego_past,
         ego_current_state=sim_current,
+        goal_pose=sim_goal_pose,
         neighbor_agents_past=sim_neighbors,
+        lanes=sim_lanes,
+        lanes_speed_limit=sim_lanes_speed_limit,
+        lanes_has_speed_limit=sim_lanes_has_speed_limit,
+        turn_indicators=sim_turn_indicators,
         ego_agent_future=np.full((80, 4), -5.0, dtype=np.float32),
         origin=np.asarray("sim"),
     )
@@ -1832,7 +1842,12 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         assert np.allclose(repaired["ego_shape"], sim_ego_shape)
         assert np.allclose(repaired["ego_agent_past"], sim_ego_past)
         assert np.allclose(repaired["ego_current_state"], sim_current)
+        assert np.allclose(repaired["goal_pose"], sim_goal_pose)
         assert np.allclose(repaired["neighbor_agents_past"], sim_neighbors)
+        assert np.allclose(repaired["lanes"], sim_lanes)
+        assert np.allclose(repaired["lanes_speed_limit"], sim_lanes_speed_limit)
+        assert np.array_equal(repaired["lanes_has_speed_limit"], sim_lanes_has_speed_limit)
+        assert np.array_equal(repaired["turn_indicators"], sim_turn_indicators)
         assert repaired["ego_agent_future"].shape == (80, 3)
         assert np.allclose(repaired["ego_agent_future"][:, 0], np.arange(80))
         assert "origin" not in repaired.files
