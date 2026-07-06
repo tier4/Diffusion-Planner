@@ -27,10 +27,12 @@ from rlvr.autoresearch.tools.mine_credit_window_scenes import (
 )
 from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
     Chunk,
+    _chunk_row,
     _iter_scene_list,
     _sample_value,
     _validate_timeline_continuity,
     iter_direct_chunks,
+    iter_manifest_chunks,
 )
 from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
@@ -177,6 +179,28 @@ def test_direct_reproducer_chunks_sample_fraction_is_deterministic(tmp_path):
     assert 0 < len(chunks) < 10
 
 
+def test_direct_reproducer_chunks_read_compact_manifest(tmp_path):
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 320)],
+    )
+    manifest = tmp_path / "chunks.jsonl"
+    with open(manifest, "w") as f:
+        for chunk in iter_direct_chunks(scene_list):
+            f.write(json.dumps(_chunk_row(chunk), sort_keys=True) + "\n")
+
+    shard0 = list(iter_manifest_chunks(manifest, num_shards=2, shard_index=0))
+    shard1 = list(iter_manifest_chunks(manifest, num_shards=2, shard_index=1))
+
+    assert [chunk.global_start_index for chunk in shard0] == [0, 160]
+    assert [chunk.global_start_index for chunk in shard1] == [80, 240]
+    assert [p.name for p in shard0[0].paths[:3]] == [
+        "bagA_00000001_00000031.npz",
+        "bagA_00000001_00000032.npz",
+        "bagA_00000001_00000033.npz",
+    ]
+
+
 def test_direct_reproducer_timeline_guard_rejects_pose_jump(tmp_path):
     chunk = Chunk(
         key="chunk",
@@ -302,6 +326,29 @@ def test_perception_mining_cmd_supports_direct_reproducer_chunks(tmp_path):
     assert "--sample_seed" in cmd
     assert "123" in cmd
     assert "--allow_existing_out_dir" in cmd
+    assert save_dir == tmp_path / "round" / "perception_danger_windows"
+
+
+def test_perception_mining_cmd_supports_direct_chunk_manifest(tmp_path):
+    manifest = tmp_path / "chunks.jsonl"
+    manifest.write_text("")
+    cfg = {
+        "reward_config": str(tmp_path / "reward.json"),
+        "threshold_config": str(tmp_path / "thresholds.json"),
+        "credit_window_config": str(tmp_path / "credit.json"),
+        "mine_labels": ["road_border_crossing"],
+        "perception_mining": {
+            "tool": "direct_reproducer_chunks",
+            "chunk_manifest": str(manifest),
+            "batch_size": 32,
+        },
+    }
+
+    cmd, save_dir = _perception_mining_cmd(cfg, tmp_path / "model.pth", tmp_path / "round")
+
+    assert "--chunk_manifest" in cmd
+    assert str(manifest) in cmd
+    assert "--scene_list" not in cmd
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 

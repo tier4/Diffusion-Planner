@@ -497,22 +497,21 @@ def _perception_mining_cmd(
     save_dir = rdir / "perception_reproducer_scenes"
     danger_save_dir = rdir / "perception_danger_windows"
     if tool in {"direct_reproducer_chunks", "direct_chunks"}:
+        chunk_manifest = mining.get("chunk_manifest")
         scene_list = _first_non_null(
             mining.get("scene_list"),
             cfg.get("route_scene_list"),
             cfg.get("scene_pool"),
         )
-        if scene_list is None:
+        if scene_list is None and chunk_manifest is None:
             raise ValueError(
-                "perception_mining.tool=direct_reproducer_chunks requires scene_list, "
-                "route_scene_list, or scene_pool"
+                "perception_mining.tool=direct_reproducer_chunks requires chunk_manifest, "
+                "scene_list, route_scene_list, or scene_pool"
             )
         cmd = [
             sys.executable,
             "-m",
             "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
-            "--scene_list",
-            str(scene_list),
             "--model_path",
             str(model_path),
             "--out_dir",
@@ -545,6 +544,10 @@ def _perception_mining_cmd(
             ",".join(cfg.get("mine_labels") or []),
             "--skip_bad_chunks",
         ]
+        if chunk_manifest is not None:
+            cmd.extend(["--chunk_manifest", str(chunk_manifest)])
+        else:
+            cmd.extend(["--scene_list", str(scene_list)])
         optional_keys = (
             "max_scenes",
             "max_chunks",

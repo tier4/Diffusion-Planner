@@ -226,29 +226,110 @@ def _chunk_row(chunk: Chunk) -> dict:
     }
 
 
-def _credit_rows_from_saved(save_dir: Path, out_jsonl: Path) -> int:
-    out_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    n_rows = 0
-    with open(out_jsonl, "w") as f:
-        for scene_path in sorted(save_dir.rglob("credit*.npz")):
-            manifest_path = scene_path.parent / "manifest.json"
-            manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-            label = str(manifest.get("credit_label") or "perception_reproducer")
-            row = {
-                "scene_path": str(scene_path),
-                "label": label,
-                "labels": [label],
-                "variant_kind": "direct_reproducer_chunk",
-                "window_dir": str(scene_path.parent),
-                "event_key": scene_path.parent.name,
-                "offense_step": manifest.get("offense_step"),
-                "offense_frame_id": manifest.get("offense_frame_id"),
-                "segment": manifest.get("segment"),
-                "segment_route_indices": manifest.get("segment_route_indices"),
-            }
-            f.write(json.dumps(row, sort_keys=True) + "\n")
-            n_rows += 1
-    return n_rows
+def _paths_from_manifest_row(row: dict, *, expected_frame_step: int) -> tuple[Path, ...]:
+    if "paths" in row:
+        return tuple(Path(str(p)) for p in row["paths"])
+    first_path = Path(str(row["start_scene_path"]))
+    match = _FRAME_RE.search(first_path.stem)
+    if match is None:
+        raise ValueError(f"Cannot reconstruct manifest chunk path from {first_path}")
+    n_frames = int(row["n_frames"])
+    start_frame = int(row.get("start_frame", int(match.group(1))))
+    width = len(match.group(1))
+    prefix = _prefix(first_path)
+    paths = tuple(
+        first_path.parent
+        / f"{prefix}_{start_frame + i * expected_frame_step:0{width}d}{first_path.suffix}"
+        for i in range(n_frames)
+    )
+    if "end_scene_path" in row and paths and paths[-1] != Path(str(row["end_scene_path"])):
+        raise ValueError(
+            "chunk manifest end_scene_path does not match reconstructed path: "
+            f"{paths[-1]} vs {row['end_scene_path']}"
+        )
+    return paths
+
+
+def _chunk_from_manifest_row(row: dict, *, expected_frame_step: int) -> Chunk:
+    paths = _paths_from_manifest_row(row, expected_frame_step=expected_frame_step)
+    if not paths:
+        raise ValueError("chunk manifest row has no paths")
+    return Chunk(
+        key=str(row.get("chunk_key") or _chunk_key(int(row["global_start_index"]), paths[0])),
+        global_start_index=int(row["global_start_index"]),
+        global_end_index=int(
+            row.get("global_end_index", int(row["global_start_index"]) + len(paths))
+        ),
+        paths=paths,
+        start_frame=int(row.get("start_frame", _frame_index(paths[0]))),
+        end_frame=int(row.get("end_frame", _frame_index(paths[-1]))),
+        end_reason=str(row.get("end_reason", "chunk_manifest")),
+        is_full_length=bool(row.get("is_full_length", len(paths) >= 2)),
+    )
+
+
+def iter_manifest_chunks(
+    chunk_manifest: Path,
+    *,
+    expected_frame_step: int = 1,
+    start_stride: int = 80,
+    max_chunks: int | None = None,
+    num_shards: int = 1,
+    shard_index: int = 0,
+    sample_fraction: float = 1.0,
+    sample_seed: int = 0,
+) -> Iterator[Chunk]:
+    if start_stride < 1:
+        raise ValueError(f"start_stride must be >= 1, got {start_stride}")
+    if expected_frame_step < 1:
+        raise ValueError(f"expected_frame_step must be >= 1, got {expected_frame_step}")
+    if num_shards < 1:
+        raise ValueError(f"num_shards must be >= 1, got {num_shards}")
+    if shard_index < 0 or shard_index >= num_shards:
+        raise ValueError(f"shard_index must be in [0, {num_shards}), got {shard_index}")
+    if sample_fraction <= 0.0 or sample_fraction > 1.0:
+        raise ValueError(f"sample_fraction must be in (0, 1], got {sample_fraction}")
+
+    yielded = 0
+    with open(chunk_manifest) as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            global_start = int(row["global_start_index"])
+            if (global_start // start_stride) % num_shards != shard_index:
+                continue
+            if (
+                sample_fraction < 1.0
+                and _sample_value(global_start, sample_seed) >= sample_fraction
+            ):
+                continue
+            try:
+                chunk = _chunk_from_manifest_row(row, expected_frame_step=expected_frame_step)
+            except Exception as exc:
+                raise ValueError(
+                    f"{chunk_manifest}:{line_no}: invalid chunk manifest row: {exc}"
+                ) from exc
+            yield chunk
+            yielded += 1
+            if max_chunks is not None and yielded >= max_chunks:
+                break
+
+
+def _credit_row_from_saved_scene(scene_path: Path, manifest: dict, label: str) -> dict:
+    return {
+        "scene_path": str(scene_path),
+        "label": label,
+        "labels": [label],
+        "variant_kind": "direct_reproducer_chunk",
+        "window_dir": str(scene_path.parent),
+        "event_key": scene_path.parent.name,
+        "offense_step": manifest.get("offense_step"),
+        "offense_frame_id": manifest.get("offense_frame_id"),
+        "segment": manifest.get("segment"),
+        "segment_route_indices": manifest.get("segment_route_indices"),
+    }
 
 
 def _validate_timeline_continuity(
@@ -341,7 +422,17 @@ def _load_model(model_path: Path, lora_path: Path | None, device: str):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scene_list", type=Path, required=True)
+    parser.add_argument("--scene_list", type=Path, default=None)
+    parser.add_argument(
+        "--chunk_manifest",
+        type=Path,
+        default=None,
+        help=(
+            "read compact chunks from a previous --plan_only segments_jsonl instead of "
+            "streaming the original scene list. This avoids each GPU shard reparsing the "
+            "full scene list."
+        ),
+    )
     parser.add_argument("--model_path", type=Path, default=None)
     parser.add_argument("--lora_path", type=Path, default=None)
     parser.add_argument("--sidecar_root", type=Path, default=None)
@@ -442,6 +533,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.scene_list is None and args.chunk_manifest is None:
+        raise ValueError("one of --scene_list or --chunk_manifest is required")
+    if args.chunk_manifest is not None and args.max_scenes is not None:
+        raise ValueError(
+            "--max_scenes only applies when streaming --scene_list; use --max_chunks with --chunk_manifest"
+        )
     if not args.plan_only and args.model_path is None:
         raise ValueError("--model_path is required unless --plan_only is set")
     if not args.plan_only:
@@ -492,7 +589,22 @@ def main() -> None:
     n_chunks = 0
     n_simulated = 0
     n_skipped = 0
+    n_credit_rows = 0
     t0 = time.perf_counter()
+    credit_f = None
+    if not args.plan_only and args.out_jsonl is not None:
+        args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        credit_f = open(args.out_jsonl, "w")
+
+    def write_credit_rows(window_dir: Path, manifest: dict, label: str) -> None:
+        nonlocal n_credit_rows
+        if credit_f is None:
+            return
+        for scene_path in sorted(Path(window_dir).glob("credit*.npz")):
+            row = _credit_row_from_saved_scene(scene_path, manifest, label)
+            credit_f.write(json.dumps(row, sort_keys=True) + "\n")
+            n_credit_rows += 1
+        credit_f.flush()
 
     def flush(chunks: list[Chunk], fout, fskip) -> None:
         nonlocal n_simulated, n_skipped
@@ -566,6 +678,7 @@ def main() -> None:
             danger_scorer=danger_scorer,
             danger_credit_windows=danger_credit_windows,
             danger_decluster_steps=args.danger_decluster_steps,
+            danger_manifest_callback=write_credit_rows,
             unstick_after=args.unstick_after,
             unstick_advance_m=args.unstick_advance_m,
         )
@@ -575,41 +688,56 @@ def main() -> None:
             n_simulated += 1
         fout.flush()
 
-    with open(args.segments_jsonl, "w") as fout, open(skipped_path, "w") as fskip:
-        pending: list[Chunk] = []
-        for chunk in iter_direct_chunks(
-            args.scene_list,
-            chunk_len=args.chunk_len,
-            start_stride=args.start_stride,
-            expected_frame_step=args.expected_frame_step,
-            min_chunk_len=args.min_chunk_len,
-            max_scenes=args.max_scenes,
-            max_chunks=args.max_chunks,
-            num_shards=args.num_shards,
-            shard_index=args.shard_index,
-            sample_fraction=args.sample_fraction,
-            sample_seed=args.sample_seed,
-        ):
-            n_chunks += 1
-            if args.plan_only:
-                fout.write(json.dumps(_chunk_row(chunk), sort_keys=True) + "\n")
-                continue
-            pending.append(chunk)
-            if len(pending) >= args.batch_size:
-                flush(pending, fout, fskip)
-                pending = []
-        if args.plan_only:
-            fout.flush()
+    try:
+        if args.chunk_manifest is not None:
+            chunk_iter = iter_manifest_chunks(
+                args.chunk_manifest,
+                expected_frame_step=args.expected_frame_step,
+                start_stride=args.start_stride,
+                max_chunks=args.max_chunks,
+                num_shards=args.num_shards,
+                shard_index=args.shard_index,
+                sample_fraction=args.sample_fraction,
+                sample_seed=args.sample_seed,
+            )
         else:
-            flush(pending, fout, fskip)
-
-    n_credit_rows = 0
-    if not args.plan_only and args.out_dir is not None and args.out_jsonl is not None:
-        n_credit_rows = _credit_rows_from_saved(args.out_dir, args.out_jsonl)
+            assert args.scene_list is not None
+            chunk_iter = iter_direct_chunks(
+                args.scene_list,
+                chunk_len=args.chunk_len,
+                start_stride=args.start_stride,
+                expected_frame_step=args.expected_frame_step,
+                min_chunk_len=args.min_chunk_len,
+                max_scenes=args.max_scenes,
+                max_chunks=args.max_chunks,
+                num_shards=args.num_shards,
+                shard_index=args.shard_index,
+                sample_fraction=args.sample_fraction,
+                sample_seed=args.sample_seed,
+            )
+        with open(args.segments_jsonl, "w") as fout, open(skipped_path, "w") as fskip:
+            pending: list[Chunk] = []
+            for chunk in chunk_iter:
+                n_chunks += 1
+                if args.plan_only:
+                    fout.write(json.dumps(_chunk_row(chunk), sort_keys=True) + "\n")
+                    continue
+                pending.append(chunk)
+                if len(pending) >= args.batch_size:
+                    flush(pending, fout, fskip)
+                    pending = []
+            if args.plan_only:
+                fout.flush()
+            else:
+                flush(pending, fout, fskip)
+    finally:
+        if credit_f is not None:
+            credit_f.close()
 
     elapsed = time.perf_counter() - t0
     summary = {
-        "scene_list": str(args.scene_list),
+        "scene_list": None if args.scene_list is None else str(args.scene_list),
+        "chunk_manifest": None if args.chunk_manifest is None else str(args.chunk_manifest),
         "chunk_len": int(args.chunk_len),
         "start_stride": int(args.start_stride),
         "min_chunk_len": int(args.min_chunk_len or args.chunk_len),

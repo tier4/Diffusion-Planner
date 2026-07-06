@@ -1553,6 +1553,7 @@ def run_segments_batched(
     realized_event_scorer=None,
     danger_credit_windows: dict[str, int] | None = None,
     danger_decluster_steps: int = 10,
+    danger_manifest_callback=None,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1811,13 +1812,13 @@ def run_segments_batched(
                                             ),
                                         )
                                     )
+                                    event_dir = Path(danger_save_dir) / (
+                                        f"{s.credit_window['route_key']}_"
+                                        f"{s.credit_window['start_frame']}_"
+                                        f"{_frame_id(s.tl, idx)}_event_{realized_label}"
+                                    )
                                     manifest = _dump_credit_window(
-                                        Path(danger_save_dir)
-                                        / (
-                                            f"{s.credit_window['route_key']}_"
-                                            f"{s.credit_window['start_frame']}_"
-                                            f"{_frame_id(s.tl, idx)}_event_{realized_label}"
-                                        ),
+                                        event_dir,
                                         s.tl,
                                         model_args,
                                         s.k,
@@ -1864,6 +1865,10 @@ def run_segments_batched(
                                         },
                                     )
                                     if manifest is not None:
+                                        if danger_manifest_callback is not None:
+                                            danger_manifest_callback(
+                                                event_dir, manifest, realized_label
+                                            )
                                         s.credit_saved = True
                                         s.done = True
                             else:
@@ -1879,12 +1884,12 @@ def run_segments_batched(
                                                 save_pre_steps,
                                             )
                                         )
-                                        _dump_credit_window(
-                                            Path(danger_save_dir)
-                                            / (
-                                                f"{s.output_route_key or _route_key(s.tl)}_"
-                                                f"{s.start}_{idx}_danger_{label}"
-                                            ),
+                                        event_dir = Path(danger_save_dir) / (
+                                            f"{s.output_route_key or _route_key(s.tl)}_"
+                                            f"{s.start}_{idx}_danger_{label}"
+                                        )
+                                        manifest = _dump_credit_window(
+                                            event_dir,
                                             s.tl,
                                             model_args,
                                             s.k,
@@ -1895,6 +1900,11 @@ def run_segments_batched(
                                             s.end,
                                             label,
                                         )
+                                        if (
+                                            manifest is not None
+                                            and danger_manifest_callback is not None
+                                        ):
+                                            danger_manifest_callback(event_dir, manifest, label)
                         if save_dir is not None and s.save_buf is not None:
                             # Per-EPISODE saving. A contact EPISODE runs while clearance <= thresh
                             # and ends when it clears (> thresh) — so a NEW distinct collision needs
@@ -2013,6 +2023,12 @@ def _dump_credit_window(
     if credit_width < 0:
         raise ValueError(f"credit_width must be >= 0, got {credit_width}")
     out_dir = Path(out_dir)
+    if out_dir.exists():
+        for stale in out_dir.glob("credit*.npz"):
+            stale.unlink()
+        stale_manifest = out_dir / "manifest.json"
+        if stale_manifest.exists():
+            stale_manifest.unlink()
     manifest = _dump_precollision_window(
         out_dir,
         tl,
