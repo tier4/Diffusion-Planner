@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -1664,7 +1665,6 @@ def run_segments_batched(
                                 shutil.rmtree(stale, ignore_errors=True)
             if credit_save_dir is not None or danger_save_dir is not None:
                 from collections import deque
-                from pathlib import Path
 
                 for off, s in enumerate(states):
                     if route_keys:
