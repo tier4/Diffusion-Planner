@@ -521,6 +521,7 @@ class _SegState:
     save_out_dir: object = None
     credit_window: dict | None = None
     credit_saved: bool = False
+    output_route_key: str | None = None
     verified_credit_labels: set[str] = field(default_factory=set)
     verified_credit_first_step: dict[str, int] = field(default_factory=dict)
     danger_event_selector: OnlineEventSelector | None = None
@@ -1644,6 +1645,7 @@ def run_segments_batched(
 
                 for off, s in enumerate(states):
                     key = route_keys[c0 + off] if route_keys else _route_key(s.tl)
+                    s.output_route_key = key
                     s.save_buf = deque(maxlen=save_max_scenes + 1)
                     s.save_out_dir = Path(save_dir) / f"{key}_{s.start}_{s.end}"
                     # Per-episode dirs are tagged by save step (..._tc#####), so a re-mine that
@@ -1663,7 +1665,9 @@ def run_segments_batched(
                 from collections import deque
                 from pathlib import Path
 
-                for s in states:
+                for off, s in enumerate(states):
+                    if route_keys:
+                        s.output_route_key = route_keys[c0 + off]
                     width = int((s.credit_window or {}).get("credit_width", save_pre_steps))
                     if danger_credit_windows:
                         width = max(width, max(int(v) for v in danger_credit_windows.values()))
@@ -1877,7 +1881,10 @@ def run_segments_batched(
                                         )
                                         _dump_credit_window(
                                             Path(danger_save_dir)
-                                            / f"{_route_key(s.tl)}_{s.start}_{idx}_danger_{label}",
+                                            / (
+                                                f"{s.output_route_key or _route_key(s.tl)}_"
+                                                f"{s.start}_{idx}_danger_{label}"
+                                            ),
                                             s.tl,
                                             model_args,
                                             s.k,

@@ -25,6 +25,11 @@ from rlvr.autoresearch.tools.mine_credit_window_scenes import (
     _select_event_windows,
     _validate_credit_config,
 )
+from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
+    Chunk,
+    _validate_timeline_continuity,
+    iter_direct_chunks,
+)
 from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _base_train_invocation,
@@ -96,6 +101,175 @@ def test_credit_window_config_rejects_missing_observed_label(tmp_path):
         assert "expert_disagreement" in str(exc)
     else:
         raise AssertionError("missing label should fail loudly")
+
+
+def _write_direct_chunk_scene_list(tmp_path, stems):
+    paths = [tmp_path / f"{stem}.npz" for stem in stems]
+    path = tmp_path / "scenes.json"
+    path.write_text(json.dumps([str(p) for p in paths]))
+    return path
+
+
+def test_direct_reproducer_chunks_sample_every_80th_scene(tmp_path):
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 240)],
+    )
+
+    chunks = list(iter_direct_chunks(scene_list))
+
+    assert [chunk.global_start_index for chunk in chunks] == [0, 80, 160]
+    assert [chunk.n_frames for chunk in chunks] == [80, 80, 80]
+    assert chunks[0].start_frame == 31
+    assert chunks[0].end_frame == 110
+
+
+def test_direct_reproducer_chunks_discard_short_jump_by_default(tmp_path):
+    stems = [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 80)]
+    stems += [f"bagA_00000001_{i:08d}" for i in range(200, 200 + 20)]
+    stems += [f"bagB_00000001_{i:08d}" for i in range(1, 1 + 60)]
+    scene_list = _write_direct_chunk_scene_list(tmp_path, stems)
+
+    chunks = list(iter_direct_chunks(scene_list))
+    partial_chunks = list(iter_direct_chunks(scene_list, min_chunk_len=2))
+
+    assert [chunk.global_start_index for chunk in chunks] == [0]
+    assert [chunk.global_start_index for chunk in partial_chunks] == [0, 80]
+    assert partial_chunks[1].n_frames == 20
+    assert partial_chunks[1].end_reason == "lineage_break"
+
+
+def test_direct_reproducer_chunks_shard_by_global_start(tmp_path):
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 320)],
+    )
+
+    shard0 = list(iter_direct_chunks(scene_list, num_shards=2, shard_index=0))
+    shard1 = list(iter_direct_chunks(scene_list, num_shards=2, shard_index=1))
+
+    assert [chunk.global_start_index for chunk in shard0] == [0, 160]
+    assert [chunk.global_start_index for chunk in shard1] == [80, 240]
+
+
+def test_direct_reproducer_timeline_guard_rejects_pose_jump(tmp_path):
+    chunk = Chunk(
+        key="chunk",
+        global_start_index=0,
+        global_end_index=3,
+        paths=tuple(tmp_path / f"bagA_00000001_{i:08d}.npz" for i in range(3)),
+        start_frame=0,
+        end_frame=2,
+        end_reason="chunk_len",
+        is_full_length=True,
+    )
+    timeline = SimpleNamespace(
+        frame_indices=np.array([0, 1, 2], dtype=np.int64),
+        poses=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [50.0, 0.0, 0.0]]),
+    )
+
+    try:
+        _validate_timeline_continuity(
+            timeline,
+            chunk,
+            expected_frame_step=1,
+            max_pose_step_m=10.0,
+            max_pose_speed_mps=20.0,
+            max_yaw_step_rad=1.57,
+        )
+    except ValueError as exc:
+        assert "pose jump" in str(exc)
+    else:
+        raise AssertionError("pose jump should be rejected")
+
+
+def test_direct_reproducer_timeline_guard_rejects_pose_speed_spike(tmp_path):
+    chunk = Chunk(
+        key="chunk",
+        global_start_index=0,
+        global_end_index=3,
+        paths=tuple(tmp_path / f"bagA_00000001_{i:08d}.npz" for i in range(3)),
+        start_frame=0,
+        end_frame=2,
+        end_reason="chunk_len",
+        is_full_length=True,
+    )
+    timeline = SimpleNamespace(
+        frame_indices=np.array([0, 1, 2], dtype=np.int64),
+        poses=np.array([[0.0, 0.0, 0.0], [4.91, 0.0, 0.0], [5.91, 0.0, 0.0]]),
+    )
+
+    try:
+        _validate_timeline_continuity(
+            timeline,
+            chunk,
+            expected_frame_step=1,
+            max_pose_step_m=10.0,
+            max_pose_speed_mps=20.0,
+            max_yaw_step_rad=1.57,
+        )
+    except ValueError as exc:
+        assert "pose speed" in str(exc)
+        assert "49.1m/s" in str(exc)
+    else:
+        raise AssertionError("pose speed spike should be rejected")
+
+
+def test_direct_reproducer_timeline_guard_unwraps_yaw(tmp_path):
+    chunk = Chunk(
+        key="chunk",
+        global_start_index=0,
+        global_end_index=3,
+        paths=tuple(tmp_path / f"bagA_00000001_{i:08d}.npz" for i in range(3)),
+        start_frame=0,
+        end_frame=2,
+        end_reason="chunk_len",
+        is_full_length=True,
+    )
+    timeline = SimpleNamespace(
+        frame_indices=np.array([0, 1, 2], dtype=np.int64),
+        poses=np.array([[0.0, 0.0, 3.13], [1.0, 0.0, -3.13], [2.0, 0.0, -3.12]]),
+    )
+
+    _validate_timeline_continuity(
+        timeline,
+        chunk,
+        expected_frame_step=1,
+        max_pose_step_m=10.0,
+        max_pose_speed_mps=20.0,
+        max_yaw_step_rad=0.1,
+    )
+
+
+def test_perception_mining_cmd_supports_direct_reproducer_chunks(tmp_path):
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    cfg = {
+        "scene_pool": str(scene_list),
+        "route_scene_list": str(scene_list),
+        "reward_config": str(tmp_path / "reward.json"),
+        "threshold_config": str(tmp_path / "thresholds.json"),
+        "credit_window_config": str(tmp_path / "credit.json"),
+        "mine_labels": ["moving_collision", "road_border_crossing"],
+        "perception_mining": {
+            "tool": "direct_reproducer_chunks",
+            "chunk_len": 80,
+            "batch_size": 32,
+            "max_pose_step_m": 10.0,
+            "max_pose_speed_mps": 20.0,
+        },
+    }
+
+    cmd, save_dir = _perception_mining_cmd(cfg, tmp_path / "model.pth", tmp_path / "round")
+
+    assert "rlvr.autoresearch.tools.mine_direct_reproducer_chunks" in cmd
+    assert "--scene_list" in cmd
+    assert str(scene_list) in cmd
+    assert "--max_pose_step_m" in cmd
+    assert "10.0" in cmd
+    assert "--max_pose_speed_mps" in cmd
+    assert "20.0" in cmd
+    assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 
 def test_lineage_resolver_maps_route_frame_and_step(tmp_path):

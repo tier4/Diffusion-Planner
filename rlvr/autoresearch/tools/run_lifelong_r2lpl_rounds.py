@@ -492,12 +492,100 @@ def _perception_mining_cmd(
     cfg: dict[str, Any], model_path: Path, rdir: Path
 ) -> tuple[list[str], Path]:
     mining = dict(cfg.get("perception_mining") or {})
-    missing = [k for k in ("npz_root",) if k not in mining]
-    if missing:
-        raise ValueError(f"perception_mining is missing required fields: {missing}")
+    tool = str(mining.get("tool", mining.get("mode", "mine_collisions_reproducer")))
     hits_jsonl = rdir / "perception_reproducer_hits.jsonl"
     save_dir = rdir / "perception_reproducer_scenes"
     danger_save_dir = rdir / "perception_danger_windows"
+    if tool in {"direct_reproducer_chunks", "direct_chunks"}:
+        scene_list = _first_non_null(
+            mining.get("scene_list"),
+            cfg.get("route_scene_list"),
+            cfg.get("scene_pool"),
+        )
+        if scene_list is None:
+            raise ValueError(
+                "perception_mining.tool=direct_reproducer_chunks requires scene_list, "
+                "route_scene_list, or scene_pool"
+            )
+        cmd = [
+            sys.executable,
+            "-m",
+            "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
+            "--scene_list",
+            str(scene_list),
+            "--model_path",
+            str(model_path),
+            "--out_dir",
+            str(danger_save_dir),
+            "--out_jsonl",
+            str(rdir / "perception_direct_credit_windows.jsonl"),
+            "--segments_jsonl",
+            str(hits_jsonl),
+            "--summary_json",
+            str(rdir / "perception_direct_summary.json"),
+            "--chunk_len",
+            str(mining.get("chunk_len", 80)),
+            "--start_stride",
+            str(mining.get("start_stride", mining.get("chunk_len", 80))),
+            "--batch_size",
+            str(mining.get("batch_size", 64)),
+            "--timeline_build_workers",
+            str(mining.get("timeline_build_workers", 8)),
+            "--n_build_threads",
+            str(mining.get("n_build_threads", 16)),
+            "--prefetch_ahead",
+            str(mining.get("prefetch_ahead", 2)),
+            "--danger_reward_config",
+            str(cfg["reward_config"]),
+            "--danger_threshold_config",
+            str(cfg["threshold_config"]),
+            "--danger_credit_window_config",
+            str(cfg["credit_window_config"]),
+            "--labels",
+            ",".join(cfg.get("mine_labels") or []),
+            "--skip_bad_chunks",
+        ]
+        optional_keys = (
+            "max_scenes",
+            "max_chunks",
+            "num_shards",
+            "shard_index",
+            "expected_frame_step",
+            "min_chunk_len",
+            "max_pose_step_m",
+            "max_pose_speed_mps",
+            "max_yaw_step_rad",
+            "near_miss_thresh",
+            "search_radius",
+            "warmup_steps",
+            "max_steps_mult",
+            "goal_reach_m",
+            "unstick_after",
+            "unstick_advance_m",
+            "device",
+            "tracker_mode",
+            "timeline_progress_mode",
+            "neighbor_history_mode",
+            "danger_decluster_steps",
+        )
+        for key in optional_keys:
+            if key in mining and mining[key] is not None:
+                cmd.extend([f"--{key}", str(mining[key])])
+        if mining.get("sidecar_root"):
+            cmd.extend(["--sidecar_root", str(mining["sidecar_root"])])
+        if bool(mining.get("gpu_transform", True)):
+            cmd.append("--gpu_transform")
+        if bool(cfg.get("enable_conflict_detector", False)) or bool(
+            mining.get("enable_conflict_detector", False)
+        ):
+            cmd.append("--enable_conflict_detector")
+        if bool(mining.get("prebuild_neighbor_tracks", True)) is False:
+            cmd.append("--no_prebuild_neighbor_tracks")
+        return cmd, danger_save_dir
+
+    missing = [k for k in ("npz_root",) if k not in mining]
+    if missing:
+        raise ValueError(f"perception_mining is missing required fields: {missing}")
     cmd = [
         sys.executable,
         "-m",
