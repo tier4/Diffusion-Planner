@@ -88,7 +88,7 @@ def _detect_lane_change_runs(
 
 
 def _decluster(idx: list[int], window: int) -> list[int]:
-    """Keep the first of any cluster of indices closer than ``window`` apart."""
+    """Keep the first clustered index; non-positive ``window`` disables declustering."""
     if window < 1:
         return sorted(int(i) for i in idx)
     return decluster_indices(idx, window)
