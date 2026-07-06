@@ -46,6 +46,20 @@ _VALIDITY_LABEL_WEIGHTS = {
     "expert_disagreement": 0.5,
 }
 _NEIGHBOR_COORD_EPS_M = 1e-6
+_TRAINING_NPZ_KEYS = {
+    "ego_agent_past",
+    "ego_agent_future",
+    "ego_current_state",
+    "neighbor_agents_past",
+    "neighbor_agents_future",
+    "static_objects",
+    "route_lanes",
+    "route_lanes_speed_limit",
+    "route_lanes_has_speed_limit",
+    "polygons",
+    "line_strings",
+    "ego_shape",
+}
 
 
 def _parse_ego_shape(text: str) -> np.ndarray | None:
@@ -69,7 +83,7 @@ def _filtered_npz_payload(loaded) -> dict[str, Any]:
     return {
         key: value
         for key, value in loaded.items()
-        if np.asarray(value).dtype.kind not in ("U", "S", "O")
+        if key in _TRAINING_NPZ_KEYS and np.asarray(value).dtype.kind not in ("U", "S", "O")
     }
 
 

@@ -214,7 +214,7 @@ def main() -> None:
         "--anchor_horizon_steps",
         type=int,
         default=40,
-        help="pick the open-loop source scene whose violation ETA is closest to this many steps",
+        help="pick the source scene whose violation ETA is closest to this many steps",
     )
     parser.add_argument(
         "--max_rollout_steps",

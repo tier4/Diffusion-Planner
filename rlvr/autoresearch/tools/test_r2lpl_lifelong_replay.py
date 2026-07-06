@@ -1598,16 +1598,20 @@ def test_union_scene_lists_dedupes_current_and_replay(tmp_path):
     assert json.loads(out.read_text()) == ["/a.npz", "/b.npz", "/c.npz"]
 
 
-def test_filtered_npz_payload_drops_string_fields():
+def test_filtered_npz_payload_keeps_only_training_fields():
     payload = _filtered_npz_payload(
         {
             "ego_agent_future": np.zeros((80, 4), dtype=np.float32),
+            "neighbor_agents_past": np.zeros((320, 31, 11), dtype=np.float32),
+            "version": np.array(1, dtype=np.uint32),
             "origin": np.asarray("map"),
             "token": np.asarray("abc"),
         }
     )
 
     assert "ego_agent_future" in payload
+    assert "neighbor_agents_past" in payload
+    assert "version" not in payload
     assert "origin" not in payload
     assert "token" not in payload
 

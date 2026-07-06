@@ -1,9 +1,9 @@
 """Mine R2LPL scenes by running direct 8-second reproducer chunks.
 
-This tool deliberately skips the old open-loop prefilter. It samples starts from
-the input scene list at fixed global intervals (default: every 80 scenes), builds
-only that local window, cuts the window before a path/frame discontinuity, and
-runs the existing closed-loop MPC perception reproducer.
+This tool samples starts from the input scene list at fixed global intervals
+(default: every 80 scenes), builds only that local window, cuts the window
+before a path/frame discontinuity, and runs the closed-loop MPC perception
+reproducer.
 """
 
 from __future__ import annotations
