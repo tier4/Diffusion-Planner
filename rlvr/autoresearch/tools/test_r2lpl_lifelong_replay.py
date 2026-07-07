@@ -365,6 +365,47 @@ def test_perception_mining_cmd_supports_direct_reproducer_chunks(tmp_path):
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 
+def test_round_runner_splits_mine_and_repair_labels(tmp_path):
+    cfg = {
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "mine_labels": [
+            "road_border_crossing",
+            "static_collision",
+            "moving_collision",
+            "road_border_near",
+            "static_near_miss",
+            "moving_near_miss",
+            "moving_ttc",
+            "expert_disagreement",
+        ],
+        "repair_labels": ["road_border_crossing", "static_collision", "moving_collision"],
+        "perception_mining": {
+            "tool": "direct_reproducer_chunks",
+            "scene_list": "/data/scenes.json",
+            "batch_size": 4,
+        },
+        "repair_config": {
+            "ego_shape": "from_npz",
+            "min_margin": 0.3,
+            "K": 8,
+        },
+        "count_rear_end_collisions": True,
+    }
+
+    mine_cmd, _save_dir = _perception_mining_cmd(cfg, tmp_path / "model.pth", tmp_path / "round")
+    repair_cmd = _repair_cmd(
+        cfg,
+        tmp_path / "model.pth",
+        tmp_path / "round" / "credit_windows.jsonl",
+        tmp_path / "round",
+    )
+
+    assert mine_cmd[mine_cmd.index("--labels") + 1] == ",".join(cfg["mine_labels"])
+    assert repair_cmd[repair_cmd.index("--labels") + 1] == ",".join(cfg["repair_labels"])
+
+
 def test_perception_mining_cmd_supports_direct_chunk_manifest(tmp_path):
     manifest = tmp_path / "chunks.jsonl"
     manifest.write_text("")

@@ -28,6 +28,7 @@ _CONFIG_REQUIRED = {
     "output_dir",
 }
 _DEFAULT_ENABLED_LABELS = ["road_border_crossing", "moving_collision"]
+_DEFAULT_REPAIR_LABELS = ["road_border_crossing", "static_collision", "moving_collision"]
 _BASE_TRAINING_KEYS = {
     "train_args",
     "batch_size",
@@ -207,6 +208,19 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     enabled_labels = judgement.get("enabled_labels") or list(_DEFAULT_ENABLED_LABELS)
     if not isinstance(enabled_labels, list) or not enabled_labels:
         raise ValueError("judgement.enabled_labels must be a non-empty list")
+    enabled_labels = [str(label) for label in enabled_labels]
+    repair_labels = judgement.get("repair_labels")
+    if repair_labels is None:
+        repair_labels = [label for label in enabled_labels if label in _DEFAULT_REPAIR_LABELS]
+    if not isinstance(repair_labels, list) or not repair_labels:
+        raise ValueError(
+            "judgement.repair_labels must be a non-empty list, or enabled_labels must include "
+            f"at least one repairable label from {_DEFAULT_REPAIR_LABELS}"
+        )
+    repair_labels = [str(label) for label in repair_labels]
+    non_mined_repair = sorted(set(repair_labels) - set(enabled_labels))
+    if non_mined_repair:
+        raise ValueError(f"judgement.repair_labels are not enabled for mining: {non_mined_repair}")
 
     repair_cfg = {
         "ego_shape": repair.get("ego_shape"),
@@ -346,7 +360,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "training_backend": training_backend,
         "output_dir": str(output_dir),
         "repair_config": repair_cfg,
-        "mine_labels": [str(label) for label in enabled_labels],
+        "mine_labels": enabled_labels,
+        "repair_labels": repair_labels,
         "enable_conflict_detector": bool(
             _first_non_null(
                 judgement.get("enable_conflict_detector"),
@@ -894,8 +909,8 @@ def _repair_cmd(
         "--device",
         str(repair_cfg.get("device", "cuda")),
     ]
-    if cfg.get("mine_labels"):
-        cmd.extend(["--labels", ",".join(cfg["mine_labels"])])
+    if cfg.get("repair_labels"):
+        cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
         cmd.append("--enable_conflict_detector")
     if bool(repair_cfg.get("allow_conflict_candidates", False)):
