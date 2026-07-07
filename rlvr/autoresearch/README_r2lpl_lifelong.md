@@ -221,7 +221,15 @@ Common production settings:
 - `event_mining.max_pose_speed_mps=20`
 - `event_mining.max_yaw_step_rad=1.57`
 - `repair_generation.candidate_count_per_scene=8`
+- `repair_generation.generation_mode=grpo_temperature`
+- `repair_generation.grpo_noise_scale=3.0`
 - `repair_generation.use_route_cl_guidance=true`
 - `perception_reproducer.tracker_mode=mpc`
 - `perception_reproducer.timeline_progress_mode=clock`
 - `perception_reproducer.neighbor_history_mode=sim`
+
+`generation_mode=grpo_temperature` uses the same K-trajectory sampling rule as
+`diffusion_planner/grpo_run.sh`: each scene is replicated K times and each row
+draws an initial diffusion temperature from `U(0, grpo_noise_scale)`. If that
+mode is disabled for an ablation, use `generation_mode=guided_variant` with
+`repair_generation.variant=rl_cl_col_sweep`.

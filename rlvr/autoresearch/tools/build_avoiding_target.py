@@ -37,6 +37,9 @@ from rlvr.grpo_trainer_batched import (
 )
 from rlvr.reward import compute_reward_batch
 
+_GENERATION_MODE_GUIDED_VARIANT = "guided_variant"
+_GENERATION_MODE_GRPO_TEMPERATURE = "grpo_temperature"
+
 _REPAIRABLE_LABELS = {"road_border_crossing", "static_collision", "moving_collision"}
 _VALIDITY_LABEL_WEIGHTS = {
     "moving_ttc": 4.0,
@@ -111,6 +114,34 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
         raise ValueError(f"expected 3 or 4 future channels, got {arr.shape}")
     yaw = arr[:, 2]
     return np.column_stack([arr[:, 0], arr[:, 1], np.cos(yaw), np.sin(yaw)]).astype(np.float32)
+
+
+@torch.no_grad()
+def _generate_grpo_temperature_scenes(
+    model,
+    norm_batch: dict[str, torch.Tensor],
+    *,
+    K: int,
+    grpo_noise_scale: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Generate K candidates per scene using the same sampler as train_grpo_predictor.py."""
+    if K < 1:
+        raise ValueError(f"K must be >= 1, got {K}")
+    if grpo_noise_scale < 0:
+        raise ValueError(f"grpo_noise_scale must be >= 0, got {grpo_noise_scale}")
+
+    from diffusion_planner.grpo_utils import expand_batch, sample_group
+
+    n_scenes = int(norm_batch["ego_current_state"].shape[0])
+    expanded = expand_batch(norm_batch, K)
+    trajs = sample_group(model, expanded, grpo_noise_scale, device)
+    if trajs.shape[0] != n_scenes * K:
+        raise RuntimeError(
+            f"GRPO temperature sampler returned {trajs.shape[0]} trajectories for "
+            f"{n_scenes} scenes and K={K}"
+        )
+    return trajs.reshape(n_scenes, K, trajs.shape[1], trajs.shape[2])
 
 
 def _candidate_violation_score(label_row: dict[str, Any], reward_row) -> float:
@@ -358,6 +389,8 @@ def build_repaired_targets(
     min_static_margin: float,
     K: int,
     variant: str,
+    generation_mode: str,
+    grpo_noise_scale: float,
     gt_max_speed: float,
     scene_batch_size: int,
     noise_low: float,
@@ -429,18 +462,32 @@ def build_repaired_targets(
             continue
 
         norm_batch = _normalize_batch(_stack_scene_data(datas, device), model_args)
-        trajs = generate_all_scenes_batched(
-            model,
-            model_args,
-            norm_batch,
-            K=K,
-            noise_range=(noise_low, noise_high),
-            device=device,
-            gen_chunk_size=K,
-            gt_max_speed=gt_max_speed,
-            generation_variant=variant,
-            use_route_cl_guidance=use_route_cl_guidance,
-        )
+        if generation_mode == _GENERATION_MODE_GRPO_TEMPERATURE:
+            trajs = _generate_grpo_temperature_scenes(
+                model,
+                norm_batch,
+                K=K,
+                grpo_noise_scale=grpo_noise_scale,
+                device=device,
+            )
+        elif generation_mode == _GENERATION_MODE_GUIDED_VARIANT:
+            trajs = generate_all_scenes_batched(
+                model,
+                model_args,
+                norm_batch,
+                K=K,
+                noise_range=(noise_low, noise_high),
+                device=device,
+                gen_chunk_size=K,
+                gt_max_speed=gt_max_speed,
+                generation_variant=variant,
+                use_route_cl_guidance=use_route_cl_guidance,
+            )
+        else:
+            raise ValueError(
+                f"unknown generation_mode {generation_mode!r}; expected "
+                f"{_GENERATION_MODE_GRPO_TEMPERATURE!r} or {_GENERATION_MODE_GUIDED_VARIANT!r}"
+            )
         scene_paths = [str(row["scene_path"]) for row in kept_rows]
         candidate_rows_per_scene = classify_loaded_scene_candidates_batch(
             scene_paths,
@@ -539,6 +586,19 @@ def main() -> None:
     ap.add_argument("--out_rows_jsonl", help="write repaired metadata rows")
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--variant", default="rl_cl_soft_sweep_stretch")
+    ap.add_argument(
+        "--generation_mode",
+        choices=[_GENERATION_MODE_GRPO_TEMPERATURE, _GENERATION_MODE_GUIDED_VARIANT],
+        default=_GENERATION_MODE_GRPO_TEMPERATURE,
+        help="candidate generator: exact GRPO temperature sampler, or guided variant registry",
+    )
+    ap.add_argument(
+        "--grpo_noise_scale",
+        type=float,
+        default=3.0,
+        help="max initial-noise temperature for --generation_mode grpo_temperature; "
+        "matches train_grpo_predictor.py default",
+    )
     ap.add_argument("--gt_max_speed", type=float, default=9.0)
     ap.add_argument("--scene_batch_size", type=int, default=8)
     ap.add_argument("--noise_low", type=float, default=0.5)
@@ -602,6 +662,8 @@ def main() -> None:
         min_static_margin=float(args.min_margin),
         K=int(args.K),
         variant=str(args.variant),
+        generation_mode=str(args.generation_mode),
+        grpo_noise_scale=float(args.grpo_noise_scale),
         gt_max_speed=float(args.gt_max_speed),
         scene_batch_size=int(args.scene_batch_size),
         noise_low=float(args.noise_low),

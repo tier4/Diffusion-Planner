@@ -1068,6 +1068,8 @@ def test_round_runner_cli_dry_run_uses_multiple_visible_gpus_or_skips(tmp_path):
         assert f"--shard_index {shard_index}" in proc.stdout
     assert f"--num_shards {len(gpu_ids)}" in proc.stdout
     assert "--allow_empty" in proc.stdout
+    assert "--generation_mode grpo_temperature" in proc.stdout
+    assert "--grpo_noise_scale 3.0" in proc.stdout
 
 
 def test_round_runner_perception_mining_writes_credit_rows_directly(tmp_path):
@@ -2300,6 +2302,8 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         min_static_margin=0.3,
         K=1,
         variant="rl_cl_soft_sweep_stretch",
+        generation_mode="guided_variant",
+        grpo_noise_scale=3.0,
         gt_max_speed=9.0,
         scene_batch_size=1,
         noise_low=0.5,
