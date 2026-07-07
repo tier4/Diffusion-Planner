@@ -1643,7 +1643,6 @@ def run_segments_batched(
             if save_dir is not None:
                 import shutil
                 from collections import deque
-                from pathlib import Path
 
                 for off, s in enumerate(states):
                     key = route_keys[c0 + off] if route_keys else _route_key(s.tl)
@@ -1881,12 +1880,20 @@ def run_segments_batched(
                                         s.terminated = "verified_danger_window_saved"
                                         s.done = True
                             else:
-                                if danger_row is not None:
+                                event_labels: list[str] = []
+                                for event_row in (danger_row, realized_row):
+                                    if event_row is None:
+                                        continue
+                                    for label in event_row.get("labels", []):
+                                        label = str(label)
+                                        if label != "clean" and label not in event_labels:
+                                            event_labels.append(label)
+                                if event_labels:
                                     selector = s.danger_event_selector or OnlineEventSelector(
                                         decluster_steps=danger_decluster_steps
                                     )
                                     s.danger_event_selector = selector
-                                    for label in selector.update(s.k, danger_row.get("labels", [])):
+                                    for label in selector.update(s.k, event_labels):
                                         width = int(
                                             (danger_credit_windows or {}).get(
                                                 label,

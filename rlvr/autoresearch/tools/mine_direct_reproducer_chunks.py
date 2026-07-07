@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    build_realized_event_scorer,
     build_reproducer_danger_scorer,
     load_credit_windows,
 )
@@ -570,6 +571,7 @@ def main() -> None:
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     allowed_labels = {label.strip() for label in args.labels.split(",") if label.strip()} or None
     danger_scorer = None
+    realized_event_scorer = None
     danger_credit_windows = None
     model = model_args = None
     if not args.plan_only:
@@ -581,6 +583,18 @@ def main() -> None:
             enable_conflict_detector=bool(args.enable_conflict_detector),
             allowed_labels=allowed_labels,
         )
+        realized_allowed_labels = (
+            {"moving_collision"}
+            if allowed_labels is None or "moving_collision" in allowed_labels
+            else None
+        )
+        if realized_allowed_labels is not None:
+            realized_event_scorer = build_realized_event_scorer(
+                reward_config=args.danger_reward_config,
+                threshold_config=args.danger_threshold_config,
+                device=device,
+                allowed_labels=realized_allowed_labels,
+            )
         danger_credit_windows = load_credit_windows(args.danger_credit_window_config)
 
     args.segments_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -677,6 +691,7 @@ def main() -> None:
             timeline_progress_mode=args.timeline_progress_mode,
             danger_save_dir=args.out_dir,
             danger_scorer=danger_scorer,
+            realized_event_scorer=realized_event_scorer,
             danger_credit_windows=danger_credit_windows,
             danger_decluster_steps=args.danger_decluster_steps,
             danger_manifest_callback=write_credit_rows,

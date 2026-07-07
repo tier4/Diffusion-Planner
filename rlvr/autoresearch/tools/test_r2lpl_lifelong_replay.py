@@ -15,6 +15,9 @@ from torch import nn
 import scenario_generation.reproducer_rollout as reproducer_rollout
 from rlvr.autoresearch.tools import build_avoiding_target as build_avoiding_target_tool
 from rlvr.autoresearch.tools import mine_credit_window_scenes as mine_credit_window_scenes_tool
+from rlvr.autoresearch.tools import (
+    mine_direct_reproducer_chunks as mine_direct_reproducer_chunks_tool,
+)
 from rlvr.autoresearch.tools import reproducer_danger_scorer
 from rlvr.autoresearch.tools import run_lifelong_r2lpl_rounds as round_runner
 from rlvr.autoresearch.tools.build_avoiding_target import (
@@ -410,6 +413,99 @@ def test_direct_reproducer_credit_row_propagates_frame_segment(tmp_path):
     assert row["segment"] == [10, 90]
     assert row["segment_route_indices"] == [10, 90]
     assert row["segment_frame_ids"] == [110, 190]
+
+
+def test_mine_direct_main_forwards_realized_moving_collision_scorer(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    def _fake_build_realized_event_scorer(**kwargs):
+        captured["realized_allowed_labels"] = kwargs.get("allowed_labels")
+        return "realized-scorer"
+
+    def _fake_run_segments_batched(*args, **kwargs):
+        captured["realized_event_scorer"] = kwargs.get("realized_event_scorer")
+        captured["danger_scorer"] = kwargs.get("danger_scorer")
+        return [SimpleNamespace(metrics={"n_collision_steps": 1, "min_clearance": -0.1})]
+
+    chunk = Chunk(
+        key="chunkA",
+        global_start_index=0,
+        global_end_index=1,
+        paths=(tmp_path / "scene_00000000.npz",),
+        start_frame=0,
+        end_frame=0,
+        end_reason="chunk_len",
+        is_full_length=True,
+    )
+
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "_load_model",
+        lambda *_args, **_kwargs: (object(), SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "build_reproducer_danger_scorer",
+        lambda **_kwargs: "danger-scorer",
+    )
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "build_realized_event_scorer",
+        _fake_build_realized_event_scorer,
+    )
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "load_credit_windows",
+        lambda _path: {"moving_collision": 15, "road_border_crossing": 15},
+    )
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "iter_direct_chunks",
+        lambda *_args, **_kwargs: iter([chunk]),
+    )
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "_build_work_unit",
+        lambda *_args, **_kwargs: (SimpleNamespace(prefetch=lambda _items: None), 0, 1),
+    )
+    monkeypatch.setattr(
+        mine_direct_reproducer_chunks_tool,
+        "run_segments_batched",
+        _fake_run_segments_batched,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mine_direct_reproducer_chunks.py",
+            "--scene_list",
+            str(tmp_path / "scenes.json"),
+            "--model_path",
+            str(tmp_path / "model.pth"),
+            "--out_dir",
+            str(tmp_path / "windows"),
+            "--out_jsonl",
+            str(tmp_path / "credit_windows.jsonl"),
+            "--segments_jsonl",
+            str(tmp_path / "segments.jsonl"),
+            "--danger_reward_config",
+            str(tmp_path / "reward.json"),
+            "--danger_threshold_config",
+            str(tmp_path / "thresholds.json"),
+            "--danger_credit_window_config",
+            str(tmp_path / "credit.json"),
+            "--labels",
+            "road_border_crossing,moving_collision",
+            "--batch_size",
+            "1",
+        ],
+    )
+
+    mine_direct_reproducer_chunks_tool.main()
+
+    assert captured["danger_scorer"] == "danger-scorer"
+    assert captured["realized_allowed_labels"] == {"moving_collision"}
+    assert captured["realized_event_scorer"] == "realized-scorer"
 
 
 def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, tmp_path):
@@ -1212,6 +1308,137 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     assert calls[0]["label"] == "road_border_crossing"
     assert calls[0]["source_label"] == "road_border_crossing"
     assert calls[0]["realized_frame"] == 101
+
+
+def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_path):
+    calls = []
+
+    class _FakeTimeline:
+        poses = np.zeros((4, 3), dtype=np.float32)
+        frame_indices = np.arange(100, 104, dtype=np.int64)
+
+        def prefetch(self, _items):
+            return None
+
+    class _FakeModel:
+        def __call__(self, data):
+            batch = data["dummy"].shape[0]
+            return None, {
+                "prediction": torch.zeros((batch, 1, 2, 4), dtype=torch.float32),
+                "turn_indicator_logit": torch.zeros((batch, 2, 3), dtype=torch.float32),
+            }
+
+    def _fake_seed_state(
+        tl,
+        start,
+        end,
+        search_radius,
+        warmup_steps,
+        near_miss_thresh,
+        goal_reach_m,
+        max_stuck_steps,
+        timers,
+        *,
+        max_steps,
+        **_kwargs,
+    ):
+        return SimpleNamespace(
+            tl=tl,
+            start=start,
+            end=end,
+            k=0,
+            max_steps=max_steps,
+            done=False,
+            terminated="running",
+            replay_mode="clock",
+            clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            collisions=np.zeros(max_steps + 1, dtype=bool),
+            near_miss_thresh=near_miss_thresh,
+            ego_shape=np.ones(3, dtype=np.float32),
+            live_pose=np.zeros(3, dtype=np.float32),
+            save_buf=None,
+            last_snap_step=None,
+            n_snaps=0,
+            turn_hist=None,
+            credit_window=None,
+            credit_saved=False,
+            verified_credit_labels=set(),
+            verified_credit_first_step={},
+            danger_event_selector=None,
+            output_route_key=None,
+        )
+
+    def _fake_pre_step(s, gpu_transform=False):
+        if s.k >= 3:
+            s.done = True
+            return None
+        return (
+            {"ego_shape": np.ones((1, 3), dtype=np.float32), "k": s.k},
+            np.zeros((320, 11), dtype=np.float32),
+            s.start + s.k,
+            None,
+            None,
+        )
+
+    def _fake_to_torch_batch(np_dicts, model_args, device):
+        return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
+
+    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+        return [(0.0, True, 1, 0) for _ in neighbors_list]
+
+    def _fake_danger_scorer(built, preds, data, device):
+        return [{"labels": ["clean"], "label": "clean"} for _ in built]
+
+    def _fake_realized_event_scorer(np_dict, *, collided):
+        return (
+            {"labels": ["moving_collision"], "label": "moving_collision"}
+            if np_dict["k"] == 1
+            else {"labels": ["clean"], "label": "clean"}
+        )
+
+    def _fake_advance_step(s, pred, idx, device, timers):
+        s.k += 1
+
+    def _fake_finalize(s, timers):
+        return SimpleNamespace(metrics={"n_steps_run": s.k})
+
+    def _fake_dump_credit_window(*args, **kwargs):
+        calls.append(
+            {
+                "out_dir": args[0],
+                "saved_steps": [rec[0] for rec in args[4]],
+                "label": args[9],
+            }
+        )
+        return {"n_scenes": len(args[4])}
+
+    monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
+    monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
+    monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
+    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
+    monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
+    monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
+
+    reproducer_rollout.run_segments_batched(
+        _FakeModel(),
+        SimpleNamespace(predicted_neighbor_num=0, future_len=2, observation_normalizer=lambda x: x),
+        [(_FakeTimeline(), 100, 103)],
+        device="cpu",
+        batch_size=1,
+        n_build_threads=1,
+        prefetch_ahead=0,
+        route_keys=["bagA"],
+        danger_save_dir=tmp_path,
+        danger_scorer=_fake_danger_scorer,
+        realized_event_scorer=_fake_realized_event_scorer,
+        danger_credit_windows={"moving_collision": 15},
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["label"] == "moving_collision"
+    assert calls[0]["saved_steps"] == [0, 1]
+    assert Path(calls[0]["out_dir"]).name == "bagA_100_101_danger_moving_collision"
 
 
 def test_dump_full_credit_segment_uses_step_key_for_verified_frame(monkeypatch, tmp_path):
