@@ -583,11 +583,14 @@ def main() -> None:
             enable_conflict_detector=bool(args.enable_conflict_detector),
             allowed_labels=allowed_labels,
         )
+        realized_supported = {"moving_collision", "static_collision", "road_border_crossing"}
         realized_allowed_labels = (
-            {"moving_collision"}
-            if allowed_labels is None or "moving_collision" in allowed_labels
-            else None
+            realized_supported
+            if allowed_labels is None
+            else realized_supported.intersection(allowed_labels)
         )
+        if realized_allowed_labels == set():
+            realized_allowed_labels = None
         if realized_allowed_labels is not None:
             realized_event_scorer = build_realized_event_scorer(
                 reward_config=args.danger_reward_config,

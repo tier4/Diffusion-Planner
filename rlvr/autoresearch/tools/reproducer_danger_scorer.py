@@ -11,6 +11,7 @@ import torch
 from planner_metrics.subscores import (
     compute_ego_neighbor_signed_clearance,
     compute_road_border_penalty,
+    compute_static_collision_penalty,
 )
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _apply_scene_thresholds,
@@ -23,7 +24,9 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from scenario_generation.reproducer_rollout import _route_key
 
-_SUPPORTED_REALIZED_EVENT_LABELS = frozenset({"moving_collision", "road_border_crossing"})
+_SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
+    {"moving_collision", "static_collision", "road_border_crossing"}
+)
 
 
 def load_credit_windows(path: Path | None) -> dict[str, int] | None:
@@ -193,6 +196,36 @@ def build_realized_event_scorer(
                     )
                     if row["moving_collision_step"] is not None:
                         labels.append("moving_collision")
+
+        if "static_collision" in allowed:
+            ego_shape = _ego_shape_from_data(tensors, torch_device)
+            neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(
+                tensors, 2, torch_device
+            )
+            row["static_collision_step"] = None
+            row["static_min_dist"] = 99.0
+            row["stopped_neighbor_count"] = 0
+            if neighbor_futures.shape[0] > 0:
+                ego_now = torch.tensor(
+                    [[[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]]],
+                    dtype=torch.float32,
+                    device=torch_device,
+                )
+                static = compute_static_collision_penalty(
+                    ego_now,
+                    ego_shape,
+                    neighbor_futures,
+                    neighbor_shapes,
+                    neighbor_valid,
+                    reward_cfg,
+                )
+                row["stopped_neighbor_count"] = int(static["stopped_mask"].sum().item())
+                if static["per_timestep_min"].numel():
+                    row["static_min_dist"] = float(static["per_timestep_min"].min().item())
+                first = static["first_crossing_steps"][0]
+                row["static_collision_step"] = None if first is None else int(first)
+                if first is not None:
+                    labels.append("static_collision")
 
         if "road_border_crossing" in allowed:
             ego_shape = tensors["ego_shape"].reshape(-1)[:3]

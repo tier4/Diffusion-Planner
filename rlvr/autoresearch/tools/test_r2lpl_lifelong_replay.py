@@ -456,7 +456,7 @@ def test_direct_reproducer_credit_row_propagates_frame_segment(tmp_path):
     assert row["segment_frame_ids"] == [110, 190]
 
 
-def test_mine_direct_main_forwards_realized_moving_collision_scorer(monkeypatch, tmp_path):
+def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     def _fake_build_realized_event_scorer(**kwargs):
@@ -536,7 +536,7 @@ def test_mine_direct_main_forwards_realized_moving_collision_scorer(monkeypatch,
             "--danger_credit_window_config",
             str(tmp_path / "credit.json"),
             "--labels",
-            "road_border_crossing,moving_collision",
+            "road_border_crossing,static_collision,moving_collision",
             "--batch_size",
             "1",
         ],
@@ -545,7 +545,11 @@ def test_mine_direct_main_forwards_realized_moving_collision_scorer(monkeypatch,
     mine_direct_reproducer_chunks_tool.main()
 
     assert captured["danger_scorer"] == "danger-scorer"
-    assert captured["realized_allowed_labels"] == {"moving_collision"}
+    assert captured["realized_allowed_labels"] == {
+        "road_border_crossing",
+        "static_collision",
+        "moving_collision",
+    }
     assert captured["realized_event_scorer"] == "realized-scorer"
 
 
@@ -1424,8 +1428,12 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
+    score_calls = {"n": 0}
+
     def _fake_score_step_batched(neighbors_list, ego_shapes, device):
-        return [(0.0, True, 1, 0) for _ in neighbors_list]
+        score_calls["n"] += 1
+        collided = score_calls["n"] >= 2
+        return [(0.0, collided, 1, 0) for _ in neighbors_list]
 
     def _fake_danger_scorer(built, preds, data, device):
         return [{"labels": ["clean"], "label": "clean"} for _ in built]
@@ -1480,6 +1488,126 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     assert calls[0]["label"] == "moving_collision"
     assert calls[0]["saved_steps"] == [0, 1]
     assert Path(calls[0]["out_dir"]).name == "bagA_100_101_danger_moving_collision"
+
+
+def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch, tmp_path):
+    calls = []
+
+    class _FakeTimeline:
+        poses = np.zeros((4, 3), dtype=np.float32)
+        frame_indices = np.arange(100, 104, dtype=np.int64)
+
+        def prefetch(self, _items):
+            return None
+
+    class _FakeModel:
+        def __call__(self, data):
+            batch = data["dummy"].shape[0]
+            return None, {
+                "prediction": torch.zeros((batch, 1, 2, 4), dtype=torch.float32),
+                "turn_indicator_logit": torch.zeros((batch, 2, 3), dtype=torch.float32),
+            }
+
+    def _fake_seed_state(
+        tl,
+        start,
+        end,
+        search_radius,
+        warmup_steps,
+        near_miss_thresh,
+        goal_reach_m,
+        max_stuck_steps,
+        timers,
+        *,
+        max_steps,
+        **_kwargs,
+    ):
+        return SimpleNamespace(
+            tl=tl,
+            start=start,
+            end=end,
+            k=0,
+            max_steps=max_steps,
+            done=False,
+            terminated="running",
+            replay_mode="clock",
+            clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            collisions=np.zeros(max_steps + 1, dtype=bool),
+            near_miss_thresh=near_miss_thresh,
+            ego_shape=np.ones(3, dtype=np.float32),
+            live_pose=np.zeros(3, dtype=np.float32),
+            save_buf=None,
+            last_snap_step=None,
+            n_snaps=0,
+            turn_hist=None,
+            credit_window=None,
+            credit_saved=False,
+            verified_credit_labels=set(),
+            verified_credit_first_step={},
+            danger_event_selector=None,
+            output_route_key=None,
+        )
+
+    def _fake_pre_step(s, gpu_transform=False):
+        if s.k >= 2:
+            s.done = True
+            return None
+        return (
+            {"ego_shape": np.ones((1, 3), dtype=np.float32), "k": s.k},
+            np.zeros((320, 11), dtype=np.float32),
+            s.start + s.k,
+            None,
+            None,
+        )
+
+    def _fake_to_torch_batch(np_dicts, model_args, device):
+        return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
+
+    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+        return [(0.0, True, 1, 0) for _ in neighbors_list]
+
+    def _fake_clean_scorer(*_args, **_kwargs):
+        return [{"labels": ["clean"], "label": "clean"}]
+
+    def _fake_clean_realized(*_args, **_kwargs):
+        return {"labels": ["clean"], "label": "clean"}
+
+    def _fake_advance_step(s, pred, idx, device, timers):
+        s.k += 1
+
+    def _fake_finalize(s, timers):
+        return SimpleNamespace(metrics={"n_steps_run": s.k})
+
+    def _fake_dump_credit_window(*args, **kwargs):
+        calls.append({"out_dir": args[0], "label": args[9]})
+        return {"n_scenes": len(args[4])}
+
+    monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
+    monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
+    monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
+    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
+    monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
+    monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
+
+    reproducer_rollout.run_segments_batched(
+        _FakeModel(),
+        SimpleNamespace(predicted_neighbor_num=0, future_len=2, observation_normalizer=lambda x: x),
+        [(_FakeTimeline(), 100, 103)],
+        device="cpu",
+        batch_size=1,
+        n_build_threads=1,
+        prefetch_ahead=0,
+        route_keys=["bagA"],
+        danger_save_dir=tmp_path,
+        danger_scorer=_fake_clean_scorer,
+        realized_event_scorer=_fake_clean_realized,
+        danger_credit_windows={"moving_collision": 15},
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["label"] == "moving_collision"
+    assert Path(calls[0]["out_dir"]).name == "bagA_100_100_danger_moving_collision"
 
 
 def test_dump_full_credit_segment_uses_step_key_for_verified_frame(monkeypatch, tmp_path):
@@ -1926,6 +2054,88 @@ def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
 
     assert "moving_collision" in row["labels"]
     assert row["moving_collision_step"] == 0
+
+
+def test_realized_event_scorer_supports_static_collision(tmp_path):
+    reward_cfg = tmp_path / "reward.json"
+    threshold_cfg = tmp_path / "thresholds.json"
+    reward_cfg.write_text(
+        json.dumps(
+            {
+                "reward_mode": "gate",
+                "w_progress": 2.0,
+                "w_centerline": 5.0,
+                "w_safety": 5.0,
+                "w_smooth": 0.5,
+                "w_feasibility": 5.0,
+                "stopped_penalty": 50.0,
+                "rb_gate_enabled": True,
+                "rb_penalty_mode": "frac",
+                "rb_cross_thresh": 0.2,
+                "rb_near_thresh": 0.2,
+                "rb_wide_thresh": 0.6,
+                "rb_cont_thresh": 1.0,
+                "rb_near_scale": 3.0,
+                "rb_wide_scale": 0.2,
+                "rb_cont_scale": 0.0,
+                "enable_lane_departure": False,
+                "lane_gate_enabled": False,
+                "lane_cross_thresh": 0.2,
+                "lane_near_thresh": 0.25,
+                "lane_wide_thresh": 0.4,
+                "lane_cont_thresh": 0.8,
+                "lane_near_scale": 3.0,
+                "lane_wide_scale": 0.2,
+                "lane_cont_scale": 0.0,
+                "centerline_usage_mode": "baselink",
+                "enable_overprogress": False,
+                "overprogress_margin": 1.1,
+                "overprogress_penalty": 0.3,
+                "progress_norm_scale": 20.0,
+                "underprogress_penalty": 0.0,
+                "underprogress_threshold": 0.5,
+                "underprogress_reference": "baseline",
+            }
+        )
+    )
+    threshold_cfg.write_text(
+        json.dumps(
+            {
+                "moving_collision_thresh": 0.2,
+                "moving_near_thresh": 0.7,
+                "static_near_thresh": 0.5,
+                "rb_near_thresh": 0.2,
+                "expert_disagreement_thresh": 1.0,
+                "expert_disagreement_sustain_steps": 10,
+                "sc_cross_thresh": 0.2,
+                "rb_cross_thresh": 0.2,
+            }
+        )
+    )
+
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"static_collision"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+    np_dict["neighbor_agents_past"][0, -1, 0] = 3.0
+    np_dict["neighbor_agents_past"][0, -1, 2] = 1.0
+    np_dict["neighbor_agents_past"][0, -1, 6] = 2.0
+    np_dict["neighbor_agents_past"][0, -1, 7] = 4.5
+    np_dict["neighbor_agents_future"][0, :, 0] = 3.0
+    np_dict["neighbor_agents_future"][0, :, 2] = 1.0
+
+    row = scorer(np_dict, collided=True)
+
+    assert "static_collision" in row["labels"]
+    assert row["static_collision_step"] == 0
+    assert row["stopped_neighbor_count"] == 1
 
 
 def test_union_scene_lists_dedupes_current_and_replay(tmp_path):

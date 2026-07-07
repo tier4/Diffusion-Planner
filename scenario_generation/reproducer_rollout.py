@@ -1888,6 +1888,12 @@ def run_segments_batched(
                                         label = str(label)
                                         if label != "clean" and label not in event_labels:
                                             event_labels.append(label)
+                                if (
+                                    bool(col)
+                                    and realized_event_scorer is not None
+                                    and "moving_collision" not in event_labels
+                                ):
+                                    event_labels.append("moving_collision")
                                 if event_labels:
                                     selector = s.danger_event_selector or OnlineEventSelector(
                                         decluster_steps=danger_decluster_steps
