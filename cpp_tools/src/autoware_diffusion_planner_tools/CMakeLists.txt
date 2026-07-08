@@ -36,6 +36,7 @@ ament_auto_add_executable(data_converter
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
   src/io/frame_writer.cpp
+  src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
   src/io/projector_factory.cpp
   src/processing/ego_sequence.cpp
@@ -55,6 +56,7 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
   src/io/frame_writer.cpp
+  src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
   src/io/projector_factory.cpp
   src/processing/ego_sequence.cpp
@@ -152,5 +154,14 @@ if(BUILD_TESTING)
       autoware_vehicle_msgs
       geometry_msgs
     )
+  endif()
+
+  # io/bag_metadata — self-contained JSON parsing, no ROS message deps
+  ament_add_gtest(test_bag_metadata
+    test/test_bag_metadata.cpp
+    src/io/bag_metadata.cpp
+  )
+  if(TARGET test_bag_metadata)
+    target_include_directories(test_bag_metadata PRIVATE include src)
   endif()
 endif()
