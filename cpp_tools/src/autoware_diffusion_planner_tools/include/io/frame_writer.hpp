@@ -15,6 +15,7 @@
 #ifndef IO__FRAME_WRITER_HPP_
 #define IO__FRAME_WRITER_HPP_
 
+#include "io/bag_metadata.hpp"
 #include "nlohmann/json.hpp"
 #include "timestamp_stats.hpp"
 #include "types/skipping_info.hpp"
@@ -31,12 +32,14 @@
 
 nlohmann::json build_frame_json(
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids);
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids,
+  const BagMetadata & bag_metadata);
 
 nlohmann::json build_route_json(
   const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
   const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten);
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten,
+  const BagMetadata & bag_metadata);
 
 // ---------------------------------------------------------------------------
 // File-writing wrappers — call the builders above, then persist to disk.
@@ -45,13 +48,15 @@ nlohmann::json build_route_json(
 void save_frame_json(
   const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids);
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids,
+  const BagMetadata & bag_metadata);
 
 void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,
   const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
   const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten);
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten,
+  const BagMetadata & bag_metadata);
 
 // Pack-sequence mode: write all of a sequence's per-frame json objects (in frame order) as a
 // single <rosbag>_<sequence_id>.json array. Each element is a build_frame_json object.

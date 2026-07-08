@@ -14,6 +14,8 @@
 
 #include "io/frame_writer.hpp"
 
+#include "io/bag_metadata.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -36,7 +38,8 @@ inline double to_millisecond(const int64_t timestamp_ns)
 
 nlohmann::json build_frame_json(
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids)
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids,
+  const BagMetadata & bag_metadata)
 {
   std::vector<int> incomplete_types;
   for (const auto & t : skipping_info.incomplete_data_types) {
@@ -63,13 +66,20 @@ nlohmann::json build_frame_json(
   // Perception track UUIDs aligned 1:1 with the neighbor_past slots (for the
   // reproducer's cross-frame association / interpolation).
   j["neighbor_ids"] = neighbor_ids;
+  j["log_file_id"] = bag_metadata.log_file_id;
+  j["vehicle_id"] = bag_metadata.vehicle_id;
+  j["project_id"] = bag_metadata.project_id;
+  j["map_version_id"] = bag_metadata.map_version_id;
+  j["date"] = bag_metadata.date;
+  j["bag_time"] = bag_metadata.bag_time;
   return j;
 }
 
 nlohmann::json build_route_json(
   const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
   const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten,
+  const BagMetadata & bag_metadata)
 {
   std::vector<int> missing_types;
   for (const auto & t : skipping_info.missing_topic_types) {
@@ -113,6 +123,12 @@ nlohmann::json build_route_json(
       {"rosbag_diff_stats", rosbag_diff_stats_json}};
   }
   j["timestamp_stats"] = timestamp_stats_json;
+  j["log_file_id"] = bag_metadata.log_file_id;
+  j["vehicle_id"] = bag_metadata.vehicle_id;
+  j["project_id"] = bag_metadata.project_id;
+  j["map_version_id"] = bag_metadata.map_version_id;
+  j["date"] = bag_metadata.date;
+  j["bag_time"] = bag_metadata.bag_time;
   return j;
 }
 
@@ -123,14 +139,15 @@ nlohmann::json build_route_json(
 void save_frame_json(
   const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids)
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids,
+  const BagMetadata & bag_metadata)
 {
   namespace fs = std::filesystem;
 
   fs::create_directories(output_path);
 
   const nlohmann::json j =
-    build_frame_json(kinematic_state, timestamp, skipping_info, neighbor_ids);
+    build_frame_json(kinematic_state, timestamp, skipping_info, neighbor_ids, bag_metadata);
 
   const std::string json_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".json";
   std::ofstream json_file(json_filename);
@@ -146,7 +163,8 @@ void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,
   const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
   const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten,
+  const BagMetadata & bag_metadata)
 {
   namespace fs = std::filesystem;
 
@@ -155,7 +173,7 @@ void save_route_json(
 
   const nlohmann::json j = build_route_json(
     num_frames, traveled_distance_m, start_timestamp, end_timestamp, skipping_info,
-    timestamp_stats_map, goal_pose_overwritten);
+    timestamp_stats_map, goal_pose_overwritten, bag_metadata);
 
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);

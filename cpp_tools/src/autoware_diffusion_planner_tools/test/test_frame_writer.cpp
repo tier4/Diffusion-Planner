@@ -14,7 +14,17 @@
 
 #include "io/frame_writer.hpp"
 
+#include "io/bag_metadata.hpp"
+
 #include <gtest/gtest.h>
+
+namespace
+{
+BagMetadata make_test_metadata()
+{
+  return {"log-id-1", "vehicle-id-1", "x2_dev", "1847-ver", "2026-01-16", "10-03-35"};
+}
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // build_frame_json
@@ -35,7 +45,7 @@ TEST(BuildFrameJsonTest, AcceptedFrameFields)
   const int64_t ts = 123456789LL;
 
   const std::vector<std::string> neighbor_ids = {"aaaa", "bbbb", "cccc"};
-  const nlohmann::json j = build_frame_json(odom, ts, info, neighbor_ids);
+  const nlohmann::json j = build_frame_json(odom, ts, info, neighbor_ids, make_test_metadata());
 
   EXPECT_FALSE(j["is_skipped"].get<bool>());
   EXPECT_EQ(j["timestamp"].get<int64_t>(), ts);
@@ -44,6 +54,12 @@ TEST(BuildFrameJsonTest, AcceptedFrameFields)
   EXPECT_DOUBLE_EQ(j["z"].get<double>(), 3.3);
   EXPECT_EQ(j["skipping_info"]["label"].get<int>(), static_cast<int>(SkippingLabel::NotSkipped));
   EXPECT_EQ(j["neighbor_ids"].get<std::vector<std::string>>(), neighbor_ids);
+  EXPECT_EQ(j["log_file_id"].get<std::string>(), "log-id-1");
+  EXPECT_EQ(j["vehicle_id"].get<std::string>(), "vehicle-id-1");
+  EXPECT_EQ(j["project_id"].get<std::string>(), "x2_dev");
+  EXPECT_EQ(j["map_version_id"].get<std::string>(), "1847-ver");
+  EXPECT_EQ(j["date"].get<std::string>(), "2026-01-16");
+  EXPECT_EQ(j["bag_time"].get<std::string>(), "10-03-35");
 }
 
 TEST(BuildFrameJsonTest, SkippedFrameIsSkippedTrue)
@@ -51,7 +67,7 @@ TEST(BuildFrameJsonTest, SkippedFrameIsSkippedTrue)
   nav_msgs::msg::Odometry odom;
   const SkippingInfo info = SkippingInfo::stale_data(600'000'000LL);
 
-  const nlohmann::json j = build_frame_json(odom, 0LL, info, std::vector<std::string>{});
+  const nlohmann::json j = build_frame_json(odom, 0LL, info, std::vector<std::string>{}, BagMetadata{});
 
   EXPECT_TRUE(j["is_skipped"].get<bool>());
   EXPECT_EQ(
@@ -67,14 +83,17 @@ TEST(BuildRouteJsonTest, BasicFieldsPresent)
   const SkippingInfo info = SkippingInfo::accepted();
   timestamp_stats::TimestampStatsMap stats_map({});  // empty map
 
-  const nlohmann::json j = build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map);
+  const nlohmann::json j = build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map, false, make_test_metadata());
 
   EXPECT_FALSE(j["is_skipped"].get<bool>());
+  EXPECT_FALSE(j["goal_pose_overwritten"].get<bool>());
   EXPECT_EQ(j["num_frames"].get<int64_t>(), 42);
   EXPECT_DOUBLE_EQ(j["traveled_distance_m"].get<double>(), 150.5);
   EXPECT_EQ(j["start_timestamp"].get<int64_t>(), 1000000LL);
   EXPECT_EQ(j["end_timestamp"].get<int64_t>(), 2000000LL);
   EXPECT_EQ(j["skipping_info"]["label"].get<int>(), static_cast<int>(SkippingLabel::NotSkipped));
+  EXPECT_EQ(j["log_file_id"].get<std::string>(), "log-id-1");
+  EXPECT_EQ(j["vehicle_id"].get<std::string>(), "vehicle-id-1");
 }
 
 TEST(BuildRouteJsonTest, SkippedRouteFieldsPresent)
@@ -82,9 +101,10 @@ TEST(BuildRouteJsonTest, SkippedRouteFieldsPresent)
   const SkippingInfo info = SkippingInfo::insufficient_frames(100, 1700);
   timestamp_stats::TimestampStatsMap stats_map({});
 
-  const nlohmann::json j = build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map);
+  const nlohmann::json j = build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map, false, BagMetadata{});
 
   EXPECT_TRUE(j["is_skipped"].get<bool>());
   EXPECT_EQ(
     j["skipping_info"]["label"].get<int>(), static_cast<int>(SkippingLabel::InsufficientFrames));
+  EXPECT_EQ(j["log_file_id"].get<std::string>(), "");
 }
