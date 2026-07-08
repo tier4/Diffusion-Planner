@@ -48,8 +48,7 @@ void process_sequence(
   SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
   const ConverterOptions & options,
   const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map,
-  const BagMetadata & bag_metadata)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const BagMetadata & bag_metadata)
 {
   using autoware::diffusion_planner::INPUT_T;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
@@ -91,7 +90,8 @@ void process_sequence(
               << ")" << std::endl;
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false, bag_metadata);
+      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false,
+      bag_metadata);
     return;
   }
 

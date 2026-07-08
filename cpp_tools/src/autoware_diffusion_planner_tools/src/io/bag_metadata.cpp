@@ -31,7 +31,8 @@ std::string get_string_or_empty(const nlohmann::json & j, const std::string & ke
   return "";
 }
 
-void parse_date_and_bag_time(const std::string & log_file_name, std::string & date, std::string & bag_time)
+void parse_date_and_bag_time(
+  const std::string & log_file_name, std::string & date, std::string & bag_time)
 {
   // Pattern: {vehicle_uuid}_{YYYY-MM-DD}-{HH-MM-SS}_{suffix}
   // The date and bag_time are separated by a hyphen between DD and HH,
@@ -50,8 +51,7 @@ BagMetadata load_bag_metadata(const std::string & rosbag_path)
 {
   BagMetadata meta;
 
-  const std::filesystem::path info_path =
-    std::filesystem::path(rosbag_path) / "log_file_info.json";
+  const std::filesystem::path info_path = std::filesystem::path(rosbag_path) / "log_file_info.json";
 
   if (!std::filesystem::is_regular_file(info_path)) {
     return meta;

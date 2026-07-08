@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "io/frame_writer.hpp"
-
 #include "io/bag_metadata.hpp"
+#include "io/frame_writer.hpp"
 
 #include <gtest/gtest.h>
 
@@ -67,7 +66,8 @@ TEST(BuildFrameJsonTest, SkippedFrameIsSkippedTrue)
   nav_msgs::msg::Odometry odom;
   const SkippingInfo info = SkippingInfo::stale_data(600'000'000LL);
 
-  const nlohmann::json j = build_frame_json(odom, 0LL, info, std::vector<std::string>{}, BagMetadata{});
+  const nlohmann::json j =
+    build_frame_json(odom, 0LL, info, std::vector<std::string>{}, BagMetadata{});
 
   EXPECT_TRUE(j["is_skipped"].get<bool>());
   EXPECT_EQ(
@@ -83,7 +83,8 @@ TEST(BuildRouteJsonTest, BasicFieldsPresent)
   const SkippingInfo info = SkippingInfo::accepted();
   timestamp_stats::TimestampStatsMap stats_map({});  // empty map
 
-  const nlohmann::json j = build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map, false, make_test_metadata());
+  const nlohmann::json j =
+    build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map, false, make_test_metadata());
 
   EXPECT_FALSE(j["is_skipped"].get<bool>());
   EXPECT_FALSE(j["goal_pose_overwritten"].get<bool>());
@@ -101,7 +102,8 @@ TEST(BuildRouteJsonTest, SkippedRouteFieldsPresent)
   const SkippingInfo info = SkippingInfo::insufficient_frames(100, 1700);
   timestamp_stats::TimestampStatsMap stats_map({});
 
-  const nlohmann::json j = build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map, false, BagMetadata{});
+  const nlohmann::json j =
+    build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map, false, BagMetadata{});
 
   EXPECT_TRUE(j["is_skipped"].get<bool>());
   EXPECT_EQ(
