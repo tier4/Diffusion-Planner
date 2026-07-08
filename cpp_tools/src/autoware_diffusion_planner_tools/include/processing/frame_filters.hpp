@@ -234,37 +234,55 @@ inline bool check_neighbor_collision(
   return false;
 }
 
-inline bool check_road_border_collision(
-  const std::vector<Corners> & ego, const std::vector<float> & line_strings, float margin)
+inline std::vector<std::array<float, 4>> collect_line_string_segments(
+  const std::vector<float> & line_strings, const int64_t type_channel)
 {
   using autoware::diffusion_planner::LINE_STRING_TYPE_NUM;
   using autoware::diffusion_planner::NUM_LINE_STRINGS;
   using autoware::diffusion_planner::POINTS_PER_LINE_STRING;
-  const int64_t dim = 2 + LINE_STRING_TYPE_NUM;  // per-point channels: [x, y, type0, type1]
+
+  const int64_t dim = 2 + LINE_STRING_TYPE_NUM;  // per-point channels: [x, y, type0, type1, ...]
   const int64_t pts = POINTS_PER_LINE_STRING;
-  constexpr int64_t border_channel = 3;  // channel 3 > 0.5 marks a road border
 
   std::vector<std::array<float, 4>> segments;  // {ax, ay, bx, by}
+
   for (int64_t n = 0; n < NUM_LINE_STRINGS; ++n) {
     const float * base = &line_strings[n * pts * dim];
-    bool is_border = false;
+
+    bool is_target_type = false;
     for (int64_t p = 0; p < pts; ++p) {
-      if (base[p * dim + border_channel] > 0.5f) {
-        is_border = true;
+      if (base[p * dim + type_channel] > 0.5f) {
+        is_target_type = true;
         break;
       }
     }
-    if (!is_border) continue;
+
+    if (!is_target_type) continue;
+
     for (int64_t p = 0; p + 1 < pts; ++p) {
       const float ax = base[p * dim + 0];
       const float ay = base[p * dim + 1];
       const float bx = base[(p + 1) * dim + 0];
       const float by = base[(p + 1) * dim + 1];
+
       const bool va = std::fabs(ax) + std::fabs(ay) > 1e-6f;
       const bool vb = std::fabs(bx) + std::fabs(by) > 1e-6f;
-      if (va && vb) segments.push_back({ax, ay, bx, by});
+
+      if (va && vb) {
+        segments.push_back({ax, ay, bx, by});
+      }
     }
   }
+
+  return segments;
+}
+
+inline bool check_road_border_collision(
+  const std::vector<Corners> & ego, const std::vector<float> & line_strings, float margin)
+{
+  constexpr int64_t border_channel = 3;  // channel 3 > 0.5 marks a road border
+  const auto segments = collect_line_string_segments(line_strings, border_channel);
+
   if (segments.empty()) return false;
 
   // 1) any ego corner within `margin` of a border segment
@@ -507,11 +525,8 @@ inline bool detect_red_light_run(
   const std::vector<float> & ego_future, const std::vector<float> & route_lanes,
   const std::vector<float> & line_strings, float red_radius_m, float head_tol_deg)
 {
-  using autoware::diffusion_planner::LINE_STRING_TYPE_NUM;
-  using autoware::diffusion_planner::NUM_LINE_STRINGS;
   using autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE;
   using autoware::diffusion_planner::OUTPUT_T;
-  using autoware::diffusion_planner::POINTS_PER_LINE_STRING;
   using autoware::diffusion_planner::POINTS_PER_SEGMENT;
   using autoware::diffusion_planner::POSE_DIM;
   using autoware::diffusion_planner::SEGMENT_POINT_DIM;
@@ -519,22 +534,31 @@ inline bool detect_red_light_run(
   using autoware::diffusion_planner::TRAFFIC_LIGHT_ONE_HOT_DIM;
   using autoware::diffusion_planner::TRAFFIC_LIGHT_RED;
 
-  std::vector<std::array<float, 2>> ego_xy;
-  ego_xy.reserve(OUTPUT_T);
+  std::vector<std::array<float, 4>> ego_states;
+  ego_states.reserve(OUTPUT_T);
+
   for (int64_t i = 0; i < OUTPUT_T; ++i) {
     const float x = ego_future[i * POSE_DIM + 0];
     const float y = ego_future[i * POSE_DIM + 1];
+    const float cos_h = ego_future[i * POSE_DIM + 2];
+    const float sin_h = ego_future[i * POSE_DIM + 3];
+
     if (std::fabs(x) <= 1e-6f && std::fabs(y) <= 1e-6f) continue;
-    ego_xy.push_back({x, y});
+
+    ego_states.push_back({x, y, cos_h, sin_h});
   }
-  if (ego_xy.size() < 2) return false;
 
-  const auto & ego_first = ego_xy.front();
-  const auto & ego_last = ego_xy.back();
-  const float ego_heading_deg = std::atan2(ego_last[1] - ego_first[1], ego_last[0] - ego_first[0]) *
-                                180.0f / static_cast<float>(M_PI);
+  if (ego_states.size() < 2) return false;
 
-  std::vector<std::array<float, 2>> red_entries;
+  struct RedLaneEntry
+  {
+    float x;
+    float y;
+    float heading_deg;
+  };
+
+  std::vector<RedLaneEntry> red_entries;
+
   red_entries.reserve(NUM_SEGMENTS_IN_ROUTE);
   for (int64_t seg = 0; seg < NUM_SEGMENTS_IN_ROUTE; ++seg) {
     const float * segment = &route_lanes[seg * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM];
@@ -563,43 +587,28 @@ inline bool detect_red_light_run(
     const float * end = &segment[last_valid * SEGMENT_POINT_DIM];
     const float lane_heading_deg =
       std::atan2(end[1] - entry[1], end[0] - entry[0]) * 180.0f / static_cast<float>(M_PI);
-    if (heading_diff_deg(lane_heading_deg, ego_heading_deg) < head_tol_deg) {
-      red_entries.push_back({entry[0], entry[1]});
-    }
+    red_entries.push_back({entry[0], entry[1], lane_heading_deg});
   }
   if (red_entries.empty()) return false;
 
-  const int64_t ls_dim = 2 + LINE_STRING_TYPE_NUM;
   const int64_t stop_channel = 2 + autoware::diffusion_planner::LINE_STRING_TYPE_STOP_LINE;
-  std::vector<std::array<float, 4>> stop_segments;
-  for (int64_t n = 0; n < NUM_LINE_STRINGS; ++n) {
-    const float * base = &line_strings[n * POINTS_PER_LINE_STRING * ls_dim];
-    bool is_stop_line = false;
-    for (int64_t p = 0; p < POINTS_PER_LINE_STRING; ++p) {
-      if (base[p * ls_dim + stop_channel] > 0.5f) {
-        is_stop_line = true;
-        break;
-      }
-    }
-    if (!is_stop_line) continue;
-    for (int64_t p = 0; p + 1 < POINTS_PER_LINE_STRING; ++p) {
-      const float ax = base[p * ls_dim + 0];
-      const float ay = base[p * ls_dim + 1];
-      const float bx = base[(p + 1) * ls_dim + 0];
-      const float by = base[(p + 1) * ls_dim + 1];
-      const bool va = std::fabs(ax) + std::fabs(ay) > 1e-6f;
-      const bool vb = std::fabs(bx) + std::fabs(by) > 1e-6f;
-      if (va && vb) stop_segments.push_back({ax, ay, bx, by});
-    }
-  }
+  const auto stop_segments = collect_line_string_segments(line_strings, stop_channel);
+
   if (stop_segments.empty()) return false;
 
   const float radius_sq = red_radius_m * red_radius_m;
-  for (size_t i = 0; i + 1 < ego_xy.size(); ++i) {
-    const float p1x = ego_xy[i][0];
-    const float p1y = ego_xy[i][1];
-    const float p2x = ego_xy[i + 1][0];
-    const float p2y = ego_xy[i + 1][1];
+  for (size_t i = 0; i + 1 < ego_states.size(); ++i) {
+    const float p1x = ego_states[i][0];
+    const float p1y = ego_states[i][1];
+    const float p2x = ego_states[i + 1][0];
+    const float p2y = ego_states[i + 1][1];
+    const float cos_h = ego_states[i][2];
+    const float sin_h = ego_states[i][3];
+    const bool has_valid_heading = std::fabs(cos_h) + std::fabs(sin_h) > 1e-6f;
+    const float ego_heading_deg =
+      has_valid_heading ? std::atan2(sin_h, cos_h) * 180.0f / static_cast<float>(M_PI)
+                        : std::atan2(p2y - p1y, p2x - p1x) * 180.0f / static_cast<float>(M_PI);
+
     for (const auto & seg : stop_segments) {
       if (!segments_intersect(p1x, p1y, p2x, p2y, seg[0], seg[1], seg[2], seg[3])) continue;
       float ix = 0.0f;
@@ -607,8 +616,12 @@ inline bool detect_red_light_run(
       if (!segment_intersection_point(p1x, p1y, p2x, p2y, seg[0], seg[1], seg[2], seg[3], ix, iy))
         continue;
       for (const auto & entry : red_entries) {
-        const float dx = ix - entry[0];
-        const float dy = iy - entry[1];
+        if (heading_diff_deg(entry.heading_deg, ego_heading_deg) >= head_tol_deg) {
+          continue;
+        }
+
+        const float dx = ix - entry.x;
+        const float dy = iy - entry.y;
         if (dx * dx + dy * dy <= radius_sq) return true;
       }
     }

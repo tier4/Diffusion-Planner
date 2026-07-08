@@ -38,8 +38,8 @@ static ConverterOptions make_default_opts()
   o.collision_time_stride = 5;
   o.offlane_max_score = 6.0f;
   o.offlane_time_stride = 1;
-  o.red_light_run_radius_m = 5.0f;
-  o.red_light_run_heading_tol_deg = 30.0f;
+  o.red_light_run_radius_m = 12.0f;
+  o.red_light_run_heading_tol_deg = 45.0f;
   o.green_stop_heading_tol_deg = 45.0f;
   o.green_stop_stay_radius_m = 2.0f;
   o.green_stop_speed_max_mps = 1.0f;
@@ -67,8 +67,8 @@ TEST(DefaultConverterOptionsTest, UsesSharedDefaults)
   EXPECT_FLOAT_EQ(opts.ego_length, -1.0f);
   EXPECT_FLOAT_EQ(opts.ego_width, -1.0f);
   EXPECT_TRUE(opts.use_interpolation);
-  EXPECT_FLOAT_EQ(opts.red_light_run_radius_m, 5.0f);
-  EXPECT_FLOAT_EQ(opts.red_light_run_heading_tol_deg, 30.0f);
+  EXPECT_FLOAT_EQ(opts.red_light_run_radius_m, 12.0f);
+  EXPECT_FLOAT_EQ(opts.red_light_run_heading_tol_deg, 45.0f);
   EXPECT_FLOAT_EQ(opts.green_stop_heading_tol_deg, 45.0f);
   EXPECT_FLOAT_EQ(opts.green_stop_stay_radius_m, 2.0f);
   EXPECT_FLOAT_EQ(opts.green_stop_speed_max_mps, 1.0f);

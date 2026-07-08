@@ -246,7 +246,6 @@ void process_sequence(
                                        point_idx * SEGMENT_POINT_DIM + TRAFFIC_LIGHT_YELLOW;
     const bool is_yellow_light = route_lanes[yellow_light_index] > 0.5 && !options.convert_yellow;
     const bool is_red_or_yellow = is_red_light || is_yellow_light;
-    const bool is_red_light_run_candidate = is_red_light;
 
     float sum_mileage = 0.0;
     for (int64_t j = 0; j < OUTPUT_T - 1; ++j) {
@@ -278,7 +277,6 @@ void process_sequence(
       covariance[0],
       covariance[7],
       is_stop,
-      is_red_light_run_candidate,
       is_red_or_yellow,
       is_future_forward,
       stopping_count,

@@ -42,12 +42,6 @@ SkippingInfo decide_frame_skip(
 {
   using autoware::diffusion_planner::INPUT_T;
 
-  const bool detected_red_light_run =
-    inputs.is_red_light_run &&
-    frame_filters::detect_red_light_run(
-      ego_future, route_lanes, line_strings, filter_params.red_light_run_radius_m,
-      filter_params.red_light_run_heading_tol_deg);
-
   if (inputs.max_msg_age_ns > kStaleThresholdNs) {
     return SkippingInfo::stale_data(inputs.max_msg_age_ns);
   }
@@ -61,13 +55,19 @@ SkippingInfo decide_frame_skip(
   // first, so a stopped-then-pulling-away frame keeps the RedOrYellowLight label; the
   // AcceleratingAtTrafficLight label then counts only the moving (linear.x >= 0.1) starts
   // that the stopped-only gate leaked.
-  if (detected_red_light_run) {
-    if (inputs.is_stop) {
+  if (inputs.is_red_or_yellow) {
+    if (inputs.is_stop && inputs.is_future_forward) {
       return SkippingInfo::red_or_yellow_light();
     }
     if (frame_filters::is_accelerating(frame_filters::compute_future_accel(ego_future))) {
       return SkippingInfo::accelerating_at_traffic_light();
     }
+  }
+  if (
+    frame_filters::detect_red_light_run(
+      ego_future, route_lanes, line_strings, filter_params.red_light_run_radius_m,
+      filter_params.red_light_run_heading_tol_deg)) {
+    return SkippingInfo::detected_red_light_run();
   }
 
   if (inputs.stopping_count > (INPUT_T + 5) && inputs.is_red_or_yellow) {

@@ -123,8 +123,8 @@ Both converter commands accept these options:
 | `--collision_time_stride N` | Time stride for trajectory collision filters | `5` |
 | `--offlane_max_score M` | Off-lane filter maximum average distance from lane centerlines | `6.0` |
 | `--offlane_time_stride N` | Time stride for the off-lane filter | `1` |
-| `--red_light_run_radius_m M` | Maximum distance from a stop-line crossing to a heading-aligned red route-lane entry | `5.0` |
-| `--red_light_run_heading_tol_deg D` | Maximum heading difference used to match the ego's own red route lane | `30.0` |
+| `--red_light_run_radius_m M` | Maximum distance from a stop-line crossing to a heading-aligned red route-lane entry | `12.0` |
+| `--red_light_run_heading_tol_deg D` | Maximum heading difference used to match the ego's own red route lane | `45.0` |
 | `--green_stop_heading_tol_deg D` | Maximum heading difference used to match ego's green route lane | `45.0` |
 | `--green_stop_stay_radius_m M` | Maximum future spatial extent for stopped-on-green detection | `2.0` |
 | `--green_stop_speed_max_mps MPS` | Maximum current speed for stopped-on-green detection | `1.0` |

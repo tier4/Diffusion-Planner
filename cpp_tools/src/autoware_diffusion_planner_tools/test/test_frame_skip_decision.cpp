@@ -45,7 +45,6 @@ FrameSkipInputs make_clear_inputs()
   in.cov_xx = 0.0;
   in.cov_yy = 0.0;
   in.is_stop = false;
-  in.is_red_light_run = false;
   in.is_red_or_yellow = false;
   in.is_future_forward = true;
   in.stopping_count = 0;
@@ -238,7 +237,6 @@ TEST(DecideFrameSkipTest, RedOrYellowLightSkip)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -261,7 +259,6 @@ TEST(DecideFrameSkipTest, AcceleratingIntoRedLightSkipsEvenWhenMoving)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = false;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -283,7 +280,6 @@ TEST(DecideFrameSkipTest, StoppedThenAcceleratingKeepsRedOrYellowLabel)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -291,11 +287,10 @@ TEST(DecideFrameSkipTest, StoppedThenAcceleratingKeepsRedOrYellowLabel)
   EXPECT_EQ(info.label, SkippingLabel::RedOrYellowLight);
 }
 
-TEST(DecideFrameSkipTest, CreepingIntoRedWhileMovingIsKept)
+TEST(DecideFrameSkipTest, CreepingAcrossRedStopLineIsDetected)
 {
-  // Moving slowly at a near-constant ~1 m/s (a creep, peak < 3 m/s) toward a red light:
-  // neither the stopped gate (is_stop = false) nor the acceleration trigger fires, so the
-  // frame is accepted rather than dropped.
+  // Constant-speed creep does not trip the acceleration trigger, but crossing the stop line
+  // near a heading-aligned red route lane is detected by the red-light-run geometry filter.
   ZeroVectors vecs;
   for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
   set_linear_future(vecs.ego_future, 1.0f, 1.0f);
@@ -306,12 +301,11 @@ TEST(DecideFrameSkipTest, CreepingIntoRedWhileMovingIsKept)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = false;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
   const SkippingInfo info = call_decide(inputs, vecs);
-  EXPECT_EQ(info.label, SkippingLabel::NotSkipped);
+  EXPECT_EQ(info.label, SkippingLabel::DetectedRedLightRun);
 }
 
 TEST(DecideFrameSkipTest, StoppedAtTrafficLightSkip)
@@ -384,7 +378,6 @@ TEST(DecideFrameSkipTest, StaleDataWinsOverRedLight)
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.max_msg_age_ns = 600'000'000LL;
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -416,8 +409,8 @@ TEST(DecideFrameSkipTest, PerpendicularRedLaneDoesNotCauseFalsePositive)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
-  inputs.is_red_or_yellow = true;
+  // Keep the legacy boolean red/yellow gate off so this isolates the geometry detector.
+  inputs.is_red_or_yellow = false;
   inputs.is_future_forward = true;
 
   const SkippingInfo info = call_decide(inputs, vecs);
