@@ -24,7 +24,7 @@ UTIL_SCRIPTS = PROJECT_ROOT / "diffusion_planner" / "util_scripts"
 DEFAULT_CPP_BINARY = (
     PROJECT_ROOT / "cpp_tools" / "build" / "autoware_diffusion_planner_tools" / "data_converter"
 )
-MAKE_MP4 = Path.home() / "misc" / "ffmpeg_lib" / "make_mp4_from_unsequential_png.sh"
+MAKE_MP4 = ROS_SCRIPTS / "make_mp4.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -190,7 +190,7 @@ def main() -> None:
         print("Skip mp4: ffmpeg is not installed (PNGs are in visualize_result/)")
     else:
         try:
-            run([str(MAKE_MP4), visualize_dir])
+            run(["python3", str(MAKE_MP4), visualize_dir])
         except subprocess.CalledProcessError as e:
             print(f"Skip mp4: ffmpeg step failed ({e}); PNGs are in visualize_result/")
 

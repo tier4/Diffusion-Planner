@@ -62,7 +62,7 @@ find ${input_dir} -mindepth 2 -maxdepth 2 -type d | sort -ru | while read -r tar
     fi
 
     # Create mp4
-    ~/misc/ffmpeg_lib/make_mp4_from_unsequential_png.sh ${temp_dir}/visualize_result 2>&1 | tee -a ${log_file}
+    python3 ros_scripts/make_mp4.py ${temp_dir}/visualize_result 2>&1 | tee -a ${log_file}
 
     # Move mp4 file to appropriate location (assuming output without extension)
     if [ -f ${temp_dir}/visualize_result.mp4 ]; then

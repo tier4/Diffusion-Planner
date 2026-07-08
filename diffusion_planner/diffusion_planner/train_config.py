@@ -149,7 +149,7 @@ class TrainConfig:
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
-    closed_loop_replan_interval: int = 40
+    closed_loop_replan_interval: int = 4
     closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
     closed_loop_fps: int = 10
     closed_loop_near_miss_thresh: float = 0.5

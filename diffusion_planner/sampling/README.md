@@ -23,7 +23,7 @@ sampling/
 | File | Role |
 |---|---|
 | `cluster.py` | CLI entry point. Reads an NPZ file list, runs the clustering pipeline, and writes the result JSON. |
-| `sampling.py` | Reads the cluster result JSON and samples an equal number of files from each cluster (equal to the smallest cluster size). Outputs a JSON list suitable for `train_run.sh`. |
+| `sampling.py` | Reads the cluster result JSON and samples an equal number of files from each cluster (equal to the smallest cluster size). Outputs a JSON list suitable for `train_run.py`. |
 | `visualize_cluster.py` | Reads the result JSON from `cluster.py` and produces a grid of subplots, one per cluster, showing overlaid ego future trajectories. |
 | `utils/elbow.py` | Utilities for computing WCSS (within-cluster sum of squares), finding the elbow point, and fitting KMeans. |
 | `utils/pipeline.py` | Feature extraction from NPZ files, the `ClusteringStrategy` abstract interface, the `ElbowKMeansStrategy` concrete implementation, and the `cluster_trajectories` pipeline function. |
@@ -98,10 +98,14 @@ python sampling.py \
 }
 ```
 
-Pass the output directly to `train_run.sh`:
+Pass the output directly to `train_run.py`:
 
 ```bash
-bash train_run.sh my_exp /path/to/sampled.json /path/to/valid.json /path/to/sft.json
+python3 train_run.py \
+  --exp_name my_exp \
+  --train_set_list /path/to/sampled.json \
+  --valid_set_list /path/to/valid.json \
+  --resume_model_path /path/to/sft.pth
 ```
 
 ### Step 3: Visualization (`visualize_cluster.py`)

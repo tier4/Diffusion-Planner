@@ -91,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--replan_interval",
         type=int,
-        default=40,
+        default=4,
         help="re-run the model every N steps (1 = every step). Between inferences the cached plan "
         "is executed, re-expressed in the current ego frame each step; the ego still steps at 10Hz",
     )

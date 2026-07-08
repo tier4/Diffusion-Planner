@@ -227,7 +227,7 @@ def get_args(args_list=None):
     parser.add_argument(
         "--closed_loop_replan_interval",
         type=int,
-        default=40,
+        default=4,
         help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
     )
     parser.add_argument(

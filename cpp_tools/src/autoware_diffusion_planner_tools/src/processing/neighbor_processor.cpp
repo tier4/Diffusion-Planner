@@ -103,10 +103,11 @@ NeighborResult process_neighbor_agents_and_future(
     for (int64_t t = 0; t < OUTPUT_T; ++t) {
       const int64_t base_idx = agent_idx * OUTPUT_T * NEIGHBOR_FUTURE_DIM + t * NEIGHBOR_FUTURE_DIM;
       for (int64_t d = 0; d < NEIGHBOR_FUTURE_DIM; ++d) {
-        if (t * AGENT_STATE_DIM + d >= arr.size()) {
+        const size_t arr_idx = (t + 1) * AGENT_STATE_DIM + d;
+        if (arr_idx >= arr.size()) {
           break;
         }
-        neighbor_future[base_idx + d] = arr[t * AGENT_STATE_DIM + d];
+        neighbor_future[base_idx + d] = arr[arr_idx];
       }
     }
   }

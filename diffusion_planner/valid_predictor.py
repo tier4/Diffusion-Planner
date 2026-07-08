@@ -252,6 +252,20 @@ def run_validation(valid_cfg: ValidConfig):
                 pbar.refresh()
     pbar.close()
 
+    # Fold in what valid_run.sh used to run next: once every rank has written its shard, render the
+    # per-frame prediction PNGs + per-clip MP4s from rank 0 with the defaults the shell used
+    # (visualize_predictions runs its own multiprocessing pool internally).
+    if valid_cfg.ddp:
+        torch.distributed.barrier()
+
+    if global_rank == 0:
+        from util_scripts.visualize_prediction import visualize_predictions
+
+        visualize_predictions(
+            predictions_dir=save_predictions_dir,
+            valid_data_list=valid_cfg.valid_set_list,
+        )
+
 
 def main():
     # 1. Parse command line arguments
