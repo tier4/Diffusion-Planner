@@ -14,6 +14,7 @@
 
 #include "conversion/data_converter.hpp"
 
+#include "io/bag_metadata.hpp"
 #include "io/frame_writer.hpp"
 #include "io/projector_factory.hpp"
 #include "processing/frame_processor.hpp"
@@ -44,6 +45,7 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
   const autoware::diffusion_planner::preprocess::LaneSegmentContext lane_segment_context(
     lanelet_map_ptr);
   const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
+  const BagMetadata bag_metadata = load_bag_metadata(paths.rosbag_path);
 
   ParsedBagData bag_data = load_rosbag(paths.rosbag_path, converter.limit);
 
@@ -56,7 +58,7 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
     std::cout << "No training samples will be generated from this rosbag." << std::endl;
     save_route_json(
       paths.save_dir, rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0, missing_topics_skip.value(),
-      bag_data.timestamp_stats_map, false);
+      bag_data.timestamp_stats_map, false, bag_metadata);
     return 0;
   }
 
@@ -67,7 +69,7 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
   for (int64_t seq_id = 0; seq_id < static_cast<int64_t>(sequences.size()); ++seq_id) {
     process_sequence(
       sequences[seq_id], seq_id, paths, converter, lane_segment_context,
-      bag_data.timestamp_stats_map);
+      bag_data.timestamp_stats_map, bag_metadata);
   }
 
   std::cout << "Data conversion completed!" << std::endl;

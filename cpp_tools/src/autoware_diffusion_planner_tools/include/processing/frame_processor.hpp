@@ -16,6 +16,7 @@
 #define PROCESSING__FRAME_PROCESSOR_HPP_
 
 #include "cli/converter_options.hpp"
+#include "io/bag_metadata.hpp"
 #include "timestamp_stats.hpp"
 #include "types/frame_data.hpp"
 
@@ -27,6 +28,7 @@ void process_sequence(
   SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
   const ConverterOptions & options,
   const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map);
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map,
+  const BagMetadata & bag_metadata);
 
 #endif  // PROCESSING__FRAME_PROCESSOR_HPP_

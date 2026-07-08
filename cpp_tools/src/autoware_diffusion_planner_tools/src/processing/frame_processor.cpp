@@ -14,6 +14,7 @@
 
 #include "processing/frame_processor.hpp"
 
+#include "io/bag_metadata.hpp"
 #include "io/frame_writer.hpp"
 #include "io/npz_frame_writer.hpp"
 #include "processing/ego_sequence.hpp"
@@ -47,7 +48,8 @@ void process_sequence(
   SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
   const ConverterOptions & options,
   const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map,
+  const BagMetadata & bag_metadata)
 {
   using autoware::diffusion_planner::INPUT_T;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
@@ -89,7 +91,7 @@ void process_sequence(
               << ")" << std::endl;
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false);
+      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false, bag_metadata);
     return;
   }
 
@@ -100,7 +102,7 @@ void process_sequence(
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
       SkippingInfo::insufficient_distance(traveled_distance, options.min_distance),
-      timestamp_stats_map, false);
+      timestamp_stats_map, false, bag_metadata);
     return;
   }
 
@@ -116,7 +118,7 @@ void process_sequence(
 
   save_route_json(
     paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-    SkippingInfo::accepted(), timestamp_stats_map, goal_pose_overwritten);
+    SkippingInfo::accepted(), timestamp_stats_map, goal_pose_overwritten, bag_metadata);
 
   // Pack-sequence accumulators: in pack mode every frame is collected here (gap-free) and
   // flushed once after the loop into a single npz + single json array for the sequence.
@@ -313,7 +315,7 @@ void process_sequence(
         turn_indicators, ego_shape);
       nlohmann::json frame_json = build_frame_json(
         seq.data_list[i].kinematic_state, seq.data_list[i].timestamp, skipping_info,
-        neighbor_result.neighbor_ids);
+        neighbor_result.neighbor_ids, bag_metadata);
       frame_json["token"] = token;
       sequence_frames_json.push_back(std::move(frame_json));
     } else {
@@ -328,7 +330,7 @@ void process_sequence(
       }
       save_frame_json(
         paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-        seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
+        seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids, bag_metadata);
     }
 
     if (i % 100 == 0) {
