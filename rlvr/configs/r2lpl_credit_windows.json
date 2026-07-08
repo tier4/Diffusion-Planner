@@ -1,12 +1,17 @@
 {
-  "_comment": "R2LPL-short credit-window widths at 10 Hz. Failure labels use 15 frames; risk/conflict labels use 10 frames.",
-  "road_border_crossing": 15,
-  "lane_crossing": 15,
-  "static_collision": 15,
-  "moving_collision": 15,
-  "road_border_near": 10,
-  "static_near_miss": 10,
-  "moving_near_miss": 10,
-  "moving_ttc": 10,
-  "expert_disagreement": 10
+  "_comment": "R2LPL repair-credit windows at 10 Hz. width_s is the duration of source scenes to extract; gap_s is how far before the violation the extracted band ends. Defaults extract scenes from 3.0s to 1.5s before the violation.",
+  "_frame_hz": 10,
+  "_defaults": {
+    "width_s": 1.5,
+    "gap_s": 1.5
+  },
+  "road_border_crossing": {},
+  "lane_crossing": {},
+  "static_collision": {},
+  "moving_collision": {},
+  "road_border_near": {},
+  "static_near_miss": {},
+  "moving_near_miss": {},
+  "moving_ttc": {},
+  "expert_disagreement": {}
 }

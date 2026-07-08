@@ -144,6 +144,25 @@ Saved event-window scenes are all-live scenes from the reproducer rollout.
 - `ego_agent_future` is temporary until repair generation replaces it with the
   accepted repaired trajectory.
 
+Credit-window timing is configured in `credit_window_config` using seconds:
+
+```json
+{
+  "_frame_hz": 10,
+  "_defaults": {"width_s": 1.5, "gap_s": 1.5},
+  "road_border_crossing": {},
+  "moving_collision": {},
+  "static_collision": {}
+}
+```
+
+With the default 10 Hz settings, the saved source scenes span 15 frames ending
+15 frames before the reproduced violation. In violation-relative filenames this
+is `credit-00030.npz` through `credit-00015.npz`, so repair generation starts
+from scenes 3.0 s to 1.5 s before the event instead of from the event itself.
+Per-label objects may override `width_s` or `gap_s`; scalar frame-count entries
+are not accepted.
+
 ## Repair Generation
 
 For each mined scene:
@@ -153,8 +172,12 @@ For each mined scene:
 3. Keep at most one winner.
 4. Drop the scene if no candidate passes.
 
-Scenes already overlapped with a moving neighbor at the current frame are
-discarded as unrecoverable repair rows.
+Before candidate generation, repair groups rows by event window. If any source
+scene in an event window is already colliding with any neighbor at t=0, or is
+already road-border crossing at t=0, the whole event window is discarded as
+unrecoverable. Static and moving collision labels remain distinct metadata, but
+the collision geometry should be kept on one shared path so the two labels do
+not drift in implementation.
 
 For mixed-platform corpora, set repair `ego_shape` to `from_npz`. Repair scoring
 then uses each scene's own required `ego_shape` field instead of enforcing one
@@ -224,6 +247,8 @@ Common production settings:
 - `repair_generation.generation_mode=grpo_temperature`
 - `repair_generation.grpo_noise_scale=3.0`
 - `repair_generation.use_route_cl_guidance=true`
+- `validate_on_repaired_targets=true` when training validation should measure
+  imitation on the repaired scene-target pairs produced by the same round
 - `perception_reproducer.tracker_mode=mpc`
 - `perception_reproducer.timeline_progress_mode=clock`
 - `perception_reproducer.neighbor_history_mode=sim`

@@ -20,7 +20,10 @@ from typing import Any
 import numpy as np
 import torch
 
-from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
+from planner_metrics.subscores import (
+    compute_ego_neighbor_signed_clearance,
+    compute_road_border_penalty,
+)
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _ego_shape_from_data,
     _load_scene_thresholds,
@@ -234,6 +237,141 @@ def _source_scene_t0_moving_overlap(
     return min_clearance <= moving_collision_thresh, min_clearance
 
 
+def _source_scene_t0_any_neighbor_overlap(
+    data: dict[str, torch.Tensor],
+    *,
+    device: torch.device,
+    collision_thresh: float,
+) -> tuple[bool, float]:
+    # TODO: unify static/moving collision classification around this shared geometry path.
+    # The label distinction should remain metadata, not a separate implementation branch.
+    ego_shape = _ego_shape_from_data(data, device)
+    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, 1, device)
+    if neighbor_futures.shape[0] == 0:
+        return False, math.inf
+
+    current_neighbors = neighbor_futures[:, :1, :4].clone()
+    current_valid = neighbor_valid[:, :1].clone()
+    neighbor_past = data.get("neighbor_agents_past")
+    if neighbor_past is not None:
+        if neighbor_past.dim() == 4:
+            neighbor_past = neighbor_past[0]
+        future_all = data.get("neighbor_agents_future")
+        if future_all is not None and future_all.dim() == 4:
+            future_all = future_all[0]
+        if future_all is not None and future_all.shape[1] >= 1:
+            slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
+            filtered_past = neighbor_past[slot_valid]
+        else:
+            filtered_past = neighbor_past
+        current_pose = filtered_past[:, -1, :]
+        if current_pose.shape[-1] >= 4:
+            current_neighbors[:, 0, :4] = current_pose[:, :4].to(device)
+            current_valid = (
+                (current_pose[:, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M)
+                .unsqueeze(1)
+                .to(device)
+            )
+
+    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_now,
+        ego_shape,
+        current_neighbors,
+        neighbor_shapes,
+        current_valid,
+    )
+    if distances.numel() == 0:
+        return False, math.inf
+    min_clearance = float(distances.min().item())
+    return min_clearance <= collision_thresh, min_clearance
+
+
+def _source_scene_t0_road_border_crossing(
+    data: dict[str, torch.Tensor],
+    rcfg,
+    *,
+    device: torch.device,
+    rb_cross_thresh: float,
+) -> tuple[bool, float]:
+    ego_shape = _ego_shape_from_data(data, device)
+    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
+    *_unused, per_timestep_min = compute_road_border_penalty(
+        ego_now,
+        ego_shape,
+        data,
+        config=rcfg,
+    )
+    min_dist = float(per_timestep_min[0, 0].item())
+    return min_dist < rb_cross_thresh, min_dist
+
+
+def _source_row_labels(row: dict[str, Any]) -> set[str]:
+    return {str(label) for label in row.get("repair_labels") or row.get("labels") or []}
+
+
+def _event_group_key(row: dict[str, Any]) -> str:
+    return str(row.get("window_dir") or row.get("event_key") or row.get("scene_path"))
+
+
+def _drop_t0_dirty_event_windows(
+    rows: list[dict[str, Any]],
+    *,
+    rcfg,
+    thresholds: dict[str, float],
+    device: torch.device,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        key = _event_group_key(row)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(row)
+
+    kept: list[dict[str, Any]] = []
+    dirty: list[dict[str, Any]] = []
+    for key in order:
+        group = grouped[key]
+        dirty_reason = None
+        dirty_value = math.inf
+        for row in group:
+            labels = _source_row_labels(row)
+            data = load_npz_data(row["scene_path"], device)
+            if labels & {"moving_collision", "static_collision"}:
+                hit, value = _source_scene_t0_any_neighbor_overlap(
+                    data,
+                    device=device,
+                    collision_thresh=float(thresholds["moving_collision_thresh"]),
+                )
+                if hit:
+                    dirty_reason = "event_window_t0_already_collided"
+                    dirty_value = value
+                    break
+            if "road_border_crossing" in labels:
+                hit, value = _source_scene_t0_road_border_crossing(
+                    data,
+                    rcfg,
+                    device=device,
+                    rb_cross_thresh=float(thresholds["rb_cross_thresh"]),
+                )
+                if hit:
+                    dirty_reason = "event_window_t0_already_road_border_crossing"
+                    dirty_value = value
+                    break
+        if dirty_reason is None:
+            kept.extend(group)
+            continue
+        for row in group:
+            dirty.append({**row, "reason": dirty_reason, "t0_min_dist": float(dirty_value)})
+        print(
+            f"  DISCARD event_window={key}: reason={dirty_reason} "
+            f"t0_min_dist={dirty_value:+.3f} rows={len(group)}"
+        )
+    return kept, dirty
+
+
 def _load_rows(
     *,
     scene_rows_jsonl: Path | None,
@@ -412,6 +550,13 @@ def build_repaired_targets(
     out_dir.mkdir(parents=True, exist_ok=True)
     repaired_rows: list[dict[str, Any]] = []
     unrepaired_rows: list[dict[str, Any]] = []
+    rows, dirty_rows = _drop_t0_dirty_event_windows(
+        rows,
+        rcfg=rcfg,
+        thresholds=thresholds,
+        device=device,
+    )
+    unrepaired_rows.extend(dirty_rows)
 
     class _Args:
         pass
@@ -434,27 +579,6 @@ def build_repaired_targets(
                     f"{p}: --ego_shape {ego_shape.tolist()} != NPZ ego_shape "
                     f"{npz_es.tolist()} (platform mismatch)"
                 )
-            t0_collided, t0_min_clearance = _source_scene_t0_moving_overlap(
-                data,
-                rcfg,
-                device=device,
-                moving_collision_thresh=float(thresholds["moving_collision_thresh"]),
-            )
-            if t0_collided:
-                unrepaired_rows.append(
-                    {
-                        **row,
-                        "reason": "t0_already_collided",
-                        "t0_moving_min_dist": float(t0_min_clearance),
-                    }
-                )
-                print(
-                    f"  UNREPAIRED {_output_name_for_scene(p)}: "
-                    f"labels={','.join(row['repair_labels'])} "
-                    f"reason=t0_already_collided "
-                    f"t0_moving_min_dist={t0_min_clearance:+.3f}"
-                )
-                continue
             datas.append(data)
             kept_rows.append(row)
 

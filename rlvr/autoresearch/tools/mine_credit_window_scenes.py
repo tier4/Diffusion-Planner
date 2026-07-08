@@ -66,8 +66,13 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _validate_credit_config(path: Path, observed_labels: set[str]) -> dict[str, int]:
-    cfg = {str(k): int(v) for k, v in _load_json(path).items() if not str(k).startswith("_")}
+def _validate_credit_config(
+    path: Path,
+    observed_labels: set[str],
+) -> dict[str, dict[str, int | float]]:
+    cfg = load_credit_windows(path)
+    if cfg is None:
+        raise ValueError(f"Credit-window config {path} did not load")
     missing = sorted(label for label in observed_labels if label != "clean" and label not in cfg)
     if missing:
         raise ValueError(f"Credit-window config {path} is missing labels: {missing}")
@@ -168,8 +173,10 @@ def _resolve_row(
             raise ValueError(
                 f"Offense frame {offense} for {scene} label {label} is absent from route pool"
             )
-        width = int(credit[label])
-        start_frame = max(min(route_frames), offense - width)
+        spec = credit[label]
+        width = int(spec["width_frames"])
+        gap = int(spec["gap_frames"])
+        start_frame = max(min(route_frames), offense - gap - width)
         while start_frame not in frame_to_pos and start_frame < offense:
             start_frame += 1
         out.append(
@@ -183,6 +190,9 @@ def _resolve_row(
                 "offense_frame": offense,
                 "offense_index": frame_to_pos[offense],
                 "credit_width": width,
+                "credit_gap": gap,
+                "credit_width_s": float(spec["width_s"]),
+                "credit_gap_s": float(spec["gap_s"]),
                 "start_frame": start_frame,
                 "start_index": frame_to_pos[start_frame],
                 "end_frame": offense,

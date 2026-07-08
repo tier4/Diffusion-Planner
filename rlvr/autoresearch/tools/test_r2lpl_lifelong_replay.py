@@ -23,6 +23,7 @@ from rlvr.autoresearch.tools import run_lifelong_r2lpl_rounds as round_runner
 from rlvr.autoresearch.tools.build_avoiding_target import (
     _best_safe_candidate,
     _candidate_violation_score,
+    _drop_t0_dirty_event_windows,
     _filtered_npz_payload,
     _future4_to_3col,
     _parse_ego_shape,
@@ -108,7 +109,15 @@ def _minimal_sft_batch(batch_size: int = 2, future_len: int = 3):
 
 def test_credit_window_config_rejects_missing_observed_label(tmp_path):
     cfg = tmp_path / "credit.json"
-    cfg.write_text(json.dumps({"static_collision": 15}))
+    cfg.write_text(
+        json.dumps(
+            {
+                "_frame_hz": 10,
+                "_defaults": {"width_s": 1.5, "gap_s": 1.5},
+                "static_collision": {},
+            }
+        )
+    )
 
     try:
         _validate_credit_config(cfg, {"static_collision", "expert_disagreement"})
@@ -116,6 +125,49 @@ def test_credit_window_config_rejects_missing_observed_label(tmp_path):
         assert "expert_disagreement" in str(exc)
     else:
         raise AssertionError("missing label should fail loudly")
+
+
+def test_credit_window_config_uses_seconds_schema_and_rejects_scalars(tmp_path):
+    cfg = tmp_path / "credit.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "_frame_hz": 10,
+                "_defaults": {"width_s": 1.5, "gap_s": 1.5},
+                "moving_collision": {},
+                "road_border_crossing": {"width_s": 2.0},
+            }
+        )
+    )
+
+    parsed = reproducer_danger_scorer.load_credit_windows(cfg)
+
+    assert parsed["moving_collision"]["width_frames"] == 15
+    assert parsed["moving_collision"]["gap_frames"] == 15
+    assert parsed["road_border_crossing"]["width_frames"] == 20
+    assert parsed["road_border_crossing"]["gap_frames"] == 15
+
+    old_cfg = tmp_path / "old_credit.json"
+    old_cfg.write_text(
+        json.dumps(
+            {
+                "_frame_hz": 10,
+                "_defaults": {"width_s": 1.5, "gap_s": 1.5},
+                "moving_collision": 15,
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="scalar frame counts are not supported"):
+        reproducer_danger_scorer.load_credit_windows(old_cfg)
+
+
+def _credit_spec(width_frames: int = 15, gap_frames: int = 15):
+    return {
+        "width_s": width_frames / 10.0,
+        "gap_s": gap_frames / 10.0,
+        "width_frames": width_frames,
+        "gap_frames": gap_frames,
+    }
 
 
 def _write_direct_chunk_scene_list(tmp_path, stems):
@@ -497,7 +549,10 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
     monkeypatch.setattr(
         mine_direct_reproducer_chunks_tool,
         "load_credit_windows",
-        lambda _path: {"moving_collision": 15, "road_border_crossing": 15},
+        lambda _path: {
+            "moving_collision": _credit_spec(),
+            "road_border_crossing": _credit_spec(),
+        },
     )
     monkeypatch.setattr(
         mine_direct_reproducer_chunks_tool,
@@ -767,7 +822,7 @@ def test_lineage_resolver_maps_route_frame_and_step(tmp_path):
         "static_collision_step": 7,
     }
 
-    [resolved] = _resolve_row(row, {"bagA": route}, {"static_collision": 15})
+    [resolved] = _resolve_row(row, {"bagA": route}, {"static_collision": _credit_spec()})
 
     assert resolved["route_key"] == "bagA"
     assert resolved["frame_index"] == 105
@@ -781,7 +836,7 @@ def test_lineage_resolver_rejects_non_route_path(tmp_path):
     row = {"scene_path": str(tmp_path / "hand_curated_scene.npz"), "labels": ["static_collision"]}
 
     try:
-        _resolve_row(row, {}, {"static_collision": 15})
+        _resolve_row(row, {}, {"static_collision": _credit_spec()})
     except ValueError as exc:
         assert "route-lineage" in str(exc) or "frame index" in str(exc)
     else:
@@ -1308,7 +1363,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             {
                 "out_dir": args[0],
                 "saved_steps": [rec[0] for rec in args[4]],
-                "label": args[9],
+                "label": args[10],
                 "realized_frame": kwargs["extra_manifest"]["realized_frame"],
                 "source_label": kwargs["extra_manifest"]["source_label"],
             }
@@ -1347,7 +1402,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         ],
         danger_save_dir=tmp_path,
         realized_event_scorer=_fake_realized_event_scorer,
-        danger_credit_windows={"road_border_crossing": 15},
+        danger_credit_windows={"road_border_crossing": _credit_spec()},
     )
 
     assert len(calls) == 1
@@ -1458,7 +1513,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             {
                 "out_dir": args[0],
                 "saved_steps": [rec[0] for rec in args[4]],
-                "label": args[9],
+                "label": args[10],
             }
         )
         return {"n_scenes": len(args[4])}
@@ -1483,7 +1538,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         danger_save_dir=tmp_path,
         danger_scorer=_fake_danger_scorer,
         realized_event_scorer=_fake_realized_event_scorer,
-        danger_credit_windows={"moving_collision": 15},
+        danger_credit_windows={"moving_collision": _credit_spec()},
     )
 
     assert len(calls) == 1
@@ -1581,7 +1636,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         return SimpleNamespace(metrics={"n_steps_run": s.k})
 
     def _fake_dump_credit_window(*args, **kwargs):
-        calls.append({"out_dir": args[0], "label": args[9]})
+        calls.append({"out_dir": args[0], "label": args[10]})
         return {"n_scenes": len(args[4])}
 
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
@@ -1604,7 +1659,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         danger_save_dir=tmp_path,
         danger_scorer=_fake_clean_scorer,
         realized_event_scorer=_fake_clean_realized,
-        danger_credit_windows={"moving_collision": 15},
+        danger_credit_windows={"moving_collision": _credit_spec()},
     )
 
     assert len(calls) == 1
@@ -1682,7 +1737,15 @@ def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
         + "\n"
     )
     credit_cfg = tmp_path / "credit.json"
-    credit_cfg.write_text(json.dumps({"moving_collision": 15}))
+    credit_cfg.write_text(
+        json.dumps(
+            {
+                "_frame_hz": 10,
+                "_defaults": {"width_s": 1.5, "gap_s": 1.5},
+                "moving_collision": {},
+            }
+        )
+    )
     out_dir = tmp_path / "out"
     out_jsonl = tmp_path / "out.jsonl"
     stale_dir = out_dir / "bagA_100_099_event_road_border_crossing"
@@ -1748,7 +1811,7 @@ def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
     monkeypatch.setattr(
         mine_credit_window_scenes_tool,
         "load_credit_windows",
-        lambda _path: {"moving_collision": 15},
+        lambda _path: {"moving_collision": _credit_spec()},
     )
     monkeypatch.setattr(
         sys,
@@ -1954,6 +2017,66 @@ def test_source_scene_t0_moving_overlap_rejects_already_collided_scene():
 
     assert collided is True
     assert min_clearance < 0.0
+
+
+def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
+    rows = [
+        {
+            "scene_path": "/tmp/event_a/credit-00030.npz",
+            "window_dir": "/tmp/event_a",
+            "labels": ["moving_collision"],
+            "repair_labels": ["moving_collision"],
+        },
+        {
+            "scene_path": "/tmp/event_a/credit-00029.npz",
+            "window_dir": "/tmp/event_a",
+            "labels": ["moving_collision"],
+            "repair_labels": ["moving_collision"],
+        },
+        {
+            "scene_path": "/tmp/event_b/credit-00030.npz",
+            "window_dir": "/tmp/event_b",
+            "labels": ["road_border_crossing"],
+            "repair_labels": ["road_border_crossing"],
+        },
+    ]
+    checked_paths: list[str] = []
+
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "load_npz_data",
+        lambda path, _device: {"scene_path": str(path)},
+    )
+
+    def _fake_t0_collision(data, **_kwargs):
+        checked_paths.append(data["scene_path"])
+        return data["scene_path"].endswith("credit-00029.npz"), -0.1
+
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_source_scene_t0_any_neighbor_overlap",
+        _fake_t0_collision,
+    )
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_source_scene_t0_road_border_crossing",
+        lambda *_args, **_kwargs: (False, 1.0),
+    )
+
+    kept, dirty = _drop_t0_dirty_event_windows(
+        rows,
+        rcfg=RewardConfig(),
+        thresholds={"moving_collision_thresh": 0.2, "rb_cross_thresh": 0.2},
+        device=torch.device("cpu"),
+    )
+
+    assert [row["scene_path"] for row in kept] == ["/tmp/event_b/credit-00030.npz"]
+    assert [row["scene_path"] for row in dirty] == [
+        "/tmp/event_a/credit-00030.npz",
+        "/tmp/event_a/credit-00029.npz",
+    ]
+    assert {row["reason"] for row in dirty} == {"event_window_t0_already_collided"}
+    assert checked_paths == ["/tmp/event_a/credit-00030.npz", "/tmp/event_a/credit-00029.npz"]
 
 
 def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):

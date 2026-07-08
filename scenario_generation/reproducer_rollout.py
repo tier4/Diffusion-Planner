@@ -45,6 +45,20 @@ from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
+
+
+def _credit_window_width_frames(spec: dict | None, fallback: int) -> int:
+    if spec is None:
+        return int(fallback)
+    return int(spec["width_frames"])
+
+
+def _credit_window_gap_frames(spec: dict | None) -> int:
+    if spec is None:
+        return 0
+    return int(spec["gap_frames"])
+
+
 PAST = INPUT_T + 1  # 31
 
 
@@ -1552,7 +1566,7 @@ def run_segments_batched(
     danger_save_dir=None,
     danger_scorer=None,
     realized_event_scorer=None,
-    danger_credit_windows: dict[str, int] | None = None,
+    danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
     danger_decluster_steps: int = 10,
     danger_manifest_callback=None,
 ) -> list[SegmentResult]:
@@ -1668,10 +1682,19 @@ def run_segments_batched(
                 for off, s in enumerate(states):
                     if route_keys:
                         s.output_route_key = route_keys[c0 + off]
-                    width = int((s.credit_window or {}).get("credit_width", save_pre_steps))
+                    window_span = int(
+                        (s.credit_window or {}).get("credit_width", save_pre_steps)
+                    ) + int((s.credit_window or {}).get("credit_gap", 0))
                     if danger_credit_windows:
-                        width = max(width, max(int(v) for v in danger_credit_windows.values()))
-                    maxlen = width + 1
+                        window_span = max(
+                            window_span,
+                            max(
+                                _credit_window_width_frames(spec, save_pre_steps)
+                                + _credit_window_gap_frames(spec)
+                                for spec in danger_credit_windows.values()
+                            ),
+                        )
+                    maxlen = window_span + 1
                     if verify_credit_windows is None:
                         maxlen = max(maxlen, save_pre_steps + 1)
                     existing_maxlen = getattr(s.save_buf, "maxlen", None)
@@ -1798,6 +1821,7 @@ def run_segments_batched(
                                 list(s.save_buf),
                                 s.last_snap_step,
                                 int(s.credit_window["credit_width"]),
+                                int(s.credit_window["credit_gap"]),
                                 s.start,
                                 s.end,
                                 str(s.credit_window["label"]),
@@ -1811,14 +1835,16 @@ def run_segments_batched(
                                 labels = list(event_row.get("labels", []))
                                 if labels and labels != ["clean"]:
                                     realized_label = str(event_row.get("label") or labels[0])
-                                    width = int(
-                                        (danger_credit_windows or {}).get(
-                                            realized_label,
+                                    spec = (danger_credit_windows or {}).get(realized_label)
+                                    width = _credit_window_width_frames(
+                                        spec,
+                                        int(
                                             (s.credit_window or {}).get(
                                                 "credit_width", save_pre_steps
-                                            ),
-                                        )
+                                            )
+                                        ),
                                     )
+                                    gap = _credit_window_gap_frames(spec)
                                     event_dir = Path(danger_save_dir) / (
                                         f"{s.credit_window['route_key']}_"
                                         f"{s.credit_window['start_frame']}_"
@@ -1832,6 +1858,7 @@ def run_segments_batched(
                                         list(s.save_buf),
                                         s.last_snap_step,
                                         width,
+                                        gap,
                                         s.start,
                                         s.end,
                                         realized_label,
@@ -1900,12 +1927,9 @@ def run_segments_batched(
                                     )
                                     s.danger_event_selector = selector
                                     for label in selector.update(s.k, event_labels):
-                                        width = int(
-                                            (danger_credit_windows or {}).get(
-                                                label,
-                                                save_pre_steps,
-                                            )
-                                        )
+                                        spec = (danger_credit_windows or {}).get(label)
+                                        width = _credit_window_width_frames(spec, save_pre_steps)
+                                        gap = _credit_window_gap_frames(spec)
                                         event_dir = Path(danger_save_dir) / (
                                             f"{s.output_route_key or _route_key(s.tl)}_"
                                             f"{s.start}_{idx}_danger_{label}"
@@ -1918,6 +1942,7 @@ def run_segments_batched(
                                             list(s.save_buf),
                                             s.last_snap_step,
                                             width,
+                                            gap,
                                             s.start,
                                             s.end,
                                             label,
@@ -2028,22 +2053,26 @@ def _dump_credit_window(
     buf,
     last_snap_step: int | None,
     credit_width: int,
+    credit_gap: int,
     seg_start: int,
     seg_end: int,
     label: str,
     extra_manifest: dict | None = None,
 ) -> dict | None:
-    """Write an inclusive R2LPL credit window ending at the offense step.
+    """Write an inclusive R2LPL credit window ending before the offense step.
 
     This is explicitly separate from collision extraction. It saves
-    ``[offense_step - credit_width, offense_step]`` and the generated futures
-    are truncated at ``offense_step`` by ``_dump_precollision_window``.
+    ``[offense_step - credit_gap - credit_width, offense_step - credit_gap]`` so repaired
+    targets are generated from an explicitly configured band before the violation.
+    Filenames remain relative to the true offense step.
     """
     import json
     from pathlib import Path
 
     if credit_width < 0:
         raise ValueError(f"credit_width must be >= 0, got {credit_width}")
+    if credit_gap < 0:
+        raise ValueError(f"credit_gap must be >= 0, got {credit_gap}")
     out_dir = Path(out_dir)
     if out_dir.exists():
         for stale in out_dir.glob("credit*.npz"):
@@ -2051,11 +2080,12 @@ def _dump_credit_window(
         stale_manifest = out_dir / "manifest.json"
         if stale_manifest.exists():
             stale_manifest.unlink()
+    window_end_step = int(offense_step) - int(credit_gap)
     manifest = _dump_precollision_window(
         out_dir,
         tl,
         model_args,
-        offense_step,
+        window_end_step,
         buf,
         last_snap_step,
         credit_width,
@@ -2071,10 +2101,15 @@ def _dump_credit_window(
     if manifest is None:
         return None
     for path in out_dir.glob("collision*.npz"):
-        path.rename(out_dir / path.name.replace("collision", "credit", 1))
+        token = int(path.stem.replace("collision", ""))
+        saved_step = window_end_step + token
+        offense_relative = saved_step - int(offense_step)
+        path.rename(out_dir / f"credit{offense_relative:+06d}.npz")
     manifest["credit_label"] = label
     manifest["credit_width"] = int(credit_width)
+    manifest["credit_gap"] = int(credit_gap)
     manifest["offense_step"] = int(offense_step)
+    manifest["credit_window_end_step"] = int(window_end_step)
     manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
     if extra_manifest:
         manifest.update(extra_manifest)

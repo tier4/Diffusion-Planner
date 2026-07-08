@@ -29,15 +29,55 @@ _SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
 )
 
 
-def load_credit_windows(path: Path | None) -> dict[str, int] | None:
+def load_credit_windows(path: Path | None) -> dict[str, dict[str, int | float]] | None:
     if path is None:
         return None
     with open(path) as f:
         raw = json.load(f)
-    out = {str(k): int(v) for k, v in raw.items() if not str(k).startswith("_")}
-    negative = [k for k, v in out.items() if v < 0]
-    if negative:
-        raise ValueError(f"credit-window widths must be >=0 for labels: {negative}")
+    frame_hz = raw.get("_frame_hz")
+    defaults = raw.get("_defaults")
+    if not isinstance(frame_hz, int | float) or float(frame_hz) <= 0:
+        raise ValueError(f"{path}: _frame_hz must be a positive number")
+    if not isinstance(defaults, dict):
+        raise ValueError(f"{path}: _defaults must define width_s and gap_s")
+
+    def _seconds_to_frames(label: str, field: str, value: object) -> tuple[float, int]:
+        if not isinstance(value, int | float):
+            raise ValueError(f"{path}: {label}.{field} must be a number of seconds")
+        seconds = float(value)
+        if seconds < 0:
+            raise ValueError(f"{path}: {label}.{field} must be >= 0, got {seconds}")
+        frames = int(round(seconds * float(frame_hz)))
+        return seconds, frames
+
+    out: dict[str, dict[str, int | float]] = {}
+    for key, value in raw.items():
+        if str(key).startswith("_"):
+            continue
+        label = str(key)
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"{path}: {label} must be an object with width_s/gap_s; scalar "
+                "frame counts are not supported"
+            )
+        width_s, width_frames = _seconds_to_frames(
+            label,
+            "width_s",
+            value.get("width_s", defaults.get("width_s")),
+        )
+        gap_s, gap_frames = _seconds_to_frames(
+            label,
+            "gap_s",
+            value.get("gap_s", defaults.get("gap_s")),
+        )
+        if width_frames < 1:
+            raise ValueError(f"{path}: {label}.width_s must round to at least 1 frame")
+        out[label] = {
+            "width_s": width_s,
+            "gap_s": gap_s,
+            "width_frames": width_frames,
+            "gap_frames": gap_frames,
+        }
     return out
 
 

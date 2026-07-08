@@ -1530,6 +1530,8 @@ def main() -> None:
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
         _union_scene_lists(repaired_paths, replay_paths, train_input_list)
+        if bool(cfg.get("validate_on_repaired_targets", False)):
+            cfg["val_scenes"] = str(train_input_list)
 
         if training_backend == "base_sft":
             train_cmd, next_model_path, train_cwd, train_env = _base_train_invocation(
