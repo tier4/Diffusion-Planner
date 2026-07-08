@@ -15,6 +15,8 @@
 #ifndef IO__BAG_METADATA_HPP_
 #define IO__BAG_METADATA_HPP_
 
+#include "nlohmann/json.hpp"
+
 #include <string>
 
 struct BagMetadata
@@ -28,5 +30,7 @@ struct BagMetadata
 };
 
 BagMetadata load_bag_metadata(const std::string & rosbag_path);
+
+void write_bag_metadata(nlohmann::json & j, const BagMetadata & bag_metadata);
 
 #endif  // IO__BAG_METADATA_HPP_

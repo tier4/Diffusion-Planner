@@ -113,3 +113,18 @@ TEST_F(BagMetadataTest, LogFileNameWithoutDateTimePattern)
   EXPECT_EQ(meta.date, "");
   EXPECT_EQ(meta.bag_time, "");
 }
+
+TEST_F(BagMetadataTest, NonStringFieldReturnsEmpty)
+{
+  write_json(R"({
+    "id": 42,
+    "vehicle_id": true,
+    "project_id": "valid_string"
+  })");
+
+  const BagMetadata meta = load_bag_metadata(tmp_dir_.string());
+
+  EXPECT_EQ(meta.log_file_id, "");
+  EXPECT_EQ(meta.vehicle_id, "");
+  EXPECT_EQ(meta.project_id, "valid_string");
+}

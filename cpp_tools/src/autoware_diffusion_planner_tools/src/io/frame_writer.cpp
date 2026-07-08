@@ -14,8 +14,6 @@
 
 #include "io/frame_writer.hpp"
 
-#include "io/bag_metadata.hpp"
-
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -66,12 +64,7 @@ nlohmann::json build_frame_json(
   // Perception track UUIDs aligned 1:1 with the neighbor_past slots (for the
   // reproducer's cross-frame association / interpolation).
   j["neighbor_ids"] = neighbor_ids;
-  j["log_file_id"] = bag_metadata.log_file_id;
-  j["vehicle_id"] = bag_metadata.vehicle_id;
-  j["project_id"] = bag_metadata.project_id;
-  j["map_version_id"] = bag_metadata.map_version_id;
-  j["date"] = bag_metadata.date;
-  j["bag_time"] = bag_metadata.bag_time;
+  write_bag_metadata(j, bag_metadata);
   return j;
 }
 
@@ -123,12 +116,7 @@ nlohmann::json build_route_json(
       {"rosbag_diff_stats", rosbag_diff_stats_json}};
   }
   j["timestamp_stats"] = timestamp_stats_json;
-  j["log_file_id"] = bag_metadata.log_file_id;
-  j["vehicle_id"] = bag_metadata.vehicle_id;
-  j["project_id"] = bag_metadata.project_id;
-  j["map_version_id"] = bag_metadata.map_version_id;
-  j["date"] = bag_metadata.date;
-  j["bag_time"] = bag_metadata.bag_time;
+  write_bag_metadata(j, bag_metadata);
   return j;
 }
 

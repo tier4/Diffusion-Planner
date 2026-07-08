@@ -121,6 +121,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_frame_writer
     test/test_frame_writer.cpp
     src/io/frame_writer.cpp
+    src/io/bag_metadata.cpp
   )
   if(TARGET test_frame_writer)
     target_include_directories(test_frame_writer PRIVATE include src)

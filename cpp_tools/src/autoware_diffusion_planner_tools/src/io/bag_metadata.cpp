@@ -18,7 +18,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <regex>
+#include <stdexcept>
 #include <string>
 
 namespace
@@ -51,13 +53,14 @@ BagMetadata load_bag_metadata(const std::string & rosbag_path)
 {
   BagMetadata meta;
 
-  const std::filesystem::path info_path = std::filesystem::path(rosbag_path) / "log_file_info.json";
-
-  if (!std::filesystem::is_regular_file(info_path)) {
-    return meta;
-  }
-
   try {
+    const std::filesystem::path info_path =
+      std::filesystem::path(rosbag_path) / "log_file_info.json";
+
+    if (!std::filesystem::is_regular_file(info_path)) {
+      return meta;
+    }
+
     std::ifstream file(info_path);
     const nlohmann::json j = nlohmann::json::parse(file);
 
@@ -70,9 +73,21 @@ BagMetadata load_bag_metadata(const std::string & rosbag_path)
     if (!log_file_name.empty()) {
       parse_date_and_bag_time(log_file_name, meta.date, meta.bag_time);
     }
-  } catch (...) {
-    return BagMetadata{};
+  } catch (const std::exception & e) {
+    std::cerr << "Warning: failed to load bag metadata from " << rosbag_path << ": " << e.what()
+              << std::endl;
+    return meta;
   }
 
   return meta;
+}
+
+void write_bag_metadata(nlohmann::json & j, const BagMetadata & bag_metadata)
+{
+  j["log_file_id"] = bag_metadata.log_file_id;
+  j["vehicle_id"] = bag_metadata.vehicle_id;
+  j["project_id"] = bag_metadata.project_id;
+  j["map_version_id"] = bag_metadata.map_version_id;
+  j["date"] = bag_metadata.date;
+  j["bag_time"] = bag_metadata.bag_time;
 }
