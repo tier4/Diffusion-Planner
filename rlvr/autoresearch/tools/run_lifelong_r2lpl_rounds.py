@@ -384,6 +384,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "checkpoint_policy": str(
             _first_non_null(rounds.get("checkpoint_selection_rule"), "latest")
         ),
+        "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
         "perception_mining": perception_mining,
     }

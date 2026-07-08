@@ -417,6 +417,41 @@ def test_perception_mining_cmd_supports_direct_reproducer_chunks(tmp_path):
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
 
 
+def test_workflow_contract_preserves_repaired_target_validation_flag(tmp_path):
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+                "training": {"val_scenes": "/tmp/valid.json"},
+                "validate_on_repaired_targets": True,
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "out"),
+        }
+    )
+
+    assert cfg["validate_on_repaired_targets"] is True
+
+
 def test_round_runner_splits_mine_and_repair_labels(tmp_path):
     cfg = {
         "reward_config": "/tmp/reward.json",
