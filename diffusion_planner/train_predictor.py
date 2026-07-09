@@ -248,7 +248,7 @@ def get_args(args_list=None):
         "--deterministic",
         type=boolean,
         default=True,
-        help="Set True to run Pytorch GPU kernels in deterministic mode (may be slightly slower).",
+        help="Set True to run PyTorch GPU kernels in deterministic mode (may be slightly slower).",
     )
     args = parser.parse_args(args_list)
     return args
