@@ -196,8 +196,10 @@ def model_training(args: TrainConfig):
 
     # Deterministic
     if args.deterministic:
-        # Warn only if it is not possible to use deterministic algorithms for some operations.
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        # Set CUBLAS_WORKSPACE_CONFIG to ensure deterministic behavior for cuBLAS operations.
+        # 4096:8 means 24 MiB workspace with more memory, faster
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
 
     # training parameters
     train_epochs = args.train_epochs
