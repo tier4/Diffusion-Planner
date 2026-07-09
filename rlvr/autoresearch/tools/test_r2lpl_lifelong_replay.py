@@ -13,14 +13,14 @@ import torch
 from torch import nn
 
 import scenario_generation.reproducer_rollout as reproducer_rollout
-from rlvr.autoresearch.tools import build_avoiding_target as build_avoiding_target_tool
+from rlvr.autoresearch.tools import build_repaired_targets as build_repaired_targets_tool
 from rlvr.autoresearch.tools import mine_credit_window_scenes as mine_credit_window_scenes_tool
 from rlvr.autoresearch.tools import (
     mine_direct_reproducer_chunks as mine_direct_reproducer_chunks_tool,
 )
 from rlvr.autoresearch.tools import reproducer_danger_scorer
 from rlvr.autoresearch.tools import run_lifelong_r2lpl_rounds as round_runner
-from rlvr.autoresearch.tools.build_avoiding_target import (
+from rlvr.autoresearch.tools.build_repaired_targets import (
     _best_safe_candidate,
     _candidate_violation_score,
     _drop_t0_dirty_event_windows,
@@ -2361,7 +2361,7 @@ def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
     checked_paths: list[str] = []
 
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "load_npz_data",
         lambda path, _device: {"scene_path": str(path)},
     )
@@ -2371,12 +2371,12 @@ def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
         return data["scene_path"].endswith("credit-00029.npz"), -0.1
 
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_source_scene_t0_any_neighbor_overlap",
         _fake_t0_collision,
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_source_scene_t0_road_border_crossing",
         lambda *_args, **_kwargs: (False, 1.0),
     )
@@ -2409,7 +2409,7 @@ def test_t0_dirty_static_collision_uses_static_cross_threshold(monkeypatch):
     seen_thresholds = []
 
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "load_npz_data",
         lambda path, _device: {"scene_path": str(path)},
     )
@@ -2419,7 +2419,7 @@ def test_t0_dirty_static_collision_uses_static_cross_threshold(monkeypatch):
         return False, 99.0
 
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_source_scene_t0_any_neighbor_overlap",
         _fake_t0_collision,
     )
@@ -2710,7 +2710,7 @@ def test_future4_to_3col_restores_yaw():
     assert np.allclose(out[:, 2], np.array([np.pi / 2, 0.0], dtype=np.float32))
 
 
-def test_build_avoiding_target_accepts_scene_local_ego_shape():
+def test_build_repaired_targets_accepts_scene_local_ego_shape():
     assert _parse_ego_shape("from_npz") is None
     assert _parse_ego_shape("npz") is None
     assert np.allclose(_parse_ego_shape("4.76,7.24,2.29"), [4.76, 7.24, 2.29])
@@ -2752,12 +2752,12 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     selected[:, 2] = 1.0
 
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "load_reward_config",
         lambda _path: RewardConfig(ignore_rear_end_collisions=False),
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_load_scene_thresholds",
         lambda _path: {
             "moving_collision_thresh": 0.2,
@@ -2772,47 +2772,47 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         },
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "load_model",
         lambda _model_path, _device: (object(), SimpleNamespace()),
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "load_npz_data",
         lambda _path, _device: data,
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_source_scene_t0_any_neighbor_overlap",
         lambda *_args, **_kwargs: (False, 99.0),
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_stack_scene_data",
         lambda _datas, _device: {},
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_normalize_batch",
         lambda _batch, _model_args: {},
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "generate_all_scenes_batched",
         lambda *_args, **_kwargs: [torch.stack([selected])],
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "classify_loaded_scene_candidates_batch",
         lambda *_args, **_kwargs: [[{"labels": ["clean"]}]],
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "compute_reward_batch",
         lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
     )
     monkeypatch.setattr(
-        build_avoiding_target_tool,
+        build_repaired_targets_tool,
         "_best_safe_candidate",
         lambda *_args, **_kwargs: (
             0,
@@ -2825,7 +2825,7 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     )
 
     rows_jsonl = tmp_path / "repaired.jsonl"
-    paths, unrepaired = build_avoiding_target_tool.build_repaired_targets(
+    paths, unrepaired = build_repaired_targets_tool.build_repaired_targets(
         model_path="model.pth",
         rows=[
             {

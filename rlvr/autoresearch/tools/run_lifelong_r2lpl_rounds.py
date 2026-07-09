@@ -904,7 +904,7 @@ def _repair_cmd(
     cmd = [
         sys.executable,
         "-m",
-        "rlvr.autoresearch.tools.build_avoiding_target",
+        "rlvr.autoresearch.tools.build_repaired_targets",
         "--model",
         str(model_path),
         "--scene_rows_jsonl",

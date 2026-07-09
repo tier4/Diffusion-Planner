@@ -60,7 +60,7 @@ structure but changes the mechanism at each stage:
 - Reproducer mechanics:
   `scenario_generation/reproducer_rollout.py`
 - Repair target generation:
-  `rlvr/autoresearch/tools/build_avoiding_target.py`
+  `rlvr/autoresearch/tools/build_repaired_targets.py`
 - Replay memory:
   `rlvr/autoresearch/tools/lifelong_replay_memory.py`
 
@@ -84,7 +84,7 @@ because every worker avoids reparsing the full scene list.
 Each round runs:
 
 1. `mine_direct_reproducer_chunks`
-2. `build_avoiding_target`
+2. `build_repaired_targets`
 3. `lifelong_replay_memory`
 4. training through either base SFT or `rlvr.autoresearch.run_experiment`
 
