@@ -611,8 +611,12 @@ def run(
         if not isinstance(replay_paths, list):
             raise ValueError(f"{replay_scenes_path} must contain a JSON list")
         train_paths = list(train_paths) + [str(p) for p in replay_paths]
+        # A scene passed via --replay_scenes IS a replay scene: mark it "replay"
+        # unconditionally so replay-specific training (replay_loss_weight / DER mask)
+        # is applied. setdefault would let a stale --scene_roles_json entry silently
+        # override this and disable the replay behavior.
         for path in replay_paths:
-            role_by_path.setdefault(str(path), "replay")
+            role_by_path[str(path)] = "replay"
         print(f"Added replay scenes: {len(replay_paths)} from {replay_scenes_path}")
     # Drop converter-flagged skip_for_training frames from everything we train/eval on
     # (default on; reproducer-only frames are not valid supervision). Single chokepoint

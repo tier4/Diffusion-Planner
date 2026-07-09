@@ -2076,8 +2076,12 @@ def _dump_credit_window(
         raise ValueError(f"credit_gap must be >= 0, got {credit_gap}")
     out_dir = Path(out_dir)
     if out_dir.exists():
-        for stale in out_dir.glob("credit*.npz"):
-            stale.unlink()
+        # Clear BOTH patterns: stale collision*.npz from a crashed prior run (between
+        # _dump_precollision_window and the rename below) would otherwise be renamed
+        # into this fresh credit window and pollute it with extra scenes.
+        for pattern in ("credit*.npz", "collision*.npz"):
+            for stale in out_dir.glob(pattern):
+                stale.unlink()
         stale_manifest = out_dir / "manifest.json"
         if stale_manifest.exists():
             stale_manifest.unlink()

@@ -33,7 +33,10 @@ def _progress_and_speed(traj: torch.Tensor, *, dt: float) -> tuple[torch.Tensor,
     progress = torch.cat(
         [torch.zeros(1, dtype=torch.float32, device=xy.device), torch.cumsum(step, dim=0)]
     )
-    speed = torch.cat([step[:1] / dt, step / dt])
+    # speed[t] is the speed of the interval ENDING at t (t=0 has no prior interval, so
+    # 0). Pad with a leading zero rather than duplicating step[0], which would bias
+    # the mean speed and misalign speed[0] with the progress convention above.
+    speed = torch.cat([torch.zeros(1, dtype=torch.float32, device=xy.device), step / dt])
     return progress, speed
 
 

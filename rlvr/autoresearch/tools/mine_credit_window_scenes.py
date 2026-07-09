@@ -143,7 +143,7 @@ def _select_event_windows(
 def _resolve_row(
     row: dict[str, Any],
     routes: dict[str, list[Path]],
-    credit: dict[str, int],
+    credit: dict[str, dict[str, Any]],
     allowed_labels: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     scene = Path(str(row["scene_path"]))
