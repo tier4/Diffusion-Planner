@@ -416,8 +416,11 @@ def main() -> None:
                     n_rows += 1
         else:
             for w in windows:
+                # Must match the writer's dir name in reproducer_rollout._dump_credit_window
+                # callers, which use offense_frame (NOT end_frame — after
+                # _select_event_windows, end_frame is the rollout end, not the offense).
                 saved_dir = args.out_dir / (
-                    f"{w['route_key']}_{w['start_frame']}_{w['end_frame']}_credit_{w['label']}"
+                    f"{w['route_key']}_{w['start_frame']}_{w['offense_frame']}_credit_{w['label']}"
                 )
                 saved = sorted(saved_dir.glob("credit*.npz"))
                 if not saved:
