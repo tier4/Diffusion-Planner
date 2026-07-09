@@ -44,7 +44,9 @@ structure but changes the mechanism at each stage:
   configurable capacity and diversity terms, then unioned into subsequent
   training rounds.
 - **Scale:** mining and repair are sharded across GPUs. Each shard writes to its
-  own directory so workers do not contend for the same output files.
+  own directory so workers do not contend for the same output files. Repair
+  sharding keeps all rows from the same event window on one worker so event-level
+  t0 dirty filtering is still applied atomically.
 - **Vehicle geometry:** repair can use `ego_shape=from_npz`, so mixed vehicle
   corpora keep each scene's own geometry during scoring and saved training data.
 
@@ -179,6 +181,12 @@ unrecoverable. Static and moving collision labels remain distinct metadata, but
 the collision geometry should be kept on one shared path so the two labels do
 not drift in implementation.
 
+Static-collision repair rows require a reward config with
+`static_collision_enabled=true`; otherwise the static-collision gates are neutral
+and the workflow fails loudly instead of accepting false repairs. Static-only t0
+dirty filtering uses `sc_cross_thresh`; moving collision filtering uses
+`moving_collision_thresh`.
+
 For mixed-platform corpora, set repair `ego_shape` to `from_npz`. Repair scoring
 then uses each scene's own required `ego_shape` field instead of enforcing one
 global vehicle shape across the whole run.
@@ -253,8 +261,20 @@ Common production settings:
 - `perception_reproducer.timeline_progress_mode=clock`
 - `perception_reproducer.neighbor_history_mode=sim`
 
+If `static_collision` is included in `repair_labels`, the reward config must set
+`static_collision_enabled=true`. For the default production mining labels
+`road_border_crossing,moving_collision`, this static-collision requirement is not
+triggered unless static rows are also repaired.
+
 `generation_mode=grpo_temperature` uses the same K-trajectory sampling rule as
 `diffusion_planner/grpo_run.sh`: each scene is replicated K times and each row
 draws an initial diffusion temperature from `U(0, grpo_noise_scale)`. If that
 mode is disabled for an ablation, use `generation_mode=guided_variant` with
 `repair_generation.variant=rl_cl_col_sweep`.
+
+## Remaining TODO
+
+- Unify static and moving collision classification behind one shared geometry
+  implementation while keeping the label distinction in metadata. The current
+  workflow has guard coverage for both labels, but some classifier paths still
+  call separate helpers.

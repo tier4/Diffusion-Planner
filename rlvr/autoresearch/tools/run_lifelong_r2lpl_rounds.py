@@ -573,6 +573,24 @@ def _split_jsonl_round_robin(rows: list[dict[str, Any]], paths: list[Path]) -> N
         _write_jsonl(path, shard_rows)
 
 
+def _event_group_key(row: dict[str, Any]) -> str:
+    return str(row.get("window_dir") or row.get("event_key") or row.get("scene_path"))
+
+
+def _split_jsonl_by_event(rows: list[dict[str, Any]], paths: list[Path]) -> None:
+    shards = [[] for _ in paths]
+    group_to_shard: dict[str, int] = {}
+    for row in rows:
+        key = _event_group_key(row)
+        shard_idx = group_to_shard.get(key)
+        if shard_idx is None:
+            shard_idx = len(group_to_shard) % len(paths)
+            group_to_shard[key] = shard_idx
+        shards[shard_idx].append(row)
+    for path, shard_rows in zip(paths, shards, strict=True):
+        _write_jsonl(path, shard_rows)
+
+
 def _canonical_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
@@ -1268,7 +1286,7 @@ def _run_repair_phase(
     shard_inputs = [
         shard_root / f"shard_{idx:02d}" / "credit_windows.jsonl" for idx in range(len(gpu_ids))
     ]
-    _split_jsonl_round_robin(rows, shard_inputs)
+    _split_jsonl_by_event(rows, shard_inputs)
     jobs = []
     repaired_lists = []
     repaired_rows_jsonls = []

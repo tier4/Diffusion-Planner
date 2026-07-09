@@ -310,6 +310,19 @@ def _source_row_labels(row: dict[str, Any]) -> set[str]:
     return {str(label) for label in row.get("repair_labels") or row.get("labels") or []}
 
 
+def _rows_require_static_collision(rows: list[dict[str, Any]]) -> bool:
+    return any("static_collision" in _source_row_labels(row) for row in rows)
+
+
+def _validate_static_collision_config(rows: list[dict[str, Any]], rcfg) -> None:
+    if _rows_require_static_collision(rows) and not bool(
+        getattr(rcfg, "static_collision_enabled", False)
+    ):
+        raise ValueError(
+            "static_collision repair rows require reward_config.static_collision_enabled=true"
+        )
+
+
 def _event_group_key(row: dict[str, Any]) -> str:
     return str(row.get("window_dir") or row.get("event_key") or row.get("scene_path"))
 
@@ -340,10 +353,17 @@ def _drop_t0_dirty_event_windows(
             labels = _source_row_labels(row)
             data = load_npz_data(row["scene_path"], device)
             if labels & {"moving_collision", "static_collision"}:
+                collision_thresh = (
+                    float(thresholds["moving_collision_thresh"])
+                    if "moving_collision" in labels
+                    else float(
+                        thresholds.get("sc_cross_thresh", thresholds["moving_collision_thresh"])
+                    )
+                )
                 hit, value = _source_scene_t0_any_neighbor_overlap(
                     data,
                     device=device,
-                    collision_thresh=float(thresholds["moving_collision_thresh"]),
+                    collision_thresh=collision_thresh,
                 )
                 if hit:
                     dirty_reason = "event_window_t0_already_collided"
@@ -545,6 +565,7 @@ def build_repaired_targets(
         rcfg,
         count_rear_end_collisions=count_rear_end_collisions,
     )
+    _validate_static_collision_config(rows, rcfg)
     thresholds = _load_scene_thresholds(threshold_config_path)
     model, model_args = load_model(model_path, device)
     out_dir.mkdir(parents=True, exist_ok=True)

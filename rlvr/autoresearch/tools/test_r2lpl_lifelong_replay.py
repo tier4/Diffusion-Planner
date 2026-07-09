@@ -28,6 +28,7 @@ from rlvr.autoresearch.tools.build_avoiding_target import (
     _future4_to_3col,
     _parse_ego_shape,
     _source_scene_t0_moving_overlap,
+    _validate_static_collision_config,
 )
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
@@ -54,6 +55,7 @@ from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _repair_cmd,
     _run_mining_phase,
     _run_repair_phase,
+    _split_jsonl_by_event,
     _union_scene_lists,
 )
 from rlvr.deviation import rollout_gt_deviation
@@ -847,6 +849,23 @@ def test_round_runner_repair_shards_use_private_inputs_outputs_and_merge(monkeyp
         {"shard": 0, "count": 0},
         {"shard": 1, "count": 0},
     ]
+
+
+def test_repair_shard_split_keeps_event_windows_atomic(tmp_path):
+    rows = [
+        {"scene_path": "/data/event_a/credit+00000.npz", "window_dir": "/data/event_a"},
+        {"scene_path": "/data/event_b/credit+00000.npz", "window_dir": "/data/event_b"},
+        {"scene_path": "/data/event_a/credit-00001.npz", "window_dir": "/data/event_a"},
+        {"scene_path": "/data/event_b/credit-00001.npz", "window_dir": "/data/event_b"},
+    ]
+    paths = [tmp_path / f"shard_{idx}.jsonl" for idx in range(2)]
+
+    _split_jsonl_by_event(rows, paths)
+
+    for path in paths:
+        shard_rows = _read_test_jsonl(path)
+        assert len({row["window_dir"] for row in shard_rows}) <= 1
+        assert len(shard_rows) == 2
 
 
 def test_lineage_resolver_maps_route_frame_and_step(tmp_path):
@@ -2112,6 +2131,60 @@ def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
     ]
     assert {row["reason"] for row in dirty} == {"event_window_t0_already_collided"}
     assert checked_paths == ["/tmp/event_a/credit-00030.npz", "/tmp/event_a/credit-00029.npz"]
+
+
+def test_t0_dirty_static_collision_uses_static_cross_threshold(monkeypatch):
+    rows = [
+        {
+            "scene_path": "/tmp/event_a/credit-00030.npz",
+            "window_dir": "/tmp/event_a",
+            "labels": ["static_collision"],
+            "repair_labels": ["static_collision"],
+        }
+    ]
+    seen_thresholds = []
+
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "load_npz_data",
+        lambda path, _device: {"scene_path": str(path)},
+    )
+
+    def _fake_t0_collision(_data, **kwargs):
+        seen_thresholds.append(kwargs["collision_thresh"])
+        return False, 99.0
+
+    monkeypatch.setattr(
+        build_avoiding_target_tool,
+        "_source_scene_t0_any_neighbor_overlap",
+        _fake_t0_collision,
+    )
+
+    kept, dirty = _drop_t0_dirty_event_windows(
+        rows,
+        rcfg=RewardConfig(),
+        thresholds={"moving_collision_thresh": 0.2, "sc_cross_thresh": 0.7, "rb_cross_thresh": 0.2},
+        device=torch.device("cpu"),
+    )
+
+    assert kept == rows
+    assert dirty == []
+    assert seen_thresholds == [0.7]
+
+
+def test_static_collision_repair_requires_static_enabled_config():
+    rows = [
+        {
+            "scene_path": "/tmp/event_a/credit-00030.npz",
+            "labels": ["static_collision"],
+            "repair_labels": ["static_collision"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="static_collision_enabled=true"):
+        _validate_static_collision_config(rows, RewardConfig(static_collision_enabled=False))
+
+    _validate_static_collision_config(rows, RewardConfig(static_collision_enabled=True))
 
 
 def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
