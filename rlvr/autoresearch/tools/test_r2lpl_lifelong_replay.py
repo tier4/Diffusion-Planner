@@ -112,8 +112,11 @@ def _minimal_sft_batch(batch_size: int = 2, future_len: int = 3):
 def _write_realized_scorer_configs(
     tmp_path: Path,
     *,
-    expert_disagreement_thresh: float = 1.0,
-    expert_disagreement_sustain_steps: int = 3,
+    wait_speed_mps: float = 0.5,
+    wait_progress_m: float = 1.0,
+    forward_progress_gap_m: float = 2.0,
+    lag_progress_gap_m: float = 3.0,
+    moving_speed_mps: float = 1.0,
 ) -> tuple[Path, Path]:
     reward_cfg = tmp_path / "reward.json"
     threshold_cfg = tmp_path / "thresholds.json"
@@ -163,8 +166,11 @@ def _write_realized_scorer_configs(
                 "moving_near_thresh": 0.7,
                 "static_near_thresh": 0.5,
                 "rb_near_thresh": 0.2,
-                "expert_disagreement_thresh": expert_disagreement_thresh,
-                "expert_disagreement_sustain_steps": expert_disagreement_sustain_steps,
+                "expert_disagreement_wait_speed_mps": wait_speed_mps,
+                "expert_disagreement_wait_progress_m": wait_progress_m,
+                "expert_disagreement_forward_progress_gap_m": forward_progress_gap_m,
+                "expert_disagreement_lag_progress_gap_m": lag_progress_gap_m,
+                "expert_disagreement_moving_speed_mps": moving_speed_mps,
                 "sc_cross_thresh": 0.2,
                 "rb_cross_thresh": 0.2,
             }
@@ -963,43 +969,73 @@ def test_lineage_resolver_rejects_non_route_path(tmp_path):
 
 def test_conflict_detector_disabled_is_silent():
     gt = torch.zeros(20, 4)
-    rollout = torch.ones(20, 4) * 10.0
+    rollout = torch.zeros(20, 4)
+    rollout[:, 0] = torch.arange(20, dtype=torch.float32) * 0.2
 
     result = detect_expert_disagreement(
         rollout,
         gt,
         enabled=False,
-        threshold_m=1.0,
-        sustain_steps=10,
+        wait_speed_mps=0.5,
+        wait_progress_m=1.0,
+        forward_progress_gap_m=2.0,
+        lag_progress_gap_m=3.0,
+        moving_speed_mps=1.0,
     )
 
     assert not result.expert_disagreement
     assert result.expert_disagreement_step is None
 
 
-def test_conflict_detector_requires_sustained_mismatch():
+def test_conflict_detector_flags_expert_wait_model_forward():
     gt = torch.zeros(20, 4)
     rollout = torch.zeros(20, 4)
-    rollout[3:8, 0] = 2.0
-    short = detect_expert_disagreement(
+    rollout[:, 0] = torch.arange(20, dtype=torch.float32) * 0.2
+
+    result = detect_expert_disagreement(
         rollout,
         gt,
         enabled=True,
-        threshold_m=1.0,
-        sustain_steps=10,
-    )
-    rollout[8:14, 0] = 2.0
-    sustained = detect_expert_disagreement(
-        rollout,
-        gt,
-        enabled=True,
-        threshold_m=1.0,
-        sustain_steps=10,
+        wait_speed_mps=0.5,
+        wait_progress_m=1.0,
+        forward_progress_gap_m=2.0,
+        lag_progress_gap_m=3.0,
+        moving_speed_mps=1.0,
     )
 
-    assert not short.expert_disagreement
-    assert sustained.expert_disagreement
-    assert sustained.expert_disagreement_step == 3
+    assert result.expert_disagreement
+    assert result.expert_disagreement_step == 0
+    assert result.reason == "expert_wait_model_forward"
+
+
+def test_conflict_detector_flags_lag_and_ahead():
+    gt = torch.zeros(20, 4)
+    gt[:, 0] = torch.arange(20, dtype=torch.float32) * 0.25
+    rollout = torch.zeros(20, 4)
+
+    lag = detect_expert_disagreement(
+        rollout,
+        gt,
+        enabled=True,
+        wait_speed_mps=0.5,
+        wait_progress_m=1.0,
+        forward_progress_gap_m=2.0,
+        lag_progress_gap_m=3.0,
+        moving_speed_mps=1.0,
+    )
+    ahead = detect_expert_disagreement(
+        gt,
+        rollout,
+        enabled=True,
+        wait_speed_mps=0.5,
+        wait_progress_m=1.0,
+        forward_progress_gap_m=2.0,
+        lag_progress_gap_m=3.0,
+        moving_speed_mps=1.0,
+    )
+
+    assert lag.reason == "model_lagging_expert"
+    assert ahead.reason in {"expert_wait_model_forward", "model_ahead_expert"}
 
 
 def test_rollout_gt_deviation_reports_first_sustained_crossing():
@@ -2124,6 +2160,64 @@ def test_repair_candidate_selector_requires_expert_disagreement_fix():
     assert meta["selected_labels"] == ["clean"]
 
 
+def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
+    candidate_rows = [
+        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+    ]
+    reward_rows = [
+        SimpleNamespace(
+            total=0.0,
+            collision_step=None,
+            rb_crossing=False,
+            lane_crossing=False,
+            static_crossing=False,
+            kinematic_violated=False,
+            sc_min_dist=1.0,
+            rb_min_dist=1.0,
+        ),
+        SimpleNamespace(
+            total=10.0,
+            collision_step=None,
+            rb_crossing=False,
+            lane_crossing=False,
+            static_crossing=False,
+            kinematic_violated=False,
+            sc_min_dist=1.0,
+            rb_min_dist=1.0,
+        ),
+    ]
+    reference = torch.zeros((4, 4), dtype=torch.float32)
+    close_to_expert = torch.zeros((4, 4), dtype=torch.float32)
+    high_reward_far = torch.zeros((4, 4), dtype=torch.float32)
+    high_reward_far[:, 0] = 10.0
+    candidates = [close_to_expert, high_reward_far]
+
+    near_idx, near_meta = _best_safe_candidate(
+        {"repair_labels": ["expert_disagreement"], "expert_disagreement_max_dev": 0.5},
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        require_conflict_clear=True,
+        candidate_trajs=candidates,
+        reference_traj=reference,
+    )
+    recoverable_idx, recoverable_meta = _best_safe_candidate(
+        {"repair_labels": ["expert_disagreement"], "expert_disagreement_max_dev": 2.0},
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        require_conflict_clear=True,
+        candidate_trajs=candidates,
+        reference_traj=reference,
+    )
+
+    assert near_idx == 0
+    assert near_meta["selected_r2lpl_state_class"] == "near_log"
+    assert recoverable_idx == 1
+    assert recoverable_meta["selected_r2lpl_state_class"] == "recoverable"
+
+
 def test_candidate_violation_score_does_not_double_count_expert_disagreement():
     row = {
         "labels": ["expert_disagreement", "road_border_near"],
@@ -2385,11 +2479,7 @@ def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
 
 
 def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
-    reward_cfg, threshold_cfg = _write_realized_scorer_configs(
-        tmp_path,
-        expert_disagreement_thresh=1.0,
-        expert_disagreement_sustain_steps=3,
-    )
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
     scorer = build_realized_event_scorer(
         reward_config=reward_cfg,
         threshold_config=threshold_cfg,
@@ -2406,19 +2496,19 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
         scorer(
             np_dict,
             collided=False,
-            live_pose=np.array([2.0, 0.0, 0.0]),
+            live_pose=np.array([float(step) * 0.4, 0.0, 0.0]),
             gt_pose=np.array([0.0, 0.0, 0.0]),
             segment_key="seg-a",
             step=step,
         )
-        for step in range(3)
+        for step in range(9)
     ]
 
     assert rows[0]["labels"] == ["clean"]
-    assert rows[1]["labels"] == ["clean"]
-    assert "expert_disagreement" in rows[2]["labels"]
-    assert rows[2]["expert_disagreement_step"] == 0
-    assert rows[2]["expert_disagreement_max_dev"] == 2.0
+    assert "expert_disagreement" in rows[1]["labels"]
+    assert rows[1]["expert_disagreement_step"] == 1
+    assert rows[1]["expert_disagreement_reason"] == "expert_wait_model_forward"
+    assert rows[-1]["expert_disagreement_max_dev"] == pytest.approx(3.2)
 
 
 def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
@@ -2470,8 +2560,11 @@ def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
                 "moving_near_thresh": 0.7,
                 "static_near_thresh": 0.5,
                 "rb_near_thresh": 0.2,
-                "expert_disagreement_thresh": 1.0,
-                "expert_disagreement_sustain_steps": 10,
+                "expert_disagreement_wait_speed_mps": 0.5,
+                "expert_disagreement_wait_progress_m": 1.0,
+                "expert_disagreement_forward_progress_gap_m": 2.0,
+                "expert_disagreement_lag_progress_gap_m": 3.0,
+                "expert_disagreement_moving_speed_mps": 1.0,
                 "sc_cross_thresh": 0.2,
                 "rb_cross_thresh": 0.2,
             }
@@ -2551,8 +2644,11 @@ def test_realized_event_scorer_supports_static_collision(tmp_path):
                 "moving_near_thresh": 0.7,
                 "static_near_thresh": 0.5,
                 "rb_near_thresh": 0.2,
-                "expert_disagreement_thresh": 1.0,
-                "expert_disagreement_sustain_steps": 10,
+                "expert_disagreement_wait_speed_mps": 0.5,
+                "expert_disagreement_wait_progress_m": 1.0,
+                "expert_disagreement_forward_progress_gap_m": 2.0,
+                "expert_disagreement_lag_progress_gap_m": 3.0,
+                "expert_disagreement_moving_speed_mps": 1.0,
                 "sc_cross_thresh": 0.2,
                 "rb_cross_thresh": 0.2,
             }
@@ -2670,8 +2766,11 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
             "moving_near_thresh": 0.7,
             "static_near_thresh": 0.5,
             "rb_near_thresh": 0.2,
-            "expert_disagreement_thresh": 1.0,
-            "expert_disagreement_sustain_steps": 10,
+            "expert_disagreement_wait_speed_mps": 0.5,
+            "expert_disagreement_wait_progress_m": 1.0,
+            "expert_disagreement_forward_progress_gap_m": 2.0,
+            "expert_disagreement_lag_progress_gap_m": 3.0,
+            "expert_disagreement_moving_speed_mps": 1.0,
         },
     )
     monkeypatch.setattr(

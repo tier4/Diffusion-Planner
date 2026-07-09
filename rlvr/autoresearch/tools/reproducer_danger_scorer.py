@@ -19,6 +19,7 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
     current_ego_neighbor_clearance,
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+from scenario_generation.conflict_detector import detect_expert_disagreement
 from scenario_generation.reproducer_rollout import _route_key
 
 _SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
@@ -172,14 +173,17 @@ def build_realized_event_scorer(
         sc_cross_thresh=None,
         rb_cross_thresh=None,
         enable_conflict_detector=False,
+        expert_disagreement_wait_speed_mps=None,
+        expert_disagreement_wait_progress_m=None,
+        expert_disagreement_forward_progress_gap_m=None,
+        expert_disagreement_lag_progress_gap_m=None,
+        expert_disagreement_moving_speed_mps=None,
     )
     thresholds = _apply_scene_thresholds(reward_cfg, scorer_args)
     torch_device = torch.device(device)
     rb_cross_thresh = float(thresholds["rb_cross_thresh"])
     static_collision_thresh = float(thresholds["sc_cross_thresh"])
     moving_collision_thresh = float(thresholds["moving_collision_thresh"])
-    expert_disagreement_thresh = float(thresholds["expert_disagreement_thresh"])
-    expert_disagreement_sustain_steps = int(thresholds["expert_disagreement_sustain_steps"])
     expert_state_by_segment: dict[Any, dict[str, Any]] = {}
 
     def _scorer(
@@ -255,29 +259,58 @@ def build_realized_event_scorer(
             row["expert_disagreement"] = False
             row["expert_disagreement_step"] = None
             row["expert_disagreement_max_dev"] = 0.0
+            row["expert_disagreement_reason"] = ""
+            row["expert_disagreement_model_end_progress"] = 0.0
+            row["expert_disagreement_expert_end_progress"] = 0.0
+            row["expert_disagreement_model_end_speed"] = 0.0
+            row["expert_disagreement_expert_end_speed"] = 0.0
             if live_pose is not None and gt_pose is not None:
                 key = segment_key if segment_key is not None else "__single_segment__"
                 state = expert_state_by_segment.setdefault(
                     key,
                     {
-                        "run": 0,
-                        "run_start": None,
                         "max_dev": 0.0,
+                        "live_xy": [],
+                        "gt_xy": [],
                     },
                 )
-                dev = float(np.linalg.norm(np.asarray(live_pose)[:2] - np.asarray(gt_pose)[:2]))
+                live_xy = np.asarray(live_pose, dtype=np.float32)[:2]
+                gt_xy = np.asarray(gt_pose, dtype=np.float32)[:2]
+                state["live_xy"].append(live_xy)
+                state["gt_xy"].append(gt_xy)
+                dev = float(np.linalg.norm(live_xy - gt_xy))
                 state["max_dev"] = max(float(state["max_dev"]), dev)
-                if dev > expert_disagreement_thresh:
-                    if int(state["run"]) == 0:
-                        state["run_start"] = step
-                    state["run"] = int(state["run"]) + 1
-                else:
-                    state["run"] = 0
-                    state["run_start"] = None
+                rollout = torch.as_tensor(
+                    np.asarray(state["live_xy"], dtype=np.float32),
+                    dtype=torch.float32,
+                    device=torch_device,
+                )
+                expert = torch.as_tensor(
+                    np.asarray(state["gt_xy"], dtype=np.float32),
+                    dtype=torch.float32,
+                    device=torch_device,
+                )
+                result = detect_expert_disagreement(
+                    rollout,
+                    expert,
+                    enabled=True,
+                    wait_speed_mps=float(thresholds["expert_disagreement_wait_speed_mps"]),
+                    wait_progress_m=float(thresholds["expert_disagreement_wait_progress_m"]),
+                    forward_progress_gap_m=float(
+                        thresholds["expert_disagreement_forward_progress_gap_m"]
+                    ),
+                    lag_progress_gap_m=float(thresholds["expert_disagreement_lag_progress_gap_m"]),
+                    moving_speed_mps=float(thresholds["expert_disagreement_moving_speed_mps"]),
+                )
                 row["expert_disagreement_max_dev"] = float(state["max_dev"])
-                if int(state["run"]) >= expert_disagreement_sustain_steps:
+                row["expert_disagreement_reason"] = result.reason
+                row["expert_disagreement_model_end_progress"] = result.model_end_progress
+                row["expert_disagreement_expert_end_progress"] = result.expert_end_progress
+                row["expert_disagreement_model_end_speed"] = result.model_end_speed
+                row["expert_disagreement_expert_end_speed"] = result.expert_end_speed
+                if result.expert_disagreement:
                     row["expert_disagreement"] = True
-                    row["expert_disagreement_step"] = state["run_start"]
+                    row["expert_disagreement_step"] = step
                     labels.append("expert_disagreement")
 
         row["labels"] = labels or ["clean"]

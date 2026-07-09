@@ -182,6 +182,33 @@ def _candidate_deviation_penalty(
     return float(np.linalg.norm(cand[:T, :2] - ref[:T, :2], axis=1).mean())
 
 
+def _normalize_values(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    lo = min(values)
+    hi = max(values)
+    if hi - lo <= 1e-9:
+        return [1.0 for _ in values]
+    return [(value - lo) / (hi - lo) for value in values]
+
+
+def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
+    dev = float(source_row.get("expert_disagreement_max_dev", 0.0))
+    if dev <= 1.0:
+        return "near_log"
+    if dev <= 5.0:
+        return "recoverable"
+    return "far_offpolicy"
+
+
+def _r2lpl_weights(state_class: str) -> tuple[float, float]:
+    if state_class == "near_log":
+        return 0.20, 0.80
+    if state_class == "recoverable":
+        return 0.95, 0.05
+    return 1.00, 0.00
+
+
 def _apply_rear_end_collision_mode(rcfg, *, count_rear_end_collisions: bool) -> None:
     if count_rear_end_collisions:
         rcfg.ignore_rear_end_collisions = False
@@ -433,7 +460,7 @@ def _best_safe_candidate(
     candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
     reference_traj: torch.Tensor | np.ndarray | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
-    accepted: list[tuple[float, float, int]] = []
+    accepted: list[tuple[float, float, float, int]] = []
     candidate_traj_list = None
     if candidate_trajs is not None:
         candidate_traj_list = list(candidate_trajs)
@@ -450,7 +477,7 @@ def _best_safe_candidate(
                 candidate_traj_list[idx] if candidate_traj_list is not None else None,
                 reference_traj,
             )
-            accepted.append((violation_score, deviation_penalty, idx))
+            accepted.append((violation_score, deviation_penalty, float(reward_row.total), idx))
 
     if not accepted:
         best_total = max(float(r.total) for r in reward_rows)
@@ -461,11 +488,31 @@ def _best_safe_candidate(
             "best_sc_min_dist": best_sc,
         }
 
-    accepted.sort(key=lambda item: (item[0], item[1], item[2]))
-    violation_score, deviation_penalty, idx = accepted[0]
+    uses_r2lpl_conflict_selection = "expert_disagreement" in set(
+        source_row.get("repair_labels", [])
+    )
+    if uses_r2lpl_conflict_selection:
+        rule_scores = _normalize_values([item[2] for item in accepted])
+        state_class = _r2lpl_state_class(source_row)
+        rule_weight, expert_weight = _r2lpl_weights(state_class)
+        ranked: list[tuple[float, float, float, int]] = []
+        for item, rule_score in zip(accepted, rule_scores, strict=True):
+            violation_score, deviation_penalty, _reward_total, idx = item
+            expert_score = math.exp(-max(deviation_penalty, 0.0) / 4.0)
+            r2lpl_score = rule_weight * rule_score + expert_weight * expert_score
+            ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
+        ranked.sort()
+        neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
+        selected_r2lpl_score = -float(neg_r2lpl_score)
+        selected_state_class = state_class
+    else:
+        accepted.sort(key=lambda item: (item[0], item[1], item[3]))
+        violation_score, deviation_penalty, _reward_total, idx = accepted[0]
+        selected_r2lpl_score = None
+        selected_state_class = None
     reward_row = reward_rows[idx]
     label_row = candidate_rows[idx]
-    return idx, {
+    meta = {
         "selected_total": float(reward_row.total),
         "selected_sc_min_dist": float(getattr(reward_row, "sc_min_dist", 99.0)),
         "selected_rb_min_dist": float(getattr(reward_row, "rb_min_dist", 99.0)),
@@ -474,6 +521,10 @@ def _best_safe_candidate(
         "selected_deviation_penalty": float(deviation_penalty),
         "selected_candidate_index": int(idx),
     }
+    if selected_r2lpl_score is not None:
+        meta["selected_r2lpl_score"] = float(selected_r2lpl_score)
+        meta["selected_r2lpl_state_class"] = selected_state_class
+    return idx, meta
 
 
 @torch.no_grad()
@@ -527,8 +578,17 @@ def build_repaired_targets(
 
     cls_args = _Args()
     cls_args.enable_conflict_detector = enable_conflict_detector
-    cls_args.expert_disagreement_thresh = thresholds["expert_disagreement_thresh"]
-    cls_args.expert_disagreement_sustain_steps = thresholds["expert_disagreement_sustain_steps"]
+    cls_args.expert_disagreement_wait_speed_mps = thresholds["expert_disagreement_wait_speed_mps"]
+    cls_args.expert_disagreement_wait_progress_m = thresholds["expert_disagreement_wait_progress_m"]
+    cls_args.expert_disagreement_forward_progress_gap_m = thresholds[
+        "expert_disagreement_forward_progress_gap_m"
+    ]
+    cls_args.expert_disagreement_lag_progress_gap_m = thresholds[
+        "expert_disagreement_lag_progress_gap_m"
+    ]
+    cls_args.expert_disagreement_moving_speed_mps = thresholds[
+        "expert_disagreement_moving_speed_mps"
+    ]
 
     for start in range(0, len(rows), scene_batch_size):
         batch_rows = rows[start : start + scene_batch_size]

@@ -278,8 +278,11 @@ def test_scene_failure_threshold_config_uses_requested_defaults():
         "moving_near_thresh": 0.7,
         "static_near_thresh": 0.5,
         "rb_near_thresh": 0.2,
-        "expert_disagreement_thresh": 1.0,
-        "expert_disagreement_sustain_steps": 10,
+        "expert_disagreement_wait_speed_mps": 0.5,
+        "expert_disagreement_wait_progress_m": 1.0,
+        "expert_disagreement_forward_progress_gap_m": 2.0,
+        "expert_disagreement_lag_progress_gap_m": 3.0,
+        "expert_disagreement_moving_speed_mps": 1.0,
         "sc_cross_thresh": 0.2,
         "rb_cross_thresh": 0.2,
     }
@@ -292,8 +295,11 @@ def test_scene_failure_thresholds_override_reward_config():
         moving_near_thresh = None
         static_near_thresh = None
         rb_near_thresh = None
-        expert_disagreement_thresh = None
-        expert_disagreement_sustain_steps = None
+        expert_disagreement_wait_speed_mps = None
+        expert_disagreement_wait_progress_m = None
+        expert_disagreement_forward_progress_gap_m = None
+        expert_disagreement_lag_progress_gap_m = None
+        expert_disagreement_moving_speed_mps = None
         sc_cross_thresh = None
         rb_cross_thresh = None
 

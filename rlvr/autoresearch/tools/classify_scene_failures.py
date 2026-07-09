@@ -78,8 +78,11 @@ _REQUIRED_THRESHOLD_FIELDS = (
     "moving_near_thresh",
     "static_near_thresh",
     "rb_near_thresh",
-    "expert_disagreement_thresh",
-    "expert_disagreement_sustain_steps",
+    "expert_disagreement_wait_speed_mps",
+    "expert_disagreement_wait_progress_m",
+    "expert_disagreement_forward_progress_gap_m",
+    "expert_disagreement_lag_progress_gap_m",
+    "expert_disagreement_moving_speed_mps",
     "sc_cross_thresh",
     "rb_cross_thresh",
 )
@@ -105,7 +108,6 @@ def _load_scene_thresholds(path: str | Path) -> dict[str, float]:
     if missing:
         raise ValueError(f"Threshold config {path} is missing required fields: {missing}")
     out = {k: float(raw[k]) for k in _REQUIRED_THRESHOLD_FIELDS}
-    out["expert_disagreement_sustain_steps"] = int(out["expert_disagreement_sustain_steps"])
     return out
 
 
@@ -124,8 +126,13 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
     config.rb_cross_thresh = resolve("rb_cross_thresh")
     config.sc_near_thresh = args.static_near_thresh
     config.rb_near_thresh = args.rb_near_thresh
-    args.expert_disagreement_thresh = resolve("expert_disagreement_thresh")
-    args.expert_disagreement_sustain_steps = int(resolve("expert_disagreement_sustain_steps"))
+    args.expert_disagreement_wait_speed_mps = resolve("expert_disagreement_wait_speed_mps")
+    args.expert_disagreement_wait_progress_m = resolve("expert_disagreement_wait_progress_m")
+    args.expert_disagreement_forward_progress_gap_m = resolve(
+        "expert_disagreement_forward_progress_gap_m"
+    )
+    args.expert_disagreement_lag_progress_gap_m = resolve("expert_disagreement_lag_progress_gap_m")
+    args.expert_disagreement_moving_speed_mps = resolve("expert_disagreement_moving_speed_mps")
 
     return {
         "moving_collision_thresh": float(args.moving_collision_thresh),
@@ -135,8 +142,15 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
         "static_collision_thresh": float(config.sc_cross_thresh),
         "sc_cross_thresh": float(config.sc_cross_thresh),
         "rb_cross_thresh": float(config.rb_cross_thresh),
-        "expert_disagreement_thresh": float(args.expert_disagreement_thresh),
-        "expert_disagreement_sustain_steps": int(args.expert_disagreement_sustain_steps),
+        "expert_disagreement_wait_speed_mps": float(args.expert_disagreement_wait_speed_mps),
+        "expert_disagreement_wait_progress_m": float(args.expert_disagreement_wait_progress_m),
+        "expert_disagreement_forward_progress_gap_m": float(
+            args.expert_disagreement_forward_progress_gap_m
+        ),
+        "expert_disagreement_lag_progress_gap_m": float(
+            args.expert_disagreement_lag_progress_gap_m
+        ),
+        "expert_disagreement_moving_speed_mps": float(args.expert_disagreement_moving_speed_mps),
     }
 
 
@@ -372,13 +386,21 @@ def _conflict_diagnostics(
         ego_traj[0],
         gt,
         enabled=bool(args.enable_conflict_detector),
-        threshold_m=float(args.expert_disagreement_thresh),
-        sustain_steps=int(args.expert_disagreement_sustain_steps),
+        wait_speed_mps=float(args.expert_disagreement_wait_speed_mps),
+        wait_progress_m=float(args.expert_disagreement_wait_progress_m),
+        forward_progress_gap_m=float(args.expert_disagreement_forward_progress_gap_m),
+        lag_progress_gap_m=float(args.expert_disagreement_lag_progress_gap_m),
+        moving_speed_mps=float(args.expert_disagreement_moving_speed_mps),
     )
     return {
         "expert_disagreement": result.expert_disagreement,
         "expert_disagreement_step": result.expert_disagreement_step,
         "expert_disagreement_max_dev": result.max_deviation,
+        "expert_disagreement_reason": result.reason,
+        "expert_disagreement_model_end_progress": result.model_end_progress,
+        "expert_disagreement_expert_end_progress": result.expert_end_progress,
+        "expert_disagreement_model_end_speed": result.model_end_speed,
+        "expert_disagreement_expert_end_speed": result.expert_end_speed,
     }
 
 
@@ -817,6 +839,19 @@ def _build_candidate_row(
         "expert_disagreement": bool(conflict.get("expert_disagreement", False)),
         "expert_disagreement_step": conflict.get("expert_disagreement_step"),
         "expert_disagreement_max_dev": float(conflict.get("expert_disagreement_max_dev", 0.0)),
+        "expert_disagreement_reason": conflict.get("expert_disagreement_reason", ""),
+        "expert_disagreement_model_end_progress": float(
+            conflict.get("expert_disagreement_model_end_progress", 0.0)
+        ),
+        "expert_disagreement_expert_end_progress": float(
+            conflict.get("expert_disagreement_expert_end_progress", 0.0)
+        ),
+        "expert_disagreement_model_end_speed": float(
+            conflict.get("expert_disagreement_model_end_speed", 0.0)
+        ),
+        "expert_disagreement_expert_end_speed": float(
+            conflict.get("expert_disagreement_expert_end_speed", 0.0)
+        ),
     }
 
 
@@ -1403,12 +1438,15 @@ def main() -> None:
     parser.add_argument("--moving_near_thresh", type=float, default=None)
     parser.add_argument("--static_near_thresh", type=float, default=None)
     parser.add_argument("--rb_near_thresh", type=float, default=None)
-    parser.add_argument("--expert_disagreement_thresh", type=float, default=None)
-    parser.add_argument("--expert_disagreement_sustain_steps", type=int, default=None)
+    parser.add_argument("--expert_disagreement_wait_speed_mps", type=float, default=None)
+    parser.add_argument("--expert_disagreement_wait_progress_m", type=float, default=None)
+    parser.add_argument("--expert_disagreement_forward_progress_gap_m", type=float, default=None)
+    parser.add_argument("--expert_disagreement_lag_progress_gap_m", type=float, default=None)
+    parser.add_argument("--expert_disagreement_moving_speed_mps", type=float, default=None)
     parser.add_argument(
         "--enable_conflict_detector",
         action="store_true",
-        help="Enable sustained model-vs-GT disagreement labeling.",
+        help="Enable R2LPL-style model-vs-expert conflict labeling.",
     )
     parser.add_argument("--sc_cross_thresh", type=float, default=None)
     parser.add_argument("--rb_cross_thresh", type=float, default=None)

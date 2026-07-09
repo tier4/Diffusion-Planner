@@ -267,10 +267,17 @@ Common production settings:
 
 If `static_collision` is included in `repair_labels` and static rows are present,
 the reward config must set `static_collision_enabled=true`; otherwise static
-collision repair fails loudly. Expert-disagreement mining uses the realized ego
-pose from the reproducer against the matched GT pose and requires sustained
-deviation configured by `expert_disagreement_thresh` and
-`expert_disagreement_sustain_steps` in the threshold config.
+collision repair fails loudly. Expert-disagreement mining follows the R2LPL
+conflict rules over realized rollout progress versus matched GT progress:
+expert-waits/model-goes, model-lags-moving-expert, and model-ahead-expert. The
+threshold config defines the wait speed/progress, forward-progress gap,
+lag-progress gap, and moving-speed values:
+
+- `expert_disagreement_wait_speed_mps=0.5`
+- `expert_disagreement_wait_progress_m=1.0`
+- `expert_disagreement_forward_progress_gap_m=2.0`
+- `expert_disagreement_lag_progress_gap_m=3.0`
+- `expert_disagreement_moving_speed_mps=1.0`
 
 `generation_mode=grpo_temperature` uses the same K-trajectory sampling rule as
 `diffusion_planner/grpo_run.sh`: each scene is replicated K times and each row
