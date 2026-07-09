@@ -38,6 +38,7 @@ from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 
+from planner_metrics.vehicle_collision import obb_corners
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.recovery_test import (
@@ -106,14 +107,12 @@ def _draw_agent_box(
 
 def _ego_obb_corners(ex, ey, heading, length, width, wheelbase) -> np.ndarray:
     """Four OBB corners (world frame) — used to attach the border-distance line.
-    Ego is rear-axle referenced: rear edge at -(length-wheelbase)/2."""
-    rear_overhang = (length - wheelbase) / 2
-    x0, x1 = -rear_overhang, length - rear_overhang
-    y0, y1 = -width / 2, width / 2
-    local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)
-    c, s = math.cos(heading), math.sin(heading)
-    R = np.array([[c, -s], [s, c]], dtype=np.float64)
-    return (R @ local.T).T + np.array([ex, ey], dtype=np.float64)
+    Ego is rear-axle referenced: rear edge at -(length-wheelbase)/2.
+
+    Delegates to the canonical
+    :func:`planner_metrics.vehicle_collision.obb_corners`.
+    """
+    return obb_corners(ex, ey, heading, length, width, wheelbase)
 
 
 def _lane_polylines(

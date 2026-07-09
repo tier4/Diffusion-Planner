@@ -52,7 +52,10 @@ import torch
 from diffusion_planner.utils.path_key import data_path_to_rel
 
 from planner_metrics.aggregate import compute_subscores_scene_batch
-from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
+from planner_metrics.subscores import (
+    compute_ego_neighbor_signed_clearance,
+    compute_safety_score_batch,
+)
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig
 
@@ -597,14 +600,56 @@ def _first_step(steps: list[int | None]) -> int | None:
     return min(values) if values else None
 
 
-def _first_moving_collision_step(
-    distances: torch.Tensor,
-    *,
-    moving_collision_thresh: float,
+def _moving_collision_step_gated(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    neighbor_futures: torch.Tensor,
+    neighbor_shapes: torch.Tensor,
+    neighbor_valid: torch.Tensor,
+    config: RewardConfig,
 ) -> int | None:
+    """First moving-collision step using the SAME definition as the reward.
+
+    A collision is an actual OBB overlap (signed clearance ``< 0``), with
+    rear-end collisions suppressed when ``config.ignore_rear_end_collisions``
+    is set (controlled by ``--count_rear_end_collisions``). This deliberately
+    replaces the old raw ``clearance <= moving_collision_thresh`` test, which
+    had no gating and over-selected rear approaches / queued vehicles, drifting
+    from ``compute_safety_score_batch`` (the reward/eval definition).
+
+    For full trajectories (T >= 2) this delegates entirely to
+    ``compute_safety_score_batch``. For a single realized step (T == 1) — used
+    by the reproducer danger scorer — ``compute_safety_score_batch`` is
+    inapplicable (its low-speed gate needs a trajectory), so the same overlap +
+    rear-end rule is applied to that single step.
+    """
+    _N, T, _ = ego_trajs.shape
+    if neighbor_futures.shape[0] == 0:
+        return None
+    if T >= 2:
+        _scores, collision_steps = compute_safety_score_batch(
+            ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config
+        )
+        return collision_steps[0]
+
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
+    )
     if distances.numel() == 0:
         return None
-    collision_by_t = (distances <= moving_collision_thresh).any(dim=1).any(dim=0)
+    collision_mask = distances < 0  # (N, N_nb, T) actual overlap only
+    if config.ignore_rear_end_collisions:
+        # Mirror compute_safety_score_batch's rear-end rule for the single
+        # realized step: drop overlaps where the NPC is behind the ego
+        # (dot(ego_heading, ego->NPC) < 0). Low-speed suppression is omitted
+        # because a single pose carries no ego speed.
+        ego_xy = ego_trajs[:, :, :2]
+        ego_heading = ego_trajs[:, :, 2:4]
+        npc_xy = neighbor_futures[:, :, :2]
+        ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
+        dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)
+        collision_mask = collision_mask & (dot >= 0)
+    collision_by_t = collision_mask.any(dim=1).any(dim=0)
     if not bool(collision_by_t.any().item()):
         return None
     return int(collision_by_t.float().argmax().item())
@@ -628,6 +673,13 @@ def current_ego_neighbor_clearance(
         "min_clearance": math.inf,
         "active_mask": torch.zeros(0, dtype=torch.bool, device=device),
         "stopped_mask": torch.zeros(0, dtype=torch.bool, device=device),
+        # Built OBB inputs (ego at origin, current neighbor pose) so callers can
+        # reuse the SAME gated collision decision (_moving_collision_step_gated).
+        "ego_now": None,
+        "ego_shape": ego_shape,
+        "neighbors": None,
+        "neighbor_shapes": None,
+        "neighbor_valid": None,
     }
     if neighbor_futures.shape[0] == 0:
         return empty
@@ -640,7 +692,11 @@ def current_ego_neighbor_clearance(
     else:
         active_mask = torch.ones_like(stopped_mask, dtype=torch.bool)
     if not bool(active_mask.any().item()):
-        return {**empty, "active_mask": active_mask, "stopped_mask": stopped_mask}
+        return {
+            **empty,
+            "active_mask": active_mask,
+            "stopped_mask": stopped_mask,
+        }
 
     current_neighbors = neighbor_futures[active_mask, :1, :4].clone()
     current_valid = neighbor_valid[active_mask, :1].clone()
@@ -679,6 +735,11 @@ def current_ego_neighbor_clearance(
         "min_clearance": min_clearance,
         "active_mask": active_mask,
         "stopped_mask": stopped_mask,
+        "ego_now": ego_now,
+        "ego_shape": ego_shape,
+        "neighbors": current_neighbors,
+        "neighbor_shapes": neighbor_shapes[active_mask],
+        "neighbor_valid": current_valid,
     }
 
 
@@ -720,10 +781,10 @@ def _moving_diagnostics(
     argmin_m = (flat_idx // T) % M
     argmin_t = flat_idx % T
     min_dist = float(distances.reshape(-1)[flat_idx].item())
-    moving_collision_step = _first_moving_collision_step(
-        distances,
-        moving_collision_thresh=moving_collision_thresh,
-    )
+    # Collision label uses the reward's gated overlap definition (rear-end /
+    # low-speed suppressed), NOT a raw proximity threshold. moving_min_dist and
+    # moving_near_miss below still report raw clearance for diagnostics.
+    moving_collision_step = _moving_collision_step_gated(ego_traj, ego_shape, mf, ms, mv, config)
 
     return {
         "moving_neighbor_count": moving_count,

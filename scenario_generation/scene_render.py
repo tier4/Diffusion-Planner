@@ -71,9 +71,9 @@ def _ensure_neighbor_future_4col(naf):
 
 
 def _obb_corners_from_placement(obs: ObstaclePlacement) -> np.ndarray:
-    from scenario_generation.gui.lanelet_scene_builder import _obb_corners
+    from planner_metrics.vehicle_collision import obb_corners
 
-    return _obb_corners(obs.x, obs.y, obs.yaw_rad, obs.length, obs.width)
+    return obb_corners(obs.x, obs.y, obs.yaw_rad, obs.length, obs.width)
 
 
 def _extract_border_polylines(scene: SceneContext) -> list[np.ndarray]:

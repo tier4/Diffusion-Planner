@@ -2125,6 +2125,7 @@ def test_repair_candidate_selector_requires_safe_fix():
         reward_rows,
         min_static_margin=0.3,
         require_conflict_clear=True,
+        target_gt_disagreement_thresh=2.0,
     )
 
     assert idx == 1
@@ -2170,6 +2171,7 @@ def test_repair_candidate_selector_requires_expert_disagreement_fix():
         reward_rows,
         min_static_margin=0.3,
         require_conflict_clear=True,
+        target_gt_disagreement_thresh=2.0,
     )
 
     assert idx == 1
@@ -2215,6 +2217,7 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
         reward_rows,
         min_static_margin=0.3,
         require_conflict_clear=True,
+        target_gt_disagreement_thresh=2.0,
         candidate_trajs=candidates,
         reference_traj=reference,
     )
@@ -2224,6 +2227,7 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
         reward_rows,
         min_static_margin=0.3,
         require_conflict_clear=True,
+        target_gt_disagreement_thresh=2.0,
         candidate_trajs=candidates,
         reference_traj=reference,
     )
@@ -2323,12 +2327,18 @@ def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
         reward_rows,
         min_static_margin=0.3,
         require_conflict_clear=True,
+        target_gt_disagreement_thresh=2.0,
         candidate_trajs=candidate_trajs,
         reference_traj=reference_traj,
     )
 
     assert idx == 0
     assert meta["selected_deviation_penalty"] < 1.0
+    # R2LPL hard-example signal is emitted alongside the deviation penalty and is
+    # distinct from realized expert_disagreement.
+    assert meta["target_gt_disagreement_mean_l2"] == meta["selected_deviation_penalty"]
+    assert meta["target_gt_disagreement_max_l2"] >= meta["target_gt_disagreement_mean_l2"]
+    assert isinstance(meta["target_gt_disagreement"], bool)
 
 
 def test_source_scene_t0_moving_overlap_rejects_already_collided_scene():

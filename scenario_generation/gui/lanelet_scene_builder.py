@@ -15,6 +15,7 @@ from enum import IntEnum
 
 import numpy as np
 
+from planner_metrics.vehicle_collision import obb_corners, obb_overlap
 from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
 
 # lanelet2 requires ROS/Autoware Python paths
@@ -209,46 +210,20 @@ def _obb_corners(
     midpoint and the box is offset forward accordingly (ego convention).
     When ``wheelbase`` is None, (x, y) is treated as the bbox centroid
     (neighbor/tracked-object convention from the perception pipeline).
+
+    Thin wrapper over the canonical shared collision geometry
+    (:mod:`planner_metrics.vehicle_collision`) so the whole repo shares one
+    OBB implementation.
     """
-    cos_h, sin_h = math.cos(heading), math.sin(heading)
-    if wheelbase is not None:
-        rear_overhang = (length - wheelbase) / 2.0
-        dx_lo, dx_hi = -rear_overhang, length - rear_overhang
-    else:
-        dx_lo, dx_hi = -length / 2.0, length / 2.0
-    dy_lo, dy_hi = -width / 2.0, width / 2.0
-    local_corners = np.array(
-        [
-            [dx_lo, dy_lo],
-            [dx_hi, dy_lo],
-            [dx_hi, dy_hi],
-            [dx_lo, dy_hi],
-        ]
-    )
-    rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
-    return (local_corners @ rot.T) + np.array([x, y])
-
-
-def _project_onto_axis(corners: np.ndarray, axis: np.ndarray) -> tuple[float, float]:
-    proj = corners @ axis
-    return float(proj.min()), float(proj.max())
+    return obb_corners(x, y, heading, length, width, wheelbase)
 
 
 def _obb_collides(corners_a: np.ndarray, corners_b: np.ndarray) -> bool:
-    """SAT collision test between two OBBs given as (4, 2) corners."""
-    for corners in (corners_a, corners_b):
-        for i in range(4):
-            edge = corners[(i + 1) % 4] - corners[i]
-            axis = np.array([-edge[1], edge[0]])
-            norm = np.linalg.norm(axis)
-            if norm < 1e-9:
-                continue
-            axis /= norm
-            min_a, max_a = _project_onto_axis(corners_a, axis)
-            min_b, max_b = _project_onto_axis(corners_b, axis)
-            if max_a < min_b or max_b < min_a:
-                return False
-    return True
+    """SAT collision test between two OBBs given as (4, 2) corners.
+
+    Delegates to the canonical shared collision geometry.
+    """
+    return obb_overlap(corners_a, corners_b)
 
 
 def _polyline_arc_length(pts: np.ndarray) -> float:

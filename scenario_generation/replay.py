@@ -65,6 +65,8 @@ matplotlib.use("Agg")
 import numpy as np
 import torch
 
+from planner_metrics.vehicle_collision import obb_corners
+
 # Live per-step lane / border / centerline scoring. Imports are module-
 # level (unconditional); the scoring path itself only runs when both
 # dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
@@ -1301,9 +1303,11 @@ def _ego_obb_corners(
 ) -> np.ndarray:
     """Four OBB corners of the ego footprint in world frame.
 
-    Uses the shared ``_obb_corners`` with the ego's actual wheelbase.
+    Delegates to the canonical
+    :func:`planner_metrics.vehicle_collision.obb_corners` with the ego's actual
+    wheelbase (rear-axle convention).
     """
-    return _obb_corners(ex, ey, heading, length, width, wheelbase=wheelbase)
+    return obb_corners(ex, ey, heading, length, width, wheelbase=wheelbase)
 
 
 def _ego_nearest_static_npc(

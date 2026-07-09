@@ -20,6 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
+from planner_metrics.vehicle_collision import obb_corners
+
 
 def _load_trajectory(run_dir: Path) -> list[dict]:
     log_path = run_dir / "trajectory_log.json"
@@ -46,22 +48,15 @@ def _compute_ego_corners(
     and ``visualize.draw_agent_box``) where ``(x, y)`` is the rear-axle
     position. The longitudinal footprint spans from ``-rear_overhang`` behind
     the rear axle to ``wheelbase + rear_overhang`` in front of it.
+
+    Corner construction is delegated to the canonical
+    :func:`planner_metrics.vehicle_collision.obb_corners`; this helper takes
+    HALF extents, so they are doubled before the call. The returned corners are
+    used order-agnostically (min corner-to-border distance), so the ring order
+    of the wrapper is fine.
     """
-    length = 2 * half_length
-    rear_overhang = (length - wheelbase) / 2
-    front_offset = wheelbase + rear_overhang
-    cos_h, sin_h = math.cos(heading), math.sin(heading)
-    corners = []
-    for dx, dy in [
-        (front_offset, half_width),
-        (front_offset, -half_width),
-        (-rear_overhang, half_width),
-        (-rear_overhang, -half_width),
-    ]:
-        cx = x + dx * cos_h - dy * sin_h
-        cy = y + dx * sin_h + dy * cos_h
-        corners.append((cx, cy))
-    return corners
+    corners = obb_corners(x, y, heading, 2.0 * half_length, 2.0 * half_width, wheelbase)
+    return [(float(cx), float(cy)) for cx, cy in corners]
 
 
 def _compute_ego_perimeter(

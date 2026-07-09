@@ -214,11 +214,25 @@ Per round, the workflow reports:
 - mined event count by label
 - generated scene count
 - accepted repaired scene count
+- target_gt_disagreement count / mean-L2 / max-L2
 - discarded unrepaired scene count
 - replay memory size
 - final training scene count
 
 Artifacts belong under the SSD `auto_research` area, not inside the git repo.
+
+## Hard-Example Signal (`target_gt_disagreement`)
+
+Each accepted repaired row records how far the SELECTED repaired target strays
+from the ORIGINAL logged GT target: `target_gt_disagreement_mean_l2`,
+`target_gt_disagreement_max_l2`, and the boolean `target_gt_disagreement`
+(max-L2 exceeds `--target_gt_disagreement_thresh`, default 2.0 m). This is
+distinct from realized `expert_disagreement` (model rollout vs logged expert
+during simulation) and is computed from the K-candidate winner already produced
+— no extra model or expert database. The moving-collision label uses the
+reward's gated overlap definition (rear-end and low-speed suppression, via
+`--count_rear_end_collisions`), matching `compute_safety_score_batch`, so repair
+labels do not drift from the reward.
 
 ## Minimal Config Shape
 
@@ -287,7 +301,6 @@ mode is disabled for an ablation, use `generation_mode=guided_variant` with
 
 ## Remaining TODO
 
-- Consider adding the R2LPL paper's additional hard-example signal based on high
-  disagreement between the generated repaired target and the original GT target.
-  The current workflow mines realized rollout-vs-GT expert disagreement, but it
-  does not yet use target-vs-GT distance as a separate training-selection flag.
+- The R2LPL target-vs-GT hard-example signal is now implemented (see the
+  `target_gt_disagreement` section above); a future step could USE the flag as a
+  training-selection or replay-priority weight rather than only recording it.

@@ -182,7 +182,14 @@ def test_classify_scene_failures_counts_rear_end_collision_when_enabled():
     assert row["moving_collision_step"] == 0
 
 
-def test_classify_scene_failures_counts_rear_end_collision_under_shared_rule():
+def test_classify_scene_failures_suppresses_rear_end_collision_by_default():
+    # Under the DEFAULT config (ignore_rear_end_collisions=True) the shared gated
+    # rule SUPPRESSES a rear-end collision (NPC hits the ego from behind — not the
+    # ego's fault), matching compute_safety_score_batch / the reward definition.
+    # It is only labelled moving_collision when --count_rear_end_collisions flips
+    # ignore_rear_end_collisions=False (see the _when_enabled test above). This
+    # replaces the old raw clearance<=thresh rule, which had no rear-end
+    # suppression and drifted from the reward.
     ego, data = _rear_end_collision_data_3col()
 
     row = classify_loaded_scene(
@@ -197,8 +204,8 @@ def test_classify_scene_failures_counts_rear_end_collision_under_shared_rule():
         device=torch.device("cpu"),
     )
 
-    assert "moving_collision" in row["labels"]
-    assert row["moving_collision_step"] == 0
+    assert "moving_collision" not in row["labels"]
+    assert row["moving_collision_step"] is None
 
 
 def test_classify_scene_failures_writes_null_rb_min_dist_without_borders(tmp_path):

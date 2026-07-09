@@ -27,6 +27,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from planner_metrics.vehicle_collision import obb_corners, obb_overlap
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -87,13 +89,14 @@ def _obb_corners(
     dx: float,
     dy: float,
 ) -> list[tuple[float, float]]:
-    cos_y = math.cos(yaw)
-    sin_y = math.sin(yaw)
-    hx, hy = dx * 0.5, dy * 0.5
-    corners_local = [(+hx, +hy), (+hx, -hy), (-hx, -hy), (-hx, +hy)]
-    return [
-        (cx + lx * cos_y - ly * sin_y, cy + lx * sin_y + ly * cos_y) for lx, ly in corners_local
-    ]
+    """Centroid-convention OBB corners via the shared collision geometry.
+
+    Returns a list of ``(x, y)`` tuples (kept for the yaml/render/shapely-free
+    callers). Delegates the geometry to
+    :mod:`planner_metrics.vehicle_collision`.
+    """
+    corners = obb_corners(cx, cy, yaw, dx, dy, wheelbase=None)
+    return [(float(px), float(py)) for px, py in corners]
 
 
 # ---------------------------------------------------------------------------
@@ -217,8 +220,6 @@ def _summarize_track(entry: dict) -> dict:
 # OBB overlap merge (union-find)
 # ---------------------------------------------------------------------------
 def _merge_overlapping_vehicles(parked_vehicles: list) -> list:
-    from shapely.geometry import Polygon
-
     n = len(parked_vehicles)
     if n == 0:
         return []
@@ -231,7 +232,7 @@ def _merge_overlapping_vehicles(parked_vehicles: list) -> list:
         qw = v["pose"]["orientation"]["w"]
         yaw = 2.0 * math.atan2(qz, qw)
         polygons.append(
-            Polygon(_obb_corners(cx, cy, yaw, v["dimensions"]["x"], v["dimensions"]["y"]))
+            np.asarray(_obb_corners(cx, cy, yaw, v["dimensions"]["x"], v["dimensions"]["y"]))
         )
         yaws.append(yaw)
 
@@ -250,7 +251,7 @@ def _merge_overlapping_vehicles(parked_vehicles: list) -> list:
 
     for i in range(n):
         for j in range(i + 1, n):
-            if polygons[i].intersects(polygons[j]):
+            if obb_overlap(polygons[i], polygons[j]):
                 _union(i, j)
 
     groups: dict[int, list[int]] = defaultdict(list)

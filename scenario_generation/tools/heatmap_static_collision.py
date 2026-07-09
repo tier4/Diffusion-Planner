@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from planner_metrics.vehicle_collision import obb_corners
 from scenario_generation.tools._heatmap_common import (
     bin_scalar_by_arc,
     build_route_polyline,
@@ -137,14 +138,16 @@ def _score_run_ego_actual(
     from scenario_generation.tools._heatmap_common import project_to_polyline
 
     def _build_obb_corners(cx, cy, cos_h, sin_h, length, width, wheelbase):
-        """Build (1, 4, 2) OBB corners from center pose + dims."""
-        rear_overhang = (length - wheelbase) / 2.0
-        x0, x1 = -rear_overhang, length - rear_overhang
-        y0, y1 = -width / 2.0, width / 2.0
-        local = torch.tensor([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=torch.float32)
-        R = torch.tensor([[cos_h, -sin_h], [sin_h, cos_h]], dtype=torch.float32)
-        world = (R @ local.T).T + torch.tensor([cx, cy], dtype=torch.float32)
-        return world.unsqueeze(0)
+        """Build (1, 4, 2) OBB corners from center pose + dims.
+
+        Delegates corner construction to the canonical
+        :func:`planner_metrics.vehicle_collision.obb_corners`. The downstream
+        SAT / closest-point calls expect a ``(1, 4, 2)`` float32 torch tensor,
+        so the numpy ``(4, 2)`` result is wrapped accordingly.
+        """
+        heading = math.atan2(sin_h, cos_h)
+        corners = obb_corners(cx, cy, heading, length, width, wheelbase)
+        return torch.as_tensor(corners, dtype=torch.float32).unsqueeze(0)
 
     npz_dir = run_dir / "npz"
     if not npz_dir.exists():

@@ -961,6 +961,59 @@ def _base_training_cfg(path_or_dict: Any) -> dict[str, Any]:
     return {"train_args": raw}
 
 
+def _effective_replay_knobs(cfg: dict[str, Any]) -> tuple[float, float]:
+    """Resolve (replay_der_coef, replay_loss_weight), workflow keys winning.
+
+    The knobs may be set at the workflow top level (``_WORKFLOW_KEYS``) or inside
+    the training config; the workflow-level value takes precedence.
+    """
+    payload = _training_config_payload(cfg["training_config"])
+    train_args = payload.get("train_args", payload)
+    der = float(cfg.get("replay_der_coef", train_args.get("replay_der_coef", 0.0)))
+    weight = float(cfg.get("replay_loss_weight", train_args.get("replay_loss_weight", 1.0)))
+    return der, weight
+
+
+def _assert_base_sft_supports_replay_knobs(cfg: dict[str, Any]) -> None:
+    """Fail loudly if base_sft is asked for DER / replay-loss weighting.
+
+    The base SFT trainer (``train_predictor``) trains on the flat repaired+replay
+    union with no role metadata, so it cannot honor these knobs. Silently
+    ignoring them would leave the user believing forgetting-protection is active
+    when it is not.
+    """
+    der, weight = _effective_replay_knobs(cfg)
+    if der > 0.0 or weight != 1.0:
+        raise ValueError(
+            "training_backend='base_sft' cannot honor replay_der_coef / "
+            f"replay_loss_weight (got replay_der_coef={der}, replay_loss_weight={weight}). "
+            "The base SFT trainer trains on the flat repaired+replay union with no role "
+            "weighting or DER. Use the ranked-SFT backend for DER / replay-loss weighting, "
+            "or remove these knobs."
+        )
+
+
+def _round_training_config(cfg: dict[str, Any], *, rdir: Path, anchor_model_path: Path) -> Path:
+    """Write this round's ranked-SFT training config.
+
+    Injects the workflow-level replay knobs and — when DER is active — sets the
+    replay anchor to THIS round's warm-start model (the prior round's
+    checkpoint), per the R2LPL spec: DER anchors replay outputs to the
+    prior-round model. Without this the anchor would stay frozen at round 1.
+    """
+    payload = _training_config_payload(cfg["training_config"])
+    out = dict(payload)
+    if "replay_loss_weight" in cfg:
+        out["replay_loss_weight"] = cfg["replay_loss_weight"]
+    if "replay_der_coef" in cfg:
+        out["replay_der_coef"] = cfg["replay_der_coef"]
+    if float(out.get("replay_der_coef", 0.0)) > 0.0:
+        out["replay_anchor_model_path"] = str(anchor_model_path)
+    round_cfg_path = rdir / "training_config.json"
+    _write_json(round_cfg_path, out)
+    return round_cfg_path
+
+
 def _append_train_arg(cmd: list[str], key: str, value: Any) -> None:
     if value is None:
         return
@@ -1454,6 +1507,20 @@ def _summarize_round(
 
     event_counts = _derive_event_counts_from_credit_rows(credit_rows)
 
+    # R2LPL hard-example signal: disagreement between the selected repaired target
+    # and the original logged GT target (distinct from realized expert_disagreement).
+    tgt_flags = [bool(r.get("target_gt_disagreement", False)) for r in repaired_rows]
+    tgt_max_l2 = [
+        float(r["target_gt_disagreement_max_l2"])
+        for r in repaired_rows
+        if r.get("target_gt_disagreement_max_l2") is not None
+    ]
+    tgt_mean_l2 = [
+        float(r["target_gt_disagreement_mean_l2"])
+        for r in repaired_rows
+        if r.get("target_gt_disagreement_mean_l2") is not None
+    ]
+
     summary = {
         "round_idx": int(round_idx),
         "route_scene_count": route_scene_count,
@@ -1464,6 +1531,11 @@ def _summarize_round(
         "simulated_event_count": int(sum(event_counts.values())),
         "generated_scene_count": len(credit_rows),
         "accepted_repaired_scene_count": len(repaired_rows),
+        "target_gt_disagreement_count": int(sum(tgt_flags)),
+        "target_gt_disagreement_mean_l2": (
+            round(sum(tgt_mean_l2) / len(tgt_mean_l2), 4) if tgt_mean_l2 else None
+        ),
+        "target_gt_disagreement_max_l2": (round(max(tgt_max_l2), 4) if tgt_max_l2 else None),
         "discarded_unrepaired_scene_count": len(unrepaired_rows),
         "replay_memory_size": len(memory.get("entries", [])),
         "final_training_scene_count": train_scene_count,
@@ -1558,6 +1630,7 @@ def main() -> None:
             cfg["val_scenes"] = str(train_input_list)
 
         if training_backend == "base_sft":
+            _assert_base_sft_supports_replay_knobs(cfg)
             train_cmd, next_model_path, train_cwd, train_env = _base_train_invocation(
                 cfg,
                 model_path=model_path,
@@ -1573,12 +1646,17 @@ def main() -> None:
                 )
             model_path = next_model_path
         else:
+            # H2: anchor DER replay to THIS round's warm-start model (the prior
+            # round's checkpoint), not a frozen round-1 anchor.
+            round_training_config = _round_training_config(
+                cfg, rdir=rdir, anchor_model_path=model_path
+            )
             train_cmd = [
                 sys.executable,
                 "-m",
                 "rlvr.autoresearch.run_experiment",
                 "--config",
-                str(cfg["training_config"]),
+                str(round_training_config),
                 "--name",
                 name,
                 "--model_path",

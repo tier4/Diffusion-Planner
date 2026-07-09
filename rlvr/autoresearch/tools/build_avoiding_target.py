@@ -29,6 +29,7 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
 )
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model, load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+from rlvr.deviation import rollout_gt_deviation
 from rlvr.grpo_trainer_batched import (
     _normalize_batch,
     _stack_scene_data,
@@ -180,6 +181,32 @@ def _candidate_deviation_penalty(
     if T < 1:
         return 0.0
     return float(np.linalg.norm(cand[:T, :2] - ref[:T, :2], axis=1).mean())
+
+
+def _candidate_deviation_max_l2(
+    candidate_traj: torch.Tensor | np.ndarray | None,
+    reference_traj: torch.Tensor | np.ndarray | None,
+) -> float:
+    """Max per-step xy L2 between a candidate and the reference GT trajectory.
+
+    Reuses ``rollout_gt_deviation`` (the canonical trajectory-deviation helper)
+    with no threshold, so it stays consistent with the realized
+    ``expert_disagreement`` deviation metric. Mirrors
+    ``_candidate_deviation_penalty``'s null-handling.
+    """
+    if reference_traj is None or candidate_traj is None:
+        return 0.0
+    if isinstance(candidate_traj, torch.Tensor):
+        cand = candidate_traj.detach().cpu().numpy().astype(np.float32, copy=False)
+    else:
+        cand = np.asarray(candidate_traj, dtype=np.float32)
+    ref = _future_to_4col(reference_traj)
+    if cand.ndim != 2 or cand.shape[1] < 2:
+        raise ValueError(f"candidate trajectory must be shaped (T,C), got {cand.shape}")
+    max_dev, _ = rollout_gt_deviation(
+        torch.from_numpy(cand[:, :2]), torch.from_numpy(ref[:, :2]), threshold_m=None
+    )
+    return float(max_dev)
 
 
 def _normalize_values(values: list[float]) -> list[float]:
@@ -457,6 +484,7 @@ def _best_safe_candidate(
     *,
     min_static_margin: float,
     require_conflict_clear: bool,
+    target_gt_disagreement_thresh: float,
     candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
     reference_traj: torch.Tensor | np.ndarray | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
@@ -512,6 +540,15 @@ def _best_safe_candidate(
         selected_state_class = None
     reward_row = reward_rows[idx]
     label_row = candidate_rows[idx]
+
+    # R2LPL hard-example signal: how far the SELECTED repaired target strays from
+    # the ORIGINAL logged GT target. Distinct from realized `expert_disagreement`
+    # (model rollout vs logged expert during simulation). deviation_penalty is
+    # already mean-L2(selected, GT); reuse it and add the max-L2.
+    selected_traj = candidate_traj_list[idx] if candidate_traj_list is not None else None
+    target_gt_mean_l2 = float(deviation_penalty)
+    target_gt_max_l2 = _candidate_deviation_max_l2(selected_traj, reference_traj)
+
     meta = {
         "selected_total": float(reward_row.total),
         "selected_sc_min_dist": float(getattr(reward_row, "sc_min_dist", 99.0)),
@@ -520,6 +557,9 @@ def _best_safe_candidate(
         "selected_violation_score": float(violation_score),
         "selected_deviation_penalty": float(deviation_penalty),
         "selected_candidate_index": int(idx),
+        "target_gt_disagreement": bool(target_gt_max_l2 >= target_gt_disagreement_thresh),
+        "target_gt_disagreement_mean_l2": target_gt_mean_l2,
+        "target_gt_disagreement_max_l2": target_gt_max_l2,
     }
     if selected_r2lpl_score is not None:
         meta["selected_r2lpl_score"] = float(selected_r2lpl_score)
@@ -553,6 +593,7 @@ def build_repaired_targets(
     use_route_cl_guidance: bool,
     count_rear_end_collisions: bool,
     allow_empty: bool = False,
+    target_gt_disagreement_thresh: float = 2.0,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -661,6 +702,7 @@ def build_repaired_targets(
                 reward_rows,
                 min_static_margin=min_static_margin,
                 require_conflict_clear=require_conflict_clear,
+                target_gt_disagreement_thresh=target_gt_disagreement_thresh,
                 candidate_trajs=scene_trajs,
                 reference_traj=reference_traj,
             )
@@ -765,6 +807,13 @@ def main() -> None:
         action="store_true",
         help="Write empty outputs instead of failing when this shard has no accepted targets.",
     )
+    ap.add_argument(
+        "--target_gt_disagreement_thresh",
+        type=float,
+        default=2.0,
+        help="max-L2 (m) between the selected repaired target and the logged GT target above "
+        "which target_gt_disagreement is flagged (R2LPL hard-example signal).",
+    )
     args = ap.parse_args()
 
     if not args.scene_rows_jsonl and not args.scenes:
@@ -822,6 +871,7 @@ def main() -> None:
         use_route_cl_guidance=not bool(args.disable_route_cl_guidance),
         count_rear_end_collisions=bool(args.count_rear_end_collisions),
         allow_empty=bool(args.allow_empty),
+        target_gt_disagreement_thresh=float(args.target_gt_disagreement_thresh),
     )
 
 

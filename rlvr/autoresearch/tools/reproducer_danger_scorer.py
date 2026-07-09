@@ -14,7 +14,7 @@ from planner_metrics.subscores import (
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _apply_scene_thresholds,
     _ego_shape_from_data,
-    _first_moving_collision_step,
+    _moving_collision_step_gated,
     classify_loaded_scenes_batch,
     current_ego_neighbor_clearance,
 )
@@ -214,9 +214,15 @@ def build_realized_event_scorer(
             distances = moving_clearance["distances"]
             if distances.numel():
                 row["moving_min_dist"] = float(moving_clearance["min_clearance"])
-                row["moving_collision_step"] = _first_moving_collision_step(
-                    distances,
-                    moving_collision_thresh=moving_collision_thresh,
+                # Unified gated collision definition (overlap + rear-end
+                # suppression per reward_cfg), NOT a raw proximity threshold.
+                row["moving_collision_step"] = _moving_collision_step_gated(
+                    moving_clearance["ego_now"],
+                    moving_clearance["ego_shape"],
+                    moving_clearance["neighbors"],
+                    moving_clearance["neighbor_shapes"],
+                    moving_clearance["neighbor_valid"],
+                    reward_cfg,
                 )
                 if row["moving_collision_step"] is not None:
                     labels.append("moving_collision")
