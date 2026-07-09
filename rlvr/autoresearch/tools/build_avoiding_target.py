@@ -20,16 +20,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from planner_metrics.subscores import (
-    compute_ego_neighbor_signed_clearance,
-    compute_road_border_penalty,
-)
+from planner_metrics.subscores import compute_road_border_penalty
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _ego_shape_from_data,
     _load_scene_thresholds,
-    _neighbor_inputs,
-    _stopped_neighbor_mask,
     classify_loaded_scene_candidates_batch,
+    current_ego_neighbor_clearance,
 )
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model, load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
@@ -43,7 +39,12 @@ from rlvr.reward import compute_reward_batch
 _GENERATION_MODE_GUIDED_VARIANT = "guided_variant"
 _GENERATION_MODE_GRPO_TEMPERATURE = "grpo_temperature"
 
-_REPAIRABLE_LABELS = {"road_border_crossing", "static_collision", "moving_collision"}
+_REPAIRABLE_LABELS = {
+    "road_border_crossing",
+    "static_collision",
+    "moving_collision",
+    "expert_disagreement",
+}
 _VALIDITY_LABEL_WEIGHTS = {
     "moving_ttc": 4.0,
     "moving_near_miss": 3.0,
@@ -193,97 +194,36 @@ def _source_scene_t0_moving_overlap(
     device: torch.device,
     moving_collision_thresh: float,
 ) -> tuple[bool, float]:
-    ego_shape = _ego_shape_from_data(data, device)
-    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, 1, device)
-    stopped_mask = _stopped_neighbor_mask(neighbor_futures, neighbor_valid, rcfg)
-    moving_mask = ~stopped_mask
-    if not bool(moving_mask.any().item()):
-        return False, math.inf
-
-    current_neighbors = neighbor_futures[moving_mask, :1, :4].clone()
-    current_valid = neighbor_valid[moving_mask, :1].clone()
-    neighbor_past = data.get("neighbor_agents_past")
-    if neighbor_past is not None:
-        if neighbor_past.dim() == 4:
-            neighbor_past = neighbor_past[0]
-        future_all = data.get("neighbor_agents_future")
-        if future_all is not None and future_all.dim() == 4:
-            future_all = future_all[0]
-        if future_all is not None and future_all.shape[1] >= 1:
-            slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
-            filtered_past = neighbor_past[slot_valid]
-        else:
-            filtered_past = neighbor_past
-        current_pose = filtered_past[moving_mask, -1, :]
-        if current_pose.shape[-1] >= 4:
-            current_neighbors[:, 0, :4] = current_pose[:, :4].to(device)
-            current_valid = (
-                (current_pose[:, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M)
-                .unsqueeze(1)
-                .to(device)
-            )
-
-    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
-    distances = compute_ego_neighbor_signed_clearance(
-        ego_now,
-        ego_shape,
-        current_neighbors,
-        neighbor_shapes[moving_mask],
-        current_valid,
+    clearance = current_ego_neighbor_clearance(
+        data,
+        rcfg,
+        device=device,
+        neighbor_kind="moving",
     )
+    distances = clearance["distances"]
     if distances.numel() == 0:
         return False, math.inf
-    min_clearance = float(distances.min().item())
+    min_clearance = float(clearance["min_clearance"])
     return min_clearance <= moving_collision_thresh, min_clearance
 
 
 def _source_scene_t0_any_neighbor_overlap(
     data: dict[str, torch.Tensor],
     *,
+    rcfg,
     device: torch.device,
     collision_thresh: float,
 ) -> tuple[bool, float]:
-    # TODO: unify static/moving collision classification around this shared geometry path.
-    # The label distinction should remain metadata, not a separate implementation branch.
-    ego_shape = _ego_shape_from_data(data, device)
-    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, 1, device)
-    if neighbor_futures.shape[0] == 0:
-        return False, math.inf
-
-    current_neighbors = neighbor_futures[:, :1, :4].clone()
-    current_valid = neighbor_valid[:, :1].clone()
-    neighbor_past = data.get("neighbor_agents_past")
-    if neighbor_past is not None:
-        if neighbor_past.dim() == 4:
-            neighbor_past = neighbor_past[0]
-        future_all = data.get("neighbor_agents_future")
-        if future_all is not None and future_all.dim() == 4:
-            future_all = future_all[0]
-        if future_all is not None and future_all.shape[1] >= 1:
-            slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
-            filtered_past = neighbor_past[slot_valid]
-        else:
-            filtered_past = neighbor_past
-        current_pose = filtered_past[:, -1, :]
-        if current_pose.shape[-1] >= 4:
-            current_neighbors[:, 0, :4] = current_pose[:, :4].to(device)
-            current_valid = (
-                (current_pose[:, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M)
-                .unsqueeze(1)
-                .to(device)
-            )
-
-    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
-    distances = compute_ego_neighbor_signed_clearance(
-        ego_now,
-        ego_shape,
-        current_neighbors,
-        neighbor_shapes,
-        current_valid,
+    clearance = current_ego_neighbor_clearance(
+        data,
+        rcfg,
+        device=device,
+        neighbor_kind="any",
     )
+    distances = clearance["distances"]
     if distances.numel() == 0:
         return False, math.inf
-    min_clearance = float(distances.min().item())
+    min_clearance = float(clearance["min_clearance"])
     return min_clearance <= collision_thresh, min_clearance
 
 
@@ -362,6 +302,7 @@ def _drop_t0_dirty_event_windows(
                 )
                 hit, value = _source_scene_t0_any_neighbor_overlap(
                     data,
+                    rcfg=rcfg,
                     device=device,
                     collision_thresh=collision_thresh,
                 )
@@ -477,6 +418,8 @@ def _repairs_source_labels(
                 or label_row["moving_collision_step"] is not None
             ):
                 return False
+        if label == "expert_disagreement" and bool(label_row.get("expert_disagreement", False)):
+            return False
     return True
 
 

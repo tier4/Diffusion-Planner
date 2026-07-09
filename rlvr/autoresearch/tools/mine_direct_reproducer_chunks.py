@@ -583,7 +583,12 @@ def main() -> None:
             enable_conflict_detector=bool(args.enable_conflict_detector),
             allowed_labels=allowed_labels,
         )
-        realized_supported = {"moving_collision", "static_collision", "road_border_crossing"}
+        realized_supported = {
+            "moving_collision",
+            "static_collision",
+            "road_border_crossing",
+            "expert_disagreement",
+        }
         realized_allowed_labels = (
             realized_supported
             if allowed_labels is None

@@ -27,8 +27,13 @@ _CONFIG_REQUIRED = {
     "training_config",
     "output_dir",
 }
-_DEFAULT_ENABLED_LABELS = ["road_border_crossing", "moving_collision"]
-_DEFAULT_REPAIR_LABELS = ["road_border_crossing", "static_collision", "moving_collision"]
+_DEFAULT_ENABLED_LABELS = ["road_border_crossing", "moving_collision", "expert_disagreement"]
+_DEFAULT_REPAIR_LABELS = [
+    "road_border_crossing",
+    "static_collision",
+    "moving_collision",
+    "expert_disagreement",
+]
 _BASE_TRAINING_KEYS = {
     "train_args",
     "batch_size",
@@ -368,7 +373,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             _first_non_null(
                 judgement.get("enable_conflict_detector"),
                 judgement.get("conflict_detector_enabled"),
-                False,
+                "expert_disagreement" in enabled_labels,
             )
         ),
         "danger_decluster_steps": int(

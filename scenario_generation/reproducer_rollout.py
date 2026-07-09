@@ -1778,17 +1778,36 @@ def run_segments_batched(
                         if danger_scorer is not None
                         else [None] * len(built)
                     )
-                    realized_rows = [
-                        realized_event_scorer(np_dict, collided=bool(col))
-                        if realized_event_scorer is not None
-                        else None
-                        for (_s, np_dict, _nb, _idx, _suuid, _wbu), (
-                            _cl,
-                            col,
-                            _M,
-                            _collider_slot,
-                        ) in zip(built, score_list)
-                    ]
+                    realized_rows = []
+                    for (_s, np_dict, _nb, _idx, _suuid, _wbu), (
+                        _cl,
+                        col,
+                        _M,
+                        _collider_slot,
+                    ) in zip(built, score_list):
+                        if realized_event_scorer is None:
+                            realized_rows.append(None)
+                            continue
+                        gt_pose = None
+                        if hasattr(_s.tl, "poses") and 0 <= int(_idx) < len(_s.tl.poses):
+                            gt_pose = _s.tl.poses[int(_idx)]
+                        route_key = getattr(_s, "output_route_key", None)
+                        if route_key is None:
+                            route_key = _route_key(_s.tl)
+                        realized_rows.append(
+                            realized_event_scorer(
+                                np_dict,
+                                collided=bool(col),
+                                live_pose=_s.live_pose,
+                                gt_pose=gt_pose,
+                                segment_key=(
+                                    route_key,
+                                    _s.start,
+                                    _s.end,
+                                ),
+                                step=_s.k,
+                            )
+                        )
                     for row_idx, (
                         (s, _np, nb, idx, suuid, wbu),
                         (cl, col, _M, collider_slot),

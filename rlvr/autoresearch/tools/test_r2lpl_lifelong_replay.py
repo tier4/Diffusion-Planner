@@ -109,6 +109,70 @@ def _minimal_sft_batch(batch_size: int = 2, future_len: int = 3):
     return device, model_args, data, neighbor_gt, neighbor_mask
 
 
+def _write_realized_scorer_configs(
+    tmp_path: Path,
+    *,
+    expert_disagreement_thresh: float = 1.0,
+    expert_disagreement_sustain_steps: int = 3,
+) -> tuple[Path, Path]:
+    reward_cfg = tmp_path / "reward.json"
+    threshold_cfg = tmp_path / "thresholds.json"
+    reward_cfg.write_text(
+        json.dumps(
+            {
+                "reward_mode": "gate",
+                "w_progress": 2.0,
+                "w_centerline": 5.0,
+                "w_safety": 5.0,
+                "w_smooth": 0.5,
+                "w_feasibility": 5.0,
+                "stopped_penalty": 50.0,
+                "rb_gate_enabled": True,
+                "rb_penalty_mode": "frac",
+                "rb_cross_thresh": 0.2,
+                "rb_near_thresh": 0.2,
+                "rb_wide_thresh": 0.6,
+                "rb_cont_thresh": 1.0,
+                "rb_near_scale": 3.0,
+                "rb_wide_scale": 0.2,
+                "rb_cont_scale": 0.0,
+                "enable_lane_departure": False,
+                "lane_gate_enabled": False,
+                "lane_cross_thresh": 0.2,
+                "lane_near_thresh": 0.25,
+                "lane_wide_thresh": 0.4,
+                "lane_cont_thresh": 0.8,
+                "lane_near_scale": 3.0,
+                "lane_wide_scale": 0.2,
+                "lane_cont_scale": 0.0,
+                "centerline_usage_mode": "baselink",
+                "enable_overprogress": False,
+                "overprogress_margin": 1.1,
+                "overprogress_penalty": 0.3,
+                "progress_norm_scale": 20.0,
+                "underprogress_penalty": 0.0,
+                "underprogress_threshold": 0.5,
+                "underprogress_reference": "baseline",
+            }
+        )
+    )
+    threshold_cfg.write_text(
+        json.dumps(
+            {
+                "moving_collision_thresh": 0.2,
+                "moving_near_thresh": 0.7,
+                "static_near_thresh": 0.5,
+                "rb_near_thresh": 0.2,
+                "expert_disagreement_thresh": expert_disagreement_thresh,
+                "expert_disagreement_sustain_steps": expert_disagreement_sustain_steps,
+                "sc_cross_thresh": 0.2,
+                "rb_cross_thresh": 0.2,
+            }
+        )
+    )
+    return reward_cfg, threshold_cfg
+
+
 def test_credit_window_config_rejects_missing_observed_label(tmp_path):
     cfg = tmp_path / "credit.json"
     cfg.write_text(
@@ -1096,6 +1160,44 @@ def test_round_runner_load_config_translates_single_entry_contract(tmp_path):
     assert cfg["gpu_ids"] == [0, 1]
 
 
+def test_round_runner_defaults_enable_expert_disagreement_repair(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                },
+                "repair_generation": {
+                    "ego_shape": "from_npz",
+                    "min_margin": 0.3,
+                },
+                "training": {"val_scenes": "/tmp/val.json"},
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"train_args": {"valid_set_list": "/tmp/val.json"}}))
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "run"),
+        }
+    )
+
+    assert "expert_disagreement" in cfg["mine_labels"]
+    assert "expert_disagreement" in cfg["repair_labels"]
+    assert cfg["enable_conflict_detector"] is True
+
+
 def test_round_runner_parses_gpu_ids_from_string():
     assert _gpu_ids_from_config({"resources": {"gpu_ids": "0, 2,3"}}) == [0, 2, 3]
 
@@ -1379,6 +1481,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             verified_credit_labels=set(),
             verified_credit_first_step={},
             danger_event_selector=None,
+            output_route_key="bagA",
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1399,7 +1502,15 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_score_step_batched(neighbors_list, ego_shapes, device):
         return [(1.0, False, 0, -1) for _ in neighbors_list]
 
-    def _fake_realized_event_scorer(np_dict, *, collided):
+    def _fake_realized_event_scorer(
+        np_dict,
+        *,
+        collided,
+        live_pose,
+        gt_pose,
+        segment_key,
+        step,
+    ):
         return (
             {"labels": ["road_border_crossing"], "label": "road_border_crossing"}
             if np_dict["k"] == 1
@@ -1521,7 +1632,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             verified_credit_labels=set(),
             verified_credit_first_step={},
             danger_event_selector=None,
-            output_route_key=None,
+            output_route_key="bagA",
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1549,7 +1660,15 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     def _fake_danger_scorer(built, preds, data, device):
         return [{"labels": ["clean"], "label": "clean"} for _ in built]
 
-    def _fake_realized_event_scorer(np_dict, *, collided):
+    def _fake_realized_event_scorer(
+        np_dict,
+        *,
+        collided,
+        live_pose,
+        gt_pose,
+        segment_key,
+        step,
+    ):
         return (
             {"labels": ["moving_collision"], "label": "moving_collision"}
             if np_dict["k"] == 1
@@ -1656,7 +1775,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             verified_credit_labels=set(),
             verified_credit_first_step={},
             danger_event_selector=None,
-            output_route_key=None,
+            output_route_key="bagA",
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1822,11 +1941,23 @@ def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
 
     def _fake_build_realized_event_scorer(**kwargs):
         captured["allowed_labels"] = kwargs.get("allowed_labels")
-        return lambda _np_dict, *, collided=False: {
-            "labels": ["moving_collision"],
-            "label": "moving_collision",
-            "realized_collision": bool(collided),
-        }
+
+        def _scorer(
+            _np_dict,
+            *,
+            collided=False,
+            live_pose=None,
+            gt_pose=None,
+            segment_key=None,
+            step=None,
+        ):
+            return {
+                "labels": ["moving_collision"],
+                "label": "moving_collision",
+                "realized_collision": bool(collided),
+            }
+
+        return _scorer
 
     def _fake_run_segments_batched(*args, **kwargs):
         saved_dir = Path(kwargs["danger_save_dir"]) / "bagA_100_100_event_moving_collision"
@@ -1946,6 +2077,51 @@ def test_repair_candidate_selector_requires_safe_fix():
 
     assert idx == 1
     assert meta["selected_total"] == 5.0
+
+
+def test_repair_candidate_selector_requires_expert_disagreement_fix():
+    source_row = {"repair_labels": ["expert_disagreement"]}
+    candidate_rows = [
+        {
+            "moving_collision_step": None,
+            "expert_disagreement": True,
+            "labels": ["expert_disagreement"],
+        },
+        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+    ]
+    reward_rows = [
+        SimpleNamespace(
+            total=10.0,
+            collision_step=None,
+            rb_crossing=False,
+            lane_crossing=False,
+            static_crossing=False,
+            kinematic_violated=False,
+            sc_min_dist=1.0,
+            rb_min_dist=1.0,
+        ),
+        SimpleNamespace(
+            total=1.0,
+            collision_step=None,
+            rb_crossing=False,
+            lane_crossing=False,
+            static_crossing=False,
+            kinematic_violated=False,
+            sc_min_dist=1.0,
+            rb_min_dist=1.0,
+        ),
+    ]
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        require_conflict_clear=True,
+    )
+
+    assert idx == 1
+    assert meta["selected_labels"] == ["clean"]
 
 
 def test_candidate_violation_score_does_not_double_count_expert_disagreement():
@@ -2206,6 +2382,43 @@ def test_r2lpl_workflow_defaults_to_count_rear_end_collisions(tmp_path):
     )
 
     assert "--count_rear_end_collisions" in repair_cmd
+
+
+def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(
+        tmp_path,
+        expert_disagreement_thresh=1.0,
+        expert_disagreement_sustain_steps=3,
+    )
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+
+    rows = [
+        scorer(
+            np_dict,
+            collided=False,
+            live_pose=np.array([2.0, 0.0, 0.0]),
+            gt_pose=np.array([0.0, 0.0, 0.0]),
+            segment_key="seg-a",
+            step=step,
+        )
+        for step in range(3)
+    ]
+
+    assert rows[0]["labels"] == ["clean"]
+    assert rows[1]["labels"] == ["clean"]
+    assert "expert_disagreement" in rows[2]["labels"]
+    assert rows[2]["expert_disagreement_step"] == 0
+    assert rows[2]["expert_disagreement_max_dev"] == 2.0
 
 
 def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):

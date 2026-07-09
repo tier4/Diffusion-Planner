@@ -9,23 +9,20 @@ import numpy as np
 import torch
 
 from planner_metrics.subscores import (
-    compute_ego_neighbor_signed_clearance,
     compute_road_border_penalty,
-    compute_static_collision_penalty,
 )
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _apply_scene_thresholds,
     _ego_shape_from_data,
     _first_moving_collision_step,
-    _neighbor_inputs,
-    _stopped_neighbor_mask,
     classify_loaded_scenes_batch,
+    current_ego_neighbor_clearance,
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from scenario_generation.reproducer_rollout import _route_key
 
 _SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
-    {"moving_collision", "static_collision", "road_border_crossing"}
+    {"moving_collision", "static_collision", "road_border_crossing", "expert_disagreement"}
 )
 
 
@@ -179,9 +176,21 @@ def build_realized_event_scorer(
     thresholds = _apply_scene_thresholds(reward_cfg, scorer_args)
     torch_device = torch.device(device)
     rb_cross_thresh = float(thresholds["rb_cross_thresh"])
+    static_collision_thresh = float(thresholds["sc_cross_thresh"])
     moving_collision_thresh = float(thresholds["moving_collision_thresh"])
+    expert_disagreement_thresh = float(thresholds["expert_disagreement_thresh"])
+    expert_disagreement_sustain_steps = int(thresholds["expert_disagreement_sustain_steps"])
+    expert_state_by_segment: dict[Any, dict[str, Any]] = {}
 
-    def _scorer(np_dict: dict[str, Any], *, collided: bool) -> dict[str, Any]:
+    def _scorer(
+        np_dict: dict[str, Any],
+        *,
+        collided: bool,
+        live_pose: np.ndarray | None = None,
+        gt_pose: np.ndarray | None = None,
+        segment_key: object | None = None,
+        step: int | None = None,
+    ) -> dict[str, Any]:
         labels: list[str] = []
         row: dict[str, Any] = {
             "trajectory_source": "reproducer_realized",
@@ -190,81 +199,38 @@ def build_realized_event_scorer(
         tensors = _np_dict_to_scoring_tensors(np_dict, device=torch_device)
 
         if "moving_collision" in allowed:
-            ego_now = torch.tensor(
-                [[[0.0, 0.0, 1.0, 0.0]]],
-                dtype=torch.float32,
+            moving_clearance = current_ego_neighbor_clearance(
+                tensors,
+                reward_cfg,
                 device=torch_device,
+                neighbor_kind="moving",
             )
-            ego_shape = _ego_shape_from_data(tensors, torch_device)
-            neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(
-                tensors, 1, torch_device
-            )
-            stopped_mask = _stopped_neighbor_mask(neighbor_futures, neighbor_valid, reward_cfg)
-            moving_mask = ~stopped_mask
             row["moving_collision_step"] = None
             row["moving_min_dist"] = float("inf")
-            if bool(moving_mask.any().item()):
-                current_neighbors = neighbor_futures[moving_mask, :1, :4].clone()
-                neighbor_past = tensors.get("neighbor_agents_past")
-                if neighbor_past is not None:
-                    if neighbor_past.dim() == 4:
-                        neighbor_past = neighbor_past[0]
-                    future_all = tensors.get("neighbor_agents_future")
-                    if future_all is not None:
-                        if future_all.dim() == 4:
-                            future_all = future_all[0]
-                        slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > 1e-6
-                        filtered_past = neighbor_past[slot_valid]
-                    else:
-                        filtered_past = neighbor_past
-                    current_neighbors[:, 0, :4] = filtered_past[moving_mask, -1, :4]
-                current_valid = (current_neighbors[:, :, :2].abs().sum(dim=-1) > 1e-6).to(
-                    torch.bool
+            distances = moving_clearance["distances"]
+            if distances.numel():
+                row["moving_min_dist"] = float(moving_clearance["min_clearance"])
+                row["moving_collision_step"] = _first_moving_collision_step(
+                    distances,
+                    moving_collision_thresh=moving_collision_thresh,
                 )
-                distances = compute_ego_neighbor_signed_clearance(
-                    ego_now,
-                    ego_shape,
-                    current_neighbors,
-                    neighbor_shapes[moving_mask],
-                    current_valid,
-                )
-                if distances.numel():
-                    row["moving_min_dist"] = float(distances.min().item())
-                    row["moving_collision_step"] = _first_moving_collision_step(
-                        distances,
-                        moving_collision_thresh=moving_collision_thresh,
-                    )
-                    if row["moving_collision_step"] is not None:
-                        labels.append("moving_collision")
+                if row["moving_collision_step"] is not None:
+                    labels.append("moving_collision")
 
         if "static_collision" in allowed:
-            ego_shape = _ego_shape_from_data(tensors, torch_device)
-            neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(
-                tensors, 2, torch_device
+            static_clearance = current_ego_neighbor_clearance(
+                tensors,
+                reward_cfg,
+                device=torch_device,
+                neighbor_kind="static",
             )
             row["static_collision_step"] = None
             row["static_min_dist"] = 99.0
-            row["stopped_neighbor_count"] = 0
-            if neighbor_futures.shape[0] > 0:
-                ego_now = torch.tensor(
-                    [[[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]]],
-                    dtype=torch.float32,
-                    device=torch_device,
-                )
-                static = compute_static_collision_penalty(
-                    ego_now,
-                    ego_shape,
-                    neighbor_futures,
-                    neighbor_shapes,
-                    neighbor_valid,
-                    reward_cfg,
-                )
-                row["stopped_neighbor_count"] = int(static["stopped_mask"].sum().item())
-                if static["per_timestep_min"].numel():
-                    row["static_min_dist"] = float(static["per_timestep_min"].min().item())
-                first = static["first_crossing_steps"][0]
-                row["static_collision_step"] = None if first is None else int(first)
-                if first is not None:
+            row["stopped_neighbor_count"] = int(static_clearance["stopped_mask"].sum().item())
+            if static_clearance["distances"].numel():
+                row["static_min_dist"] = float(static_clearance["min_clearance"])
+                if row["static_min_dist"] <= static_collision_thresh:
+                    row["static_collision_step"] = 0
                     labels.append("static_collision")
 
         if "road_border_crossing" in allowed:
@@ -284,6 +250,35 @@ def build_realized_event_scorer(
             row["rb_min_dist"] = rb_min_dist
             if rb_min_dist < rb_cross_thresh:
                 labels.append("road_border_crossing")
+
+        if "expert_disagreement" in allowed:
+            row["expert_disagreement"] = False
+            row["expert_disagreement_step"] = None
+            row["expert_disagreement_max_dev"] = 0.0
+            if live_pose is not None and gt_pose is not None:
+                key = segment_key if segment_key is not None else "__single_segment__"
+                state = expert_state_by_segment.setdefault(
+                    key,
+                    {
+                        "run": 0,
+                        "run_start": None,
+                        "max_dev": 0.0,
+                    },
+                )
+                dev = float(np.linalg.norm(np.asarray(live_pose)[:2] - np.asarray(gt_pose)[:2]))
+                state["max_dev"] = max(float(state["max_dev"]), dev)
+                if dev > expert_disagreement_thresh:
+                    if int(state["run"]) == 0:
+                        state["run_start"] = step
+                    state["run"] = int(state["run"]) + 1
+                else:
+                    state["run"] = 0
+                    state["run_start"] = None
+                row["expert_disagreement_max_dev"] = float(state["max_dev"])
+                if int(state["run"]) >= expert_disagreement_sustain_steps:
+                    row["expert_disagreement"] = True
+                    row["expert_disagreement_step"] = state["run_start"]
+                    labels.append("expert_disagreement")
 
         row["labels"] = labels or ["clean"]
         row["label"] = labels[0] if labels else "clean"

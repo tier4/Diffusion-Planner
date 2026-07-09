@@ -588,6 +588,78 @@ def _first_moving_collision_step(
     return int(collision_by_t.float().argmax().item())
 
 
+def current_ego_neighbor_clearance(
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+    *,
+    device: torch.device,
+    neighbor_kind: str = "any",
+) -> dict[str, Any]:
+    """Shared current-step ego-vs-neighbor OBB clearance for moving/static labels."""
+    if neighbor_kind not in {"any", "moving", "static"}:
+        raise ValueError(f"neighbor_kind must be any, moving, or static; got {neighbor_kind!r}")
+    ego_shape = _ego_shape_from_data(data, device)
+    horizon = 2 if neighbor_kind == "static" else 1
+    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, horizon, device)
+    empty = {
+        "distances": torch.zeros(0, 0, 0, device=device),
+        "min_clearance": math.inf,
+        "active_mask": torch.zeros(0, dtype=torch.bool, device=device),
+        "stopped_mask": torch.zeros(0, dtype=torch.bool, device=device),
+    }
+    if neighbor_futures.shape[0] == 0:
+        return empty
+
+    stopped_mask = _stopped_neighbor_mask(neighbor_futures, neighbor_valid, config)
+    if neighbor_kind == "moving":
+        active_mask = ~stopped_mask
+    elif neighbor_kind == "static":
+        active_mask = stopped_mask
+    else:
+        active_mask = torch.ones_like(stopped_mask, dtype=torch.bool)
+    if not bool(active_mask.any().item()):
+        return {**empty, "active_mask": active_mask, "stopped_mask": stopped_mask}
+
+    current_neighbors = neighbor_futures[active_mask, :1, :4].clone()
+    current_valid = neighbor_valid[active_mask, :1].clone()
+    neighbor_past = data.get("neighbor_agents_past")
+    if neighbor_past is not None:
+        if neighbor_past.dim() == 4:
+            neighbor_past = neighbor_past[0]
+        future_all = data.get("neighbor_agents_future")
+        if future_all is not None and future_all.dim() == 4:
+            future_all = future_all[0]
+        if future_all is not None and future_all.shape[1] >= 1:
+            slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
+            filtered_past = neighbor_past[slot_valid]
+        else:
+            filtered_past = neighbor_past
+        current_pose = filtered_past[active_mask, -1, :]
+        if current_pose.shape[-1] >= 4:
+            current_neighbors[:, 0, :4] = current_pose[:, :4].to(device)
+            current_valid = (
+                (current_pose[:, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M)
+                .unsqueeze(1)
+                .to(device)
+            )
+
+    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_now,
+        ego_shape,
+        current_neighbors,
+        neighbor_shapes[active_mask],
+        current_valid,
+    )
+    min_clearance = math.inf if distances.numel() == 0 else float(distances.min().item())
+    return {
+        "distances": distances,
+        "min_clearance": min_clearance,
+        "active_mask": active_mask,
+        "stopped_mask": stopped_mask,
+    }
+
+
 def _moving_diagnostics(
     ego_traj: torch.Tensor,
     data: dict[str, torch.Tensor],
