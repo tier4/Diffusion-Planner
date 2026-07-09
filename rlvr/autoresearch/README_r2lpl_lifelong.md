@@ -105,6 +105,50 @@ scene list or chunk manifest
   -> configured SFT training backend
 ```
 
+## Detection Semantics — closed-loop (realized) vs open-loop (predicted)
+
+This is the central design rule of the workflow. The two phases check rule
+violations against DIFFERENT trajectories, and they must never be mixed:
+
+**Reproducer phase = CLOSED-LOOP = REALIZED ego only.**
+The reproducer drives the model closed-loop (MPC + clock; see Reproducer
+Defaults) and, at every sim step, checks the **realized ego pose** against every
+rule:
+- moving / static collision: ego-vs-neighbor OBB overlap at the realized pose
+  (the reward's gated definition — rear-end and low-speed suppressed);
+- road-border crossing: realized-pose road-border distance `< rb_cross_thresh`;
+- expert disagreement: realized rollout pose vs the matched logged GT pose.
+
+The **first realized step that breaks a rule is the `offense_step`**. The model's
+own *predicted* trajectory is NEVER used to detect or anchor a violation here —
+in closed loop the ego re-plans every step, so a predicted crossing that the
+realized ego avoids is a phantom, not a violation. (Concretely: the miner is run
+with `danger_scorer=None`; only the realized-event scorer + the realized OBB
+collision drive events. A predicted-trajectory scorer belongs to the open-loop
+side only.)
+
+**Credit window = the realized poses `[offense − gap − width, offense − gap]`.**
+With the defaults (`width_s = gap_s = 1.5 s` at 10 Hz) that is the 1.5 s of
+realized poses spanning **[3.0 s, 1.5 s] before the offense** — files
+`credit-00030.npz … credit-00015.npz`. The window deliberately **ends `gap_s`
+before the offense**: the model must have already committed to avoiding the
+violation by then. These realized-context scenes are what go to the repair shop.
+
+**Repair phase = OPEN-LOOP = PREDICTED trajectory.**
+The repair shop cannot re-simulate closed-loop. For each credit scene it
+generates K candidate trajectories and accepts one whose **full predicted 80-step
+trajectory** clears every rule (`compute_reward_batch` gates: collision, road
+border, lane, kinematic). The predicted-trajectory rule check lives HERE, and
+only here.
+
+**Manifest fields (per event dir):**
+- `offense_step` / `offense_frame_id` — the realized violation step / frame.
+- `credit_window_end_step` — `offense_step − credit_gap` (where the saved window
+  ends).
+- `window_end_step` — terminal step of the saved window (= `credit_window_end_step`
+  for credit windows; = the collision step for the one-pass collision save). This
+  field was previously mis-named `collision_step`.
+
 ## Chunk Semantics
 
 - Default chunk length: 80 frames.

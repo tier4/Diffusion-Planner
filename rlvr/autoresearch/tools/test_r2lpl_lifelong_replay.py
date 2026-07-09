@@ -661,11 +661,6 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
     )
     monkeypatch.setattr(
         mine_direct_reproducer_chunks_tool,
-        "build_reproducer_danger_scorer",
-        lambda **_kwargs: "danger-scorer",
-    )
-    monkeypatch.setattr(
-        mine_direct_reproducer_chunks_tool,
         "build_realized_event_scorer",
         _fake_build_realized_event_scorer,
     )
@@ -722,7 +717,8 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
 
     mine_direct_reproducer_chunks_tool.main()
 
-    assert captured["danger_scorer"] == "danger-scorer"
+    # Closed-loop reproducer mining is realized-only: no predicted danger_scorer.
+    assert captured["danger_scorer"] is None
     assert captured["realized_allowed_labels"] == {
         "road_border_crossing",
         "static_collision",

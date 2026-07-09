@@ -24,7 +24,6 @@ import torch
 
 from rlvr.autoresearch.tools.reproducer_danger_scorer import (
     build_realized_event_scorer,
-    build_reproducer_danger_scorer,
     load_credit_windows,
 )
 from scenario_generation.perf_timer import Timers
@@ -589,13 +588,13 @@ def main() -> None:
     model = model_args = None
     if not args.plan_only:
         model, model_args = _load_model(args.model_path, args.lora_path, device)
-        danger_scorer = build_reproducer_danger_scorer(
-            reward_config=args.danger_reward_config,
-            threshold_config=args.danger_threshold_config,
-            device=device,
-            enable_conflict_detector=bool(args.enable_conflict_detector),
-            allowed_labels=allowed_labels,
-        )
+        # Closed-loop reproducer mining is REALIZED-ONLY: every rule (collision,
+        # road-border, static, expert-disagreement) is checked against the
+        # realized ego pose at each sim step, and the FIRST realized violation
+        # anchors the credit window. The predicted-trajectory check
+        # (build_reproducer_danger_scorer) belongs to the OPEN-LOOP side
+        # (classify / repair), NOT the closed-loop sim, so it is not used here
+        # (danger_scorer stays None).
         realized_supported = {
             "moving_collision",
             "static_collision",
