@@ -128,11 +128,12 @@ collision drive events. A predicted-trajectory scorer belongs to the open-loop
 side only.)
 
 **Credit window = the realized poses `[offense − gap − width, offense − gap]`.**
-With the defaults (`width_s = gap_s = 1.5 s` at 10 Hz) that is the 1.5 s of
-realized poses spanning **[3.0 s, 1.5 s] before the offense** — files
-`credit-00030.npz … credit-00015.npz`. The window deliberately **ends `gap_s`
-before the offense**: the model must have already committed to avoiding the
-violation by then. These realized-context scenes are what go to the repair shop.
+With the defaults (`width_s = gap_s = 1.5 s` at 10 Hz → 15 frames each) that is
+the ~1.5 s of realized poses spanning **[3.0 s, 1.5 s] before the offense** —
+`width + 1 = 16` files (endpoints inclusive), `credit-00030.npz … credit-00015.npz`.
+The window deliberately **ends `gap` frames before the offense**: the model must
+have already committed to avoiding the violation by then. These realized-context
+scenes are what go to the repair shop.
 
 **Repair phase = OPEN-LOOP = PREDICTED trajectory.**
 The repair shop cannot re-simulate closed-loop. For each credit scene it
@@ -204,12 +205,14 @@ Credit-window timing is configured in `credit_window_config` using seconds:
 }
 ```
 
-With the default 10 Hz settings, the saved source scenes span 15 frames ending
-15 frames before the reproduced violation. In violation-relative filenames this
-is `credit-00030.npz` through `credit-00015.npz`, so repair generation starts
-from scenes 3.0 s to 1.5 s before the event instead of from the event itself.
-Per-label objects may override `width_s` or `gap_s`; scalar frame-count entries
-are not accepted.
+With the default 10 Hz settings (`width_s = gap_s = 1.5 s` → `width_frames =
+gap_frames = 15`), the saved window ends `gap_frames` (15) before the reproduced
+violation and covers `width_frames + 1 = 16` scenes (the range is inclusive of
+both endpoints, so `_dump_precollision_window` saves `credit_width + 1` frames).
+In violation-relative filenames this is `credit-00030.npz` through
+`credit-00015.npz` (16 files), so repair generation starts from scenes 3.0 s to
+1.5 s before the event instead of from the event itself. Per-label objects may
+override `width_s` or `gap_s`; scalar frame-count entries are not accepted.
 
 ## Repair Generation
 

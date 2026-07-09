@@ -1799,6 +1799,13 @@ def run_segments_batched(
                                 s.start,
                                 s.end,
                                 str(s.credit_window["label"]),
+                                # Record the AUTHORITATIVE offense frame, not the
+                                # current buffered index: in pose mode the cursor
+                                # can overshoot `offense_index` by >1 frame, so
+                                # buf[-1][1] would misreport the offense frame.
+                                extra_manifest={
+                                    "offense_frame_id": int(s.credit_window["offense_frame"])
+                                },
                             )
                             s.credit_saved = True
                             s.terminated = "credit_window_saved"
