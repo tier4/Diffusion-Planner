@@ -243,6 +243,13 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
 
+    # Deterministic
+    parser.add_argument(
+        "--deterministic",
+        type=boolean,
+        default=True,
+        help="Set True to run Pytorch GPU kernels in deterministic mode (may be slightly slower).",
+    )
     args = parser.parse_args(args_list)
     return args
 

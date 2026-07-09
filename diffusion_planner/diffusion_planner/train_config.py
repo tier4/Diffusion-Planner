@@ -163,3 +163,8 @@ class TrainConfig:
     # ---------------------------------------------------------
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
+
+    # ---------------------------------------------------------
+    # Deterministic
+    # ---------------------------------------------------------
+    deterministic: bool = True

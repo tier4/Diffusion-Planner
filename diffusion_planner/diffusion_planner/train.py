@@ -172,6 +172,7 @@ def model_training(args: TrainConfig):
         print("Batch size: {}".format(args.batch_size))
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
+        print("Deterministic mode: {}".format(args.deterministic))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -192,6 +193,11 @@ def model_training(args: TrainConfig):
 
     # set seed
     set_seed(args.seed + global_rank)
+
+    # Deterministic
+    if args.deterministic:
+        # Warn only if it is not possible to use deterministic algorithms for some operations.
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
     # training parameters
     train_epochs = args.train_epochs
