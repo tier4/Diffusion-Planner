@@ -68,6 +68,10 @@ _CREDIT_EVENT_METADATA_KEYS = (
     "expert_disagreement_expert_end_progress",
     "expert_disagreement_model_end_speed",
     "expert_disagreement_expert_end_speed",
+    # Propagate the rear-end tag into the credit-window manifest so downstream
+    # (mining / repair filters) can drop a rear-end moving-collision if desired
+    # instead of it being indistinguishable from a genuine forward collision.
+    "rear_end_collision",
 )
 
 

@@ -406,6 +406,7 @@ def main() -> None:
                         "realized_label": manifest.get("realized_label", realized_label),
                         "realized_step": manifest.get("realized_step"),
                         "realized_frame": manifest.get("realized_frame"),
+                        "rear_end_collision": bool(manifest.get("rear_end_collision", False)),
                         "scene_frame_id": saved_frames[scene_idx]
                         if scene_idx < len(saved_frames)
                         else None,
