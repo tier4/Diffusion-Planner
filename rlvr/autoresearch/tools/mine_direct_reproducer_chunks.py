@@ -319,7 +319,7 @@ def iter_manifest_chunks(
 
 
 def _credit_row_from_saved_scene(scene_path: Path, manifest: dict, label: str) -> dict:
-    return {
+    row = {
         "scene_path": str(scene_path),
         "label": label,
         "labels": [label],
@@ -332,6 +332,19 @@ def _credit_row_from_saved_scene(scene_path: Path, manifest: dict, label: str) -
         "segment_route_indices": manifest.get("segment_route_indices"),
         "segment_frame_ids": manifest.get("segment_frame_ids"),
     }
+    for key in (
+        "expert_disagreement",
+        "expert_disagreement_step",
+        "expert_disagreement_max_dev",
+        "expert_disagreement_reason",
+        "expert_disagreement_model_end_progress",
+        "expert_disagreement_expert_end_progress",
+        "expert_disagreement_model_end_speed",
+        "expert_disagreement_expert_end_speed",
+    ):
+        if key in manifest:
+            row[key] = manifest[key]
+    return row
 
 
 def _validate_timeline_continuity(

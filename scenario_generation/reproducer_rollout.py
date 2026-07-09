@@ -59,6 +59,24 @@ def _credit_window_gap_frames(spec: dict | None) -> int:
     return int(spec["gap_frames"])
 
 
+_CREDIT_EVENT_METADATA_KEYS = (
+    "expert_disagreement",
+    "expert_disagreement_step",
+    "expert_disagreement_max_dev",
+    "expert_disagreement_reason",
+    "expert_disagreement_model_end_progress",
+    "expert_disagreement_expert_end_progress",
+    "expert_disagreement_model_end_speed",
+    "expert_disagreement_expert_end_speed",
+)
+
+
+def _credit_event_metadata(event_row: dict | None) -> dict:
+    if not event_row:
+        return {}
+    return {key: event_row[key] for key in _CREDIT_EVENT_METADATA_KEYS if key in event_row}
+
+
 PAST = INPUT_T + 1  # 31
 
 
@@ -1882,6 +1900,7 @@ def run_segments_batched(
                                         s.end,
                                         realized_label,
                                         extra_manifest={
+                                            **_credit_event_metadata(event_row),
                                             "source_label": str(s.credit_window["label"]),
                                             "source_anchor_frame": int(
                                                 s.credit_window["frame_index"]
@@ -1927,6 +1946,7 @@ def run_segments_batched(
                                         s.done = True
                             else:
                                 event_labels: list[str] = []
+                                event_row_by_label: dict[str, dict] = {}
                                 for event_row in (danger_row, realized_row):
                                     if event_row is None:
                                         continue
@@ -1934,12 +1954,16 @@ def run_segments_batched(
                                         label = str(label)
                                         if label != "clean" and label not in event_labels:
                                             event_labels.append(label)
+                                        if label != "clean" and label not in event_row_by_label:
+                                            event_row_by_label[label] = event_row
                                 if (
                                     bool(col)
                                     and realized_event_scorer is not None
                                     and "moving_collision" not in event_labels
                                 ):
                                     event_labels.append("moving_collision")
+                                    if realized_row is not None:
+                                        event_row_by_label["moving_collision"] = realized_row
                                 if event_labels:
                                     selector = s.danger_event_selector or OnlineEventSelector(
                                         decluster_steps=danger_decluster_steps
@@ -1965,6 +1989,9 @@ def run_segments_batched(
                                             s.start,
                                             s.end,
                                             label,
+                                            extra_manifest=_credit_event_metadata(
+                                                event_row_by_label.get(label)
+                                            ),
                                         )
                                         if (
                                             manifest is not None

@@ -606,6 +606,14 @@ def test_direct_reproducer_credit_row_propagates_frame_segment(tmp_path):
             "segment": [10, 90],
             "segment_route_indices": [10, 90],
             "segment_frame_ids": [110, 190],
+            "expert_disagreement": True,
+            "expert_disagreement_step": 6,
+            "expert_disagreement_max_dev": 2.5,
+            "expert_disagreement_reason": "model_lagging_expert",
+            "expert_disagreement_model_end_progress": 1.0,
+            "expert_disagreement_expert_end_progress": 4.0,
+            "expert_disagreement_model_end_speed": 0.2,
+            "expert_disagreement_expert_end_speed": 3.0,
         },
         "moving_collision",
     )
@@ -613,6 +621,14 @@ def test_direct_reproducer_credit_row_propagates_frame_segment(tmp_path):
     assert row["segment"] == [10, 90]
     assert row["segment_route_indices"] == [10, 90]
     assert row["segment_frame_ids"] == [110, 190]
+    assert row["expert_disagreement"] is True
+    assert row["expert_disagreement_step"] == 6
+    assert row["expert_disagreement_max_dev"] == 2.5
+    assert row["expert_disagreement_reason"] == "model_lagging_expert"
+    assert row["expert_disagreement_model_end_progress"] == 1.0
+    assert row["expert_disagreement_expert_end_progress"] == 4.0
+    assert row["expert_disagreement_model_end_speed"] == 0.2
+    assert row["expert_disagreement_expert_end_speed"] == 3.0
 
 
 def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_path):
