@@ -742,13 +742,13 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
 
 
 def _feed_turn_indicator(s: _SegState, outputs) -> None:
-    """Closed-loop turn-signal feedback for the single-segment ``run_segment`` rollout.
+    """Closed-loop turn-signal feedback for the single-segment ``render_segment`` rollout.
 
     Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
     out within PAST steps). No-op in recorded mode (``turn_hist`` is None there). Mirrors
     the per-batch feedback in ``run_segments_batched`` so a sim-mode single-segment rollout
-    evolves the turn signal identically instead of holding the seed. (``render_segment`` /
-    ``extract_collision_scenes`` are recorded-only — no ``turn_hist`` — so they don't call it.)"""
+    evolves the turn signal identically instead of holding the seed. (``render_segment`` is
+    recorded-only — no ``turn_hist`` — so it doesn't call it.)"""
     if s.turn_hist is None:
         return
     ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
@@ -864,7 +864,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
-    """Score this step and advance the ego (sequential path: run_segment + extractor)."""
+    """Score this step and advance the ego (sequential render_segment path)."""
     _score_into(s, neighbors_live, device, timers)
     _advance_step(s, pred, idx, device, timers)
 
@@ -891,69 +891,6 @@ def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
     return SegmentResult(
         metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
     )
-
-
-@torch.no_grad()
-def run_segment(
-    model,
-    model_args,
-    tl: RouteTimeline,
-    start: int,
-    end: int,
-    device: str = "cuda",
-    near_miss_thresh: float = 0.5,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 0,
-    max_steps: int | None = None,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    neighbor_history_mode: str = "recorded",
-    tracker_mode: str = "mpc",
-    timers: Timers | None = None,
-) -> SegmentResult:
-    """Single-segment closed-loop reproducer rollout over recorded frames [start, end).
-
-    Unstick is on by default (snap the ego forward onto the recorded GT pose after
-    ``unstick_after`` steps of no progress). The only timeout is the step cap
-    ``max_steps`` (default 3*(end-start)); the hard stuck-cutoff is off.
-    """
-    timers = timers or Timers()
-    s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        near_miss_thresh,
-        goal_reach_m,
-        max_stuck_steps,
-        timers,
-        max_steps=max_steps if max_steps is not None else 3 * (end - start),
-        unstick_after=unstick_after,
-        unstick_advance_m=unstick_advance_m,
-        unstick_radius_mult=unstick_radius_mult,
-        unstick_teleport_after=unstick_teleport_after,
-        neighbor_history_mode=neighbor_history_mode,
-        tracker_mode=tracker_mode,
-    )
-    while not s.done:
-        with timers("input_build"):
-            pre = _pre_step(s)
-        if pre is None:
-            break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        with timers("to_torch"):
-            data = _to_torch_batch([np_dict], model_args, device)
-        with timers("model_forward"):
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
-        _post_step(s, pred, neighbors_live, idx, device, timers)
-    return _finalize(s, timers)
 
 
 # --------------------------------------------------------------------------- #
@@ -1598,8 +1535,8 @@ def run_segments_batched(
     rolling buffer of its last ``save_pre_steps`` scene snapshots and, on the FIRST
     step within ``save_thresh`` m of a neighbor, dumps that window (+ manifest) to
     ``save_dir/<route>_<start>_<end>/``. The scenes come from THIS run — the same one
-    that detected the collision — so they always match the hit (the legacy two-pass
-    ``extract_collision_scenes`` re-ran the rollout, which is batch-sensitive and so
+    that detected the collision — so they always match the hit (a legacy two-pass
+    extractor, since removed, re-ran the rollout, which is batch-sensitive and so
     could anchor a different/empty window). The buffer is cleared on an unstick
     teleport so a saved window never spans the jump. ``route_keys`` (aligned to
     ``work_units``) names the output dirs; if None it is derived from each timeline.
@@ -2619,7 +2556,12 @@ def _dump_precollision_window(
         "segment": [int(seg_start), int(seg_end)],
         "segment_route_indices": [int(seg_start), int(seg_end)],
         "segment_frame_ids": [_frame_id(tl, seg_start), _frame_id(tl, seg_end_inclusive)],
-        "collision_step": int(t_c),
+        # Terminal step of the saved window (== t_c). For the one-pass collision
+        # save this is the actual collision step (window ends AT the collision),
+        # but for R2LPL credit windows it is offense_step - credit_gap (the window
+        # ends credit_gap before the violation), NOT the collision — the wrapper
+        # also records the unambiguous offense_step / credit_window_end_step.
+        "window_end_step": int(t_c),
         "collision_thresh": float(collision_thresh),
         "n_scenes": len(saved),
         "steps_saved": saved,
@@ -2628,131 +2570,3 @@ def _dump_precollision_window(
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
-
-
-def extract_collision_scenes(
-    model,
-    model_args,
-    tl: RouteTimeline,
-    start: int,
-    end: int,
-    out_dir,
-    device: str = "cuda",
-    collision_thresh: float = 0.2,
-    pre_steps: int = 80,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    max_steps: int | None = None,
-    pre_arc_m: float = 1.0,
-    max_scenes: int = 160,
-    min_post_snap_frames: int = 30,
-    min_pre_frames: int = 30,
-) -> dict | None:
-    """Mine the batch of scenes leading up to the FIRST collision in a segment.
-
-    Runs the closed-loop reproducer over [start, end); on the first sim-step T_c
-    whose ego↔any-neighbor OBB clearance <= ``collision_thresh`` (default 0.2 m),
-    saves the ``pre_steps`` (default 80) scenes BEFORE the collision as training
-    NPZs. Each saved scene is a full model-input snapshot centered on the ego at
-    that step, with:
-      * ego_agent_past + ego_current_state (backtracked live history),
-      * neighbor_agents_past (recorded neighbors re-centered),
-      * neighbor_agents_future (recorded GT, re-centered),
-      * the full map (lanes/route/borders/polygons/goal/ego_shape/turn_indicators),
-      * ego_agent_future = the realized live ego path truncated AT the collision
-        (zeros for timesteps after T_c).
-
-    When the collision is early (T_c < pre_steps) the window is SHORTER (all-live): it
-    shares ``_dump_precollision_window``, which no longer backfills recorded frames
-    before the rollout start (splicing the recorded ego/perception onto the live state
-    produced a discontinuous clearance seam) and skips a hit with fewer than
-    ``min_pre_frames`` (default 30) live frames before the contact. Returns a manifest
-    dict, or None if no collision occurred / the window was too short.
-
-    NOTE: this is the legacy SECOND-PASS path — it re-runs the rollout to reconstruct
-    the window, so the collision it finds can differ from the one the miner detected
-    (the closed-loop rollout is sensitive to GPU batch composition). Prefer the
-    ONE-PASS save in ``run_segments_batched`` (``save_dir=...``), which dumps the
-    buffer from the SAME run that detected the collision. Kept for backward compat.
-    """
-    from collections import deque
-    from pathlib import Path
-
-    if max_scenes < pre_steps + 1:
-        # Same invariant the one-pass saver enforces: the window is >= pre_steps frames
-        # plus the collision step, so a smaller cap would silently truncate it.
-        raise ValueError(
-            f"max_scenes ({max_scenes}) must be >= pre_steps + 1 ({pre_steps + 1}); "
-            "otherwise the saved window is silently truncated."
-        )
-    out_dir = Path(out_dir)
-    cap = max_steps if max_steps is not None else 3 * (end - start)
-    timers = Timers()
-    s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        0.5,
-        5.0,
-        0,
-        timers,
-        max_steps=cap,
-        unstick_after=unstick_after,
-        unstick_advance_m=unstick_advance_m,
-        unstick_radius_mult=unstick_radius_mult,
-        unstick_teleport_after=unstick_teleport_after,
-    )
-    # Rolling buffer of the last max_scenes+1 live steps; each: (k, idx, live_pose, np_dict).
-    buf: deque = deque(maxlen=max_scenes + 1)
-    t_c = None
-    # Step right after the most recent unstick snap (None = no snap yet). The pre-collision
-    # window must not cross a snap, or a saved scene's realized ego_future/ego_past would
-    # span the ~5 m teleport.
-    last_snap_step = None
-    while not s.done:
-        k = s.k
-        pre = _pre_step(s)
-        if pre is None:
-            break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
-        pred = outputs["prediction"][0, 0].cpu().numpy()
-        clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
-        # 6-tuple to match the batched buffer / _dump_precollision_window unpacking; this
-        # legacy extractor path is recorded-mode (no sim tracker) -> slot_uuids/world None.
-        buf.append((k, idx, s.live_pose.copy(), np_dict, None, None))
-        if clr <= collision_thresh:
-            t_c = k
-            break
-        prev_snaps = s.n_snaps
-        _post_step(s, pred, neighbors_live, idx, device, timers)
-        if s.n_snaps > prev_snaps:  # an unstick snap fired advancing k -> s.k
-            last_snap_step = s.k
-    if t_c is None:
-        return None
-
-    # buf's last entry is the collision step t_c (appended before the break), so it
-    # already carries the t_c world pose needed for the late scenes' ego_future.
-    return _dump_precollision_window(
-        out_dir,
-        tl,
-        model_args,
-        t_c,
-        list(buf),
-        last_snap_step,
-        pre_steps,
-        collision_thresh,
-        start,
-        end,
-        pre_arc_m=pre_arc_m,
-        max_scenes=max_scenes,
-        min_post_snap_frames=min_post_snap_frames,
-        min_pre_frames=min_pre_frames,
-    )
