@@ -59,6 +59,17 @@ struct ConverterOptions
   float red_light_run_radius_m;
   float red_light_run_heading_tol_deg;
 
+  // Green-stop filter. A frame is skipped when ego stays put at a green
+  // heading-aligned route lane and no neighbor is ahead to justify stopping.
+  // Static-object blockers are not checked because this converter currently
+  // writes zero static_objects.
+  float green_stop_heading_tol_deg;
+  float green_stop_stay_radius_m;
+  float green_stop_speed_max_mps;
+  float green_stop_ahead_m;
+  float green_stop_lead_fwd_m;
+  float green_stop_lead_lat_m;
+
   // When true, also write the npz for frame-level skipped frames (collision,
   // off-lane, red/yellow light, vehicle stopped) so they can be visualised with
   // their skip reason. Intended for inspection/testing only; off in production.

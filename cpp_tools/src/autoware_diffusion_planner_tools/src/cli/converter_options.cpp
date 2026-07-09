@@ -80,6 +80,24 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "Maximum heading difference in degrees between ego future and a red route lane when "
     "matching the ego's own signal.");
   app.add_option(
+    "--green_stop_heading_tol_deg", green_stop_heading_tol_deg,
+    "Maximum heading difference in degrees between ego heading and a green route lane.");
+  app.add_option(
+    "--green_stop_stay_radius_m", green_stop_stay_radius_m,
+    "Maximum future spatial extent in meters for a green-stop stationary window.");
+  app.add_option(
+    "--green_stop_speed_max_mps", green_stop_speed_max_mps,
+    "Maximum current ego speed in m/s for green-stop stationary detection.");
+  app.add_option(
+    "--green_stop_ahead_m", green_stop_ahead_m,
+    "Maximum forward distance in meters to a heading-aligned green route-lane entry.");
+  app.add_option(
+    "--green_stop_lead_fwd_m", green_stop_lead_fwd_m,
+    "Forward extent in meters of the green-stop lead-neighbor corridor.");
+  app.add_option(
+    "--green_stop_lead_lat_m", green_stop_lead_lat_m,
+    "Half-width in meters of the green-stop lead-neighbor corridor.");
+  app.add_option(
     "--write_skipped_npz", write_skipped_npz,
     "Also write npz files for skipped frames when non-zero. "
     "Intended for inspection.");
@@ -129,6 +147,14 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.red_light_run_radius_m = 12.0f;
   options.red_light_run_heading_tol_deg = 45.0f;
 
+  // Green-stop detector defaults match Sakayori's npz_cleansing reference.
+  options.green_stop_heading_tol_deg = 45.0f;
+  options.green_stop_stay_radius_m = 2.0f;
+  options.green_stop_speed_max_mps = 1.0f;
+  options.green_stop_ahead_m = 40.0f;
+  options.green_stop_lead_fwd_m = 30.0f;
+  options.green_stop_lead_lat_m = 2.0f;
+
   // Inspection-only: production keeps this off so skipped frames write no npz.
   options.write_skipped_npz = false;
   // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
@@ -161,6 +187,24 @@ std::optional<std::string> validate_options(const ConverterOptions & opts)
   }
   if (opts.red_light_run_heading_tol_deg < 0.0f) {
     return "red_light_run_heading_tol_deg must be non-negative.";
+  }
+  if (opts.green_stop_heading_tol_deg < 0.0f) {
+    return "green_stop_heading_tol_deg must be non-negative.";
+  }
+  if (opts.green_stop_stay_radius_m < 0.0f) {
+    return "green_stop_stay_radius_m must be non-negative.";
+  }
+  if (opts.green_stop_speed_max_mps < 0.0f) {
+    return "green_stop_speed_max_mps must be non-negative.";
+  }
+  if (opts.green_stop_ahead_m < 0.0f) {
+    return "green_stop_ahead_m must be non-negative.";
+  }
+  if (opts.green_stop_lead_fwd_m < 0.0f) {
+    return "green_stop_lead_fwd_m must be non-negative.";
+  }
+  if (opts.green_stop_lead_lat_m < 0.0f) {
+    return "green_stop_lead_lat_m must be non-negative.";
   }
   return std::nullopt;
 }

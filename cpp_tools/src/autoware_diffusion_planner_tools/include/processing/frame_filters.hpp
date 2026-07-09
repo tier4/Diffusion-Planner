@@ -376,6 +376,143 @@ inline bool is_off_lane(const OffLaneResult & r, float max_score)
 }
 
 // ---------------------------------------------------------------------------
+// Green-stop detector, ported from Sakayori's npz_cleansing reference.
+//
+// A frame is dropped when ego is effectively stopped, a heading-aligned green
+// route lane is ahead, and no current neighbor occupies the forward corridor.
+// Static-object blockers are intentionally omitted because this converter writes
+// zero-filled static_objects today.
+// ---------------------------------------------------------------------------
+
+inline bool object_in_forward_corridor(
+  float x, float y, float ch, float sh, float lead_fwd_m, float lead_lat_m)
+{
+  const float fwd = x * ch + y * sh;
+  const float lat = -x * sh + y * ch;
+  return (fwd > 0.5f) && (fwd < lead_fwd_m) && (std::fabs(lat) < lead_lat_m);
+}
+
+inline bool detect_green_stop(
+  const std::vector<float> & ego_future, const std::vector<float> & ego_current,
+  const std::vector<float> & route_lanes, const std::vector<float> & neighbor_past,
+  float stay_radius_m, float speed_max_mps, float green_ahead_m, float lead_fwd_m, float lead_lat_m,
+  float heading_tol_deg)
+{
+  using autoware::diffusion_planner::INPUT_T;
+  using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
+  using autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE;
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::POINTS_PER_SEGMENT;
+  using autoware::diffusion_planner::POSE_DIM;
+  using autoware::diffusion_planner::SEGMENT_POINT_DIM;
+  using autoware::diffusion_planner::TRAFFIC_LIGHT;
+  using autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN;
+  using autoware::diffusion_planner::TRAFFIC_LIGHT_ONE_HOT_DIM;
+
+  if (ego_future.size() < static_cast<size_t>(OUTPUT_T * POSE_DIM) || ego_current.size() < 6) {
+    return false;
+  }
+  if (
+    route_lanes.size() <
+    static_cast<size_t>(NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM)) {
+    return false;
+  }
+
+  int64_t exact_zero_rows = 0;
+  const float first_x = ego_future[0];
+  const float first_y = ego_future[1];
+  float max_excursion = 0.0f;
+  for (int64_t t = 0; t < OUTPUT_T; ++t) {
+    const float x = ego_future[t * POSE_DIM + 0];
+    const float y = ego_future[t * POSE_DIM + 1];
+    if (x == 0.0f && y == 0.0f) {
+      ++exact_zero_rows;
+    }
+    const float dx = x - first_x;
+    const float dy = y - first_y;
+    max_excursion = std::max(max_excursion, std::sqrt(dx * dx + dy * dy));
+  }
+  if (exact_zero_rows > 5 || max_excursion >= stay_radius_m) {
+    return false;
+  }
+
+  const float ch = ego_current[2];
+  const float sh = ego_current[3];
+  const float heading_norm = std::sqrt(ch * ch + sh * sh);
+  if (heading_norm <= 1e-6f) {
+    return false;
+  }
+  const float ego_ch = ch / heading_norm;
+  const float ego_sh = sh / heading_norm;
+  const float vx = ego_current[4];
+  const float vy = ego_current[5];
+  const float speed = std::sqrt(vx * vx + vy * vy);
+  if (speed >= speed_max_mps) {
+    return false;
+  }
+
+  bool has_aligned_green_ahead = false;
+  const float ego_heading_deg = std::atan2(ego_sh, ego_ch) * 180.0f / static_cast<float>(M_PI);
+  for (int64_t seg = 0; seg < NUM_SEGMENTS_IN_ROUTE; ++seg) {
+    const float * segment = &route_lanes[seg * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM];
+    const float * tl = &segment[TRAFFIC_LIGHT];
+    float tl_max = tl[0];
+    int tl_argmax = 0;
+    for (int k = 1; k < TRAFFIC_LIGHT_ONE_HOT_DIM; ++k) {
+      if (tl[k] > tl_max) {
+        tl_max = tl[k];
+        tl_argmax = k;
+      }
+    }
+    if (tl_max <= 0.5f || (TRAFFIC_LIGHT + tl_argmax) != TRAFFIC_LIGHT_GREEN) continue;
+
+    int64_t first_valid = -1;
+    int64_t last_valid = -1;
+    for (int64_t p = 0; p < POINTS_PER_SEGMENT; ++p) {
+      const float * pt = &segment[p * SEGMENT_POINT_DIM];
+      if (std::fabs(pt[0]) <= 1e-6f && std::fabs(pt[1]) <= 1e-6f) continue;
+      if (first_valid < 0) first_valid = p;
+      last_valid = p;
+    }
+    if (first_valid < 0 || last_valid <= first_valid) continue;
+
+    const float * entry = &segment[first_valid * SEGMENT_POINT_DIM];
+    const float * end = &segment[last_valid * SEGMENT_POINT_DIM];
+    const float fwd = entry[0] * ego_ch + entry[1] * ego_sh;
+    if (fwd <= 0.0f || fwd >= green_ahead_m) continue;
+
+    const float lane_heading_deg =
+      std::atan2(end[1] - entry[1], end[0] - entry[0]) * 180.0f / static_cast<float>(M_PI);
+    if (heading_diff_deg(lane_heading_deg, ego_heading_deg) < heading_tol_deg) {
+      has_aligned_green_ahead = true;
+      break;
+    }
+  }
+  if (!has_aligned_green_ahead) {
+    return false;
+  }
+
+  const int64_t past = INPUT_T + 1;
+  constexpr int64_t np_dim = 11;
+  if (neighbor_past.size() < static_cast<size_t>(MAX_NUM_NEIGHBORS * past * np_dim)) {
+    return false;
+  }
+  for (int64_t n = 0; n < MAX_NUM_NEIGHBORS; ++n) {
+    const float * current = &neighbor_past[(n * past + INPUT_T) * np_dim];
+    if (
+      std::fabs(current[0]) + std::fabs(current[1]) + std::fabs(current[2]) +
+        std::fabs(current[3]) <=
+      1e-6f) {
+      continue;
+    }
+    if (object_in_forward_corridor(current[0], current[1], ego_ch, ego_sh, lead_fwd_m, lead_lat_m))
+      return false;
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Red-light-run detector, ported from the python NPZ filter.
 //
 // The coarse "route contains a red lane" signal is too noisy at intersections:

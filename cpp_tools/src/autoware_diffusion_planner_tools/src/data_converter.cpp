@@ -38,7 +38,9 @@ void print_options(const ConverterPaths & paths, const ConverterOptions & conver
     "collision_time_stride: {}\n"
     "Off-lane filter max_score: {}, offlane_time_stride: {}\n"
     "Write skipped npz: {}, Sidecar only: {}, Pack sequence: {}\n"
-    "Red-light-run filter radius_m: {}, heading_tol_deg: {}\n",
+    "Red-light-run filter radius_m: {}, heading_tol_deg: {}\n"
+    "Green-stop filter heading_tol_deg: {}, stay_radius_m: {}, speed_max_mps: {}, "
+    "ahead_m: {}, lead_fwd_m: {}, lead_lat_m: {}\n",
     converter.ego_wheel_base, converter.ego_length, converter.ego_width, paths.rosbag_path,
     paths.vector_map_path, paths.save_dir, converter.step, converter.limit, converter.min_frames,
     converter.min_distance, converter.search_nearest_route, converter.convert_yellow,
@@ -46,7 +48,9 @@ void print_options(const ConverterPaths & paths, const ConverterOptions & conver
     converter.neighbor_margin, converter.road_border_margin, converter.collision_time_stride,
     converter.offlane_max_score, converter.offlane_time_stride, converter.write_skipped_npz,
     converter.sidecar_only, converter.pack_sequence, converter.red_light_run_radius_m,
-    converter.red_light_run_heading_tol_deg);
+    converter.red_light_run_heading_tol_deg, converter.green_stop_heading_tol_deg,
+    converter.green_stop_stay_radius_m, converter.green_stop_speed_max_mps,
+    converter.green_stop_ahead_m, converter.green_stop_lead_fwd_m, converter.green_stop_lead_lat_m);
 }
 
 bool parse_arguments(int argc, char ** argv, ConverterPaths & paths, ConverterOptions & converter)

@@ -211,3 +211,177 @@ TEST(CheckCollisionTest, NoObjectsNoCollision)
     0.0f, 5);
   EXPECT_FALSE(r.collided());
 }
+
+namespace
+{
+
+std::vector<float> make_stationary_future(float x = 0.2f, float y = 0.0f)
+{
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::POSE_DIM;
+  std::vector<float> ego_future(OUTPUT_T * POSE_DIM, 0.0f);
+  for (int64_t t = 0; t < OUTPUT_T; ++t) {
+    ego_future[t * POSE_DIM + 0] = x;
+    ego_future[t * POSE_DIM + 1] = y;
+    ego_future[t * POSE_DIM + 2] = 1.0f;
+    ego_future[t * POSE_DIM + 3] = 0.0f;
+  }
+  return ego_future;
+}
+
+std::vector<float> make_ego_current(float cos_h = 1.0f, float sin_h = 0.0f, float vx = 0.0f)
+{
+  std::vector<float> ego_current(10, 0.0f);
+  ego_current[2] = cos_h;
+  ego_current[3] = sin_h;
+  ego_current[4] = vx;
+  ego_current[5] = 0.0f;
+  return ego_current;
+}
+
+std::vector<float> make_route_lanes()
+{
+  using autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE;
+  using autoware::diffusion_planner::POINTS_PER_SEGMENT;
+  using autoware::diffusion_planner::SEGMENT_POINT_DIM;
+  return std::vector<float>(NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM, 0.0f);
+}
+
+std::vector<float> make_neighbor_past()
+{
+  using autoware::diffusion_planner::INPUT_T;
+  using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
+  constexpr int64_t np_dim = 11;
+  return std::vector<float>(MAX_NUM_NEIGHBORS * (INPUT_T + 1) * np_dim, 0.0f);
+}
+
+void set_route_lane_light(
+  std::vector<float> & route_lanes, int64_t segment_idx, int64_t light_index, float entry_x = 8.0f,
+  float entry_y = 0.0f, float end_x = 20.0f, float end_y = 0.0f)
+{
+  using autoware::diffusion_planner::POINTS_PER_SEGMENT;
+  using autoware::diffusion_planner::SEGMENT_POINT_DIM;
+  using autoware::diffusion_planner::TRAFFIC_LIGHT;
+  using autoware::diffusion_planner::TRAFFIC_LIGHT_ONE_HOT_DIM;
+  const int64_t first = (segment_idx * POINTS_PER_SEGMENT + 0) * SEGMENT_POINT_DIM;
+  const int64_t second = (segment_idx * POINTS_PER_SEGMENT + 1) * SEGMENT_POINT_DIM;
+  route_lanes[first + 0] = entry_x;
+  route_lanes[first + 1] = entry_y;
+  route_lanes[second + 0] = end_x;
+  route_lanes[second + 1] = end_y;
+  for (int64_t k = 0; k < TRAFFIC_LIGHT_ONE_HOT_DIM; ++k) {
+    route_lanes[first + TRAFFIC_LIGHT + k] = 0.0f;
+  }
+  route_lanes[first + light_index] = 1.0f;
+}
+
+void set_neighbor_current(std::vector<float> & neighbor_past, float x, float y)
+{
+  using autoware::diffusion_planner::INPUT_T;
+  constexpr int64_t past = INPUT_T + 1;
+  constexpr int64_t np_dim = 11;
+  const int64_t base = (0 * past + INPUT_T) * np_dim;
+  neighbor_past[base + 0] = x;
+  neighbor_past[base + 1] = y;
+  neighbor_past[base + 2] = 1.0f;
+  neighbor_past[base + 3] = 0.0f;
+}
+
+bool call_green_stop(
+  const std::vector<float> & ego_future, const std::vector<float> & ego_current,
+  const std::vector<float> & route_lanes, const std::vector<float> & neighbor_past)
+{
+  return detect_green_stop(
+    ego_future, ego_current, route_lanes, neighbor_past,
+    2.0f,   // stay_radius_m
+    1.0f,   // speed_max_mps
+    40.0f,  // green_ahead_m
+    30.0f,  // lead_fwd_m
+    2.0f,   // lead_lat_m
+    45.0f   // heading_tol_deg
+  );
+}
+
+}  // namespace
+
+TEST(GreenStopTest, StoppedAtGreenNoNeighborAheadReturnsTrue)
+{
+  auto ego_future = make_stationary_future();
+  const auto ego_current = make_ego_current();
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN);
+
+  EXPECT_TRUE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}
+
+TEST(GreenStopTest, MovingEgoReturnsFalse)
+{
+  auto ego_future = make_stationary_future();
+  const auto ego_current = make_ego_current(1.0f, 0.0f, 1.5f);
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN);
+
+  EXPECT_FALSE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}
+
+TEST(GreenStopTest, RedRouteLaneReturnsFalse)
+{
+  auto ego_future = make_stationary_future();
+  const auto ego_current = make_ego_current();
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_RED);
+
+  EXPECT_FALSE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}
+
+TEST(GreenStopTest, PerpendicularGreenLaneReturnsFalse)
+{
+  auto ego_future = make_stationary_future();
+  const auto ego_current = make_ego_current();
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(
+    route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN, 8.0f, 0.0f, 8.0f, 20.0f);
+
+  EXPECT_FALSE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}
+
+TEST(GreenStopTest, NeighborAheadReturnsFalse)
+{
+  auto ego_future = make_stationary_future();
+  const auto ego_current = make_ego_current();
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN);
+  set_neighbor_current(neighbor_past, 12.0f, 0.5f);
+
+  EXPECT_FALSE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}
+
+TEST(GreenStopTest, NeighborOutsideCorridorReturnsTrue)
+{
+  auto ego_future = make_stationary_future();
+  const auto ego_current = make_ego_current();
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN);
+  set_neighbor_current(neighbor_past, 12.0f, 4.0f);
+
+  EXPECT_TRUE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}
+
+TEST(GreenStopTest, PaddedFutureReturnsFalse)
+{
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::POSE_DIM;
+  std::vector<float> ego_future(OUTPUT_T * POSE_DIM, 0.0f);
+  const auto ego_current = make_ego_current();
+  auto route_lanes = make_route_lanes();
+  auto neighbor_past = make_neighbor_past();
+  set_route_lane_light(route_lanes, 0, autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN);
+
+  EXPECT_FALSE(call_green_stop(ego_future, ego_current, route_lanes, neighbor_past));
+}

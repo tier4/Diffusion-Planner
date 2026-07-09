@@ -34,10 +34,11 @@ constexpr int64_t kStuckThresholdTicks = 30;
 
 SkippingInfo decide_frame_skip(
   const FrameSkipInputs & inputs, const std::vector<float> & ego_future,
-  const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
-  const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
-  const std::vector<float> & line_strings, const std::vector<float> & lanes,
-  const std::vector<float> & route_lanes, const FrameFilterParams & filter_params)
+  const std::vector<float> & ego_current, const std::vector<float> & ego_shape,
+  const std::vector<float> & static_objects, const std::vector<float> & neighbor_future,
+  const std::vector<float> & neighbor_past, const std::vector<float> & line_strings,
+  const std::vector<float> & lanes, const std::vector<float> & route_lanes,
+  const FrameFilterParams & filter_params)
 {
   using autoware::diffusion_planner::INPUT_T;
 
@@ -71,6 +72,15 @@ SkippingInfo decide_frame_skip(
 
   if (inputs.stopping_count > (INPUT_T + 5) && inputs.is_red_or_yellow) {
     return SkippingInfo::stopped_at_traffic_light();
+  }
+
+  if (
+    frame_filters::detect_green_stop(
+      ego_future, ego_current, route_lanes, neighbor_past, filter_params.green_stop_stay_radius_m,
+      filter_params.green_stop_speed_max_mps, filter_params.green_stop_ahead_m,
+      filter_params.green_stop_lead_fwd_m, filter_params.green_stop_lead_lat_m,
+      filter_params.green_stop_heading_tol_deg)) {
+    return SkippingInfo::green_stop();
   }
 
   if (!inputs.is_red_or_yellow && inputs.no_future_progress_x_step > kStuckThresholdTicks) {

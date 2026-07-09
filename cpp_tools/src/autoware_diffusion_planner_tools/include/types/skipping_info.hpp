@@ -96,6 +96,7 @@ enum class SkippingLabel {
                                // extra coverage of this trigger is measurable.
   DetectedRedLightRun,         // Detected red light run: ego future crosses a stop line segment
                                // near the entry point of a heading-aligned red route lane
+  GreenStop,                   // Stopped at a heading-aligned green light with no lead neighbor.
 };
 
 // Structure to hold detailed skipping information
@@ -183,6 +184,11 @@ struct SkippingInfo
       "heading-aligned red route lane",
       {},
       {}};
+  }
+
+  static SkippingInfo green_stop()
+  {
+    return {SkippingLabel::GreenStop, "Stopped at green light with no lead neighbor", {}, {}};
   }
 
   // reasons: any of "static_object", "neighbor", "road_border"
