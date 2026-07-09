@@ -655,6 +655,43 @@ def _moving_collision_step_gated(
     return int(collision_by_t.float().argmax().item())
 
 
+def _moving_collision_all_rear_end(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    neighbor_futures: torch.Tensor,
+    neighbor_shapes: torch.Tensor,
+    neighbor_valid: torch.Tensor,
+) -> bool:
+    """Whether every overlapping NPC is behind the ego (a pure rear-end).
+
+    Uses the SAME OBB overlap (signed clearance ``< 0``) as
+    ``_moving_collision_step_gated`` but ignores rear-end suppression, then asks
+    whether all overlaps are rear-ends. Lets a caller DETECT the collision and
+    still tag it so a rear-end can be dropped downstream if desired (rather than
+    silently discarding it at detection time). Only meaningful for a single
+    realized step (T == 1); returns False for empty/no-overlap inputs.
+    """
+    if ego_trajs is None or neighbor_futures is None or neighbor_futures.shape[0] == 0:
+        return False
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
+    )
+    if distances.numel() == 0:
+        return False
+    overlap = distances < 0  # (N, N_nb, T)
+    if not bool(overlap.any().item()):
+        return False
+    ego_xy = ego_trajs[:, :, :2]
+    ego_heading = ego_trajs[:, :, 2:4]
+    npc_xy = neighbor_futures[:, :, :2]
+    ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
+    dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)
+    behind = dot < 0
+    # Pure rear-end iff there is no forward-hemisphere (dot >= 0) overlap.
+    forward_overlap = overlap & ~behind
+    return not bool(forward_overlap.any().item())
+
+
 def current_ego_neighbor_clearance(
     data: dict[str, torch.Tensor],
     config: RewardConfig,
@@ -666,7 +703,16 @@ def current_ego_neighbor_clearance(
     if neighbor_kind not in {"any", "moving", "static"}:
         raise ValueError(f"neighbor_kind must be any, moving, or static; got {neighbor_kind!r}")
     ego_shape = _ego_shape_from_data(data, device)
-    horizon = 2 if neighbor_kind == "static" else 1
+    # Both moving and static need >=2 future frames so _stopped_neighbor_mask can
+    # classify a neighbor as stopped (it returns all-False on a single frame). "any"
+    # ignores the stopped/moving split entirely, so one frame suffices there. When the
+    # snapshot carries fewer future frames than that (a single realized-step t0 gate),
+    # degrade to what's available: motion can't be classified from one pose, so every
+    # neighbor stays active — the conservative choice for a t0 already-collided gate.
+    horizon = 1 if neighbor_kind == "any" else 2
+    nf_future = data.get("neighbor_agents_future")
+    if nf_future is not None and nf_future.dim() >= 2:
+        horizon = max(1, min(horizon, int(nf_future.shape[-2])))
     neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, horizon, device)
     empty = {
         "distances": torch.zeros(0, 0, 0, device=device),
@@ -707,8 +753,11 @@ def current_ego_neighbor_clearance(
         future_all = data.get("neighbor_agents_future")
         if future_all is not None and future_all.dim() == 4:
             future_all = future_all[0]
-        if future_all is not None and future_all.shape[1] >= 1:
-            slot_valid = future_all[:, :1, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
+        if future_all is not None and future_all.shape[1] >= horizon:
+            # Match the horizon window _neighbor_inputs used to select neighbors, so
+            # filtered_past lines up 1:1 with active_mask (else IndexError when a
+            # neighbor is zero at frame 0 but valid within the horizon window).
+            slot_valid = future_all[:, :horizon, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
             filtered_past = neighbor_past[slot_valid]
         else:
             filtered_past = neighbor_past

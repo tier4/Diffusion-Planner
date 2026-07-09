@@ -241,26 +241,6 @@ def _apply_rear_end_collision_mode(rcfg, *, count_rear_end_collisions: bool) -> 
         rcfg.ignore_rear_end_collisions = False
 
 
-def _source_scene_t0_moving_overlap(
-    data: dict[str, torch.Tensor],
-    rcfg,
-    *,
-    device: torch.device,
-    moving_collision_thresh: float,
-) -> tuple[bool, float]:
-    clearance = current_ego_neighbor_clearance(
-        data,
-        rcfg,
-        device=device,
-        neighbor_kind="moving",
-    )
-    distances = clearance["distances"]
-    if distances.numel() == 0:
-        return False, math.inf
-    min_clearance = float(clearance["min_clearance"])
-    return min_clearance <= moving_collision_thresh, min_clearance
-
-
 def _source_scene_t0_any_neighbor_overlap(
     data: dict[str, torch.Tensor],
     *,
@@ -726,7 +706,10 @@ def build_repaired_targets(
             repaired = dict(row)
             repaired["source_scene_path"] = str(row["scene_path"])
             repaired["scene_path"] = str(out_path)
-            repaired["ego_shape"] = [float(x) for x in npz_es.tolist()]
+            # Per-scene ego_shape from THIS scene's data — not the batch-loop
+            # leftover npz_es (which is the last validation-loop scene).
+            scene_es = data["ego_shape"].detach().cpu().numpy().reshape(-1)[:3]
+            repaired["ego_shape"] = [float(x) for x in scene_es.tolist()]
             repaired.update(meta)
             repaired_rows.append(repaired)
             print(

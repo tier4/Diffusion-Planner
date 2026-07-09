@@ -94,7 +94,7 @@ def detect_expert_disagreement(
     if expert_waiting and model_forward:
         return ConflictResult(
             True,
-            0,
+            None,  # not localized: flagged from horizon summaries, no step index
             max_dev,
             "expert_wait_model_forward",
             model_end_progress,
@@ -111,7 +111,7 @@ def detect_expert_disagreement(
     ):
         return ConflictResult(
             True,
-            0,
+            None,  # not localized: flagged from horizon summaries, no step index
             max_dev,
             "model_lagging_expert",
             model_end_progress,
@@ -123,7 +123,7 @@ def detect_expert_disagreement(
     if model_end_progress - expert_end_progress >= forward_progress_gap_m:
         return ConflictResult(
             True,
-            0,
+            None,  # not localized: flagged from horizon summaries, no step index
             max_dev,
             "model_ahead_expert",
             model_end_progress,

@@ -1845,6 +1845,13 @@ def run_segments_batched(
                                         realized_label,
                                         extra_manifest={
                                             **_credit_event_metadata(event_row),
+                                            # Authoritative offense frame id (not the
+                                            # buf[-1] tick, which can overshoot in pose
+                                            # mode) — overrides _dump_credit_window's
+                                            # buffer-derived default.
+                                            "offense_frame_id": int(
+                                                s.credit_window["offense_frame"]
+                                            ),
                                             "source_label": str(s.credit_window["label"]),
                                             "source_anchor_frame": int(
                                                 s.credit_window["frame_index"]
@@ -2100,6 +2107,10 @@ def _dump_credit_window(
     manifest["credit_gap"] = int(credit_gap)
     manifest["offense_step"] = int(offense_step)
     manifest["credit_window_end_step"] = int(window_end_step)
+    # Default offense frame id = the last buffered tick. Correct for the online
+    # danger path (offense == current step == buf end); mined credit-window
+    # callers pass the authoritative offense_frame_id in extra_manifest to
+    # override it (the buffer tick can overshoot the offense in pose mode).
     manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
     if extra_manifest:
         manifest.update(extra_manifest)

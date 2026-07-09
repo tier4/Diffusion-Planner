@@ -27,7 +27,6 @@ from rlvr.autoresearch.tools.build_avoiding_target import (
     _filtered_npz_payload,
     _future4_to_3col,
     _parse_ego_shape,
-    _source_scene_t0_moving_overlap,
     _validate_static_collision_config,
 )
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
@@ -1016,7 +1015,8 @@ def test_conflict_detector_flags_expert_wait_model_forward():
     )
 
     assert result.expert_disagreement
-    assert result.expert_disagreement_step == 0
+    # This detector flags from horizon summaries and does not localize a step.
+    assert result.expert_disagreement_step is None
     assert result.reason == "expert_wait_model_forward"
 
 
@@ -2337,34 +2337,6 @@ def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
     assert isinstance(meta["target_gt_disagreement"], bool)
 
 
-def test_source_scene_t0_moving_overlap_rejects_already_collided_scene():
-    data = {
-        "ego_shape": torch.tensor([[4.76, 7.24, 2.29]], dtype=torch.float32),
-        "neighbor_agents_future": torch.tensor(
-            [[[[-2.0, 0.0, 1.0, 0.0]]]],
-            dtype=torch.float32,
-        ),
-        "neighbor_agents_past": torch.tensor(
-            [[[[0.0] * 11 for _ in range(31)]]],
-            dtype=torch.float32,
-        ),
-    }
-    data["neighbor_agents_past"][0, 0, -1, 0] = -2.0
-    data["neighbor_agents_past"][0, 0, -1, 2] = 1.0
-    data["neighbor_agents_past"][0, 0, -1, 6] = 2.0
-    data["neighbor_agents_past"][0, 0, -1, 7] = 4.5
-
-    collided, min_clearance = _source_scene_t0_moving_overlap(
-        data,
-        RewardConfig(ignore_rear_end_collisions=False),
-        device=torch.device("cpu"),
-        moving_collision_thresh=0.2,
-    )
-
-    assert collided is True
-    assert min_clearance < 0.0
-
-
 def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
     rows = [
         {
@@ -2604,11 +2576,15 @@ def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
         "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
+    # Collision is checked at the neighbor's CURRENT pose (last past frame),
+    # overlapping the ego at x=4.52. The future must show real motion so the
+    # neighbor is classified as MOVING (not stopped) — a stationary neighbor
+    # here is a static_collision, not a moving one.
     np_dict["neighbor_agents_past"][0, -1, 0] = 4.52
     np_dict["neighbor_agents_past"][0, -1, 2] = 1.0
     np_dict["neighbor_agents_past"][0, -1, 6] = 2.0
     np_dict["neighbor_agents_past"][0, -1, 7] = 4.5
-    np_dict["neighbor_agents_future"][0, :, 0] = 4.52
+    np_dict["neighbor_agents_future"][0, :, 0] = np.linspace(4.52, 6.52, 80)
     np_dict["neighbor_agents_future"][0, :, 2] = 1.0
 
     row = scorer(np_dict, collided=False)
@@ -2807,7 +2783,7 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(
         build_avoiding_target_tool,
-        "_source_scene_t0_moving_overlap",
+        "_source_scene_t0_any_neighbor_overlap",
         lambda *_args, **_kwargs: (False, 99.0),
     )
     monkeypatch.setattr(

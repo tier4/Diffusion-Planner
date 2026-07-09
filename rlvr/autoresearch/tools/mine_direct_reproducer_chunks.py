@@ -529,6 +529,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--danger_credit_window_config", type=Path, default=None)
     parser.add_argument("--danger_decluster_steps", type=int, default=10)
     parser.add_argument("--enable_conflict_detector", action="store_true")
+    parser.add_argument(
+        "--count_rear_end_collisions",
+        action="store_true",
+        help="count rear-end collisions in realized-event moving-collision detection "
+        "(default: honor the reward config's ignore_rear_end_collisions)",
+    )
     parser.add_argument("--labels", default="")
     parser.add_argument("--skip_bad_chunks", action="store_true")
     parser.add_argument(
@@ -614,6 +620,7 @@ def main() -> None:
                 threshold_config=args.danger_threshold_config,
                 device=device,
                 allowed_labels=realized_allowed_labels,
+                count_rear_end_collisions=args.count_rear_end_collisions or None,
             )
         danger_credit_windows = load_credit_windows(args.danger_credit_window_config)
 

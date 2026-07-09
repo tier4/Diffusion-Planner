@@ -128,9 +128,11 @@ collision drive events. A predicted-trajectory scorer belongs to the open-loop
 side only.)
 
 **Credit window = the realized poses `[offense − gap − width, offense − gap]`.**
-With the defaults (`width_s = gap_s = 1.5 s` at 10 Hz → 15 frames each) that is
-the ~1.5 s of realized poses spanning **[3.0 s, 1.5 s] before the offense** —
-`width + 1 = 16` files (endpoints inclusive), `credit-00030.npz … credit-00015.npz`.
+With the defaults (`width_s = gap_s = 1.5 s` at 10 Hz → `width = 15` frames of
+span, `gap = 15` frames of offset) that is the ~1.5 s of realized poses spanning
+**[3.0 s, 1.5 s] before the offense**. A span of 15 frames has 16 inclusive
+endpoints, so `_dump_precollision_window` saves `width + 1 = 16` files,
+`credit-00030.npz … credit-00015.npz`.
 The window deliberately **ends `gap` frames before the offense**: the model must
 have already committed to avoiding the violation by then. These realized-context
 scenes are what go to the repair shop.

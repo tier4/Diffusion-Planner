@@ -9,7 +9,12 @@ so the whole codebase shares ONE collision algorithm.
 Nothing here re-implements SAT or closest-point math — it only adapts
 representation (numpy<->torch, radians<->cos/sin, single<->batched). The frozen
 reward/SFT/eval path (:mod:`planner_metrics.subscores` / :mod:`rlvr.reward`)
-calls the primitives directly; this module stays numerically identical to them.
+calls the same primitives directly. Two deliberate differences from that path:
+this shim promotes inputs to float64 (``_WRAPPER_DTYPE``) for stable detection
+geometry, and ``overlap`` treats exact boundary touch (distance ``== 0``) as a
+hit (``<= 0``) whereas the reward penalty uses a strict ``< 0``. Results agree to
+float precision away from the exact-touch boundary; do not assume bit-identical
+scores against the reward path.
 
 Notes:
 - ``wheelbase is not None`` selects the ego (rear-axle) convention, matching

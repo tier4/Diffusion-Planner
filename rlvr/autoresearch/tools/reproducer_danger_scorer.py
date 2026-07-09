@@ -14,6 +14,7 @@ from planner_metrics.subscores import (
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _apply_scene_thresholds,
     _ego_shape_from_data,
+    _moving_collision_all_rear_end,
     _moving_collision_step_gated,
     classify_loaded_scenes_batch,
     current_ego_neighbor_clearance,
@@ -105,8 +106,13 @@ def build_reproducer_danger_scorer(
     device: str,
     enable_conflict_detector: bool = False,
     allowed_labels: set[str] | None = None,
+    count_rear_end_collisions: bool | None = None,
 ):
     reward_cfg = load_reward_config(reward_config)
+    if count_rear_end_collisions is not None:
+        # Keep mining rear-end consistent with the repair side and the RAW-col
+        # event trigger: --count_rear_end_collisions -> do NOT ignore them.
+        reward_cfg.ignore_rear_end_collisions = not count_rear_end_collisions
     scorer_args = SimpleNamespace(
         threshold_config=threshold_config,
         moving_near_thresh=None,
@@ -155,6 +161,7 @@ def build_realized_event_scorer(
     threshold_config: Path,
     device: str,
     allowed_labels: set[str] | None = None,
+    count_rear_end_collisions: bool | None = None,
 ):
     allowed = set(allowed_labels) if allowed_labels else set(_SUPPORTED_REALIZED_EVENT_LABELS)
     unsupported = sorted(allowed - _SUPPORTED_REALIZED_EVENT_LABELS)
@@ -165,6 +172,10 @@ def build_realized_event_scorer(
         )
 
     reward_cfg = load_reward_config(reward_config)
+    if count_rear_end_collisions is not None:
+        # See build_reproducer_danger_scorer: keep realized-event moving-collision
+        # detection consistent with the repair side / RAW-col trigger.
+        reward_cfg.ignore_rear_end_collisions = not count_rear_end_collisions
     scorer_args = SimpleNamespace(
         threshold_config=threshold_config,
         moving_near_thresh=None,
@@ -211,6 +222,7 @@ def build_realized_event_scorer(
             )
             row["moving_collision_step"] = None
             row["moving_min_dist"] = float("inf")
+            row["rear_end_collision"] = False
             distances = moving_clearance["distances"]
             if distances.numel():
                 row["moving_min_dist"] = float(moving_clearance["min_clearance"])
@@ -226,6 +238,15 @@ def build_realized_event_scorer(
                 )
                 if row["moving_collision_step"] is not None:
                     labels.append("moving_collision")
+                    # Keep rear-ends but TAG them, so downstream can drop them if
+                    # desired instead of losing the collision at detection time.
+                    row["rear_end_collision"] = _moving_collision_all_rear_end(
+                        moving_clearance["ego_now"],
+                        moving_clearance["ego_shape"],
+                        moving_clearance["neighbors"],
+                        moving_clearance["neighbor_shapes"],
+                        moving_clearance["neighbor_valid"],
+                    )
 
         if "static_collision" in allowed:
             static_clearance = current_ego_neighbor_clearance(

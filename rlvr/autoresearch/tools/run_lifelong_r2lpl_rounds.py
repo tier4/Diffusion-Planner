@@ -781,6 +781,9 @@ def _perception_mining_cmd(
         cmd.append("--no_prebuild_neighbor_tracks")
     if bool(mining.get("allow_existing_out_dir", False)):
         cmd.append("--allow_existing_out_dir")
+    if bool(cfg.get("count_rear_end_collisions", False)):
+        # Keep realized-event mining rear-end-consistent with the repair side.
+        cmd.append("--count_rear_end_collisions")
     return cmd, danger_save_dir
 
 
