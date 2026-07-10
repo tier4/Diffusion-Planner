@@ -497,3 +497,93 @@ def test_classify_scene_flags_moving_collision_at_clearance_threshold():
 
     assert "moving_collision" in row["labels"]
     assert row["moving_collision_step"] == 0
+
+
+# --- moving-collision distance-band definition (clearance <= moving_collision_thresh) ---
+# The moving-collision detector counts a contact when the EXACT closest-point
+# clearance is within the threshold band (default 0.2 m), matching the static
+# path's sc_cross_thresh — NOT strict OBB overlap. These tests pin that a
+# genuinely NON-overlapping neighbor (positive clearance, but <= 0.2 m) counts,
+# a farther one does not, and rear-end / low-speed gating still apply.
+
+from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
+from rlvr.autoresearch.tools.classify_scene_failures import _moving_collision_step_gated
+
+
+def _forward_pair(gap_x: float, nsteps: int = 5, behind: bool = False):
+    """Ego (2x2) + one neighbor (2x2), both moving forward together at 2.5 m/s.
+
+    Returns (ego_trajs (1,T,4), ego_shape (3,), nf (1,T,4), ns (1,2), nv (1,T)).
+    With both boxes 2 m long and centered, along-x clearance ~= |gap_x| - 2.
+    """
+    T = nsteps
+    ego_x = torch.arange(T, dtype=torch.float32) * 0.25  # 2.5 m/s at dt=0.1
+    ego = torch.zeros(1, T, 4)
+    ego[0, :, 0] = ego_x
+    ego[0, :, 2] = 1.0  # heading +x (cos=1, sin=0)
+    off = -gap_x if behind else gap_x
+    nf = torch.zeros(1, T, 4)
+    nf[0, :, 0] = ego_x + off
+    nf[0, :, 2] = 1.0
+    ego_shape = torch.tensor([0.0, 2.0, 2.0], dtype=torch.float32)  # wb=0, L=2, W=2
+    ns = torch.tensor([[2.0, 2.0]], dtype=torch.float32)  # width, length
+    nv = torch.ones(1, T, dtype=torch.bool)
+    return ego, ego_shape, nf, ns, nv
+
+
+def _min_clearance(ego, ego_shape, nf, ns, nv) -> float:
+    d = compute_ego_neighbor_signed_clearance(ego, ego_shape, nf, ns, nv)
+    return float(d.min().item())
+
+
+def test_moving_collision_counts_within_band_without_overlap():
+    # gap 2.1 m centers -> ~0.1 m clearance: NON-overlapping but inside 0.2 m band.
+    ego, es, nf, ns, nv = _forward_pair(2.1)
+    clr = _min_clearance(ego, es, nf, ns, nv)
+    assert clr > 0.0, f"expected non-overlapping (clr>0), got {clr:.3f}"
+    assert clr <= 0.2, f"expected within 0.2 m band, got {clr:.3f}"
+    cfg = RewardConfig()
+    step = _moving_collision_step_gated(ego, es, nf, ns, nv, cfg, 0.2)
+    assert step is not None, "within-band non-overlapping contact must count as a collision"
+    # And the strict-overlap definition would NOT have flagged it:
+    assert _moving_collision_step_gated(ego, es, nf, ns, nv, cfg, 0.0) is None
+
+
+def test_moving_collision_ignores_outside_band():
+    # gap 2.6 m centers -> ~0.6 m clearance: outside the 0.2 m band.
+    ego, es, nf, ns, nv = _forward_pair(2.6)
+    clr = _min_clearance(ego, es, nf, ns, nv)
+    assert clr > 0.2, f"expected clearance > band, got {clr:.3f}"
+    step = _moving_collision_step_gated(ego, es, nf, ns, nv, RewardConfig(), 0.2)
+    assert step is None
+
+
+def test_moving_collision_rear_end_suppressed_unless_counted():
+    # Neighbor 0.1 m behind the ego, moving with it.
+    ego, es, nf, ns, nv = _forward_pair(2.1, behind=True)
+    clr = _min_clearance(ego, es, nf, ns, nv)
+    assert 0.0 < clr <= 0.2
+    # Default suppresses rear-ends -> not the ego's fault -> no collision.
+    assert (
+        _moving_collision_step_gated(
+            ego, es, nf, ns, nv, RewardConfig(ignore_rear_end_collisions=True), 0.2
+        )
+        is None
+    )
+    # With --count_rear_end_collisions (ignore=False) it IS counted.
+    assert (
+        _moving_collision_step_gated(
+            ego, es, nf, ns, nv, RewardConfig(ignore_rear_end_collisions=False), 0.2
+        )
+        is not None
+    )
+
+
+def test_moving_collision_low_speed_suppressed():
+    # In-band ahead contact, but ego is nearly stationary (<1 m/s) -> queued
+    # traffic, not a collision (low-speed gate, T>=2).
+    ego, es, nf, ns, nv = _forward_pair(2.1)
+    ego[0, :, 0] = torch.arange(ego.shape[1], dtype=torch.float32) * 0.02  # 0.2 m/s
+    nf[0, :, 0] = ego[0, :, 0] + 2.1
+    step = _moving_collision_step_gated(ego, es, nf, ns, nv, RewardConfig(), 0.2)
+    assert step is None

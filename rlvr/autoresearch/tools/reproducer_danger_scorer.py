@@ -236,6 +236,7 @@ def build_realized_event_scorer(
                     moving_clearance["neighbor_shapes"],
                     moving_clearance["neighbor_valid"],
                     reward_cfg,
+                    moving_collision_thresh,
                 )
                 if row["moving_collision_step"] is not None:
                     labels.append("moving_collision")
@@ -247,6 +248,7 @@ def build_realized_event_scorer(
                         moving_clearance["neighbors"],
                         moving_clearance["neighbor_shapes"],
                         moving_clearance["neighbor_valid"],
+                        moving_collision_thresh,
                     )
 
         if "static_collision" in allowed:

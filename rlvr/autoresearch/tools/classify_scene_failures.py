@@ -52,10 +52,7 @@ import torch
 from diffusion_planner.utils.path_key import data_path_to_rel
 
 from planner_metrics.aggregate import compute_subscores_scene_batch
-from planner_metrics.subscores import (
-    compute_ego_neighbor_signed_clearance,
-    compute_safety_score_batch,
-)
+from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig
 
@@ -607,48 +604,57 @@ def _moving_collision_step_gated(
     neighbor_shapes: torch.Tensor,
     neighbor_valid: torch.Tensor,
     config: RewardConfig,
+    moving_collision_thresh: float,
 ) -> int | None:
-    """First moving-collision step using the SAME definition as the reward.
+    """First moving-collision step using a closest-point DISTANCE threshold.
 
-    A collision is an actual OBB overlap (signed clearance ``< 0``), with
-    rear-end collisions suppressed when ``config.ignore_rear_end_collisions``
-    is set (controlled by ``--count_rear_end_collisions``). This deliberately
-    replaces the old raw ``clearance <= moving_collision_thresh`` test, which
-    had no gating and over-selected rear approaches / queued vehicles, drifting
-    from ``compute_safety_score_batch`` (the reward/eval definition).
+    A collision is counted when the exact closest-point clearance between the
+    ego and a neighbor OBB is ``<= moving_collision_thresh`` (default 0.2 m) at
+    any timestep — the same distance-band definition the STATIC path uses
+    (``sc_cross_thresh``), so moving and static agree on what "collision" means.
+    Clearance comes from the reward primitive
+    ``compute_ego_neighbor_signed_clearance`` (exact closest point).
 
-    For full trajectories (T >= 2) this delegates entirely to
-    ``compute_safety_score_batch``. For a single realized step (T == 1) — used
-    by the reproducer danger scorer — ``compute_safety_score_batch`` is
-    inapplicable (its low-speed gate needs a trajectory), so the same overlap +
-    rear-end rule is applied to that single step.
+    Two gates decide WHICH contacts are the ego's fault (not the threshold):
+    - rear-end suppression (when ``config.ignore_rear_end_collisions`` is set,
+      i.e. ``--count_rear_end_collisions`` is off): a neighbor behind the ego,
+      or one that ever contacted from behind, is excluded thereafter — the ego
+      cannot control a following vehicle. Mirrors ``compute_safety_score_batch``.
+    - low-speed suppression (T >= 2 only): contacts are ignored while the ego is
+      slower than 1 m/s, so queued bumper-to-bumper traffic is not a collision.
+      A single realized pose (T == 1, reproducer danger scorer) carries no ego
+      speed, so this gate is skipped there.
+
+    NOTE (labeling vs reward): the frozen reward's hard collision uses strict
+    OBB overlap (clearance ``< 0``); this labeling/mining detector deliberately
+    uses the 0.2 m distance band instead (accurate closest-point distance, no
+    OBB inflation) so mined events match the static definition.
     """
     _N, T, _ = ego_trajs.shape
     if neighbor_futures.shape[0] == 0:
         return None
-    if T >= 2:
-        _scores, collision_steps = compute_safety_score_batch(
-            ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config
-        )
-        return collision_steps[0]
-
     distances = compute_ego_neighbor_signed_clearance(
         ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
     )
     if distances.numel() == 0:
         return None
-    collision_mask = distances < 0  # (N, N_nb, T) actual overlap only
+    ego_xy = ego_trajs[:, :, :2]  # (N, T, 2)
+    collision_mask = distances <= moving_collision_thresh  # (N, N_nb, T) within the band
     if config.ignore_rear_end_collisions:
-        # Mirror compute_safety_score_batch's rear-end rule for the single
-        # realized step: drop overlaps where the NPC is behind the ego
-        # (dot(ego_heading, ego->NPC) < 0). Low-speed suppression is omitted
-        # because a single pose carries no ego speed.
-        ego_xy = ego_trajs[:, :, :2]
         ego_heading = ego_trajs[:, :, 2:4]
         npc_xy = neighbor_futures[:, :, :2]
-        ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
-        dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)
-        collision_mask = collision_mask & (dot >= 0)
+        ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)  # (N, N_nb, T, 2)
+        dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)  # (N, N_nb, T)
+        npc_is_behind = dot < 0
+        # Once a neighbor contacts from behind, drop it for all later steps too
+        # (it later crosses into the forward hemisphere as it overtakes).
+        rear_contact = collision_mask & npc_is_behind
+        ever_rear = rear_contact.cummax(dim=2).values
+        collision_mask = collision_mask & ~npc_is_behind & ~ever_rear
+    if T >= 2:
+        ego_speed = (torch.diff(ego_xy, dim=1) / config.dt).norm(dim=-1)  # (N, T-1)
+        ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
+        collision_mask = collision_mask & (ego_speed > 1.0).unsqueeze(1)
     collision_by_t = collision_mask.any(dim=1).any(dim=0)
     if not bool(collision_by_t.any().item()):
         return None
@@ -661,15 +667,17 @@ def _moving_collision_all_rear_end(
     neighbor_futures: torch.Tensor,
     neighbor_shapes: torch.Tensor,
     neighbor_valid: torch.Tensor,
+    moving_collision_thresh: float,
 ) -> bool:
-    """Whether every overlapping NPC is behind the ego (a pure rear-end).
+    """Whether every in-band NPC is behind the ego (a pure rear-end).
 
-    Uses the SAME OBB overlap (signed clearance ``< 0``) as
-    ``_moving_collision_step_gated`` but ignores rear-end suppression, then asks
-    whether all overlaps are rear-ends. Lets a caller DETECT the collision and
-    still tag it so a rear-end can be dropped downstream if desired (rather than
-    silently discarding it at detection time). Only meaningful for a single
-    realized step (T == 1); returns False for empty/no-overlap inputs.
+    Uses the SAME closest-point distance band (clearance
+    ``<= moving_collision_thresh``) as ``_moving_collision_step_gated`` but
+    ignores rear-end suppression, then asks whether all in-band contacts are
+    rear-ends. Lets a caller DETECT the collision and still tag it so a rear-end
+    can be dropped downstream if desired (rather than silently discarding it at
+    detection time). Only meaningful for a single realized step (T == 1);
+    returns False for empty/no-contact inputs.
     """
     if ego_trajs is None or neighbor_futures is None or neighbor_futures.shape[0] == 0:
         return False
@@ -678,7 +686,7 @@ def _moving_collision_all_rear_end(
     )
     if distances.numel() == 0:
         return False
-    overlap = distances < 0  # (N, N_nb, T)
+    overlap = distances <= moving_collision_thresh  # (N, N_nb, T)
     if not bool(overlap.any().item()):
         return False
     ego_xy = ego_trajs[:, :, :2]
@@ -833,7 +841,9 @@ def _moving_diagnostics(
     # Collision label uses the reward's gated overlap definition (rear-end /
     # low-speed suppressed), NOT a raw proximity threshold. moving_min_dist and
     # moving_near_miss below still report raw clearance for diagnostics.
-    moving_collision_step = _moving_collision_step_gated(ego_traj, ego_shape, mf, ms, mv, config)
+    moving_collision_step = _moving_collision_step_gated(
+        ego_traj, ego_shape, mf, ms, mv, config, moving_collision_thresh
+    )
 
     return {
         "moving_neighbor_count": moving_count,
@@ -979,6 +989,12 @@ def classify_loaded_scenes_batch(
     args=None,
 ) -> list[dict[str, Any]]:
     """Classify a B-scene batch with one scored trajectory per scene."""
+    if ego_trajs.dim() != 4 or ego_trajs.shape[1] != 1:
+        raise ValueError(
+            "classify_loaded_scenes_batch expects exactly one trajectory per scene, "
+            f"ego_trajs shaped (B,1,T,4); got {tuple(ego_trajs.shape)}. "
+            "Use classify_loaded_scene_candidates_batch for N>1 candidates."
+        )
     rows_per_scene = classify_loaded_scene_candidates_batch(
         scene_paths,
         ego_trajs,

@@ -283,10 +283,14 @@ from the ORIGINAL logged GT target: `target_gt_disagreement_mean_l2`,
 (max-L2 exceeds `--target_gt_disagreement_thresh`, default 2.0 m). This is
 distinct from realized `expert_disagreement` (model rollout vs logged expert
 during simulation) and is computed from the K-candidate winner already produced
-— no extra model or expert database. The moving-collision label uses the
-reward's gated overlap definition (rear-end and low-speed suppression, via
-`--count_rear_end_collisions`), matching `compute_safety_score_batch`, so repair
-labels do not drift from the reward.
+— no extra model or expert database. The moving-collision label counts a contact
+when the exact closest-point clearance is within `moving_collision_thresh`
+(default 0.2 m) — the same distance band the static path uses (`sc_cross_thresh`),
+so moving and static agree on what "collision" means. Rear-end suppression (via
+`--count_rear_end_collisions`) and low-speed suppression still gate which
+contacts are the ego's fault. (The frozen reward's hard collision uses strict OBB
+overlap, clearance `< 0`; this labeling/mining band is intentionally the 0.2 m
+distance, matching static.)
 
 ## Minimal Config Shape
 
