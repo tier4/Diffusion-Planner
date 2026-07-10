@@ -595,10 +595,12 @@ def main() -> None:
     if not args.plan_only:
         model, model_args = _load_model(args.model_path, args.lora_path, device)
         # Closed-loop reproducer mining is REALIZED-ONLY: every rule (collision,
-        # road-border, static, expert-disagreement) is checked against the
-        # realized ego pose at each sim step, and the FIRST realized violation
-        # anchors the credit window. The predicted-trajectory check
-        # (build_reproducer_danger_scorer) belongs to the OPEN-LOOP side
+        # road-border, static) is checked against the realized ego pose at each
+        # sim step; expert-disagreement (Conflict) instead compares the model's
+        # OPEN-LOOP proposal at each step against the logged expert future (route
+        # arc-length progress + speed, paper-faithful). The FIRST violation anchors
+        # the credit window. The predicted-trajectory failure classifier
+        # (build_reproducer_danger_scorer) belongs to the OPEN-LOOP repair side
         # (classify / repair), NOT the closed-loop sim, so it is not used here
         # (danger_scorer stays None).
         realized_supported = {

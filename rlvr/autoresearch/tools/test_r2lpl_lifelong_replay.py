@@ -1671,9 +1671,6 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         np_dict,
         *,
         collided,
-        live_pose,
-        gt_pose,
-        segment_key,
         step,
         **_kwargs,
     ):
@@ -1830,9 +1827,6 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         np_dict,
         *,
         collided,
-        live_pose,
-        gt_pose,
-        segment_key,
         step,
         **_kwargs,
     ):
@@ -2113,10 +2107,8 @@ def test_mine_credit_window_main_forwards_allowed_labels_to_realized_verifier(
             _np_dict,
             *,
             collided=False,
-            live_pose=None,
-            gt_pose=None,
-            segment_key=None,
             step=None,
+            **_kwargs,
         ):
             return {
                 "labels": ["moving_collision"],
@@ -2514,7 +2506,7 @@ def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
         "/tmp/event_a/credit-00030.npz",
         "/tmp/event_a/credit-00029.npz",
     ]
-    assert {row["reason"] for row in dirty} == {"event_window_t0_already_collided"}
+    assert {row["reason"] for row in dirty} == {"event_window_t0_collision_or_near"}
     assert checked_paths == ["/tmp/event_a/credit-00030.npz", "/tmp/event_a/credit-00029.npz"]
 
 
@@ -2621,9 +2613,6 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
     row = scorer(
         np_dict,
         collided=False,
-        live_pose=np.array([0.0, 0.0, 0.0]),
-        gt_pose=np.array([0.0, 0.0, 0.0]),
-        segment_key="seg-a",
         step=4,
         model_pred_world=model_pred_world,
         expert_future_world=expert_future_world,
@@ -3281,7 +3270,7 @@ def test_refresh_repair_strips_repair_added_keys_from_unrepaired_rows(monkeypatc
 
     monkeypatch.setattr(round_runner, "_run", _fake_run)
 
-    newly = _refresh_repair(
+    newly, _refresh_elapsed = _refresh_repair(
         cfg, tmp_path / "model.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[]
     )
 

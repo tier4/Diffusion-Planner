@@ -1745,12 +1745,6 @@ def run_segments_batched(
                         if realized_event_scorer is None:
                             realized_rows.append(None)
                             continue
-                        gt_pose = None
-                        if hasattr(_s.tl, "poses") and 0 <= int(_idx) < len(_s.tl.poses):
-                            gt_pose = _s.tl.poses[int(_idx)]
-                        route_key = getattr(_s, "output_route_key", None)
-                        if route_key is None:
-                            route_key = _route_key(_s.tl)
                         # Paper-faithful Conflict inputs: the model's OPEN-LOOP proposal in
                         # world xy, the logged expert future (INCLUDING the current pose at
                         # index 0, so the detector's +1 shift lands on the first future
@@ -1777,13 +1771,6 @@ def run_segments_batched(
                             realized_event_scorer(
                                 np_dict,
                                 collided=bool(col),
-                                live_pose=_s.live_pose,
-                                gt_pose=gt_pose,
-                                segment_key=(
-                                    route_key,
-                                    _s.start,
-                                    _s.end,
-                                ),
                                 step=_s.k,
                                 model_pred_world=model_pred_world,
                                 expert_future_world=expert_future_world,

@@ -1550,13 +1550,13 @@ def _refresh_repair(
     scope: str,
     cycle: int,
     gpu_ids: list[int],
-) -> list[str]:
+) -> tuple[list[str], float]:
     """Re-run repair (K-gen + retrieval, NO re-sim) on mined credit windows.
 
     Uses the CURRENT checkpoint ``model_path`` to harvest scenes that became
-    rule-feasible as the policy improved. Returns the list of newly-repaired
-    scene NPZ paths. Also folds the harvested repairs into the round's canonical
-    ``repaired_targets.json`` / ``.jsonl`` and rewrites
+    rule-feasible as the policy improved. Returns (newly-repaired scene NPZ paths,
+    repair wall-time seconds). Also folds the harvested repairs into the round's
+    canonical ``repaired_targets.json`` / ``.jsonl`` and rewrites
     ``repaired_targets_unrepaired.json`` to the still-unrepaired set so the next
     cycle only re-attempts what remains.
     """
@@ -1591,9 +1591,30 @@ def _refresh_repair(
         repair_overrides={"device": "cuda"} if gpu_id is not None else None,
         allow_empty=True,
     )
-    _run(cmd, refresh_dir / "repair.log", env=_env_for_gpu(gpu_id))
+    refresh_elapsed = _run(cmd, refresh_dir / "repair.log", env=_env_for_gpu(gpu_id))
 
     newly = [str(p) for p in _read_json_list(out_list)] if out_list.exists() else []
+
+    # scope="all" re-attempts EVERY credit window, so it re-repairs sources the
+    # initial repair already covered. Those land at new refresh output paths, which
+    # _union_scene_lists (dedup by output path) can't see as the same source -> the
+    # source would train twice with two different targets. Keep only refresh
+    # repairs whose SOURCE scene is not already in the canonical set.
+    refresh_rows_jsonl = refresh_dir / "repaired_targets.jsonl"
+    canonical_rows_jsonl = rdir / "repaired_targets.jsonl"
+    if scope == "all" and newly:
+        canon_sources = {
+            row.get("source_scene_path")
+            for row in (_read_jsonl(canonical_rows_jsonl) if canonical_rows_jsonl.exists() else [])
+            if row.get("source_scene_path")
+        }
+        kept = [
+            row
+            for row in _read_jsonl(refresh_rows_jsonl)
+            if row.get("source_scene_path") not in canon_sources
+        ]
+        _write_jsonl(refresh_rows_jsonl, kept)
+        newly = [str(row["scene_path"]) for row in kept if row.get("scene_path")]
 
     # Fold harvested repairs into the round's canonical artifacts.
     if newly:
@@ -1602,8 +1623,6 @@ def _refresh_repair(
             [str(p) for p in _read_json_list(canonical_list)] if canonical_list.exists() else []
         )
         _union_scene_lists(existing, newly, canonical_list)
-        refresh_rows_jsonl = refresh_dir / "repaired_targets.jsonl"
-        canonical_rows_jsonl = rdir / "repaired_targets.jsonl"
         _merge_jsonl_files([canonical_rows_jsonl, refresh_rows_jsonl], canonical_rows_jsonl)
 
     # The refresh's still-unrepaired output IS the new full unrepaired set: for
@@ -1613,7 +1632,7 @@ def _refresh_repair(
     refresh_unrepaired = out_list.with_name(out_list.stem + "_unrepaired.json")
     new_unrepaired = _read_json_list(refresh_unrepaired) if refresh_unrepaired.exists() else []
     _write_json(rdir / "repaired_targets_unrepaired.json", new_unrepaired)
-    return newly
+    return newly, refresh_elapsed
 
 
 def _run_base_sft_training(
@@ -1658,6 +1677,9 @@ def _run_base_sft_training(
     total_elapsed = 0.0
     current_model = model_path
     last_cycle = len(chunk_sizes) - 1
+    chunk_targets = _repair_refresh_chunk_targets(
+        _checkpoint_epoch(model_path), epochs_per_round, refresh_every, max_cycles
+    )
     for cycle, chunk in enumerate(chunk_sizes):
         train_cmd, next_model_path, cwd, env = _base_train_invocation(
             cfg,
@@ -1667,10 +1689,9 @@ def _run_base_sft_training(
             round_idx=round_idx,
             epochs_this_chunk=chunk,
         )
-        target = _checkpoint_epoch(current_model) + chunk
         print(
             f"[round {round_idx}] train chunk {cycle} "
-            f"({chunk} epochs -> target epoch {target}): {' '.join(train_cmd)}"
+            f"({chunk} epochs -> target epoch {chunk_targets[cycle]}): {' '.join(train_cmd)}"
         )
         total_elapsed += _run(train_cmd, rdir / f"train_chunk{cycle}.log", cwd=cwd, env=env)
         if not next_model_path.exists():
@@ -1680,7 +1701,10 @@ def _run_base_sft_training(
         current_model = next_model_path
         if cycle == last_cycle:
             break
-        newly = _refresh_repair(cfg, current_model, rdir, scope=scope, cycle=cycle, gpu_ids=gpu_ids)
+        newly, refresh_elapsed = _refresh_repair(
+            cfg, current_model, rdir, scope=scope, cycle=cycle, gpu_ids=gpu_ids
+        )
+        total_elapsed += refresh_elapsed
         if newly:
             existing = [str(p) for p in _read_json_list(train_input_list)]
             _union_scene_lists(existing, newly, train_input_list)

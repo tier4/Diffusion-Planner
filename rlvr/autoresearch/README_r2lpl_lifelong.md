@@ -110,16 +110,21 @@ scene list or chunk manifest
 This is the central design rule of the workflow. The two phases check rule
 violations against DIFFERENT trajectories, and they must never be mixed:
 
-**Reproducer phase = CLOSED-LOOP = REALIZED ego only.**
+**Reproducer phase = CLOSED-LOOP.**
 The reproducer drives the model closed-loop (MPC + clock; see Reproducer
-Defaults) and, at every sim step, checks the **realized ego pose** against every
-rule:
+Defaults) and, at every sim step, checks each rule. Collision / road-border use
+the **realized ego pose**; expert disagreement (Conflict) uses the model's
+**open-loop proposal** vs the logged expert (paper-faithful — the realized ego
+re-plans and smooths, so a decision-level acceleration/yielding conflict is only
+visible in the proposed plan):
 - moving / static collision: ego-vs-neighbor OBB overlap at the realized pose
   (the reward's gated definition — rear-end and low-speed suppressed);
 - road-border crossing: realized-pose road-border distance `< rb_cross_thresh`;
-- expert disagreement: realized rollout pose vs the matched logged GT pose.
+- expert disagreement: the model's open-loop proposal vs the logged expert
+  future, compared as route arc-length progress + speed (relative to the current
+  pose, expert shifted +1 step) — the R2LPL Conflict criterion.
 
-The **first realized step that breaks a rule is the `offense_step`**. The model's
+The **first step that breaks a rule is the `offense_step`**. The model's
 own *predicted* trajectory is NEVER used to detect or anchor a violation here —
 in closed loop the ego re-plans every step, so a predicted crossing that the
 realized ego avoids is a phantom, not a violation. (Concretely: the miner is run
@@ -331,7 +336,8 @@ Common production settings:
 If `static_collision` is included in `repair_labels` and static rows are present,
 the reward config must set `static_collision_enabled=true`; otherwise static
 collision repair fails loudly. Expert-disagreement mining follows the R2LPL
-conflict rules over realized rollout progress versus matched GT progress:
+conflict rules over the model's OPEN-LOOP proposal progress versus the matched
+logged-expert progress (route arc-length + speed, relative to the current pose):
 expert-waits/model-goes, model-lags-moving-expert, and model-ahead-expert. The
 threshold config defines the wait speed/progress, forward-progress gap,
 lag-progress gap, and moving-speed values:

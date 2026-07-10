@@ -396,7 +396,9 @@ def _drop_t0_dirty_event_windows(
                     collision_thresh=collision_thresh,
                 )
                 if hit:
-                    dirty_reason = "event_window_t0_already_collided"
+                    # Signed clearance <= collision_thresh: an actual overlap OR a
+                    # below-threshold near miss at t=0 (not necessarily overlapping).
+                    dirty_reason = "event_window_t0_collision_or_near"
                     dirty_value = value
                     break
             if "road_border_crossing" in labels:
