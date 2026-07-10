@@ -1123,16 +1123,35 @@ def test_projected_disagreement_none_when_consistent():
 
 
 def test_projected_disagreement_expert_plus_one_shift_is_applied():
+    # Inputs already start at 0 (relative), so relativization is a no-op here.
     # With the +1 shift the reported expert_end is expert_progress[horizon]=5.0;
-    # without it, it would be expert_progress[horizon-1]=9.0.
+    # without it, it would be expert_progress[:horizon][-1]=30.0.
     result = detect_expert_disagreement_projected(
         model_progress=np.array([0.0, 1.0, 2.0, 3.0]),
         model_speed=np.zeros(4),
-        expert_progress=np.array([100.0, 10.0, 20.0, 30.0, 5.0]),
+        expert_progress=np.array([0.0, 10.0, 20.0, 30.0, 5.0]),
         expert_speed=np.full(5, 0.4),
         **_PROJECTED_THRESHOLDS,
     )
     assert result.expert_end_progress == pytest.approx(5.0)
+
+
+def test_projected_disagreement_relativizes_absolute_progress():
+    # Progress passed as ABSOLUTE route arc (mid-route: large offset) must be
+    # relativized to the current pose so the absolute wait/forward thresholds
+    # apply to horizon advancement. Expert waits, model drives forward ->
+    # expert_wait_model_forward must fire despite the large absolute offset.
+    abs_offset = 250.0
+    result = detect_expert_disagreement_projected(
+        model_progress=abs_offset + np.array([0.0, 2.0, 4.0, 6.0, 8.0]),
+        model_speed=np.full(5, 2.0),
+        expert_progress=abs_offset + np.zeros(5),
+        expert_speed=np.zeros(5),
+        **_PROJECTED_THRESHOLDS,
+    )
+    assert result.expert_disagreement
+    assert result.reason == "expert_wait_model_forward"
+    assert result.expert_end_progress == pytest.approx(0.0, abs=1e-5)
 
 
 def test_projected_disagreement_rejects_nonpositive_threshold():
@@ -2615,6 +2634,8 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
     assert "expert_disagreement" in row["labels"]
     assert row["expert_disagreement_step"] == 4
     assert row["expert_disagreement_reason"] == "expert_wait_model_forward"
+    # Progress is relativized to a COMMON origin (expert index 0). The expert
+    # sits at the route origin (s0=0), so the model keeps its ~10 m end arc.
     assert row["expert_disagreement_model_end_progress"] == pytest.approx(10.0, abs=0.1)
     assert row["expert_disagreement_expert_end_progress"] == pytest.approx(0.0, abs=1e-4)
 

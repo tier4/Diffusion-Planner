@@ -228,6 +228,20 @@ def build_expert_morph_candidate(
     det = det[:T]
     expert = expert[:T]
 
+    # The logged expert future can be zero-padded past its valid length (recorded
+    # route ended before the horizon). Those trailing (0,0) pads would project to
+    # the route origin and collapse the expert arc/lateral at the tail (teleport +
+    # tail yaw), so hold the last valid pose for the remainder. NOTE: an all-zero
+    # expert is a genuinely STOPPED expert (relative motion ~0 everywhere), NOT
+    # padding — it must be kept (it drives the morph to a stop), so only the
+    # valid-prefix-then-trailing-zeros case is held, never rejected.
+    expert = expert.copy()
+    expert_valid = np.abs(expert[:, :2]).sum(axis=1) > _EPS
+    if expert_valid.any() and not expert_valid.all():
+        last_valid = int(np.max(np.flatnonzero(expert_valid)))
+        if last_valid < T - 1:
+            expert[last_valid + 1 :] = expert[last_valid]
+
     det_xy = det[:, :2]
     expert_xy = expert[:, :2]
 

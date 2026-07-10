@@ -206,6 +206,19 @@ def detect_expert_disagreement_projected(
     if expert_progress.shape[0] != expert_speed.shape[0]:
         raise ValueError("expert_progress and expert_speed must have equal length")
 
+    # Progress must be measured RELATIVE to the current pose so the absolute
+    # wait/forward thresholds apply to horizon advancement — matching the
+    # reference's current-state-relative Frenet column. Callers may pass absolute
+    # route arc-length (from the route start); without this a mid-route offense has
+    # a large expert_end_progress and the expert_wait_model_forward branch never
+    # fires. Subtract a COMMON origin (the current pose = expert index 0) from BOTH
+    # so the model-vs-expert differences (model_ahead / model_lagging branches) are
+    # preserved. No-op when inputs already start at 0.
+    if expert_progress.shape[0]:
+        s0 = float(expert_progress[0])
+        model_progress = model_progress - s0
+        expert_progress = expert_progress - s0
+
     horizon = min(int(model_progress.shape[0]), int(expert_progress.shape[0]) - 1)
     if horizon <= 1:
         return ConflictResult(False, None, 0.0)

@@ -2604,6 +2604,7 @@ def _dump_precollision_window(
         expert_eaf = np.zeros((fut_len, 4), dtype=np.float32)
         rec0 = tl.poses[idx]
         Rr = _rotation_matrix(float(rec0[2]))  # world delta -> recorded-ego frame
+        n_expert = 0
         for j in range(1, fut_len + 1):
             ridx = idx + j
             if ridx >= len(tl.poses):
@@ -2611,6 +2612,12 @@ def _dump_precollision_window(
             d = Rr @ (tl.poses[ridx][:2] - rec0[:2])
             dh = float(tl.poses[ridx][2] - rec0[2])
             expert_eaf[j - 1] = (d[0], d[1], math.cos(dh), math.sin(dh))
+            n_expert = j
+        # HOLD the last valid pose past the recorded route end instead of leaving
+        # (0,0) zero-padding: a zero tail reads as a teleport back to the ego
+        # origin (breaks the GT overlay + collapses the morph's expert projection).
+        if 0 < n_expert < fut_len:
+            expert_eaf[n_expert:] = expert_eaf[n_expert - 1]
         scene["ego_expert_future"] = expert_eaf
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
