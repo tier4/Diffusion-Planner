@@ -46,12 +46,16 @@ from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
 )
 from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
+    _apply_repair_refresh_config,
     _base_train_invocation,
     _gpu_ids_from_config,
     _load_config,
     _lora_for_policy,
     _perception_mining_cmd,
+    _refresh_repair,
     _repair_cmd,
+    _repair_refresh_chunk_sizes,
+    _repair_refresh_chunk_targets,
     _run_mining_phase,
     _run_repair_phase,
     _split_jsonl_by_event,
@@ -3141,3 +3145,155 @@ def test_sft_der_applies_only_to_replay_rows_in_mixed_batch():
     loss.backward()
     assert model.value.grad is not None
     assert torch.isfinite(model.value.grad)
+
+
+# ---------------------------------------------------------------------------
+# intra-training re-repair (repair_refresh) inner loop
+# ---------------------------------------------------------------------------
+
+
+def _repair_refresh_base_cfg():
+    return {
+        "epochs_per_round": 4,
+        "training_backend": "base_sft",
+    }
+
+
+def test_repair_refresh_rejects_every_greater_than_epochs_per_round():
+    cfg = _repair_refresh_base_cfg()
+    cfg["repair_refresh_every_epochs"] = 5
+    with pytest.raises(ValueError, match="epochs_per_round"):
+        _apply_repair_refresh_config(cfg)
+
+
+def test_repair_refresh_rejects_non_base_sft_backend():
+    cfg = _repair_refresh_base_cfg()
+    cfg["repair_refresh_every_epochs"] = 2
+    cfg["training_backend"] = "rsft"
+    with pytest.raises(ValueError, match="base_sft"):
+        _apply_repair_refresh_config(cfg)
+
+
+def test_repair_refresh_rejects_unknown_scope():
+    cfg = _repair_refresh_base_cfg()
+    cfg["repair_refresh_scope"] = "bogus"
+    with pytest.raises(ValueError, match="repair_refresh_scope"):
+        _apply_repair_refresh_config(cfg)
+
+
+def test_repair_refresh_defaults_when_absent():
+    cfg = _apply_repair_refresh_config(_repair_refresh_base_cfg())
+    assert cfg["repair_refresh_every_epochs"] == 0
+    assert cfg["repair_refresh_scope"] == "unrepaired"
+    assert cfg["repair_refresh_max_cycles"] == 0
+
+
+def test_repair_refresh_chunk_sizes_and_targets_split_evenly():
+    # epochs_per_round=4, refresh_every=2 => two chunks of 2, one refresh between.
+    assert _repair_refresh_chunk_sizes(4, 2, 0) == [2, 2]
+    # base epoch 80 -> 82 -> 84 (absolute train_epochs targets).
+    assert _repair_refresh_chunk_targets(80, 4, 2, 0) == [82, 84]
+
+
+def test_repair_refresh_chunk_sizes_handles_remainder_and_off_state():
+    # remainder: 5 epochs in chunks of 2 => 2, 2, 1.
+    assert _repair_refresh_chunk_sizes(5, 2, 0) == [2, 2, 1]
+    # feature OFF (every==0) or every>=epochs_per_round => single full chunk.
+    assert _repair_refresh_chunk_sizes(4, 0, 0) == [4]
+    assert _repair_refresh_chunk_sizes(4, 4, 0) == [4]
+
+
+def test_repair_refresh_chunk_sizes_respects_max_cycles():
+    # max_cycles=1: one refresh, then finish the rest in a single last chunk.
+    assert _repair_refresh_chunk_sizes(6, 2, 1) == [2, 4]
+    assert _repair_refresh_chunk_targets(80, 6, 2, 1) == [82, 86]
+
+
+def test_refresh_repair_strips_repair_added_keys_from_unrepaired_rows(monkeypatch, tmp_path):
+    rdir = tmp_path / "round"
+    rdir.mkdir(parents=True, exist_ok=True)
+    # Credit rows define the legal key set for build_repaired_targets.
+    credit_rows = [
+        {"scene_path": "/data/a.npz", "label": "moving_collision", "event_key": "ev0"},
+        {"scene_path": "/data/b.npz", "label": "static_collision", "event_key": "ev1"},
+    ]
+    (rdir / "credit_windows.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in credit_rows)
+    )
+    # Unrepaired rows = credit-row keys PLUS repair-added keys that must be stripped.
+    unrepaired = [
+        {
+            "scene_path": "/data/a.npz",
+            "label": "moving_collision",
+            "event_key": "ev0",
+            "reason": "no_safe_candidate",
+            "meta": {"min_dist": 0.1},
+            "t0_min_dist": 0.05,
+        }
+    ]
+    (rdir / "repaired_targets_unrepaired.json").write_text(json.dumps(unrepaired))
+    (rdir / "repaired_targets.json").write_text(json.dumps([]))
+    (rdir / "repaired_targets.jsonl").write_text("")
+
+    cfg = {
+        "reward_config": str(tmp_path / "reward.json"),
+        "threshold_config": str(tmp_path / "thresholds.json"),
+        "repair_labels": ["moving_collision", "static_collision"],
+        "repair_config": {"ego_shape": "4.76,7.24,2.29", "min_margin": 0.3, "K": 8},
+    }
+
+    def _fake_run(cmd, log_path, *, cwd=None, env=None):
+        # build_repaired_targets writes: out_list, out_rows_jsonl, and an
+        # <out_list>_unrepaired.json. Simulate repairing the single scene.
+        out_list = Path(cmd[cmd.index("--out_list") + 1])
+        out_rows = Path(cmd[cmd.index("--out_rows_jsonl") + 1])
+        out_list.parent.mkdir(parents=True, exist_ok=True)
+        out_list.write_text(json.dumps(["/data/repaired_a.npz"]))
+        out_rows.write_text(
+            json.dumps({"scene_path": "/data/repaired_a.npz", "source_scene_path": "/data/a.npz"})
+            + "\n"
+        )
+        return 1.0
+
+    monkeypatch.setattr(round_runner, "_run", _fake_run)
+
+    newly = _refresh_repair(
+        cfg, tmp_path / "model.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[]
+    )
+
+    # The scene-rows jsonl fed to build_repaired_targets must contain ONLY the
+    # credit-row keys (reason/meta/t0_min_dist stripped).
+    written = _read_test_jsonl(rdir / "refresh_0" / "credit_windows.jsonl")
+    assert written == [
+        {"scene_path": "/data/a.npz", "label": "moving_collision", "event_key": "ev0"}
+    ]
+    assert set(written[0].keys()) == {"scene_path", "label", "event_key"}
+
+    # Harvested repairs fold into the canonical artifacts.
+    assert newly == ["/data/repaired_a.npz"]
+    assert json.loads((rdir / "repaired_targets.json").read_text()) == ["/data/repaired_a.npz"]
+    # Cleared everything => unrepaired list rewritten to empty.
+    assert json.loads((rdir / "repaired_targets_unrepaired.json").read_text()) == []
+
+
+def test_refresh_repair_returns_empty_when_no_unrepaired_rows(monkeypatch, tmp_path):
+    rdir = tmp_path / "round"
+    rdir.mkdir(parents=True, exist_ok=True)
+    (rdir / "credit_windows.jsonl").write_text(
+        json.dumps({"scene_path": "/data/a.npz", "label": "moving_collision"}) + "\n"
+    )
+    # No unrepaired file at all => nothing to re-attempt, repair never runs.
+    cfg = {
+        "reward_config": str(tmp_path / "reward.json"),
+        "threshold_config": str(tmp_path / "thresholds.json"),
+        "repair_config": {"ego_shape": "4.76,7.24,2.29", "min_margin": 0.3},
+    }
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("_run should not be called when there is nothing to re-attempt")
+
+    monkeypatch.setattr(round_runner, "_run", _boom)
+    assert (
+        _refresh_repair(cfg, tmp_path / "m.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[])
+        == []
+    )

@@ -52,6 +52,7 @@ _RSFT_TRAINING_KEYS = {
 }
 _MINING_TOOL = "direct_reproducer_chunks"
 _TORCH_DDP_FILE_STORE = Path("/tmp/tmp_dist_init")
+_REPAIR_REFRESH_SCOPES = {"unrepaired", "all"}
 
 
 def _load_any_json(path: Path) -> Any:
@@ -157,6 +158,47 @@ def _infer_training_backend(training_cfg: dict[str, Any]) -> str:
     return "base_sft"
 
 
+def _apply_repair_refresh_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Normalize + loudly validate the intra-training re-repair (repair_refresh) knobs.
+
+    ``repair_refresh_every_epochs`` (int, default 0 => OFF). When ``0 < every <
+    epochs_per_round`` the base_sft path trains in chunks of ``every`` epochs,
+    re-running repair on the mined credit windows with the current checkpoint
+    between chunks. Only the base_sft backend supports the inner loop.
+    """
+    cfg.setdefault("repair_refresh_every_epochs", 0)
+    cfg.setdefault("repair_refresh_scope", "unrepaired")
+    cfg.setdefault("repair_refresh_max_cycles", 0)
+    every = int(cfg["repair_refresh_every_epochs"])
+    max_cycles = int(cfg["repair_refresh_max_cycles"])
+    scope = str(cfg["repair_refresh_scope"])
+    epochs_per_round = int(cfg["epochs_per_round"])
+    if every < 0:
+        raise ValueError(f"repair_refresh_every_epochs must be >= 0, got {every}")
+    if max_cycles < 0:
+        raise ValueError(f"repair_refresh_max_cycles must be >= 0, got {max_cycles}")
+    if scope not in _REPAIR_REFRESH_SCOPES:
+        raise ValueError(
+            f"repair_refresh_scope must be one of {sorted(_REPAIR_REFRESH_SCOPES)}, got {scope!r}"
+        )
+    if every > epochs_per_round:
+        raise ValueError(
+            f"repair_refresh_every_epochs ({every}) must be <= epochs_per_round "
+            f"({epochs_per_round})"
+        )
+    if every > 0:
+        backend = str(cfg.get("training_backend", "base_sft"))
+        if backend != "base_sft":
+            raise ValueError(
+                "repair_refresh_every_epochs requires training_backend='base_sft'; "
+                f"the intra-training re-repair loop is not supported for backend {backend!r}"
+            )
+    cfg["repair_refresh_every_epochs"] = every
+    cfg["repair_refresh_max_cycles"] = max_cycles
+    cfg["repair_refresh_scope"] = scope
+    return cfg
+
+
 def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     workflow_source = contract.get("workflow_config")
     if workflow_source is None:
@@ -178,6 +220,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     repair = dict(workflow.get("repair_generation") or {})
     replay = dict(workflow.get("replay_memory") or {})
     rounds = dict(workflow.get("rounds") or {})
+    refresh = dict(rounds.get("repair_refresh") or workflow.get("repair_refresh") or {})
     training_section = dict(workflow.get("training") or {})
 
     scene_list = _contract_scene_list(contract)
@@ -391,6 +434,28 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
         "perception_mining": perception_mining,
+        "repair_refresh_every_epochs": int(
+            _first_non_null(
+                refresh.get("every_epochs"),
+                refresh.get("repair_refresh_every_epochs"),
+                rounds.get("repair_refresh_every_epochs"),
+                0,
+            )
+        ),
+        "repair_refresh_scope": str(
+            _first_non_null(
+                refresh.get("scope"),
+                rounds.get("repair_refresh_scope"),
+                "unrepaired",
+            )
+        ),
+        "repair_refresh_max_cycles": int(
+            _first_non_null(
+                refresh.get("max_cycles"),
+                rounds.get("repair_refresh_max_cycles"),
+                0,
+            )
+        ),
     }
     if gpu_ids:
         cfg["gpu_ids"] = gpu_ids
@@ -398,7 +463,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         cfg["scene_pool"] = str(scene_list)
         cfg["route_scene_list"] = str(scene_list)
 
-    return cfg
+    return _apply_repair_refresh_config(cfg)
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -420,7 +485,7 @@ def _load_config(path: Path) -> dict[str, Any]:
         raise ValueError(
             "perception_mining requires chunk_manifest, scene_list, route_scene_list, or scene_pool"
         )
-    return cfg
+    return _apply_repair_refresh_config(cfg)
 
 
 def _config_from_cli_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -1033,6 +1098,48 @@ def _append_train_arg(cmd: list[str], key: str, value: Any) -> None:
     cmd.extend([f"--{key}", str(value)])
 
 
+def _repair_refresh_chunk_sizes(
+    epochs_per_round: int, refresh_every: int, max_cycles: int
+) -> list[int]:
+    """Split ``epochs_per_round`` into training chunks for the re-repair inner loop.
+
+    Returns per-chunk epoch counts. A re-repair fires between each consecutive
+    pair of chunks (i.e. ``len(sizes) - 1`` refreshes). ``max_cycles`` (>0) caps
+    the number of refreshes: after that many refreshes the remaining epochs are
+    trained in one final chunk with no further re-repair. When the feature is off
+    (``refresh_every <= 0`` or ``>= epochs_per_round``) a single full chunk is
+    returned, preserving the legacy single-invocation behavior.
+    """
+    if refresh_every <= 0 or refresh_every >= epochs_per_round:
+        return [epochs_per_round]
+    sizes: list[int] = []
+    remaining = epochs_per_round
+    refreshes_done = 0
+    while remaining > 0:
+        if max_cycles and refreshes_done >= max_cycles:
+            sizes.append(remaining)
+            break
+        chunk = min(refresh_every, remaining)
+        sizes.append(chunk)
+        remaining -= chunk
+        if remaining <= 0:
+            break
+        refreshes_done += 1
+    return sizes
+
+
+def _repair_refresh_chunk_targets(
+    base_epoch: int, epochs_per_round: int, refresh_every: int, max_cycles: int
+) -> list[int]:
+    """Absolute ``--train_epochs`` target for each chunk given the warm-start epoch."""
+    targets: list[int] = []
+    acc = base_epoch
+    for chunk in _repair_refresh_chunk_sizes(epochs_per_round, refresh_every, max_cycles):
+        acc += chunk
+        targets.append(acc)
+    return targets
+
+
 def _base_train_invocation(
     cfg: dict[str, Any],
     *,
@@ -1040,6 +1147,7 @@ def _base_train_invocation(
     train_list: Path,
     rdir: Path,
     round_idx: int,
+    epochs_this_chunk: int | None = None,
 ) -> tuple[list[str], Path, Path, dict[str, str]]:
     train_cfg = _base_training_cfg(cfg["training_config"])
     overrides = dict(train_cfg.get("train_args", {}))
@@ -1056,7 +1164,10 @@ def _base_train_invocation(
     )
     save_dir = rdir / "base_train"
     save_dir.mkdir(parents=True, exist_ok=True)
-    total_epochs = _checkpoint_epoch(model_path) + int(cfg["epochs_per_round"])
+    epochs_to_add = (
+        int(cfg["epochs_per_round"]) if epochs_this_chunk is None else int(epochs_this_chunk)
+    )
+    total_epochs = _checkpoint_epoch(model_path) + epochs_to_add
     gpu_ids = _gpu_ids_from_config(cfg)
     default_nproc = len(gpu_ids) if gpu_ids else 1
     nproc = int(train_cfg.get("nproc_per_node", overrides.pop("nproc_per_node", default_nproc)))
@@ -1408,6 +1519,169 @@ def _run_repair_phase(
     return elapsed
 
 
+def _credit_row_keys(credit_jsonl: Path) -> set[str]:
+    """Union of keys seen across the mined credit-window rows.
+
+    Used to strip repair-added keys (``reason``, repair meta) off unrepaired rows
+    so a refresh re-attempt feeds ``build_repaired_targets`` clean credit rows.
+    """
+    keys: set[str] = set()
+    for row in _read_jsonl(credit_jsonl):
+        keys.update(row.keys())
+    return keys
+
+
+def _refresh_repair(
+    cfg: dict[str, Any],
+    model_path: Path,
+    rdir: Path,
+    *,
+    scope: str,
+    cycle: int,
+    gpu_ids: list[int],
+) -> list[str]:
+    """Re-run repair (K-gen + retrieval, NO re-sim) on mined credit windows.
+
+    Uses the CURRENT checkpoint ``model_path`` to harvest scenes that became
+    rule-feasible as the policy improved. Returns the list of newly-repaired
+    scene NPZ paths. Also folds the harvested repairs into the round's canonical
+    ``repaired_targets.json`` / ``.jsonl`` and rewrites
+    ``repaired_targets_unrepaired.json`` to the still-unrepaired set so the next
+    cycle only re-attempts what remains.
+    """
+    refresh_dir = rdir / f"refresh_{cycle}"
+    refresh_dir.mkdir(parents=True, exist_ok=True)
+    credit_jsonl = rdir / "credit_windows.jsonl"
+    if scope == "all":
+        input_jsonl = credit_jsonl
+    elif scope == "unrepaired":
+        input_jsonl = refresh_dir / "credit_windows.jsonl"
+        unrepaired_path = rdir / "repaired_targets_unrepaired.json"
+        unrepaired_rows = _read_json_list(unrepaired_path) if unrepaired_path.exists() else []
+        if not unrepaired_rows:
+            _write_jsonl(input_jsonl, [])
+            return []
+        keep_keys = _credit_row_keys(credit_jsonl)
+        stripped = [{k: v for k, v in row.items() if k in keep_keys} for row in unrepaired_rows]
+        _write_jsonl(input_jsonl, stripped)
+    else:
+        raise ValueError(f"unknown repair_refresh_scope: {scope!r}")
+
+    gpu_id = gpu_ids[0] if gpu_ids else None
+    out_list = refresh_dir / "repaired_targets.json"
+    cmd = _repair_cmd(
+        cfg,
+        model_path,
+        input_jsonl,
+        rdir,
+        out_dir=refresh_dir / "repaired_targets",
+        out_list=out_list,
+        out_rows_jsonl=refresh_dir / "repaired_targets.jsonl",
+        repair_overrides={"device": "cuda"} if gpu_id is not None else None,
+        allow_empty=True,
+    )
+    _run(cmd, refresh_dir / "repair.log", env=_env_for_gpu(gpu_id))
+
+    newly = [str(p) for p in _read_json_list(out_list)] if out_list.exists() else []
+
+    # Fold harvested repairs into the round's canonical artifacts.
+    if newly:
+        canonical_list = rdir / "repaired_targets.json"
+        existing = (
+            [str(p) for p in _read_json_list(canonical_list)] if canonical_list.exists() else []
+        )
+        _union_scene_lists(existing, newly, canonical_list)
+        refresh_rows_jsonl = refresh_dir / "repaired_targets.jsonl"
+        canonical_rows_jsonl = rdir / "repaired_targets.jsonl"
+        _merge_jsonl_files([canonical_rows_jsonl, refresh_rows_jsonl], canonical_rows_jsonl)
+
+    # The refresh's still-unrepaired output IS the new full unrepaired set: for
+    # scope="unrepaired" we re-attempted exactly the prior unrepaired rows, for
+    # scope="all" we re-attempted every credit window. Rewrite it (empty when the
+    # refresh cleared everything) so the next cycle re-attempts only what remains.
+    refresh_unrepaired = out_list.with_name(out_list.stem + "_unrepaired.json")
+    new_unrepaired = _read_json_list(refresh_unrepaired) if refresh_unrepaired.exists() else []
+    _write_json(rdir / "repaired_targets_unrepaired.json", new_unrepaired)
+    return newly
+
+
+def _run_base_sft_training(
+    cfg: dict[str, Any],
+    *,
+    model_path: Path,
+    train_input_list: Path,
+    rdir: Path,
+    round_idx: int,
+    gpu_ids: list[int],
+) -> tuple[float, Path]:
+    """Run the round's base_sft training, optionally with intra-training re-repair.
+
+    When ``repair_refresh_every_epochs`` is off (0 or >= epochs_per_round) this is
+    the legacy single ``_base_train_invocation`` + ``_run``. When enabled, training
+    proceeds in chunks; between chunks a re-repair harvests newly-recoverable
+    scenes (no re-sim) which are merged into the train set before the next chunk.
+    Returns (total_train_wall_time_sec, produced_checkpoint_path).
+    """
+    epochs_per_round = int(cfg["epochs_per_round"])
+    refresh_every = int(cfg.get("repair_refresh_every_epochs", 0))
+    max_cycles = int(cfg.get("repair_refresh_max_cycles", 0))
+    scope = str(cfg.get("repair_refresh_scope", "unrepaired"))
+    chunk_sizes = _repair_refresh_chunk_sizes(epochs_per_round, refresh_every, max_cycles)
+
+    if len(chunk_sizes) == 1:
+        train_cmd, next_model_path, cwd, env = _base_train_invocation(
+            cfg,
+            model_path=model_path,
+            train_list=train_input_list,
+            rdir=rdir,
+            round_idx=round_idx,
+        )
+        print(f"[round {round_idx}] train: {' '.join(train_cmd)}")
+        elapsed = _run(train_cmd, rdir / "train.log", cwd=cwd, env=env)
+        if not next_model_path.exists():
+            raise FileNotFoundError(
+                f"base trainer did not create expected checkpoint: {next_model_path}"
+            )
+        return elapsed, next_model_path
+
+    total_elapsed = 0.0
+    current_model = model_path
+    last_cycle = len(chunk_sizes) - 1
+    for cycle, chunk in enumerate(chunk_sizes):
+        train_cmd, next_model_path, cwd, env = _base_train_invocation(
+            cfg,
+            model_path=current_model,
+            train_list=train_input_list,
+            rdir=rdir,
+            round_idx=round_idx,
+            epochs_this_chunk=chunk,
+        )
+        target = _checkpoint_epoch(current_model) + chunk
+        print(
+            f"[round {round_idx}] train chunk {cycle} "
+            f"({chunk} epochs -> target epoch {target}): {' '.join(train_cmd)}"
+        )
+        total_elapsed += _run(train_cmd, rdir / f"train_chunk{cycle}.log", cwd=cwd, env=env)
+        if not next_model_path.exists():
+            raise FileNotFoundError(
+                f"base trainer did not create expected checkpoint: {next_model_path}"
+            )
+        current_model = next_model_path
+        if cycle == last_cycle:
+            break
+        newly = _refresh_repair(cfg, current_model, rdir, scope=scope, cycle=cycle, gpu_ids=gpu_ids)
+        if newly:
+            existing = [str(p) for p in _read_json_list(train_input_list)]
+            _union_scene_lists(existing, newly, train_input_list)
+            print(
+                f"[round {round_idx}] repair_refresh cycle {cycle}: "
+                f"merged {len(newly)} newly-repaired scene(s) into train set"
+            )
+        else:
+            print(f"[round {round_idx}] repair_refresh cycle {cycle}: no new repairs")
+    return total_elapsed, current_model
+
+
 def _print_dry_run_plan(
     cfg: dict[str, Any],
     model_path: Path,
@@ -1631,20 +1905,14 @@ def main() -> None:
 
         if training_backend == "base_sft":
             _assert_base_sft_supports_replay_knobs(cfg)
-            train_cmd, next_model_path, train_cwd, train_env = _base_train_invocation(
+            phase_times["train"], model_path = _run_base_sft_training(
                 cfg,
                 model_path=model_path,
-                train_list=train_input_list,
+                train_input_list=train_input_list,
                 rdir=rdir,
                 round_idx=round_idx,
+                gpu_ids=gpu_ids,
             )
-            print(f"[round {round_idx}] train: {' '.join(train_cmd)}")
-            phase_times["train"] = _run(train_cmd, rdir / "train.log", cwd=train_cwd, env=train_env)
-            if not next_model_path.exists():
-                raise FileNotFoundError(
-                    f"base trainer did not create expected checkpoint: {next_model_path}"
-                )
-            model_path = next_model_path
         else:
             # H2: anchor DER replay to THIS round's warm-start model (the prior
             # round's checkpoint), not a frozen round-1 anchor.
