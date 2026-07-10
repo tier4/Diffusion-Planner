@@ -1006,6 +1006,17 @@ def _repair_cmd(
         "--device",
         str(repair_cfg.get("device", "cuda")),
     ]
+    # Expert-disagreement repair knobs (default on; no config change needed to enable).
+    if not bool(repair_cfg.get("repair_expert_gt_candidate", True)):
+        cmd.append("--no_repair_expert_gt_candidate")
+    if not bool(repair_cfg.get("repair_expert_reference", True)):
+        cmd.append("--no_repair_expert_reference")
+    if "expert_morph_w_max" in repair_cfg:
+        cmd.extend(["--expert_morph_w_max", str(repair_cfg["expert_morph_w_max"])])
+    if "expert_morph_max_accel" in repair_cfg:
+        cmd.extend(["--expert_morph_max_accel", str(repair_cfg["expert_morph_max_accel"])])
+    if "expert_morph_max_jerk" in repair_cfg:
+        cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if cfg.get("repair_labels"):
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):

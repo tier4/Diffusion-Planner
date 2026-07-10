@@ -24,11 +24,14 @@ from rlvr.autoresearch.tools.build_repaired_targets import (
     _best_safe_candidate,
     _candidate_violation_score,
     _drop_t0_dirty_event_windows,
+    _expert_reference_scoring_data,
     _filtered_npz_payload,
     _future4_to_3col,
     _parse_ego_shape,
+    _row_is_expert_disagreement,
     _validate_static_collision_config,
 )
+from rlvr.autoresearch.tools.expert_morph import build_expert_morph_candidate
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
     _resolve_row,
@@ -3297,3 +3300,154 @@ def test_refresh_repair_returns_empty_when_no_unrepaired_rows(monkeypatch, tmp_p
         _refresh_repair(cfg, tmp_path / "m.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[])
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# Frenet det->GT morph candidate (expert_morph.build_expert_morph_candidate)
+# ---------------------------------------------------------------------------
+
+_MORPH_T = 80
+_MORPH_DT = 0.1
+
+
+def _straight_route(length_m: float = 60.0, n: int = 200) -> np.ndarray:
+    return np.stack([np.linspace(0.0, length_m, n), np.zeros(n)], axis=1)
+
+
+def _straight_traj(xs: np.ndarray) -> np.ndarray:
+    xy = np.stack([xs, np.zeros(len(xs))], axis=1)
+    return np.concatenate([xy, np.ones((len(xs), 1)), np.zeros((len(xs), 1))], axis=1)
+
+
+def test_expert_morph_takeoff_advances_toward_expert():
+    # det ~stationary, expert ramps forward -> morph must advance to ~expert terminal.
+    det = _straight_traj(np.zeros(_MORPH_T))
+    expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # ~4 m/s
+    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    assert morph is not None
+    assert morph.shape == (_MORPH_T, 4)
+    # Monotone non-decreasing longitudinal progress (no backward step).
+    assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+    # Reaches most of the expert's terminal progress by the horizon end.
+    assert morph[-1, 0] > 0.8 * expert[-1, 0]
+    # t=0 continuity in xy.
+    assert np.allclose(morph[0, :2], det[0, :2], atol=0.2)
+
+
+def test_expert_morph_stop_holds_position():
+    # det ramps forward, expert flat (stationary) -> morph is pulled back toward
+    # the stationary expert (terminal progress well below det's) and stays monotone.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # ~4 m/s
+    expert = _straight_traj(np.zeros(_MORPH_T))
+    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    assert morph is not None
+    assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+    # Pulled back well short of the det terminal progress ("holds position").
+    assert morph[-1, 0] < 0.5 * det[-1, 0]
+    # t=0 continuity in xy AND initial speed (v0 == det initial speed).
+    assert np.allclose(morph[0, :2], det[0, :2], atol=0.2)
+    v0_det = np.linalg.norm(det[1, :2] - det[0, :2]) / _MORPH_DT
+    v0_morph = np.linalg.norm(morph[1, :2] - morph[0, :2]) / _MORPH_DT
+    assert abs(v0_det - v0_morph) < 0.5
+
+
+def test_expert_morph_rejects_impossible_deceleration():
+    # High initial speed, short horizon, expert demands a full stop -> the accel /
+    # jerk clamps cannot follow, so the candidate is rejected (None).
+    Ts = 20
+    det = _straight_traj(np.cumsum(np.full(Ts, 2.0)))  # 20 m/s
+    expert = _straight_traj(np.zeros(Ts))
+    route = _straight_route(length_m=200.0, n=400)
+    assert build_expert_morph_candidate(det, expert, route) is None
+
+
+def test_expert_morph_rejects_route_too_short():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
+    short_route = np.array([[0.0, 0.0], [1.0, 0.0]])
+    assert build_expert_morph_candidate(det, expert, short_route) is None
+
+
+def test_expert_morph_never_reverses():
+    # A wiggly blend must still yield a monotone longitudinal signal.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.3)))
+    expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)))
+    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    assert morph is not None
+    assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Expert-reference scoring fix
+# ---------------------------------------------------------------------------
+
+
+def test_expert_reference_scoring_data_swaps_progress_gt():
+    realized = torch.arange(12, dtype=torch.float32).reshape(1, 3, 4)
+    expert = torch.zeros(1, 3, 4)
+    data = {
+        "ego_agent_future": realized,
+        "ego_expert_future": expert,
+        "route_lanes": torch.ones(1, 2, 5, 4),
+    }
+    scoring = _expert_reference_scoring_data(data, scene_path="/data/x.npz")
+    # Reward progress GT (ego_agent_future) is now the logged expert.
+    assert torch.equal(scoring["ego_agent_future"], expert)
+    # Original dict is NOT mutated (scoring-only).
+    assert torch.equal(data["ego_agent_future"], realized)
+    # Other keys are shared through (route unaffected).
+    assert torch.equal(scoring["route_lanes"], data["route_lanes"])
+
+
+def test_expert_reference_scoring_data_fails_loud_when_missing():
+    data = {"ego_agent_future": torch.zeros(1, 3, 4)}
+    with pytest.raises(ValueError, match="ego_expert_future"):
+        _expert_reference_scoring_data(data, scene_path="/data/x.npz")
+
+
+def test_expert_reference_only_applies_to_expert_disagreement():
+    assert _row_is_expert_disagreement({"repair_labels": ["expert_disagreement"]}) is True
+    assert _row_is_expert_disagreement({"repair_labels": ["moving_collision"]}) is False
+    assert _row_is_expert_disagreement({"repair_labels": ["road_border_crossing"]}) is False
+
+
+def test_repair_cmd_defaults_expert_knobs_on_and_honors_overrides(tmp_path):
+    base_cfg = {
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "repair_config": {"ego_shape": "from_npz", "min_margin": 0.3},
+    }
+    # Defaults on: no disabling flags emitted.
+    cmd = _repair_cmd(
+        base_cfg,
+        tmp_path / "model.pth",
+        tmp_path / "round" / "credit.jsonl",
+        tmp_path / "round",
+    )
+    assert "--no_repair_expert_gt_candidate" not in cmd
+    assert "--no_repair_expert_reference" not in cmd
+
+    # Explicit off + morph overrides threaded through.
+    cfg2 = {
+        **base_cfg,
+        "repair_config": {
+            "ego_shape": "from_npz",
+            "min_margin": 0.3,
+            "repair_expert_gt_candidate": False,
+            "repair_expert_reference": False,
+            "expert_morph_w_max": 0.8,
+            "expert_morph_max_accel": 1.5,
+            "expert_morph_max_jerk": 3.0,
+        },
+    }
+    cmd2 = _repair_cmd(
+        cfg2,
+        tmp_path / "model.pth",
+        tmp_path / "round" / "credit.jsonl",
+        tmp_path / "round",
+    )
+    assert "--no_repair_expert_gt_candidate" in cmd2
+    assert "--no_repair_expert_reference" in cmd2
+    assert cmd2[cmd2.index("--expert_morph_w_max") + 1] == "0.8"
+    assert cmd2[cmd2.index("--expert_morph_max_accel") + 1] == "1.5"
+    assert cmd2[cmd2.index("--expert_morph_max_jerk") + 1] == "3.0"

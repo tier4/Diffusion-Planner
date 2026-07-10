@@ -27,7 +27,12 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
     classify_loaded_scene_candidates_batch,
     current_ego_neighbor_clearance,
 )
-from rlvr.autoresearch.tools.eval_det_avoidance import load_model, load_npz_data
+from rlvr.autoresearch.tools.eval_det_avoidance import (
+    det_inference_batched,
+    load_model,
+    load_npz_data,
+)
+from rlvr.autoresearch.tools.expert_morph import build_expert_morph_candidate
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.deviation import rollout_gt_deviation
 from rlvr.grpo_trainer_batched import (
@@ -119,6 +124,56 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
         raise ValueError(f"expected 3 or 4 future channels, got {arr.shape}")
     yaw = arr[:, 2]
     return np.column_stack([arr[:, 0], arr[:, 1], np.cos(yaw), np.sin(yaw)]).astype(np.float32)
+
+
+def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
+    return "expert_disagreement" in set(row.get("repair_labels") or [])
+
+
+def _route_xy_from_data(data: dict[str, torch.Tensor]) -> np.ndarray | None:
+    """Concatenate route_lanes (ego frame) into one xy polyline.
+
+    data["route_lanes"] is (1, L, P, C); channels 0:2 are xy. All-zero padding
+    points are dropped and the lanes are concatenated in order.
+    """
+    if "route_lanes" not in data:
+        return None
+    rl = data["route_lanes"].detach().cpu().numpy()
+    if rl.ndim == 4:
+        rl = rl[0]
+    if rl.ndim != 3 or rl.shape[-1] < 2:
+        return None
+    pts: list[np.ndarray] = []
+    for lane in rl:  # (P, C)
+        xy = lane[:, :2].astype(np.float64)
+        valid = np.abs(xy).sum(axis=1) > 1e-6
+        xy = xy[valid]
+        if xy.shape[0] > 0:
+            pts.append(xy)
+    if not pts:
+        return None
+    return np.concatenate(pts, axis=0)
+
+
+def _expert_reference_scoring_data(
+    data: dict[str, torch.Tensor],
+    *,
+    scene_path: str,
+) -> dict[str, torch.Tensor]:
+    """Shallow copy of ``data`` whose ego_agent_future is the LOGGED EXPERT.
+
+    For expert_disagreement scenes reward.py's over/under-progress penalties must
+    reference the logged human expert, not the realized (disagreeing) ego. Fails
+    loudly if the mine did not supply ego_expert_future (no silent fallback).
+    """
+    if "ego_expert_future" not in data:
+        raise ValueError(
+            f"{scene_path}: expert_disagreement scene lacks 'ego_expert_future'; the mining "
+            "step must have produced it (repair_expert_reference has no silent fallback)."
+        )
+    scoring = dict(data)
+    scoring["ego_agent_future"] = data["ego_expert_future"]
+    return scoring
 
 
 @torch.no_grad()
@@ -572,6 +627,11 @@ def build_repaired_targets(
     count_rear_end_collisions: bool,
     allow_empty: bool = False,
     target_gt_disagreement_thresh: float = 2.0,
+    repair_expert_gt_candidate: bool = True,
+    repair_expert_reference: bool = True,
+    expert_morph_w_max: float = 1.0,
+    expert_morph_max_accel: float = 2.0,
+    expert_morph_max_jerk: float = 4.0,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -669,11 +729,82 @@ def build_repaired_targets(
             args=cls_args,
         )
 
-        for row, data, scene_trajs, candidate_rows in zip(
-            kept_rows, datas, trajs, candidate_rows_per_scene, strict=True
+        # Deterministic plan per scene — only needed to seed the Frenet det->GT
+        # morph candidate for expert_disagreement scenes.
+        want_morph = repair_expert_gt_candidate and any(
+            _row_is_expert_disagreement(row) for row in kept_rows
+        )
+        det_trajs = None
+        if want_morph:
+            det_trajs = det_inference_batched(
+                model, model_args, datas, device, norm_batch=norm_batch
+            )
+
+        for scene_idx, (row, data, scene_trajs, candidate_rows) in enumerate(
+            zip(kept_rows, datas, trajs, candidate_rows_per_scene, strict=True)
         ):
-            reward_rows = compute_reward_batch(scene_trajs, data, rcfg)
-            reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
+            is_expert = _row_is_expert_disagreement(row)
+
+            # R2 expert-reference scoring fix: for expert_disagreement scenes the
+            # progress / expert-consistency terms must reference the LOGGED EXPERT,
+            # not the realized disagreeing ego. Scoring-only — no mutation of the
+            # original data dict, and the SAVED target is still the selected candidate.
+            if repair_expert_reference and is_expert:
+                scoring_data = _expert_reference_scoring_data(
+                    data, scene_path=str(row["scene_path"])
+                )
+                reference_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
+            else:
+                scoring_data = data
+                reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
+
+            reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
+            candidate_rows = list(candidate_rows)
+
+            name = _output_name_for_scene(row["scene_path"])
+
+            # Extra Frenet det->GT morph candidate for expert_disagreement scenes.
+            morph_added = False
+            morph_index: int | None = None
+            if repair_expert_gt_candidate and is_expert:
+                route_xy = _route_xy_from_data(data)
+                expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
+                det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
+                morph = None
+                if route_xy is not None:
+                    morph = build_expert_morph_candidate(
+                        det_traj,
+                        expert_traj,
+                        route_xy,
+                        w_max=expert_morph_w_max,
+                        max_accel=expert_morph_max_accel,
+                        max_jerk=expert_morph_max_jerk,
+                    )
+                if morph is not None:
+                    morph_tensor = torch.from_numpy(np.ascontiguousarray(morph)).to(
+                        device=device, dtype=scene_trajs.dtype
+                    )
+                    morph_cls = classify_loaded_scene_candidates_batch(
+                        [str(row["scene_path"])],
+                        morph_tensor[None, None],
+                        [data],
+                        rcfg,
+                        moving_collision_thresh=thresholds["moving_collision_thresh"],
+                        moving_near_thresh=thresholds["moving_near_thresh"],
+                        static_near_thresh=thresholds["static_near_thresh"],
+                        rb_near_thresh=thresholds["rb_near_thresh"],
+                        device=device,
+                        args=cls_args,
+                    )
+                    morph_reward_row = compute_reward_batch(morph_tensor[None], scoring_data, rcfg)[
+                        0
+                    ]
+                    morph_index = len(candidate_rows)
+                    candidate_rows.append(morph_cls[0][0])
+                    reward_rows.append(morph_reward_row)
+                    scene_trajs = torch.cat([scene_trajs, morph_tensor[None]], dim=0)
+                    morph_added = True
+
             best_idx, meta = _best_safe_candidate(
                 row,
                 candidate_rows,
@@ -683,7 +814,12 @@ def build_repaired_targets(
                 candidate_trajs=scene_trajs,
                 reference_traj=reference_traj,
             )
-            name = _output_name_for_scene(row["scene_path"])
+            morph_selected = bool(morph_added and best_idx == morph_index)
+            if is_expert:
+                meta["expert_morph_added"] = bool(morph_added)
+                meta["expert_morph_selected"] = morph_selected
+            if morph_added:
+                print(f"  morph candidate {name}: added=True selected={morph_selected}")
             if best_idx is None:
                 unrepaired_rows.append({**row, **meta})
                 print(
@@ -793,6 +929,35 @@ def main() -> None:
         help="max-L2 (m) between the selected repaired target and the logged GT target above "
         "which target_gt_disagreement is flagged (R2LPL hard-example signal).",
     )
+    ap.add_argument(
+        "--repair_expert_gt_candidate",
+        dest="repair_expert_gt_candidate",
+        action="store_true",
+        default=True,
+        help="Add a Frenet det->GT morph candidate for expert_disagreement scenes (default on).",
+    )
+    ap.add_argument(
+        "--no_repair_expert_gt_candidate",
+        dest="repair_expert_gt_candidate",
+        action="store_false",
+        help="Disable the Frenet det->GT morph candidate.",
+    )
+    ap.add_argument(
+        "--repair_expert_reference",
+        dest="repair_expert_reference",
+        action="store_true",
+        default=True,
+        help="Score expert_disagreement scenes against the logged expert future (default on).",
+    )
+    ap.add_argument(
+        "--no_repair_expert_reference",
+        dest="repair_expert_reference",
+        action="store_false",
+        help="Score expert_disagreement scenes against the realized ego future instead.",
+    )
+    ap.add_argument("--expert_morph_w_max", type=float, default=1.0)
+    ap.add_argument("--expert_morph_max_accel", type=float, default=2.0)
+    ap.add_argument("--expert_morph_max_jerk", type=float, default=4.0)
     args = ap.parse_args()
 
     if not args.scene_rows_jsonl and not args.scenes:
@@ -850,6 +1015,11 @@ def main() -> None:
         count_rear_end_collisions=bool(args.count_rear_end_collisions),
         allow_empty=bool(args.allow_empty),
         target_gt_disagreement_thresh=float(args.target_gt_disagreement_thresh),
+        repair_expert_gt_candidate=bool(args.repair_expert_gt_candidate),
+        repair_expert_reference=bool(args.repair_expert_reference),
+        expert_morph_w_max=float(args.expert_morph_w_max),
+        expert_morph_max_accel=float(args.expert_morph_max_accel),
+        expert_morph_max_jerk=float(args.expert_morph_max_jerk),
     )
 
 
