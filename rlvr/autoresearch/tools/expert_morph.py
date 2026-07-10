@@ -286,14 +286,22 @@ def build_expert_morph_candidate(
     recon_xy = base + d_smooth[:, None] * left_normal
 
     # Heading = smooth route tangent + bounded lateral-rate correction. The
-    # correction is suppressed below a low-speed threshold so a near-stationary
-    # step cannot produce an atan2 spike (a stop holds the route tangent).
+    # correction is faded out with a SMOOTH speed ramp (not a hard threshold —
+    # a hard cutoff steps the heading as the ego decelerates through it, the
+    # residual end-of-clip yaw jump), so a near-stationary step cannot produce an
+    # atan2 spike (a stop holds the route tangent).
     ds_dt = np.concatenate([[0.0], np.diff(s_feasible)]) / dt
     dd_dt = np.concatenate([[0.0], np.diff(d_smooth)]) / dt
-    beta = np.zeros(T, dtype=np.float64)
-    moving = ds_dt > 0.5
-    beta[moving] = np.clip(np.arctan2(dd_dt[moving], np.maximum(ds_dt[moving], _EPS)), -0.3, 0.3)
+    speed_ramp = np.clip((ds_dt - 0.2) / (0.8 - 0.2), 0.0, 1.0)  # 0 below 0.2 m/s, 1 above 0.8
+    beta = speed_ramp * np.clip(np.arctan2(dd_dt, np.maximum(ds_dt, _EPS)), -0.3, 0.3)
     heading = theta_q + beta
+
+    # Hard guarantee: cap the per-step yaw rate so no residual spike survives
+    # (e.g. from a route-end tangent edge). max_yaw_rate ~ 0.6 rad/s.
+    max_yaw_step = 0.6 * dt
+    for t in range(1, T):
+        dh = (heading[t] - heading[t - 1] + np.pi) % (2 * np.pi) - np.pi
+        heading[t] = heading[t - 1] + float(np.clip(dh, -max_yaw_step, max_yaw_step))
 
     out = np.empty((T, 4), dtype=np.float32)
     out[:, 0] = recon_xy[:, 0]
