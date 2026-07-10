@@ -1,0 +1,63 @@
+{
+  "_comment": "Template R2LPL lifelong-replay workflow config. Copy this file and replace every REPLACE_ME/... path and the WB,L,W ego shape with your own assets. The two config paths under 'judgement' point at files shipped in this repo and normally need no change. 'enabled_labels' ships with all three detectors ON by default (road_border_crossing + moving_collision use the realized closed-loop ego; expert_disagreement uses the model's open-loop proposal vs the logged expert future, per the R2LPL paper). Remove a label from the list to disable mining/repair for it.",
+  "inference": {
+    "mode": "det",
+    "batch_size": 32,
+    "device": "cuda"
+  },
+  "judgement": {
+    "reward_config": "REPLACE_ME/reward_config.json",
+    "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
+    "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json",
+    "enabled_labels": [
+      "road_border_crossing",
+      "moving_collision",
+      "expert_disagreement"
+    ]
+  },
+  "event_mining": {
+    "source_gap_steps": 10,
+    "danger_decluster_steps": 10,
+    "chunk_len": 80,
+    "start_stride": 80,
+    "expected_frame_step": 1,
+    "max_scenes": 10000
+  },
+  "perception_reproducer": {
+    "batch_size": 16,
+    "device": "cuda",
+    "render_webm": false,
+    "verify_reproduced_issue": true,
+    "neighbor_history_mode": "sim",
+    "anchor_horizon_steps": 40,
+    "max_rollout_steps": 80,
+    "timeline_progress_mode": "clock",
+    "tracker_mode": "mpc"
+  },
+  "repair_generation": {
+    "ego_shape": "WB,L,W",
+    "min_margin": 0.3,
+    "candidate_count_per_scene": 8,
+    "generation_batch_size": 8,
+    "device": "cuda",
+    "variant": "rl_cl_soft_sweep_stretch",
+    "noise_low": 0.5,
+    "noise_high": 2,
+    "use_route_cl_guidance": true
+  },
+  "replay_memory": {
+    "capacity": 16,
+    "alpha": 0.5,
+    "beta": 0.5,
+    "arc_bin_m": 25
+  },
+  "rounds": {
+    "rounds": 1,
+    "epochs_per_round": 1,
+    "checkpoint_selection_rule": "latest"
+  },
+  "training": {
+    "backend": "base_sft",
+    "val_scenes": "REPLACE_ME/val_scenes.json"
+  }
+}

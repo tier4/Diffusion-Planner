@@ -434,11 +434,14 @@ def _repairs_source_labels(
     reward_row,
     *,
     min_static_margin: float,
-    require_conflict_clear: bool,
 ) -> bool:
+    # Paper-faithful recoverability (R2LPL Eq. recoverability): a candidate is valid iff
+    # it is RULE-FEASIBLE (q_i > 0) — safety / drivable / route / static-margin. Expert /
+    # GT likeness is NEVER a hard gate: the reference expresses expert agreement only as a
+    # soft, deviation-class-weighted term (c_E, dropped entirely for far-off states,
+    # w_E=0). So expert_disagreement is handled by the soft r2lpl_score ranking in
+    # _best_safe_candidate, not by rejecting conflict-flagged candidates here.
     if not _passes_global_gates(label_row, reward_row):
-        return False
-    if require_conflict_clear and bool(label_row.get("expert_disagreement", False)):
         return False
     for label in source_labels:
         if label == "road_border_crossing" and reward_row.rb_crossing:
@@ -452,8 +455,6 @@ def _repairs_source_labels(
                 or label_row["moving_collision_step"] is not None
             ):
                 return False
-        if label == "expert_disagreement" and bool(label_row.get("expert_disagreement", False)):
-            return False
     return True
 
 
@@ -463,7 +464,6 @@ def _best_safe_candidate(
     reward_rows,
     *,
     min_static_margin: float,
-    require_conflict_clear: bool,
     target_gt_disagreement_thresh: float,
     candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
     reference_traj: torch.Tensor | np.ndarray | None = None,
@@ -478,7 +478,6 @@ def _best_safe_candidate(
             label_row,
             reward_row,
             min_static_margin=min_static_margin,
-            require_conflict_clear=require_conflict_clear,
         ):
             violation_score = _candidate_violation_score(label_row, reward_row)
             deviation_penalty = _candidate_deviation_penalty(
@@ -568,7 +567,6 @@ def build_repaired_targets(
     noise_low: float,
     noise_high: float,
     device: torch.device,
-    require_conflict_clear: bool,
     enable_conflict_detector: bool,
     use_route_cl_guidance: bool,
     count_rear_end_collisions: bool,
@@ -681,7 +679,6 @@ def build_repaired_targets(
                 candidate_rows,
                 reward_rows,
                 min_static_margin=min_static_margin,
-                require_conflict_clear=require_conflict_clear,
                 target_gt_disagreement_thresh=target_gt_disagreement_thresh,
                 candidate_trajs=scene_trajs,
                 reference_traj=reference_traj,
@@ -777,7 +774,6 @@ def main() -> None:
     ap.add_argument("--noise_low", type=float, default=0.5)
     ap.add_argument("--noise_high", type=float, default=2.0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--allow_conflict_candidates", action="store_true")
     ap.add_argument("--enable_conflict_detector", action="store_true")
     ap.add_argument("--disable_route_cl_guidance", action="store_true")
     ap.add_argument(
@@ -849,7 +845,6 @@ def main() -> None:
         noise_low=float(args.noise_low),
         noise_high=float(args.noise_high),
         device=torch.device(args.device),
-        require_conflict_clear=not bool(args.allow_conflict_candidates),
         enable_conflict_detector=bool(args.enable_conflict_detector),
         use_route_cl_guidance=not bool(args.disable_route_cl_guidance),
         count_rear_end_collisions=bool(args.count_rear_end_collisions),

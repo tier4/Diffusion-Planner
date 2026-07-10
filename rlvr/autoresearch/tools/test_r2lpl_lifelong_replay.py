@@ -60,7 +60,10 @@ from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
 from rlvr.deviation import rollout_gt_deviation
 from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
 from rlvr.reward import RewardConfig
-from scenario_generation.conflict_detector import detect_expert_disagreement
+from scenario_generation.conflict_detector import (
+    detect_expert_disagreement,
+    detect_expert_disagreement_projected,
+)
 from scenario_generation.danger_event_selection import (
     OnlineEventSelector,
     contiguous_index_runs,
@@ -1050,6 +1053,94 @@ def test_conflict_detector_flags_lag_and_ahead():
     assert ahead.reason in {"expert_wait_model_forward", "model_ahead_expert"}
 
 
+_PROJECTED_THRESHOLDS = dict(
+    wait_speed_mps=0.5,
+    wait_progress_m=1.0,
+    forward_progress_gap_m=2.0,
+    lag_progress_gap_m=3.0,
+    moving_speed_mps=1.0,
+)
+
+
+def test_projected_disagreement_flags_expert_wait_model_forward():
+    # Expert idle at the origin, model runs forward.
+    result = detect_expert_disagreement_projected(
+        model_progress=np.array([0.0, 3.0, 6.0, 9.0, 12.0]),
+        model_speed=np.zeros(5),
+        expert_progress=np.zeros(6),
+        expert_speed=np.zeros(6),
+        **_PROJECTED_THRESHOLDS,
+    )
+    assert result.expert_disagreement
+    assert result.reason == "expert_wait_model_forward"
+
+
+def test_projected_disagreement_flags_model_lagging_expert():
+    result = detect_expert_disagreement_projected(
+        model_progress=np.zeros(5),
+        model_speed=np.zeros(5),
+        expert_progress=np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
+        expert_speed=np.full(6, 2.0),
+        **_PROJECTED_THRESHOLDS,
+    )
+    assert result.expert_disagreement
+    assert result.reason == "model_lagging_expert"
+
+
+def test_projected_disagreement_flags_model_ahead_expert():
+    # Model far ahead of a slow expert (not waiting, not the lagging speed regime).
+    result = detect_expert_disagreement_projected(
+        model_progress=np.array([10.0, 10.0, 10.0, 10.0]),
+        model_speed=np.zeros(4),
+        expert_progress=np.array([0.0, 9.0, 9.0, 9.0, 5.0]),
+        expert_speed=np.full(5, 0.4),
+        **_PROJECTED_THRESHOLDS,
+    )
+    assert result.expert_disagreement
+    assert result.reason == "model_ahead_expert"
+    # +1 shift: expert_end reads expert_progress[4]=5.0, NOT the unshifted [3]=9.0
+    # (which would make the ahead-gap 1.0 and NOT trip the 2.0 threshold).
+    assert result.expert_end_progress == pytest.approx(5.0)
+
+
+def test_projected_disagreement_none_when_consistent():
+    result = detect_expert_disagreement_projected(
+        model_progress=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        model_speed=np.full(5, 0.5),
+        expert_progress=np.array([0.0, 1.0, 2.0, 3.0, 4.0, 4.5]),
+        expert_speed=np.full(6, 1.5),
+        **_PROJECTED_THRESHOLDS,
+    )
+    assert not result.expert_disagreement
+    assert result.reason == ""
+
+
+def test_projected_disagreement_expert_plus_one_shift_is_applied():
+    # With the +1 shift the reported expert_end is expert_progress[horizon]=5.0;
+    # without it, it would be expert_progress[horizon-1]=9.0.
+    result = detect_expert_disagreement_projected(
+        model_progress=np.array([0.0, 1.0, 2.0, 3.0]),
+        model_speed=np.zeros(4),
+        expert_progress=np.array([100.0, 10.0, 20.0, 30.0, 5.0]),
+        expert_speed=np.full(5, 0.4),
+        **_PROJECTED_THRESHOLDS,
+    )
+    assert result.expert_end_progress == pytest.approx(5.0)
+
+
+def test_projected_disagreement_rejects_nonpositive_threshold():
+    bad = dict(_PROJECTED_THRESHOLDS)
+    bad["moving_speed_mps"] = 0.0
+    with pytest.raises(ValueError, match="moving_speed_mps"):
+        detect_expert_disagreement_projected(
+            model_progress=np.zeros(4),
+            model_speed=np.zeros(4),
+            expert_progress=np.zeros(5),
+            expert_speed=np.zeros(5),
+            **bad,
+        )
+
+
 def test_rollout_gt_deviation_reports_first_sustained_crossing():
     gt = torch.zeros(12, 4)
     rollout = torch.zeros(12, 4)
@@ -1558,6 +1649,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         gt_pose,
         segment_key,
         step,
+        **_kwargs,
     ):
         return (
             {"labels": ["road_border_crossing"], "label": "road_border_crossing"}
@@ -1716,6 +1808,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         gt_pose,
         segment_key,
         step,
+        **_kwargs,
     ):
         return (
             {"labels": ["moving_collision"], "label": "moving_collision"}
@@ -2120,7 +2213,6 @@ def test_repair_candidate_selector_requires_safe_fix():
         candidate_rows,
         reward_rows,
         min_static_margin=0.3,
-        require_conflict_clear=True,
         target_gt_disagreement_thresh=2.0,
     )
 
@@ -2128,7 +2220,13 @@ def test_repair_candidate_selector_requires_safe_fix():
     assert meta["selected_total"] == 5.0
 
 
-def test_repair_candidate_selector_requires_expert_disagreement_fix():
+def test_repair_candidate_selector_does_not_hard_gate_expert_disagreement():
+    # Paper-faithful R2 retrieval: expert / GT likeness is NEVER a hard gate. A
+    # candidate still flagged expert_disagreement must remain SELECTABLE (recoverability
+    # depends only on rule-feasibility q_i>0); expert agreement enters only via the soft,
+    # class-weighted r2lpl_score. Here both candidates are rule-feasible; with no
+    # candidate/reference trajs the soft expert term ties (exp(0)=1 each), so the higher
+    # rule-reward candidate wins even though it is the conflict-flagged one.
     source_row = {"repair_labels": ["expert_disagreement"]}
     candidate_rows = [
         {
@@ -2166,12 +2264,12 @@ def test_repair_candidate_selector_requires_expert_disagreement_fix():
         candidate_rows,
         reward_rows,
         min_static_margin=0.3,
-        require_conflict_clear=True,
         target_gt_disagreement_thresh=2.0,
     )
 
-    assert idx == 1
-    assert meta["selected_labels"] == ["clean"]
+    # Conflict-flagged candidate is NOT rejected; soft ranking keeps the higher-reward one.
+    assert idx == 0
+    assert meta["selected_labels"] == ["expert_disagreement"]
 
 
 def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
@@ -2212,7 +2310,6 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
         candidate_rows,
         reward_rows,
         min_static_margin=0.3,
-        require_conflict_clear=True,
         target_gt_disagreement_thresh=2.0,
         candidate_trajs=candidates,
         reference_traj=reference,
@@ -2222,7 +2319,6 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
         candidate_rows,
         reward_rows,
         min_static_margin=0.3,
-        require_conflict_clear=True,
         target_gt_disagreement_thresh=2.0,
         candidate_trajs=candidates,
         reference_traj=reference,
@@ -2322,7 +2418,6 @@ def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
         candidate_rows,
         reward_rows,
         min_static_margin=0.3,
-        require_conflict_clear=True,
         target_gt_disagreement_thresh=2.0,
         candidate_trajs=candidate_trajs,
         reference_traj=reference_traj,
@@ -2485,24 +2580,55 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
         "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
+    # Straight route along +x used as the arc-length reference.
+    ref_polyline_world = np.stack([np.linspace(0.0, 100.0, 101), np.zeros(101)], axis=1).astype(
+        np.float32
+    )
+    # Expert waits: current pose (index 0) + a still future all at the origin.
+    expert_future_world = np.zeros((81, 2), dtype=np.float32)
+    expert_future_speed = np.zeros((81,), dtype=np.float32)
+    # Model drives forward from ~0 to ~10 m of arc length.
+    model_pred_world = np.stack([np.linspace(0.1, 10.0, 80), np.zeros(80)], axis=1).astype(
+        np.float32
+    )
 
-    rows = [
-        scorer(
-            np_dict,
-            collided=False,
-            live_pose=np.array([float(step) * 0.4, 0.0, 0.0]),
-            gt_pose=np.array([0.0, 0.0, 0.0]),
-            segment_key="seg-a",
-            step=step,
-        )
-        for step in range(9)
-    ]
+    row = scorer(
+        np_dict,
+        collided=False,
+        live_pose=np.array([0.0, 0.0, 0.0]),
+        gt_pose=np.array([0.0, 0.0, 0.0]),
+        segment_key="seg-a",
+        step=4,
+        model_pred_world=model_pred_world,
+        expert_future_world=expert_future_world,
+        expert_future_speed=expert_future_speed,
+        ref_polyline_world=ref_polyline_world,
+    )
 
-    assert rows[0]["labels"] == ["clean"]
-    assert "expert_disagreement" in rows[1]["labels"]
-    assert rows[1]["expert_disagreement_step"] == 1
-    assert rows[1]["expert_disagreement_reason"] == "expert_wait_model_forward"
-    assert rows[-1]["expert_disagreement_max_dev"] == pytest.approx(3.2)
+    assert "expert_disagreement" in row["labels"]
+    assert row["expert_disagreement_step"] == 4
+    assert row["expert_disagreement_reason"] == "expert_wait_model_forward"
+    assert row["expert_disagreement_model_end_progress"] == pytest.approx(10.0, abs=0.1)
+    assert row["expert_disagreement_expert_end_progress"] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_realized_event_scorer_expert_disagreement_requires_inputs(tmp_path):
+    # No silent fallback: the branch is allowed but the open-loop / route inputs
+    # are missing -> fail loudly instead of silently skipping.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+    with pytest.raises(ValueError, match="mining path must pass them"):
+        scorer(np_dict, collided=False, step=0)
 
 
 def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
@@ -2850,7 +2976,6 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         noise_low=0.5,
         noise_high=2.0,
         device=torch.device("cpu"),
-        require_conflict_clear=True,
         enable_conflict_detector=True,
         use_route_cl_guidance=False,
         count_rear_end_collisions=True,

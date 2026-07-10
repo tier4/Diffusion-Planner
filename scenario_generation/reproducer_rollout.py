@@ -1738,12 +1738,10 @@ def run_segments_batched(
                         else [None] * len(built)
                     )
                     realized_rows = []
-                    for (_s, np_dict, _nb, _idx, _suuid, _wbu), (
-                        _cl,
-                        col,
-                        _M,
-                        _collider_slot,
-                    ) in zip(built, score_list):
+                    for _row_i, (
+                        (_s, np_dict, _nb, _idx, _suuid, _wbu),
+                        (_cl, col, _M, _collider_slot),
+                    ) in enumerate(zip(built, score_list)):
                         if realized_event_scorer is None:
                             realized_rows.append(None)
                             continue
@@ -1753,6 +1751,28 @@ def run_segments_batched(
                         route_key = getattr(_s, "output_route_key", None)
                         if route_key is None:
                             route_key = _route_key(_s.tl)
+                        # Paper-faithful Conflict inputs: the model's OPEN-LOOP proposal in
+                        # world xy, the logged expert future (INCLUDING the current pose at
+                        # index 0, so the detector's +1 shift lands on the first future
+                        # step), the real logged expert speeds, and the full recorded expert
+                        # path as the arc-length reference polyline.
+                        pred_row = preds[_row_i]  # (80, 4) ego-frame [x, y, cos, sin]
+                        model_pred_world, _ = _ego_pred_to_world(
+                            pred_row[:, :2],
+                            pred_row[:, 2:4],
+                            float(_s.live_pose[0]),
+                            float(_s.live_pose[1]),
+                            float(_s.live_pose[2]),
+                        )
+                        expert_future_world = None
+                        expert_future_speed = None
+                        ref_polyline_world = None
+                        if hasattr(_s.tl, "poses") and hasattr(_s.tl, "speeds"):
+                            H = int(pred_row.shape[0])
+                            idx_i = int(_idx)
+                            expert_future_world = _s.tl.poses[idx_i : idx_i + 1 + H, :2]
+                            expert_future_speed = _s.tl.speeds[idx_i : idx_i + 1 + H]
+                            ref_polyline_world = _s.tl.poses[:, :2]
                         realized_rows.append(
                             realized_event_scorer(
                                 np_dict,
@@ -1765,6 +1785,10 @@ def run_segments_batched(
                                     _s.end,
                                 ),
                                 step=_s.k,
+                                model_pred_world=model_pred_world,
+                                expert_future_world=expert_future_world,
+                                expert_future_speed=expert_future_speed,
+                                ref_polyline_world=ref_polyline_world,
                             )
                         )
                     for row_idx, (
@@ -2571,6 +2595,23 @@ def _dump_precollision_window(
             ex, ey, eh = _world_pose_to_ego(poses_by_step[fk], live_pose)
             eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
         scene["ego_agent_future"] = eaf
+        # Logged expert (GT) future for the R2LPL Conflict comparison / GT overlay: the
+        # recorded ego's RELATIVE forward motion from the current cursor, re-anchored to
+        # the live ego (the paper's pseudo-target, get_expert_trajectory_from_scenario_
+        # with_rollout_ego). Starts at the live-ego origin and follows the recorded shape,
+        # so it overlays cleanly with the model plan / repaired target. NOT a training
+        # target — an auxiliary field consumers ignore unless they ask for it.
+        expert_eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        rec0 = tl.poses[idx]
+        Rr = _rotation_matrix(float(rec0[2]))  # world delta -> recorded-ego frame
+        for j in range(1, fut_len + 1):
+            ridx = idx + j
+            if ridx >= len(tl.poses):
+                break
+            d = Rr @ (tl.poses[ridx][:2] - rec0[:2])
+            dh = float(tl.poses[ridx][2] - rec0[2])
+            expert_eaf[j - 1] = (d[0], d[1], math.cos(dh), math.sin(dh))
+        scene["ego_expert_future"] = expert_eaf
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)

@@ -255,7 +255,6 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             _first_non_null(repair.get("noise_high"), repair.get("guidance_noise_high"), 2.0)
         ),
         "device": str(_first_non_null(repair.get("device"), "cuda")),
-        "allow_conflict_candidates": bool(repair.get("allow_conflict_candidates", False)),
         "use_route_cl_guidance": bool(repair.get("use_route_cl_guidance", True)),
     }
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
@@ -946,8 +945,6 @@ def _repair_cmd(
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
         cmd.append("--enable_conflict_detector")
-    if bool(repair_cfg.get("allow_conflict_candidates", False)):
-        cmd.append("--allow_conflict_candidates")
     if not bool(repair_cfg.get("use_route_cl_guidance", True)):
         cmd.append("--disable_route_cl_guidance")
     if bool(cfg.get("count_rear_end_collisions", False)):

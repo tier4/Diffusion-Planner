@@ -20,8 +20,9 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
     current_ego_neighbor_clearance,
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-from scenario_generation.conflict_detector import detect_expert_disagreement
-from scenario_generation.reproducer_rollout import _route_key
+from scenario_generation.conflict_detector import detect_expert_disagreement_projected
+from scenario_generation.reproducer_rollout import DT, _route_key
+from scenario_generation.tools._heatmap_common import project_points_to_polyline
 
 _SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
     {"moving_collision", "static_collision", "road_border_crossing", "expert_disagreement"}
@@ -195,7 +196,6 @@ def build_realized_event_scorer(
     rb_cross_thresh = float(thresholds["rb_cross_thresh"])
     static_collision_thresh = float(thresholds["sc_cross_thresh"])
     moving_collision_thresh = float(thresholds["moving_collision_thresh"])
-    expert_state_by_segment: dict[Any, dict[str, Any]] = {}
 
     def _scorer(
         np_dict: dict[str, Any],
@@ -205,6 +205,10 @@ def build_realized_event_scorer(
         gt_pose: np.ndarray | None = None,
         segment_key: object | None = None,
         step: int | None = None,
+        model_pred_world: np.ndarray | None = None,
+        expert_future_world: np.ndarray | None = None,
+        expert_future_speed: np.ndarray | None = None,
+        ref_polyline_world: np.ndarray | None = None,
     ) -> dict[str, Any]:
         labels: list[str] = []
         row: dict[str, Any] = {
@@ -291,54 +295,68 @@ def build_realized_event_scorer(
             row["expert_disagreement_expert_end_progress"] = 0.0
             row["expert_disagreement_model_end_speed"] = 0.0
             row["expert_disagreement_expert_end_speed"] = 0.0
-            if live_pose is not None and gt_pose is not None:
-                key = segment_key if segment_key is not None else "__single_segment__"
-                state = expert_state_by_segment.setdefault(
-                    key,
-                    {
-                        "max_dev": 0.0,
-                        "live_xy": [],
-                        "gt_xy": [],
-                    },
+            # Paper-faithful Conflict: compare the model's OPEN-LOOP proposal against the
+            # logged expert future, both re-expressed as route ARC-LENGTH progress, expert
+            # shifted +1 step (see detect_expert_disagreement_projected). No silent
+            # fallback: the mining path must always supply these inputs.
+            if (
+                model_pred_world is None
+                or expert_future_world is None
+                or expert_future_speed is None
+                or ref_polyline_world is None
+            ):
+                raise ValueError(
+                    "expert_disagreement is enabled but the open-loop proposal / expert "
+                    "future / route inputs were not provided (model_pred_world, "
+                    "expert_future_world, expert_future_speed, ref_polyline_world). The "
+                    "mining path must pass them."
                 )
-                live_xy = np.asarray(live_pose, dtype=np.float32)[:2]
-                gt_xy = np.asarray(gt_pose, dtype=np.float32)[:2]
-                state["live_xy"].append(live_xy)
-                state["gt_xy"].append(gt_xy)
-                dev = float(np.linalg.norm(live_xy - gt_xy))
-                state["max_dev"] = max(float(state["max_dev"]), dev)
-                rollout = torch.as_tensor(
-                    np.asarray(state["live_xy"], dtype=np.float32),
-                    dtype=torch.float32,
-                    device=torch_device,
-                )
-                expert = torch.as_tensor(
-                    np.asarray(state["gt_xy"], dtype=np.float32),
-                    dtype=torch.float32,
-                    device=torch_device,
-                )
-                result = detect_expert_disagreement(
-                    rollout,
-                    expert,
-                    enabled=True,
-                    wait_speed_mps=float(thresholds["expert_disagreement_wait_speed_mps"]),
-                    wait_progress_m=float(thresholds["expert_disagreement_wait_progress_m"]),
-                    forward_progress_gap_m=float(
-                        thresholds["expert_disagreement_forward_progress_gap_m"]
-                    ),
-                    lag_progress_gap_m=float(thresholds["expert_disagreement_lag_progress_gap_m"]),
-                    moving_speed_mps=float(thresholds["expert_disagreement_moving_speed_mps"]),
-                )
-                row["expert_disagreement_max_dev"] = float(state["max_dev"])
-                row["expert_disagreement_reason"] = result.reason
-                row["expert_disagreement_model_end_progress"] = result.model_end_progress
-                row["expert_disagreement_expert_end_progress"] = result.expert_end_progress
-                row["expert_disagreement_model_end_speed"] = result.model_end_speed
-                row["expert_disagreement_expert_end_speed"] = result.expert_end_speed
-                if result.expert_disagreement:
-                    row["expert_disagreement"] = True
-                    row["expert_disagreement_step"] = step
-                    labels.append("expert_disagreement")
+            model_xy = np.asarray(model_pred_world, dtype=np.float64).reshape(-1, 2)
+            expert_xy = np.asarray(expert_future_world, dtype=np.float64).reshape(-1, 2)
+            expert_speed = np.asarray(expert_future_speed, dtype=np.float32).reshape(-1)
+            ref_xy = np.asarray(ref_polyline_world, dtype=np.float64).reshape(-1, 2)
+            if ref_xy.shape[0] < 2:
+                raise ValueError("ref_polyline_world must have >= 2 points for projection")
+            # Cumulative arc length of the reference (recorded expert) polyline — same
+            # formula _heatmap_common.build_route_polyline uses.
+            seg = np.diff(ref_xy, axis=0)
+            seg_len = np.sqrt((seg * seg).sum(axis=1))
+            ref_s = np.concatenate([[0.0], np.cumsum(seg_len)])
+            # Project model + expert points onto the route -> arc-length progress.
+            model_progress = project_points_to_polyline(model_xy, ref_xy, ref_s)[:, 0].astype(
+                np.float32
+            )
+            expert_progress = project_points_to_polyline(expert_xy, ref_xy, ref_s)[:, 0].astype(
+                np.float32
+            )
+            # Diffusion model has no speed channel -> finite-diff its world xy. Leading
+            # zero keeps speed[t] aligned with progress[t] (interval ENDING at t), matching
+            # the _progress_and_speed convention.
+            model_step = np.linalg.norm(np.diff(model_xy, axis=0), axis=1) / DT
+            model_speed = np.concatenate([[0.0], model_step]).astype(np.float32)
+            result = detect_expert_disagreement_projected(
+                model_progress,
+                model_speed,
+                expert_progress,
+                expert_speed,
+                wait_speed_mps=float(thresholds["expert_disagreement_wait_speed_mps"]),
+                wait_progress_m=float(thresholds["expert_disagreement_wait_progress_m"]),
+                forward_progress_gap_m=float(
+                    thresholds["expert_disagreement_forward_progress_gap_m"]
+                ),
+                lag_progress_gap_m=float(thresholds["expert_disagreement_lag_progress_gap_m"]),
+                moving_speed_mps=float(thresholds["expert_disagreement_moving_speed_mps"]),
+            )
+            row["expert_disagreement_max_dev"] = float(result.max_deviation)
+            row["expert_disagreement_reason"] = result.reason
+            row["expert_disagreement_model_end_progress"] = result.model_end_progress
+            row["expert_disagreement_expert_end_progress"] = result.expert_end_progress
+            row["expert_disagreement_model_end_speed"] = result.model_end_speed
+            row["expert_disagreement_expert_end_speed"] = result.expert_end_speed
+            if result.expert_disagreement:
+                row["expert_disagreement"] = True
+                row["expert_disagreement_step"] = step
+                labels.append("expert_disagreement")
 
         row["labels"] = labels or ["clean"]
         row["label"] = labels[0] if labels else "clean"
