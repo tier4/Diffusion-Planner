@@ -16,8 +16,6 @@ projection geometry).
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
 from scenario_generation.tools._heatmap_common import project_points_to_polyline
@@ -135,6 +133,31 @@ def _feasible_lateral(d_target: np.ndarray, *, rate_cap: float, dt: float) -> np
     return d
 
 
+def _moving_average(x: np.ndarray, w: int) -> np.ndarray:
+    """Odd-window moving average with edge padding (length preserved)."""
+    if w <= 1 or len(x) < w:
+        return np.asarray(x, dtype=np.float64)
+    k = np.ones(w) / w
+    padded = np.pad(np.asarray(x, dtype=np.float64), w // 2, mode="edge")
+    return np.convolve(padded, k, mode="valid")[: len(x)]
+
+
+def _smoothed_tangent_angles(pts: np.ndarray) -> np.ndarray:
+    """Unwrapped, smoothed per-vertex tangent angle of a polyline.
+
+    Central differences give a per-VERTEX tangent (continuous across segment
+    joins, unlike a per-SEGMENT tangent), unwrapped then lightly smoothed so the
+    route normal — and hence the reconstructed lateral offset + heading — does
+    not flip at route-segment boundaries.
+    """
+    d = np.zeros_like(pts, dtype=np.float64)
+    d[1:-1] = pts[2:] - pts[:-2]
+    d[0] = pts[1] - pts[0]
+    d[-1] = pts[-1] - pts[-2]
+    ang = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+    return _moving_average(ang, 5)
+
+
 def _arc_interp(
     s_ref: np.ndarray, pts: np.ndarray, s_query: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -249,25 +272,28 @@ def build_expert_morph_candidate(
     d_feasible = _feasible_lateral(d_blend, rate_cap=_DEFAULT_LATERAL_RATE_CAP_MPS, dt=dt)
 
     # Reconstruct ego-frame xy from (s,d): route point at arc s, offset by d
-    # along the route left-normal (matches project_to_polyline's sign
-    # convention: +lateral == left of travel).
-    base, unit_tan = _arc_interp(s_ref, route, s_feasible)
+    # along the SMOOTHED route left-normal. Using a per-vertex smoothed tangent
+    # (not the piecewise per-segment tangent) keeps the normal continuous across
+    # route-segment joins — a per-segment tangent flips there and teleports the
+    # lateral-offset point / spikes the heading.
+    base, _seg_tan = _arc_interp(s_ref, route, s_feasible)
+    theta_ref = _smoothed_tangent_angles(route)
+    theta_q = np.interp(np.clip(s_feasible, 0.0, float(s_ref[-1])), s_ref, theta_ref)
+    unit_tan = np.stack([np.cos(theta_q), np.sin(theta_q)], axis=1)
     left_normal = np.stack([-unit_tan[:, 1], unit_tan[:, 0]], axis=1)
-    recon_xy = base + d_feasible[:, None] * left_normal
+    # Lightly smooth the lateral offset to avoid wiggle from noisy projections.
+    d_smooth = _moving_average(d_feasible, 5)
+    recon_xy = base + d_smooth[:, None] * left_normal
 
-    # Heading from finite differences of the reconstructed path (naturally folds
-    # in the route tangent plus the small correction from the lateral rate);
-    # fall back to the route tangent when nearly stationary.
-    tan_angle = np.arctan2(unit_tan[:, 1], unit_tan[:, 0])
-    heading = np.empty(T, dtype=np.float64)
-    dxy = np.diff(recon_xy, axis=0)
-    step_norm = np.linalg.norm(dxy, axis=1)
-    for t in range(T - 1):
-        if step_norm[t] > 1e-3:
-            heading[t] = math.atan2(dxy[t, 1], dxy[t, 0])
-        else:
-            heading[t] = tan_angle[t]
-    heading[T - 1] = heading[T - 2]
+    # Heading = smooth route tangent + bounded lateral-rate correction. The
+    # correction is suppressed below a low-speed threshold so a near-stationary
+    # step cannot produce an atan2 spike (a stop holds the route tangent).
+    ds_dt = np.concatenate([[0.0], np.diff(s_feasible)]) / dt
+    dd_dt = np.concatenate([[0.0], np.diff(d_smooth)]) / dt
+    beta = np.zeros(T, dtype=np.float64)
+    moving = ds_dt > 0.5
+    beta[moving] = np.clip(np.arctan2(dd_dt[moving], np.maximum(ds_dt[moving], _EPS)), -0.3, 0.3)
+    heading = theta_q + beta
 
     out = np.empty((T, 4), dtype=np.float32)
     out[:, 0] = recon_xy[:, 0]
