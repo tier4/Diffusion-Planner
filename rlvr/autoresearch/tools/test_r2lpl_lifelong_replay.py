@@ -1219,6 +1219,100 @@ def test_replay_memory_preserves_rare_buckets_with_capacity():
     assert len(selected) == 2
 
 
+def test_replay_memory_label_quotas_reserve_capacity():
+    # 20 high-priority rb rows vs 4 low-priority expert rows at capacity 8:
+    # without quotas the expert rows are crowded out beyond the single
+    # rare-bucket pick; a 0.5 expert quota must retain floor(0.5*8)=4 of them.
+    rows = [
+        {
+            "scene_path": f"/tmp/rb_{i}.npz",
+            "label": "road_border_crossing",
+            "route_arc_m": float(i),  # spread over arc bins
+            "variant_kind": "credit",
+            "difficulty": 100.0 + i,
+        }
+        for i in range(20)
+    ]
+    rows += [
+        {
+            "scene_path": f"/tmp/expert_{i}.npz",
+            "label": "expert_disagreement",
+            "route_arc_m": 0.0,
+            "variant_kind": "credit",
+            "difficulty": float(i),
+        }
+        for i in range(4)
+    ]
+
+    baseline = build_memory(
+        rows, {"entries": []}, {}, capacity=8, alpha=1.0, beta=0.0, arc_bin_m=1000.0
+    )
+    n_expert_baseline = sum(1 for r in baseline["entries"] if r["label"] == "expert_disagreement")
+
+    memory = build_memory(
+        rows,
+        {"entries": []},
+        {},
+        capacity=8,
+        alpha=1.0,
+        beta=0.0,
+        arc_bin_m=1000.0,
+        label_quotas={"expert_disagreement": 0.5},
+    )
+    n_expert = sum(1 for r in memory["entries"] if r["label"] == "expert_disagreement")
+    assert len(memory["entries"]) == 8
+    assert n_expert == 4
+    assert n_expert > n_expert_baseline
+    assert memory["label_quotas"] == {"expert_disagreement": 0.5}
+
+
+def test_replay_memory_label_quotas_parse_rejects_bad_spec():
+    from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas
+
+    assert _parse_label_quotas(None) == {}
+    assert _parse_label_quotas("a=0.25,b=0.5") == {"a": 0.25, "b": 0.5}
+    with pytest.raises(ValueError):
+        _parse_label_quotas("nofraction")
+    with pytest.raises(ValueError):
+        _parse_label_quotas("a=1.5")
+    with pytest.raises(ValueError):
+        _parse_label_quotas("a=0.7,b=0.7")
+
+
+def test_anchor_slice_paths_ratio_and_waits_stratification(tmp_path):
+    normal = [f"/tmp/normal_{i}.npz" for i in range(100)]
+    waits = [f"/tmp/waits_{i}.npz" for i in range(50)]
+    normal_json = tmp_path / "normal.json"
+    waits_json = tmp_path / "waits.json"
+    normal_json.write_text(json.dumps(normal))
+    waits_json.write_text(json.dumps(waits))
+
+    cfg = {
+        "scene_list": str(normal_json),
+        "ratio": 1.6,
+        "waits_scene_list": str(waits_json),
+        "waits_fraction": 0.25,
+        "seed": 7,
+    }
+    picked = round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=1)
+    assert len(picked) == 16  # ceil(1.6 * 10)
+    n_waits = sum(1 for p in picked if "waits_" in p)
+    assert n_waits == 4  # round(0.25 * 16)
+    assert len(set(picked)) == len(picked)
+    # reproducible per round, redrawn across rounds
+    assert picked == round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=1)
+    assert picked != round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=2)
+
+    # disabled when absent; loud on partial config
+    assert round_runner._anchor_slice_paths(None, n_focus=10, round_idx=1) == []
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths({"scene_list": str(normal_json)}, 10, 1)
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths(
+            {"scene_list": str(normal_json), "ratio": 1.0, "waits_fraction": 0.2}, 10, 1
+        )
+
+
 def test_round_runner_checkpoint_policy_prefers_latest_lora(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -3385,6 +3479,132 @@ def test_expert_morph_never_reverses():
     morph = build_expert_morph_candidate(det, expert, _straight_route())
     assert morph is not None
     assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+
+
+def test_expert_morph_return_diag_reports_stage():
+    # ok: diag carries the clamp statistics.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
+    expert = _straight_traj(np.zeros(_MORPH_T))
+    morph, diag = build_expert_morph_candidate(det, expert, _straight_route(), return_diag=True)
+    assert morph is not None
+    assert diag["stage"] == "ok"
+    assert "terminal_err_m" in diag and "clamp_fire_fraction" in diag and "v0_mps" in diag
+
+    # infeasible deceleration: rejection reason + statistics.
+    Ts = 20
+    det_fast = _straight_traj(np.cumsum(np.full(Ts, 2.0)))  # 20 m/s
+    expert_stop = _straight_traj(np.zeros(Ts))
+    morph, diag = build_expert_morph_candidate(
+        det_fast, expert_stop, _straight_route(length_m=200.0, n=400), return_diag=True
+    )
+    assert morph is None
+    assert diag["stage"] == "infeasible_deceleration"
+    assert diag["terminal_err_m"] > 0.0
+
+    # unreliable route.
+    morph, diag = build_expert_morph_candidate(
+        det, expert, np.array([[0.0, 0.0], [1.0, 0.0]]), return_diag=True
+    )
+    assert morph is None
+    assert diag["stage"] in {"route_unreliable", "endpoint_overshoot"}
+
+    # default (no return_diag) keeps the plain return type.
+    assert build_expert_morph_candidate(det, expert, _straight_route()) is not None
+
+
+def _morph_outcome_reward_row(total: float, *, rb_crossing: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        total=total,
+        collision_step=None,
+        rb_crossing=rb_crossing,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+def _morph_outcome_candidate_row(labels: list[str]) -> dict:
+    return {"moving_collision_step": None, "expert_disagreement": False, "labels": labels}
+
+
+def test_best_safe_candidate_reports_morph_outcome():
+    source_row = {"repair_labels": ["expert_disagreement"], "expert_disagreement_max_dev": 0.5}
+    T = 20
+    expert = np.zeros((T, 4), dtype=np.float32)
+    mover = np.zeros((T, 4), dtype=np.float32)
+    mover[:, 0] = np.arange(T, dtype=np.float32)  # far from the waiting expert
+    morph = np.zeros((T, 4), dtype=np.float32)  # matches the waiting expert
+
+    # morph accepted + wins (near_log -> expert-closeness dominates).
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [_morph_outcome_candidate_row(["clean"]), _morph_outcome_candidate_row(["clean"])],
+        [_morph_outcome_reward_row(5.0), _morph_outcome_reward_row(0.0)],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx == 1
+    assert meta["morph_outcome"] == "selected"
+
+    # morph accepted but loses -> lost_selection + its r2lpl score recorded.
+    far_off = {"repair_labels": ["expert_disagreement"], "expert_disagreement_max_dev": 9.0}
+    idx, meta = _best_safe_candidate(
+        far_off,  # far_offpolicy -> rule-score weight 1.0, expert weight 0.0
+        [_morph_outcome_candidate_row(["clean"]), _morph_outcome_candidate_row(["clean"])],
+        [_morph_outcome_reward_row(5.0), _morph_outcome_reward_row(0.0)],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx == 0
+    assert meta["morph_outcome"] == "lost_selection"
+    assert "morph_r2lpl_score" in meta
+
+    # morph gate-rejected (rb crossing) while a model candidate is safe.
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [_morph_outcome_reward_row(5.0), _morph_outcome_reward_row(0.0, rb_crossing=True)],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx == 0
+    assert meta["morph_outcome"] == "gate_rejected"
+    assert meta["morph_labels"] == ["road_border_crossing"]
+
+    # every candidate gate-rejected -> no_safe_candidate still reports the morph gate.
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [
+            _morph_outcome_reward_row(-5.0, rb_crossing=True),
+            _morph_outcome_reward_row(-9.0, rb_crossing=True),
+        ],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx is None
+    assert meta["reason"] == "no_safe_candidate"
+    assert meta["morph_outcome"] == "gate_rejected"
 
 
 # ---------------------------------------------------------------------------
