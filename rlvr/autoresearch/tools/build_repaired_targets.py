@@ -646,7 +646,7 @@ def build_repaired_targets(
     expert_morph_w_max: float = 1.0,
     expert_morph_max_accel: float = 2.0,
     expert_morph_max_jerk: float = 4.0,
-    expert_stop_anchor: str = "pseudo",
+    expert_stop_anchor: str = "recorded",
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -997,12 +997,14 @@ def main() -> None:
     ap.add_argument(
         "--expert_stop_anchor",
         choices=["pseudo", "recorded"],
-        default="pseudo",
+        default="recorded",
         help=(
-            "Where a stopped-expert morph stops: 'pseudo' (default) = the expert's "
-            "remaining travel distance applied from the ego pose; 'recorded' = the "
-            "recorded expert's actual stop position projected onto the det path "
-            "(requires ego_recorded_future in the mined scenes)."
+            "Where a stopped-expert morph stops. 'recorded' (default) = the recorded "
+            "expert's actual stop position projected onto the det path (position "
+            "fidelity; requires ego_recorded_future in the mined scenes; earlier, "
+            "harder stops cost some morph coverage). 'pseudo' = the expert's remaining "
+            "travel distance applied from the ego pose (paper pseudo-target; maximum "
+            "coverage, stops land later than the human's)."
         ),
     )
     ap.add_argument("--expert_morph_max_accel", type=float, default=2.0)

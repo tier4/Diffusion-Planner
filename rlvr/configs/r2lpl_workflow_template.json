@@ -43,7 +43,9 @@
     "variant": "rl_cl_soft_sweep_stretch",
     "noise_low": 0.5,
     "noise_high": 2,
-    "use_route_cl_guidance": true
+    "use_route_cl_guidance": true,
+    "expert_stop_anchor": "recorded",
+    "_comment_expert_stop_anchor": "Where a stopped-expert morph stops: 'recorded' (default; the recorded expert's actual stop position, needs ego_recorded_future in mined scenes) or 'pseudo' (the expert's remaining travel distance from the ego pose; max coverage)."
   },
   "replay_memory": {
     "capacity": 200,

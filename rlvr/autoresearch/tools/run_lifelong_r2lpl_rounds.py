@@ -288,6 +288,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "rl_cl_col_sweep",
         ),
         "gt_max_speed": float(_first_non_null(repair.get("gt_max_speed"), 9.0)),
+        "expert_stop_anchor": str(_first_non_null(repair.get("expert_stop_anchor"), "recorded")),
         "scene_batch_size": int(
             _first_non_null(repair.get("generation_batch_size"), repair.get("scene_batch_size"), 8)
         ),
@@ -1122,6 +1123,8 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_accel", str(repair_cfg["expert_morph_max_accel"])])
     if "expert_morph_max_jerk" in repair_cfg:
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
+    if "expert_stop_anchor" in repair_cfg:
+        cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
     if cfg.get("repair_labels"):
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
