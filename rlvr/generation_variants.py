@@ -20,6 +20,11 @@ cl_spd_config dict fields:
   lat_lambda     — max lateral offset in metres (default 2.0)
   lat_scale      — lateral guidance scale (default 5.0)
   col            — collision guidance scale (default 0, disabled)
+  anchor         — dict enabling path-mode anchor_following for the slot:
+                   {"index": <prototype row>, "scale": <default 3.0>, plus any
+                   anchor_following param (dist_cap, step_gain, ...)}.
+                   Requires prototypes_path in the GRPO config (fails loudly
+                   otherwise).
 
 noise_config dict fields:
   noise          — (min, max) per-element noise range
@@ -255,6 +260,21 @@ _GUIDED_RSFT_V2 = [
     _CL10_SPD10_NOISY,
 ]
 
+
+def _anchor_slot(i: int, scale: float = 3.0, noise: tuple = (0.0, 0.0)) -> dict:
+    """Slot following prototype path i via path-mode anchor_following."""
+    return {
+        "cl": 0.0,
+        "spd": 0.0,
+        "noise": noise,
+        "anchor": {"index": i, "scale": scale},
+        "label": f"ANCHOR{i}_s{scale:g}",
+    }
+
+
+# 6 anchor-mode slots (prototype rows 0-5) for multimodal exploration.
+_ANCHOR_SLOTS_6 = [_anchor_slot(i) for i in range(6)]
+
 # Noise sweeps
 _NOISE_SWEEP_FULL = [
     {"noise": (0.1, 0.3), "label": "noise_n0103"},
@@ -292,6 +312,14 @@ _VARIANTS: dict[str, GenerationVariant] = {
         description="Default RSFT base: 6 guided + 9 noise sweep (0.1->5.0).",
         cl_spd_configs=_GUIDED_RSFT_V2,
         noise_configs=_NOISE_SWEEP_FULL,
+    ),
+    "rsft_v2_anchor": GenerationVariant(
+        description="rsft_v2 guided + 6 anchor-mode slots (path-mode "
+        "anchor_following on prototype rows 0-5; requires prototypes_path — "
+        "build with rlvr.autoresearch.tools.build_path_prototypes) + 3 mid "
+        "noise. Multimodal exploration via prototype paths.",
+        cl_spd_configs=_GUIDED_RSFT_V2 + _ANCHOR_SLOTS_6,
+        noise_configs=_NOISE_SWEEP_FULL[2:5],
     ),
     # ====== Runner-up / honorable mentions (kept for comparison) ======
     "rsft_v2_legacy": GenerationVariant(

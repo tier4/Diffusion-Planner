@@ -859,6 +859,7 @@ def train_epoch_ranked_sft(
                 speed_stretch=spd_stretch,
                 generation_variant=getattr(config, "generation_variant", "default"),
                 use_route_cl_guidance=getattr(config, "use_route_cl_guidance", False),
+                prototypes_path=getattr(config, "prototypes_path", None),
             )  # [N, K, T, 4]
 
     if mode != "curated":

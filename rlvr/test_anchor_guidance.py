@@ -160,6 +160,21 @@ class TestLegacyWaypointMode:
             make_guidance(prototypes_path, idx=0, mode="bogus")
 
 
+class TestAnchorVariant:
+    def test_rsft_v2_anchor_slot_composition(self):
+        from rlvr.generation_variants import get_variant
+
+        v = get_variant("rsft_v2_anchor")
+        anchor_slots = [c for c in v.cl_spd_configs if c.get("anchor") is not None]
+        assert len(anchor_slots) == 6
+        assert [c["anchor"]["index"] for c in anchor_slots] == list(range(6))
+        # 1 det + guided/anchor cl_spd + noise fits K=16
+        assert 1 + len(v.cl_spd_configs) + len(v.noise_configs) == 16
+        for c in anchor_slots:
+            assert c["cl"] == 0.0 and c["spd"] == 0.0
+            assert c["label"].startswith("ANCHOR")
+
+
 class TestReward:
     def test_reward_ranks_closer_trajectory_higher(self, prototypes_path):
         g = make_guidance(prototypes_path, idx=1)
