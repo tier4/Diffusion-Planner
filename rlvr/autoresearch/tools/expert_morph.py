@@ -5,18 +5,26 @@ For ``expert_disagreement`` scenes the disagreement is a PROGRESS / timing
 mismatch between the model's deterministic plan and the logged human expert.
 The morph is deliberately simple:
 
-1. **Re-time the det plan to the expert's speed profile** — blend the two
-   per-step speed profiles under a quintic onset weight (zero speed-jump at
-   t=0), integrate to an arc schedule, and interpolate the det plan's own
-   positions AND headings at those arcs. The det plan is already a feasible,
-   kinematically valid trajectory; driving the same path slower (or stopping
-   on it) stays valid by construction — a stop is a fixed point on the path
-   with its fixed heading.
-2. **Lateral merge toward the expert** — the expert's lateral offset is
-   measured in the det path's own Frenet frame (projection reuses
-   ``_heatmap_common``; no hand-rolled geometry) and applied with an
-   arc-progress weight under a slope cap (|Δd| ≤ slope·Δs), so the offset can
-   only change while the vehicle moves: no lateral drift at standstill.
+1. **Re-time the det plan to the expert's timing** — blend the two cumulative
+   DISTANCE SCHEDULES (not instantaneous speeds) under a quintic onset weight
+   (zero speed-jump at t=0), track the result with an accel/jerk-limited
+   profile, and interpolate the det plan's own positions AND headings at the
+   resulting arcs. The det plan is already a feasible, kinematically valid
+   trajectory; driving the same path slower (or stopping on it) stays valid
+   by construction — a stop is a fixed point on the path with its fixed
+   heading.
+2. **Stopped expert => stop-arc cap** — when the expert ends stopped (or its
+   log-truncated held tail reads as stopped), the arc schedule is capped at a
+   stop point: by default the expert trajectory's final point, or the
+   caller-supplied ``stop_anchor_xy`` (e.g. the recorded expert's actual stop
+   position). The cap anticipates with a braking parabola and is floored at
+   the tracker's shortest feasible stop from the det plan's initial speed.
+3. **Lateral merge toward the expert** — the expert's lateral offset at the
+   morph's end arc, measured in the det path's own Frenet frame (projection
+   reuses ``_heatmap_common``; no hand-rolled geometry), applied as ONE
+   analytic quintic ease in arc space whose magnitude is pre-scaled so the
+   crab-angle slope bound holds without pointwise clipping; the offset only
+   changes while the vehicle moves — no lateral drift at standstill.
 
 Everything is ego-frame numpy in/out.
 """
@@ -338,7 +346,10 @@ def build_expert_morph_candidate(
             d_end = float(np.interp(s_feasible[-1], a_mono, d_int))
     arc_span = max(float(s_feasible[-1] - s_feasible[0]), _EPS)
     if abs(d_end) > _EPS:
-        scale = min(1.0, _DEFAULT_LATERAL_SLOPE_CAP * arc_span / (1.875 * abs(d_end)))
+        # Peak slope of d_end*scale*quintic(u, w_max) is 1.875*w_max*scale*|d_end|/span,
+        # so w_max belongs in the denominator — without it the crab-angle bound
+        # is violated for w_max > 1.
+        scale = min(1.0, _DEFAULT_LATERAL_SLOPE_CAP * arc_span / (1.875 * w_max * abs(d_end)))
     else:
         scale = 0.0
     u_arc = (s_feasible - s_feasible[0]) / arc_span

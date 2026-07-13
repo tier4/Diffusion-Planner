@@ -90,8 +90,14 @@ Each round runs:
 
 The miner writes `credit_windows.jsonl` directly. Repair generation consumes that
 file and writes accepted repaired scenes. Replay memory merges current accepted
-scenes with prior replay scenes. Training uses the repaired current scenes plus
-the replay list.
+scenes with prior replay scenes, with optional per-label reserved capacity
+(`replay_memory.label_quotas`) so a dominant event label cannot evict a rarer
+behavior class across rounds. Training uses the repaired current scenes plus the
+replay list, plus — when `training.anchor` is configured — a seeded slice of
+real logged normal scenes at `ratio` : 1 (anchor : focus), optionally stratified
+with a waits/interaction list; training on repaired+replay only leaves the model
+unanchored off the failure distribution (base_sft backend only; the runner
+rejects the anchor with any other backend).
 
 At a high level:
 
@@ -267,15 +273,16 @@ schedules under an accel/jerk-limited tracker) and eases laterally toward the
 expert in the det path's Frenet frame. It goes through the same gates and
 selection as every other candidate — nothing is forced.
 
-When the expert is stopped at the horizon end, the morph brakes to a stop. WHERE
-it stops is controlled by `repair_generation.expert_stop_anchor`
-(CLI `--expert_stop_anchor`):
+When the expert ends stopped (including a log-truncated held tail that reads
+as stopped), the morph brakes to a stop. WHERE it stops is controlled by
+`repair_generation.expert_stop_anchor` (CLI `--expert_stop_anchor`):
 
 - **`recorded` (default)** — stop at the recorded expert's ACTUAL stop position,
   projected onto the det path. Position-fidelity semantics: the target stops
   where the human stopped. Requires `ego_recorded_future` in the mined scenes
-  (saved by the reproducer alongside `ego_expert_future`; re-mine older corpora
-  that lack it — the repair fails loudly rather than falling back). Because the
+  (saved by the reproducer alongside `ego_expert_future`). Older corpora that
+  lack the field fail loudly BEFORE any GPU work, with two remedies: re-mine,
+  or run with `expert_stop_anchor: "pseudo"`. Because the
   diverged-ahead ego must stop earlier and harder, some morphs become
   kinematically infeasible and their scenes fall back to model candidates or go
   unrepaired: fidelity costs coverage.
@@ -284,8 +291,8 @@ it stops is controlled by `repair_generation.expert_stop_anchor`
   expert's timing"). Maximum morph coverage, but the stop lands as far past the
   human's stop point as the ego had already diverged.
 
-Both anchors are floored at the tracker's shortest feasible stop from the ego's
-current speed, so neither can demand the impossible. Pick `recorded` when the
+Both anchors are floored at the tracker's shortest feasible stop from the det
+plan's initial speed, so neither can demand the impossible. Pick `recorded` when the
 campaign metric is stop-location fidelity (patience repair); pick `pseudo` when
 repair coverage matters more than where exactly the target stops.
 

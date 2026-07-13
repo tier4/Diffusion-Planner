@@ -3409,10 +3409,11 @@ def test_refresh_repair_returns_empty_when_no_unrepaired_rows(monkeypatch, tmp_p
         raise AssertionError("_run should not be called when there is nothing to re-attempt")
 
     monkeypatch.setattr(round_runner, "_run", _boom)
-    assert (
-        _refresh_repair(cfg, tmp_path / "m.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[])
-        == []
-    )
+    # Returns the (paths, elapsed) tuple the caller unpacks — a bare [] here
+    # crashed the round loop the first time a refresh found nothing to do.
+    assert _refresh_repair(
+        cfg, tmp_path / "m.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[]
+    ) == ([], 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -3554,6 +3555,99 @@ def _traj_along_polyline(route: np.ndarray, s_query: np.ndarray) -> np.ndarray:
         np.maximum(np.abs(np.gradient(xs)), 1e-9) * np.sign(np.gradient(xs) + 1e-12),
     )
     return np.stack([xs, ys, np.cos(th), np.sin(th)], axis=1).astype(np.float32)
+
+
+def test_expert_morph_stop_anchor_overrides_stop_location():
+    # recorded-anchor semantics: the caller-supplied stop point wins over the
+    # expert's traveled distance. Expert travels to 20 m; anchor at 12 m must
+    # pull the stop to ~12.5 (anchor + overshoot margin).
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # 4 m/s
+    s_exp = np.minimum(np.cumsum(np.full(_MORPH_T, 0.4)), 20.0)
+    expert = _straight_traj(s_exp)
+    morph = build_expert_morph_candidate(det, expert, stop_anchor_xy=np.array([12.0, 0.0]))
+    assert morph is not None
+    assert abs(morph[-1, 0] - 12.5) < 1.0
+    # without the anchor the stop lands at the expert's terminal (~20.5 bound)
+    default = build_expert_morph_candidate(det, expert)
+    assert default is not None
+    assert default[-1, 0] > 15.0
+
+
+def test_expert_morph_stop_anchor_floored_by_feasible_stop():
+    # An anchor the ego cannot reach (1 m ahead at 5 m/s) must be floored at
+    # the tracker's shortest feasible stop, not demanded.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)))  # 5 m/s
+    expert = _straight_traj(np.zeros(_MORPH_T))
+    morph = build_expert_morph_candidate(det, expert, stop_anchor_xy=np.array([1.0, 0.0]))
+    assert morph is not None
+    step = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=-1)
+    assert (step / _MORPH_DT < 0.5).any()  # it does stop
+    assert morph[-1, 0] > 1.5  # but beyond the infeasible 1 m anchor
+
+
+def test_expert_morph_lateral_slope_cap_honors_w_max():
+    # The analytic lateral magnitude limit must include w_max: at w_max=2 the
+    # quintic's peak slope doubles, and without the factor the crab-angle
+    # bound is violated.
+    from rlvr.autoresearch.tools.expert_morph import _DEFAULT_LATERAL_SLOPE_CAP
+
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
+    det[:, 1] = 0.0
+    expert = _straight_traj(np.minimum(np.cumsum(np.full(_MORPH_T, 0.4)), 4.0))
+    expert[:, 1] = 4.0  # large lateral gap, short stop arc
+    morph = build_expert_morph_candidate(det, expert, w_max=2.0)
+    if morph is None:
+        return  # rejected outright is acceptable; the cap claim is about accepted output
+    dd = np.abs(np.diff(morph[:, 1]))
+    ds = (
+        np.linalg.norm(np.diff(morph[:, :2], axis=1), axis=-1)
+        if False
+        else np.abs(np.diff(morph[:, 0]))
+    )
+    moving = ds > 1e-3
+    assert (dd[moving] / ds[moving]).max() <= _DEFAULT_LATERAL_SLOPE_CAP * 1.2 + 1e-6
+
+
+def test_preflight_recorded_anchor_raises_on_missing_field(tmp_path):
+    from rlvr.autoresearch.tools.build_repaired_targets import _preflight_recorded_anchor
+
+    T = 80
+    base = dict(
+        ego_agent_future=np.zeros((T, 3), dtype=np.float32),
+        ego_expert_future=np.zeros((T, 4), dtype=np.float32),
+    )
+    old = tmp_path / "old.npz"
+    np.savez(old, **base)
+    new = tmp_path / "new.npz"
+    np.savez(new, **base, ego_recorded_future=np.zeros((T, 4), dtype=np.float32))
+
+    rows_old = [{"scene_path": str(old), "repair_labels": ["expert_disagreement"]}]
+    rows_new = [{"scene_path": str(new), "repair_labels": ["expert_disagreement"]}]
+    rows_nonexpert = [{"scene_path": str(old), "repair_labels": ["road_border_crossing"]}]
+
+    with pytest.raises(ValueError, match="ego_recorded_future"):
+        _preflight_recorded_anchor(rows_old)
+    _preflight_recorded_anchor(rows_new)  # passes
+    _preflight_recorded_anchor(rows_nonexpert)  # non-expert rows are exempt
+
+
+def test_repair_cmd_forwards_expert_stop_anchor(tmp_path):
+    cfg = {
+        "reward_config": "r.json",
+        "threshold_config": "t.json",
+        "repair_config": {
+            "ego_shape": "4.76,7.24,2.29",
+            "min_margin": 0.3,
+            "expert_stop_anchor": "pseudo",
+        },
+    }
+    cmd = round_runner._repair_cmd(cfg, tmp_path / "m.pth", tmp_path / "c.jsonl", tmp_path)
+    idx = cmd.index("--expert_stop_anchor")
+    assert cmd[idx + 1] == "pseudo"
+    # without the key the flag is omitted (CLI default 'recorded' applies)
+    del cfg["repair_config"]["expert_stop_anchor"]
+    cmd2 = round_runner._repair_cmd(cfg, tmp_path / "m.pth", tmp_path / "c.jsonl", tmp_path)
+    assert "--expert_stop_anchor" not in cmd2
 
 
 def test_expert_morph_return_diag_reports_stage():

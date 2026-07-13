@@ -222,6 +222,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     rounds = dict(workflow.get("rounds") or {})
     refresh = dict(rounds.get("repair_refresh") or workflow.get("repair_refresh") or {})
     training_section = dict(workflow.get("training") or {})
+    if "anchor" in training_section and not training_section["anchor"]:
+        raise ValueError(
+            "workflow training.anchor is present but empty; remove the section or "
+            "fill in scene_list/ratio"
+        )
 
     scene_list = _contract_scene_list(contract)
     chunk_manifest = _first_non_null(
@@ -1044,8 +1049,13 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
     missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
     if missing:
         raise ValueError(f"training.anchor is missing required fields: {missing}")
+    if float(anchor_cfg["ratio"]) <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {anchor_cfg['ratio']}")
     if (anchor_cfg.get("waits_scene_list") is None) != (anchor_cfg.get("waits_fraction") is None):
         raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+    waits_fraction = anchor_cfg.get("waits_fraction")
+    if waits_fraction is not None and not 0.0 < float(waits_fraction) < 1.0:
+        raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {waits_fraction}")
     for key in ("scene_list", "waits_scene_list"):
         value = anchor_cfg.get(key)
         if value is None:
@@ -1686,7 +1696,7 @@ def _refresh_repair(
         unrepaired_rows = _read_json_list(unrepaired_path) if unrepaired_path.exists() else []
         if not unrepaired_rows:
             _write_jsonl(input_jsonl, [])
-            return []
+            return [], 0.0
         keep_keys = _credit_row_keys(credit_jsonl)
         stripped = [{k: v for k, v in row.items() if k in keep_keys} for row in unrepaired_rows]
         _write_jsonl(input_jsonl, stripped)

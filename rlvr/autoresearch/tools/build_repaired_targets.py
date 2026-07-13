@@ -616,6 +616,29 @@ def _best_safe_candidate(
 
 
 @torch.no_grad()
+def _preflight_recorded_anchor(rows: list[dict[str, Any]]) -> None:
+    """Fail BEFORE model load / GPU work when --expert_stop_anchor recorded is
+    unusable: every expert_disagreement scene must carry ego_recorded_future.
+
+    Old mined corpora predate the field; without this check the run burns
+    through generation until the first expert scene, hours into a round.
+    """
+    missing = []
+    for row in rows:
+        if not _row_is_expert_disagreement(row):
+            continue
+        with np.load(row["scene_path"]) as z:
+            if "ego_recorded_future" not in z.files:
+                missing.append(str(row["scene_path"]))
+    if missing:
+        raise ValueError(
+            f"--expert_stop_anchor recorded requires 'ego_recorded_future' in mined "
+            f"scenes, missing in {len(missing)} expert_disagreement scene(s), e.g. "
+            f"{missing[0]}. Either re-mine with a reproducer that saves it, or run "
+            f"with --expert_stop_anchor pseudo (no silent fallback)."
+        )
+
+
 def build_repaired_targets(
     *,
     model_path: str,
@@ -654,6 +677,12 @@ def build_repaired_targets(
         count_rear_end_collisions=count_rear_end_collisions,
     )
     _validate_static_collision_config(rows, rcfg)
+    if expert_stop_anchor == "recorded":
+        _preflight_recorded_anchor(rows)
+    elif expert_stop_anchor != "pseudo":
+        raise ValueError(
+            f"unknown expert_stop_anchor {expert_stop_anchor!r}; expected 'pseudo' or 'recorded'"
+        )
     thresholds = _load_scene_thresholds(threshold_config_path)
     model, model_args = load_model(model_path, device)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -791,7 +820,8 @@ def build_repaired_targets(
                         raise ValueError(
                             f"{row['scene_path']}: --expert_stop_anchor recorded requires "
                             "'ego_recorded_future' in the mined scene (re-mine with a "
-                            "reproducer that saves it; no silent fallback)."
+                            "reproducer that saves it, or run with --expert_stop_anchor "
+                            "pseudo; no silent fallback)."
                         )
                     recorded = _future_to_4col(data["ego_recorded_future"].detach().cpu().numpy())
                     stop_anchor_xy = recorded[-1, :2]
