@@ -3414,10 +3414,6 @@ _MORPH_T = 80
 _MORPH_DT = 0.1
 
 
-def _straight_route(length_m: float = 60.0, n: int = 200) -> np.ndarray:
-    return np.stack([np.linspace(0.0, length_m, n), np.zeros(n)], axis=1)
-
-
 def _straight_traj(xs: np.ndarray) -> np.ndarray:
     xy = np.stack([xs, np.zeros(len(xs))], axis=1)
     return np.concatenate([xy, np.ones((len(xs), 1)), np.zeros((len(xs), 1))], axis=1)
@@ -3427,7 +3423,7 @@ def test_expert_morph_takeoff_advances_toward_expert():
     # det ~stationary, expert ramps forward -> morph must advance to ~expert terminal.
     det = _straight_traj(np.zeros(_MORPH_T))
     expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # ~4 m/s
-    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert morph.shape == (_MORPH_T, 4)
     # Monotone non-decreasing longitudinal progress (no backward step).
@@ -3443,7 +3439,7 @@ def test_expert_morph_stop_holds_position():
     # the stationary expert (terminal progress well below det's) and stays monotone.
     det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # ~4 m/s
     expert = _straight_traj(np.zeros(_MORPH_T))
-    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert np.all(np.diff(morph[:, 0]) >= -1e-4)
     # Pulled back well short of the det terminal progress ("holds position").
@@ -3461,31 +3457,101 @@ def test_expert_morph_rejects_impossible_deceleration():
     Ts = 20
     det = _straight_traj(np.cumsum(np.full(Ts, 2.0)))  # 20 m/s
     expert = _straight_traj(np.zeros(Ts))
-    route = _straight_route(length_m=200.0, n=400)
-    assert build_expert_morph_candidate(det, expert, route) is None
+    assert build_expert_morph_candidate(det, expert) is None
 
 
-def test_expert_morph_rejects_route_too_short():
-    det = _straight_traj(np.zeros(_MORPH_T))
+def test_expert_morph_rejects_diverged_paths():
+    # Expert far off the det path laterally -> no meaningful merge corridor.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
     expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
-    short_route = np.array([[0.0, 0.0], [1.0, 0.0]])
-    assert build_expert_morph_candidate(det, expert, short_route) is None
+    expert[:, 1] = 12.0
+    morph, diag = build_expert_morph_candidate(det, expert, return_diag=True)
+    assert morph is None
+    assert diag["stage"] == "paths_diverged"
 
 
 def test_expert_morph_never_reverses():
     # A wiggly blend must still yield a monotone longitudinal signal.
     det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.3)))
     expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)))
-    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+
+
+def test_expert_morph_no_lateral_motion_at_standstill():
+    # det moves forward on a laterally-offset line, expert is stopped on the
+    # centerline: after the morph brakes to a stop, the position must FREEZE —
+    # lateral blending must not keep sliding the point sideways (the
+    # "curls onto itself" artifact: crab-walk at standstill).
+    det_xy_x = np.cumsum(np.full(_MORPH_T, 0.4))  # ~4 m/s
+    det = _straight_traj(det_xy_x)
+    det[:, 1] = 1.5  # det path laterally offset from the expert's stop point
+    expert = _straight_traj(np.zeros(_MORPH_T))  # stopped at origin (d=0)
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    step = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=-1)
+    stopped = step / _MORPH_DT < 0.1
+    assert stopped.any()
+    t_stop = int(np.argmax(stopped))
+    # once stopped, every subsequent step must stay stopped (no curl / drift)
+    assert np.all(step[t_stop:] / _MORPH_DT < 0.1)
+    tail_drift = np.linalg.norm(morph[-1, :2] - morph[t_stop, :2])
+    assert tail_drift < 0.15
+
+
+def test_expert_morph_passes_reward_kinematic_gate():
+    # The acceptance criterion that used to reject 32/52 real expert-waits
+    # morphs: the reward's own kinematic gate (SG-smoothed yaw-rate vs absolute
+    # cap AND bicycle-model curvature bound). Motion-derived heading must pass
+    # it without scenario tuning — including the hard case: braking to a stop
+    # while the route curves.
+    import torch as _torch
+
+    from planner_metrics.config import RewardConfig
+    from planner_metrics.subscores import compute_kinematic_gate
+
+    # Curved route: straight 20 m then a gentle 90-degree bend.
+    a = np.stack([np.linspace(0.0, 20.0, 80), np.zeros(80)], axis=1)
+    ang = np.linspace(-np.pi / 2, 0.0, 120)
+    b = np.stack([20.0 + 15.0 * np.cos(ang), 15.0 + 15.0 * np.sin(ang)], axis=1)
+    route = np.concatenate([a, b[1:]], axis=0)
+
+    # det: constant 4 m/s along the route; expert: stops early (at ~6 m).
+    s_det = np.cumsum(np.full(_MORPH_T, 0.4))
+    det = _traj_along_polyline(route, s_det)
+    s_exp = np.minimum(np.cumsum(np.full(_MORPH_T, 0.2)), 6.0)
+    expert = _traj_along_polyline(route, s_exp)
+
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    cfg = RewardConfig()
+    gate = compute_kinematic_gate(
+        _torch.from_numpy(morph)[None],
+        cfg,
+        _torch.tensor([3.0, 4.5, 1.9]),
+    )
+    assert float(gate[0]) == 1.0
+
+
+def _traj_along_polyline(route: np.ndarray, s_query: np.ndarray) -> np.ndarray:
+    seg = np.diff(route, axis=0)
+    seg_len = np.linalg.norm(seg, axis=1)
+    s_ref = np.concatenate([[0.0], np.cumsum(seg_len)])
+    xs = np.interp(s_query, s_ref, route[:, 0])
+    ys = np.interp(s_query, s_ref, route[:, 1])
+    th = np.arctan2(
+        np.gradient(ys),
+        np.maximum(np.abs(np.gradient(xs)), 1e-9) * np.sign(np.gradient(xs) + 1e-12),
+    )
+    return np.stack([xs, ys, np.cos(th), np.sin(th)], axis=1).astype(np.float32)
 
 
 def test_expert_morph_return_diag_reports_stage():
     # ok: diag carries the clamp statistics.
     det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
     expert = _straight_traj(np.zeros(_MORPH_T))
-    morph, diag = build_expert_morph_candidate(det, expert, _straight_route(), return_diag=True)
+    morph, diag = build_expert_morph_candidate(det, expert, return_diag=True)
     assert morph is not None
     assert diag["stage"] == "ok"
     assert "terminal_err_m" in diag and "clamp_fire_fraction" in diag and "v0_mps" in diag
@@ -3494,22 +3560,18 @@ def test_expert_morph_return_diag_reports_stage():
     Ts = 20
     det_fast = _straight_traj(np.cumsum(np.full(Ts, 2.0)))  # 20 m/s
     expert_stop = _straight_traj(np.zeros(Ts))
-    morph, diag = build_expert_morph_candidate(
-        det_fast, expert_stop, _straight_route(length_m=200.0, n=400), return_diag=True
-    )
+    morph, diag = build_expert_morph_candidate(det_fast, expert_stop, return_diag=True)
     assert morph is None
     assert diag["stage"] == "infeasible_deceleration"
     assert diag["terminal_err_m"] > 0.0
 
-    # unreliable route.
-    morph, diag = build_expert_morph_candidate(
-        det, expert, np.array([[0.0, 0.0], [1.0, 0.0]]), return_diag=True
-    )
+    # too short horizon.
+    morph, diag = build_expert_morph_candidate(det[:1], expert[:1], return_diag=True)
     assert morph is None
-    assert diag["stage"] in {"route_unreliable", "endpoint_overshoot"}
+    assert diag["stage"] == "too_short_horizon"
 
     # default (no return_diag) keeps the plain return type.
-    assert build_expert_morph_candidate(det, expert, _straight_route()) is not None
+    assert build_expert_morph_candidate(det, expert) is not None
 
 
 def _morph_outcome_reward_row(total: float, *, rb_crossing: bool = False) -> SimpleNamespace:

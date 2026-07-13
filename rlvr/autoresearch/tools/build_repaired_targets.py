@@ -130,31 +130,6 @@ def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
     return "expert_disagreement" in set(row.get("repair_labels") or [])
 
 
-def _route_xy_from_data(data: dict[str, torch.Tensor]) -> np.ndarray | None:
-    """Concatenate route_lanes (ego frame) into one xy polyline.
-
-    data["route_lanes"] is (1, L, P, C); channels 0:2 are xy. All-zero padding
-    points are dropped and the lanes are concatenated in order.
-    """
-    if "route_lanes" not in data:
-        return None
-    rl = data["route_lanes"].detach().cpu().numpy()
-    if rl.ndim == 4:
-        rl = rl[0]
-    if rl.ndim != 3 or rl.shape[-1] < 2:
-        return None
-    pts: list[np.ndarray] = []
-    for lane in rl:  # (P, C)
-        xy = lane[:, :2].astype(np.float64)
-        valid = np.abs(xy).sum(axis=1) > 1e-6
-        xy = xy[valid]
-        if xy.shape[0] > 0:
-            pts.append(xy)
-    if not pts:
-        return None
-    return np.concatenate(pts, axis=0)
-
-
 def _expert_reference_scoring_data(
     data: dict[str, torch.Tensor],
     *,
@@ -807,33 +782,16 @@ def build_repaired_targets(
             morph_index: int | None = None
             morph_diag: dict[str, Any] | None = None
             if repair_expert_gt_candidate and is_expert:
-                route_xy = _route_xy_from_data(data)
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
-                morph = None
-                if route_xy is None:
-                    morph_diag = {"stage": "no_route"}
-                else:
-                    # Yaw-rate bounds mirror the reward's compute_kinematic_gate so
-                    # the morph cannot be synthesized into a kinematically-gated
-                    # rejection (stopping morphs must not turn at standstill).
-                    scene_wheelbase = float(data["ego_shape"].reshape(-1)[0])
-                    scene_kappa_max = (
-                        rcfg.kinematic_margin
-                        * math.tan(rcfg.max_steer)
-                        / max(scene_wheelbase, 1e-3)
-                    )
-                    morph, morph_diag = build_expert_morph_candidate(
-                        det_traj,
-                        expert_traj,
-                        route_xy,
-                        w_max=expert_morph_w_max,
-                        max_accel=expert_morph_max_accel,
-                        max_jerk=expert_morph_max_jerk,
-                        max_yaw_rate=float(rcfg.max_yaw_rate),
-                        kappa_max=scene_kappa_max,
-                        return_diag=True,
-                    )
+                morph, morph_diag = build_expert_morph_candidate(
+                    det_traj,
+                    expert_traj,
+                    w_max=expert_morph_w_max,
+                    max_accel=expert_morph_max_accel,
+                    max_jerk=expert_morph_max_jerk,
+                    return_diag=True,
+                )
                 if morph is not None:
                     morph_tensor = torch.from_numpy(np.ascontiguousarray(morph)).to(
                         device=device, dtype=scene_trajs.dtype

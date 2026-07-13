@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Frenet det->GT morph repair candidate for expert_disagreement scenes.
+"""det->GT morph repair candidate for expert_disagreement scenes.
 
 For ``expert_disagreement`` scenes the disagreement is a PROGRESS / timing
 mismatch between the model's deterministic plan and the logged human expert.
-This module builds a single extra repair candidate by blending the model
-deterministic plan (``det_traj``) toward the logged expert future
-(``expert_traj``) in the route Frenet frame, under a smooth quintic onset
-weight (zero deformation AND zero speed-jump at t=0) plus longitudinal
-acceleration / jerk feasibility clamps.
+The morph is deliberately simple:
 
-Everything is ego-frame numpy in/out. The route Frenet frame is built by
-REUSING ``scenario_generation.tools._heatmap_common`` (no hand-rolled
-projection geometry).
+1. **Re-time the det plan to the expert's speed profile** — blend the two
+   per-step speed profiles under a quintic onset weight (zero speed-jump at
+   t=0), integrate to an arc schedule, and interpolate the det plan's own
+   positions AND headings at those arcs. The det plan is already a feasible,
+   kinematically valid trajectory; driving the same path slower (or stopping
+   on it) stays valid by construction — a stop is a fixed point on the path
+   with its fixed heading.
+2. **Lateral merge toward the expert** — the expert's lateral offset is
+   measured in the det path's own Frenet frame (projection reuses
+   ``_heatmap_common``; no hand-rolled geometry) and applied with an
+   arc-progress weight under a slope cap (|Δd| ≤ slope·Δs), so the offset can
+   only change while the vehicle moves: no lateral drift at standstill.
+
+Everything is ego-frame numpy in/out.
 """
 
 from __future__ import annotations
@@ -28,12 +35,17 @@ _CLAMP_TOL = 1e-6
 _TERMINAL_PROGRESS_TOL_M = 2.0
 # ...or if the accel/jerk clamps had to fire on more than this fraction of steps.
 _CLAMP_FIRE_FRACTION = 0.5
-# Route reliability: reject if a det/expert endpoint overshoots the polyline end
-# (or precedes its start) by more than this many metres along the terminal tangent.
-_ROUTE_OVERSHOOT_MARGIN_M = 3.0
-# Lateral rate cap (m/s) — bounds |d[i]-d[i-1]|/dt so the morph cannot teleport
-# sideways.
-_DEFAULT_LATERAL_RATE_CAP_MPS = 2.0
+# Lateral slope cap (m of offset per m of arc) — |Δd| <= slope_cap * Δs, so the
+# lateral offset freezes when the vehicle stops (~30° max path-crab angle).
+_DEFAULT_LATERAL_SLOPE_CAP = 0.58
+# Reject when the expert strays this far laterally from the det path — the two
+# trajectories no longer describe the same maneuver corridor and a lateral
+# merge is meaningless.
+_PATHS_DIVERGED_M = 5.0
+# Expert counts as stopped at the horizon end below this speed (m/s); then the
+# morph's arc is capped at the expert's stop location plus this overshoot.
+_STOPPED_EXPERT_SPEED_MPS = 0.5
+_STOP_ARC_OVERSHOOT_M = 0.5
 _EPS = 1e-9
 
 
@@ -55,27 +67,6 @@ def _quintic_smoothstep(u: np.ndarray, w_max: float) -> np.ndarray:
     """
     u = np.clip(u, 0.0, 1.0)
     return w_max * (6.0 * u**5 - 15.0 * u**4 + 10.0 * u**3)
-
-
-def _endpoint_overshoot(pt: np.ndarray, pts: np.ndarray) -> float:
-    """Signed metres a point lies BEYOND the polyline (start or end).
-
-    Returns the larger of the start-side overshoot (point precedes the first
-    vertex along the initial tangent) and the end-side overshoot (point lies
-    past the last vertex along the terminal tangent). Non-positive when the
-    point projects onto the interior.
-    """
-    head_tan = pts[1] - pts[0]
-    head_len = float(np.linalg.norm(head_tan))
-    tail_tan = pts[-1] - pts[-2]
-    tail_len = float(np.linalg.norm(tail_tan))
-    over_start = 0.0
-    over_end = 0.0
-    if head_len > _EPS:
-        over_start = -float(np.dot(pt - pts[0], head_tan / head_len))
-    if tail_len > _EPS:
-        over_end = float(np.dot(pt - pts[-1], tail_tan / tail_len))
-    return max(over_start, over_end)
 
 
 def _feasible_longitudinal(
@@ -120,103 +111,57 @@ def _feasible_longitudinal(
     return s, n_fired
 
 
-def _feasible_lateral(d_target: np.ndarray, *, rate_cap: float, dt: float) -> np.ndarray:
-    """Bound the lateral signal's per-step rate to |d[i]-d[i-1]|/dt <= rate_cap."""
-    T = int(d_target.shape[0])
-    d = np.empty(T, dtype=np.float64)
-    d[0] = float(d_target[0])
-    max_step = rate_cap * dt
-    for i in range(1, T):
-        step = float(d_target[i] - d[i - 1])
-        step = float(np.clip(step, -max_step, max_step))
-        d[i] = d[i - 1] + step
-    return d
+def _det_headings(det: np.ndarray) -> np.ndarray:
+    """Unwrapped per-step heading of the det plan.
 
-
-def _moving_average(x: np.ndarray, w: int) -> np.ndarray:
-    """Odd-window moving average with edge padding (length preserved)."""
-    if w <= 1 or len(x) < w:
-        return np.asarray(x, dtype=np.float64)
-    k = np.ones(w) / w
-    padded = np.pad(np.asarray(x, dtype=np.float64), w // 2, mode="edge")
-    return np.convolve(padded, k, mode="valid")[: len(x)]
-
-
-def _smoothed_tangent_angles(pts: np.ndarray) -> np.ndarray:
-    """Unwrapped, smoothed per-vertex tangent angle of a polyline.
-
-    Central differences give a per-VERTEX tangent (continuous across segment
-    joins, unlike a per-SEGMENT tangent), unwrapped then lightly smoothed so the
-    route normal — and hence the reconstructed lateral offset + heading — does
-    not flip at route-segment boundaries.
+    Prefers the plan's own (cos, sin) channels — they are valid even where the
+    plan is stationary. Falls back to the path tangent for 2-column input.
     """
-    d = np.zeros_like(pts, dtype=np.float64)
-    d[1:-1] = pts[2:] - pts[:-2]
-    d[0] = pts[1] - pts[0]
-    d[-1] = pts[-1] - pts[-2]
-    ang = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
-    return _moving_average(ang, 5)
-
-
-def _arc_interp(
-    s_ref: np.ndarray, pts: np.ndarray, s_query: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Interpolate polyline position + unit tangent at arc positions s_query.
-
-    Returns (base_xy (M,2), unit_tangent (M,2)).
-    """
-    s_max = float(s_ref[-1])
-    sq = np.clip(s_query, 0.0, s_max)
-    idx = np.searchsorted(s_ref, sq, side="right") - 1
-    idx = np.clip(idx, 0, len(s_ref) - 2)
-    seg_len = s_ref[idx + 1] - s_ref[idx]
-    frac = (sq - s_ref[idx]) / np.maximum(seg_len, _EPS)
-    seg_vec = pts[idx + 1] - pts[idx]
-    base = pts[idx] + frac[:, None] * seg_vec
-    tan_len = np.linalg.norm(seg_vec, axis=1, keepdims=True)
-    unit_tan = seg_vec / np.maximum(tan_len, _EPS)
-    return base, unit_tan
+    if det.shape[1] >= 4:
+        return np.unwrap(np.arctan2(det[:, 3], det[:, 2]))
+    d = np.zeros_like(det[:, :2])
+    d[1:-1] = det[2:, :2] - det[:-2, :2]
+    d[0] = det[1, :2] - det[0, :2]
+    d[-1] = det[-1, :2] - det[-2, :2]
+    ang = np.arctan2(d[:, 1], d[:, 0])
+    # Hold heading through stationary stretches (no tangent to read off).
+    moving = np.linalg.norm(d, axis=1) > _EPS
+    if moving.any():
+        first = int(np.argmax(moving))
+        ang[:first] = ang[first]
+        for i in range(first + 1, len(ang)):
+            if not moving[i]:
+                ang[i] = ang[i - 1]
+    return np.unwrap(ang)
 
 
 def build_expert_morph_candidate(
     det_traj: np.ndarray,
     expert_traj: np.ndarray,
-    route_xy: np.ndarray,
     *,
     w_max: float = 1.0,
     max_accel: float = 2.0,
     max_jerk: float = 4.0,
     dt: float = 0.1,
-    max_yaw_rate: float = 0.6,
-    kappa_max: float | None = None,
     return_diag: bool = False,
 ) -> np.ndarray | None | tuple[np.ndarray | None, dict]:
-    """Blend a deterministic plan toward the logged expert in route Frenet frame.
+    """Re-time the det plan to the expert's speed profile + lateral merge.
 
     Args:
         det_traj: (T,4) [x,y,cos,sin] ego-frame model deterministic plan.
         expert_traj: (T,4) [x,y,cos,sin] ego-frame logged expert future.
-        route_xy: (P,2) ego-frame route centerline polyline.
-        w_max: peak onset weight (1.0 -> reach the expert by the horizon end).
+        w_max: peak onset weight (1.0 -> fully adopt the expert by horizon end).
         max_accel: longitudinal accel cap (m/s^2).
         max_jerk: longitudinal jerk cap (m/s^3).
         dt: timestep (s).
-        max_yaw_rate: absolute per-step yaw-rate cap (rad/s).
-        kappa_max: optional bicycle-model curvature bound (1/m). When given,
-            the per-step yaw rate is ALSO capped to ``kappa_max * speed`` — a
-            stopping morph must not turn at standstill, or the reward's
-            ``compute_kinematic_gate`` (same bound) rejects the candidate.
-            Pass the same ``kinematic_margin * tan(max_steer) / wheelbase`` the
-            reward config uses.
         return_diag: when True, return ``(morph, diag)`` where ``diag`` records
             why synthesis failed (``stage``) plus the clamp statistics — the
             repair pipeline persists it so morph losses are diagnosable.
 
     Returns:
         (T,4) [x,y,cos,sin] ego-frame morphed trajectory, or None when the
-        route projection is unreliable or the feasibility clamps had to distort
-        the intended blend too much (see module-level thresholds). With
-        ``return_diag`` a ``(morph, diag)`` tuple instead.
+        blend is infeasible (see module-level thresholds). With ``return_diag``
+        a ``(morph, diag)`` tuple instead.
     """
 
     def _ret(morph: np.ndarray | None, stage: str, **extra):
@@ -226,36 +171,20 @@ def build_expert_morph_candidate(
 
     det = np.asarray(det_traj, dtype=np.float64)
     expert = np.asarray(expert_traj, dtype=np.float64)
-    route = np.asarray(route_xy, dtype=np.float64)
-
     if det.ndim != 2 or det.shape[1] < 2:
         raise ValueError(f"det_traj must be (T,>=2), got {det.shape}")
     if expert.ndim != 2 or expert.shape[1] < 2:
         raise ValueError(f"expert_traj must be (T,>=2), got {expert.shape}")
 
-    # Route reliability: need at least a segment.
-    if route.ndim != 2 or route.shape[1] < 2 or route.shape[0] < 2:
-        return _ret(None, "route_unreliable")
-    # Drop consecutive duplicate route points (zero-length segments break arc).
-    keep = np.concatenate([[True], np.linalg.norm(np.diff(route, axis=0), axis=1) > _EPS])
-    route = route[keep]
-    if route.shape[0] < 2:
-        return _ret(None, "route_unreliable")
-
     T = int(min(det.shape[0], expert.shape[0]))
     if T < 2:
         return _ret(None, "too_short_horizon")
     det = det[:T]
-    expert = expert[:T]
+    expert = expert[:T].copy()
 
-    # The logged expert future can be zero-padded past its valid length (recorded
-    # route ended before the horizon). Those trailing (0,0) pads would project to
-    # the route origin and collapse the expert arc/lateral at the tail (teleport +
-    # tail yaw), so hold the last valid pose for the remainder. NOTE: an all-zero
-    # expert is a genuinely STOPPED expert (relative motion ~0 everywhere), NOT
-    # padding — it must be kept (it drives the morph to a stop), so only the
-    # valid-prefix-then-trailing-zeros case is held, never rejected.
-    expert = expert.copy()
+    # The logged expert future can be zero-padded past its valid length. Those
+    # trailing (0,0) pads would read as teleports, so hold the last valid pose.
+    # NOTE: an all-zero expert is a genuinely STOPPED expert, not padding.
     expert_valid = np.abs(expert[:, :2]).sum(axis=1) > _EPS
     if expert_valid.any() and not expert_valid.all():
         last_valid = int(np.max(np.flatnonzero(expert_valid)))
@@ -265,41 +194,64 @@ def build_expert_morph_candidate(
     det_xy = det[:, :2]
     expert_xy = expert[:, :2]
 
-    # Reject if the trajectory extends beyond the route arc by a margin.
-    for pt in (det_xy[0], det_xy[-1], expert_xy[0], expert_xy[-1]):
-        overshoot = _endpoint_overshoot(pt, route)
-        if overshoot > _ROUTE_OVERSHOOT_MARGIN_M:
-            return _ret(None, "endpoint_overshoot", overshoot_m=float(overshoot))
-
-    s_ref = _cumulative_arc(route)
-    if s_ref[-1] < _EPS:
-        return _ret(None, "route_unreliable")
-
-    det_proj = project_points_to_polyline(det_xy, route, s_ref)
-    gt_proj = project_points_to_polyline(expert_xy, route, s_ref)
-    s_det, d_det = det_proj[:, 0], det_proj[:, 1]
-    s_gt, d_gt = gt_proj[:, 0], gt_proj[:, 1]
-
-    # Smooth quintic onset weight.
+    # --- 1. Re-time: blend the distance-traveled schedules. ---
+    # s_det_sched / s_gt_sched are each trajectory's own cumulative distance
+    # over time. Blending the SCHEDULES (not the instantaneous speeds) makes
+    # the morph's terminal arc converge to the expert's traveled distance —
+    # "drive the det path with the expert's timing".
+    v_det = np.linalg.norm(np.diff(det_xy, axis=0), axis=1) / dt  # (T-1,)
+    s_det_sched = np.concatenate([[0.0], np.cumsum(v_det * dt)])
+    v_gt = np.linalg.norm(np.diff(expert_xy, axis=0), axis=1) / dt  # (T-1,)
+    s_gt_sched = np.concatenate([[0.0], np.cumsum(v_gt * dt)])
     u = np.arange(T, dtype=np.float64) / float(T - 1)
     w = _quintic_smoothstep(u, w_max)
+    s_target = s_det_sched + w * (s_gt_sched - s_det_sched)
+    # Monotone non-decreasing (a time-varying blend of monotone schedules can
+    # locally reverse; the vehicle cannot).
+    s_target = np.maximum.accumulate(s_target)
 
-    # Blend in Frenet.
-    s_blend = s_det + w * (s_gt - s_det)
-    d_blend = d_det + w * (d_gt - d_det)
+    s_det = _cumulative_arc(det_xy)
+    th_det = _det_headings(det)
 
-    # Monotone non-decreasing longitudinal target (no reversing).
-    s_blend = np.maximum.accumulate(s_blend)
+    # --- 1b. Stopped expert => stop AT the expert's stop location (projected
+    # onto the det path), not merely after the expert's traveled DISTANCE: the
+    # (diverged, ahead) ego covering the same distance can land mid-curve or on
+    # a road border where the det plan was only passing through — and a target
+    # that PARKS there is unsafe. The cap anticipates with the braking parabola
+    # v <= sqrt(2 a_eff (s_cap - s)) so the demand stays trackable, and is
+    # floored at the tracker's own shortest feasible stop (the ego may already
+    # be past the expert's spot).
+    expert_speed_end = float(np.linalg.norm(expert_xy[-1] - expert_xy[-2]) / dt)
+    if expert_speed_end < _STOPPED_EXPERT_SPEED_MPS:
+        keep0 = np.concatenate([[True], np.linalg.norm(np.diff(det_xy, axis=0), axis=1) > _EPS])
+        stop_pts = det_xy[keep0]
+        if stop_pts.shape[0] >= 2:
+            stop_proj = project_points_to_polyline(
+                expert_xy[-1:], stop_pts, _cumulative_arc(stop_pts)
+            )
+            a_stop = float(stop_proj[0, 0]) + _STOP_ARC_OVERSHOOT_M
+            s_floor, _ = _feasible_longitudinal(
+                np.full(T, float(s_target[0])),
+                float(v_det[0]),
+                max_accel=max_accel,
+                max_jerk=max_jerk,
+                dt=dt,
+            )
+            s_cap = max(a_stop, float(s_floor[-1]) + 0.5)
+            a_eff = 0.7 * max_accel
+            s_capped = np.empty_like(s_target)
+            s_capped[0] = min(float(s_target[0]), s_cap)
+            for i in range(1, T):
+                ds_i = float(s_target[i] - s_target[i - 1])
+                v_allow = np.sqrt(max(2.0 * a_eff * (s_cap - s_capped[i - 1]), 0.0))
+                s_capped[i] = min(s_capped[i - 1] + min(ds_i, v_allow * dt), s_cap)
+            s_target = s_capped
 
-    # Initial ego speed from the det plan (keep v[0] continuous with the ego).
-    v0 = float(np.linalg.norm(det_xy[1] - det_xy[0]) / dt)
-
+    # --- 1c. Feasibility: accel/jerk-limited tracking of the demand. ---
     s_feasible, n_fired = _feasible_longitudinal(
-        s_blend, v0, max_accel=max_accel, max_jerk=max_jerk, dt=dt
+        s_target, float(v_det[0]), max_accel=max_accel, max_jerk=max_jerk, dt=dt
     )
-
-    # Feasibility failure: clamps distorted the intended progress too much.
-    terminal_err = abs(float(s_feasible[-1] - s_blend[-1]))
+    terminal_err = abs(float(s_feasible[-1] - s_target[-1]))
     fired_fraction = n_fired / float(max(T - 1, 1))
     if terminal_err > _TERMINAL_PROGRESS_TOL_M or fired_fraction > _CLAMP_FIRE_FRACTION:
         return _ret(
@@ -307,64 +259,74 @@ def build_expert_morph_candidate(
             "infeasible_deceleration",
             terminal_err_m=terminal_err,
             clamp_fire_fraction=fired_fraction,
-            v0_mps=v0,
+            v0_mps=float(v_det[0]),
         )
+    # Numerical standstill hygiene: the tracker's jerk-limited decay leaves a
+    # long tail of sub-centimetre steps. Positions/headings are interpolated
+    # from the arc, so crumb-sized arc motion becomes crumb-sized pose noise —
+    # snap steps below 1 cm to exactly zero so a stop is bit-exact (identical
+    # arcs -> identical interpolated poses -> exact zero yaw and speed, like
+    # logged data).
+    step_arc = np.diff(s_feasible)
+    step_arc[step_arc < 0.01] = 0.0
+    s_feasible = np.concatenate([[s_feasible[0]], s_feasible[0] + np.cumsum(step_arc)])
 
-    d_feasible = _feasible_lateral(d_blend, rate_cap=_DEFAULT_LATERAL_RATE_CAP_MPS, dt=dt)
+    # --- 2. Sample the det plan's own positions + headings at the new arcs. ---
+    # np.interp needs monotone x; s_det is non-decreasing (ties allowed).
+    base_x = np.interp(s_feasible, s_det, det_xy[:, 0])
+    base_y = np.interp(s_feasible, s_det, det_xy[:, 1])
+    th = np.interp(s_feasible, s_det, th_det)
+    # Beyond the det path's end (expert faster than det), continue along the
+    # det plan's terminal heading.
+    over = s_feasible > s_det[-1]
+    if over.any():
+        extra = s_feasible[over] - float(s_det[-1])
+        base_x[over] = det_xy[-1, 0] + extra * np.cos(th_det[-1])
+        base_y[over] = det_xy[-1, 1] + extra * np.sin(th_det[-1])
+        th[over] = th_det[-1]
+    base = np.stack([base_x, base_y], axis=1)
 
-    # Reconstruct ego-frame xy from (s,d): route point at arc s, offset by d
-    # along the SMOOTHED route left-normal. Using a per-vertex smoothed tangent
-    # (not the piecewise per-segment tangent) keeps the normal continuous across
-    # route-segment joins — a per-segment tangent flips there and teleports the
-    # lateral-offset point / spikes the heading.
-    base, _seg_tan = _arc_interp(s_ref, route, s_feasible)
-    theta_ref = _smoothed_tangent_angles(route)
-    theta_q = np.interp(np.clip(s_feasible, 0.0, float(s_ref[-1])), s_ref, theta_ref)
-    unit_tan = np.stack([np.cos(theta_q), np.sin(theta_q)], axis=1)
-    left_normal = np.stack([-unit_tan[:, 1], unit_tan[:, 0]], axis=1)
-    # Lightly smooth the lateral offset to avoid wiggle from noisy projections.
-    d_smooth = _moving_average(d_feasible, 5)
-    recon_xy = base + d_smooth[:, None] * left_normal
+    # --- 3. Lateral merge toward the expert, in the det path's Frenet frame. ---
+    # ONE smooth ease from the det path toward the expert's lateral offset at
+    # the morph's end arc: d(s) = d_end * quintic(arc fraction). The magnitude
+    # is limited analytically so the lateral slope never exceeds the crab-angle
+    # bound — no pointwise clipping, hence no slope discontinuities for the
+    # kinematic gate's SG-smoothed yaw to trip on. A quintic's peak slope is
+    # 1.875/span, so scale = slope_cap*span / (1.875*|d_end|), capped at 1.
+    d_end = 0.0
+    keep = np.concatenate([[True], np.linalg.norm(np.diff(det_xy, axis=0), axis=1) > _EPS])
+    ref_pts = det_xy[keep]
+    if ref_pts.shape[0] >= 2:
+        ref_arc = _cumulative_arc(ref_pts)
+        proj = project_points_to_polyline(expert_xy, ref_pts, ref_arc)
+        a_gt, d_gt = proj[:, 0], proj[:, 1]
+        # Only projections landing in the path INTERIOR are lateral offsets; an
+        # expert that overruns the det path's end projects onto the endpoint
+        # and its longitudinal overhang would masquerade as a lateral gap.
+        interior = (a_gt > _EPS) & (a_gt < float(ref_arc[-1]) - _EPS)
+        if interior.any():
+            a_int, d_int = a_gt[interior], d_gt[interior]
+            if float(np.max(np.abs(d_int))) > _PATHS_DIVERGED_M:
+                return _ret(None, "paths_diverged", max_lateral_gap_m=float(np.max(np.abs(d_int))))
+            # Expert lateral at the arc where the morph ends.
+            a_mono = np.maximum.accumulate(a_int)
+            d_end = float(np.interp(s_feasible[-1], a_mono, d_int))
+    arc_span = max(float(s_feasible[-1] - s_feasible[0]), _EPS)
+    if abs(d_end) > _EPS:
+        scale = min(1.0, _DEFAULT_LATERAL_SLOPE_CAP * arc_span / (1.875 * abs(d_end)))
+    else:
+        scale = 0.0
+    u_arc = (s_feasible - s_feasible[0]) / arc_span
+    d = d_end * scale * _quintic_smoothstep(u_arc, w_max)
 
-    # Heading = smooth route tangent + bounded lateral-rate correction. The
-    # correction is faded out with a SMOOTH speed ramp (not a hard threshold —
-    # a hard cutoff steps the heading as the ego decelerates through it, the
-    # residual end-of-clip yaw jump), so a near-stationary step cannot produce an
-    # atan2 spike (a stop holds the route tangent).
-    ds_dt = np.concatenate([[0.0], np.diff(s_feasible)]) / dt
-    dd_dt = np.concatenate([[0.0], np.diff(d_smooth)]) / dt
-    speed_ramp = np.clip((ds_dt - 0.2) / (0.8 - 0.2), 0.0, 1.0)  # 0 below 0.2 m/s, 1 above 0.8
-    beta = speed_ramp * np.clip(np.arctan2(dd_dt, np.maximum(ds_dt, _EPS)), -0.3, 0.3)
-    heading = theta_q + beta
-
-    # Hard guarantee: cap the per-step yaw rate so no residual spike survives
-    # (e.g. from a route-end tangent edge). Two bounds, matching the reward's
-    # compute_kinematic_gate: the absolute cap AND — when kappa_max is given —
-    # the bicycle-model bound kappa_max * speed (with a safety factor, since the
-    # gate evaluates SG-smoothed signals, not these raw steps). Without the
-    # speed-aware bound a decelerating/stopped morph turns faster than a real
-    # vehicle can at that speed and the gate rejects it (observed: 32/52
-    # expert-waits morphs kinematically gated, all at speed < ~1.3 m/s).
-    # t=0 continuity: start from the det plan's actual heading, not the route
-    # tangent (a tangent snap at t=0 is itself an infeasible yaw step).
-    # The reward gate evaluates SG-SMOOTHED heading vs SG-SMOOTHED speed, so the
-    # raw caps must be conservative: below _HEADING_FREEZE_SPEED_MPS the heading
-    # is frozen outright — SG smoothing bleeds pre-stop heading change into the
-    # stopped region, where the curvature bound collapses to ~0 and even
-    # milli-rad/s residuals fire the gate (observed at SG speeds of 0.06-0.11 m/s).
-    _KAPPA_SAFETY = 0.85
-    _HEADING_FREEZE_SPEED_MPS = 0.5
-    heading[0] = float(np.arctan2(det[0, 3], det[0, 2])) if det.shape[1] >= 4 else heading[0]
-    for t in range(1, T):
-        yaw_rate_cap = max_yaw_rate
-        if kappa_max is not None:
-            if float(ds_dt[t]) < _HEADING_FREEZE_SPEED_MPS:
-                yaw_rate_cap = 0.0
-            else:
-                yaw_rate_cap = min(yaw_rate_cap, _KAPPA_SAFETY * kappa_max * float(ds_dt[t]))
-        max_yaw_step = yaw_rate_cap * dt
-        dh = (heading[t] - heading[t - 1] + np.pi) % (2 * np.pi) - np.pi
-        heading[t] = heading[t - 1] + float(np.clip(dh, -max_yaw_step, max_yaw_step))
+    left_normal = np.stack([-np.sin(th), np.cos(th)], axis=1)
+    recon_xy = base + d[:, None] * left_normal
+    # Heading correction for the lateral slope; d is a smooth function of the
+    # arc, so beta is smooth and vanishes wherever the arc stops advancing.
+    ds = np.concatenate([[0.0], np.diff(s_feasible)])
+    dd = np.concatenate([[0.0], np.diff(d)])
+    beta = np.where(ds > _EPS, np.arctan2(dd, np.maximum(ds, _EPS)), 0.0)
+    heading = th + beta
 
     out = np.empty((T, 4), dtype=np.float32)
     out[:, 0] = recon_xy[:, 0]
@@ -376,5 +338,5 @@ def build_expert_morph_candidate(
         "ok",
         terminal_err_m=terminal_err,
         clamp_fire_fraction=fired_fraction,
-        v0_mps=v0,
+        v0_mps=float(v_det[0]),
     )
