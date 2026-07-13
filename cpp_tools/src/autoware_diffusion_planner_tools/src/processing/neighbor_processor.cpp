@@ -16,13 +16,120 @@
 
 #include <autoware/diffusion_planner/conversion/agent.hpp>
 #include <autoware/diffusion_planner/dimensions.hpp>
+#include <autoware/object_recognition_utils/object_recognition_utils.hpp>
 #include <autoware_utils_uuid/uuid_helper.hpp>
+#include <rclcpp/time.hpp>
+
+#include <autoware_perception_msgs/msg/object_classification.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 constexpr int64_t NEIGHBOR_FUTURE_DIM = 4;  // x, y, cos(yaw), sin(yaw)
+
+namespace
+{
+
+bool is_unknown_object(const autoware_perception_msgs::msg::TrackedObject & object)
+{
+  const auto label = autoware::object_recognition_utils::getHighestProbLabel(object.classification);
+  return label == autoware_perception_msgs::msg::ObjectClassification::UNKNOWN;
+}
+
+std::vector<autoware::diffusion_planner::AgentHistory> build_past_histories(
+  const std::vector<FrameData> & data_list, const int64_t current_idx,
+  const Eigen::Matrix4d & map2bl_matrix)
+{
+  using autoware::diffusion_planner::AgentHistory;
+  using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
+  using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
+
+  const int64_t start_idx =
+    std::max(static_cast<int64_t>(0), current_idx - INPUT_T_WITH_CURRENT + 1);
+  std::unordered_map<std::string, AgentHistory> histories_map;
+
+  for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
+    const int64_t frame_idx = start_idx + t;
+    if (frame_idx >= static_cast<int64_t>(data_list.size())) {
+      break;
+    }
+
+    const auto & tracked_objects = data_list[frame_idx].tracked_objects;
+    const rclcpp::Time objects_timestamp(tracked_objects.header.stamp);
+    std::vector<std::string> found_ids;
+    found_ids.reserve(tracked_objects.objects.size());
+
+    for (const auto & object : tracked_objects.objects) {
+      if (is_unknown_object(object)) {
+        continue;
+      }
+      const std::string object_id = autoware_utils_uuid::to_hex_string(object.object_id);
+      auto it = histories_map.find(object_id);
+      if (it == histories_map.end()) {
+        it = histories_map.emplace(object_id, AgentHistory(INPUT_T_WITH_CURRENT)).first;
+      }
+      it->second.update(object, objects_timestamp);
+      found_ids.push_back(object_id);
+    }
+
+    for (auto it = histories_map.begin(); it != histories_map.end();) {
+      if (std::find(found_ids.begin(), found_ids.end(), it->first) == found_ids.end()) {
+        it = histories_map.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  std::vector<AgentHistory> histories;
+  histories.reserve(histories_map.size());
+  for (const auto & [_, history] : histories_map) {
+    histories.push_back(history);
+  }
+  for (auto & history : histories) {
+    history.apply_transform(map2bl_matrix);
+  }
+  std::sort(histories.begin(), histories.end(), [](const AgentHistory & a, const AgentHistory & b) {
+    const double a_dist =
+      std::hypot(a.get_latest_state().pose(0, 3), a.get_latest_state().pose(1, 3));
+    const double b_dist =
+      std::hypot(b.get_latest_state().pose(0, 3), b.get_latest_state().pose(1, 3));
+    return a_dist < b_dist;
+  });
+  if (histories.size() > MAX_NUM_NEIGHBORS) {
+    histories.erase(
+      histories.begin() + static_cast<std::ptrdiff_t>(MAX_NUM_NEIGHBORS), histories.end());
+  }
+
+  return histories;
+}
+
+std::vector<float> flatten_histories_with_leading_padding(
+  const std::vector<autoware::diffusion_planner::AgentHistory> & histories,
+  const size_t max_num_agent, const size_t time_length)
+{
+  using autoware::diffusion_planner::AGENT_STATE_DIM;
+
+  std::vector<float> data;
+  data.reserve(max_num_agent * time_length * AGENT_STATE_DIM);
+
+  for (const auto & history : histories) {
+    const auto history_array = history.as_array();
+    const size_t observed_steps = history_array.size() / AGENT_STATE_DIM;
+    const size_t padding_steps = time_length > observed_steps ? time_length - observed_steps : 0;
+    data.insert(data.end(), padding_steps * AGENT_STATE_DIM, 0.0f);
+    data.insert(data.end(), history_array.begin(), history_array.end());
+  }
+
+  data.resize(max_num_agent * time_length * AGENT_STATE_DIM, 0.0f);
+  return data;
+}
+
+}  // namespace
 
 NeighborResult process_neighbor_agents_and_future(
   const std::vector<FrameData> & data_list, const int64_t current_idx,
@@ -30,27 +137,13 @@ NeighborResult process_neighbor_agents_and_future(
 {
   using autoware::diffusion_planner::AGENT_STATE_DIM;
   using autoware::diffusion_planner::AgentHistory;
-  using autoware::diffusion_planner::flatten_histories_to_vector;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
   using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
   using autoware::diffusion_planner::OUTPUT_T;
 
-  // Build agent histories using AgentData::update_histories
-  const int64_t start_idx =
-    std::max(static_cast<int64_t>(0), current_idx - INPUT_T_WITH_CURRENT + 1);
-  const bool ignore_unknown_agents = true;
-  autoware::diffusion_planner::AgentData agent_data_past;
-  for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
-    const int64_t frame_idx = start_idx + t;
-    if (frame_idx >= static_cast<int64_t>(data_list.size())) {
-      break;
-    }
-    agent_data_past.update_histories(data_list[frame_idx].tracked_objects, ignore_unknown_agents);
-  }
-  const auto transformed_histories =
-    agent_data_past.transformed_and_trimmed_histories(map2bl_matrix, MAX_NUM_NEIGHBORS);
-  const std::vector<float> neighbor_past =
-    flatten_histories_to_vector(transformed_histories, MAX_NUM_NEIGHBORS, INPUT_T_WITH_CURRENT);
+  const auto transformed_histories = build_past_histories(data_list, current_idx, map2bl_matrix);
+  const std::vector<float> neighbor_past = flatten_histories_with_leading_padding(
+    transformed_histories, MAX_NUM_NEIGHBORS, INPUT_T_WITH_CURRENT);
 
   // Build id -> AgentHistory map for future filling
   const std::vector<AgentHistory> agent_histories = transformed_histories;

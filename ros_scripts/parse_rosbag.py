@@ -339,8 +339,7 @@ def build_neighbor_past(data_list, i, map2bl_matrix_4x4, max_num_objects, time_l
                     dq.popleft()
                 dq.append(state)
             else:
-                # New agent: fill the whole history with the first observation.
-                histories[oid] = deque([state] * time_length, maxlen=time_length)
+                histories[oid] = deque([state], maxlen=time_length)
             found_ids.add(oid)
         # Drop agents not present in this frame.
         for oid in [k for k in histories if k not in found_ids]:
@@ -352,8 +351,9 @@ def build_neighbor_past(data_list, i, map2bl_matrix_4x4, max_num_objects, time_l
 
     out = np.zeros((max_num_objects, time_length, 11), dtype=np.float32)
     for a, (_oid, history) in enumerate(items):
+        start_t = time_length - len(history)
         for t, state in enumerate(history):
-            out[a, t] = _agent_state_array(state, map2bl_matrix_4x4)
+            out[a, start_t + t] = _agent_state_array(state, map2bl_matrix_4x4)
     agent_ids = [oid for oid, _ in items]
     return out, agent_ids
 
