@@ -143,6 +143,7 @@ def build_expert_morph_candidate(
     max_accel: float = 2.0,
     max_jerk: float = 4.0,
     dt: float = 0.1,
+    stop_anchor_xy: np.ndarray | None = None,
     return_diag: bool = False,
 ) -> np.ndarray | None | tuple[np.ndarray | None, dict]:
     """Re-time the det plan to the expert's speed profile + lateral merge.
@@ -154,6 +155,11 @@ def build_expert_morph_candidate(
         max_accel: longitudinal accel cap (m/s^2).
         max_jerk: longitudinal jerk cap (m/s^3).
         dt: timestep (s).
+        stop_anchor_xy: optional (2,) ego-frame point overriding WHERE a
+            stopped-expert morph stops: its projection onto the det path
+            becomes the stop arc (e.g. the recorded expert's actual stop
+            position). Default: the pseudo-target's final point, i.e. the
+            expert's remaining travel distance applied from the ego's pose.
         return_diag: when True, return ``(morph, diag)`` where ``diag`` records
             why synthesis failed (``stage``) plus the clamp statistics — the
             repair pipeline persists it so morph losses are diagnosable.
@@ -226,8 +232,15 @@ def build_expert_morph_candidate(
         keep0 = np.concatenate([[True], np.linalg.norm(np.diff(det_xy, axis=0), axis=1) > _EPS])
         stop_pts = det_xy[keep0]
         if stop_pts.shape[0] >= 2:
+            # Where should the morph stop? Default: the (re-anchored)
+            # pseudo-target's final point = the expert's REMAINING distance
+            # applied from the ego's own pose. With stop_anchor_xy: the
+            # caller-supplied point — e.g. the recorded expert's actual stop
+            # POSITION — for "stop where the driver stopped" semantics (a
+            # diverged-ahead ego then stops earlier, bounded by the floor).
+            stop_point = expert_xy[-1:] if stop_anchor_xy is None else stop_anchor_xy[None, :2]
             stop_proj = project_points_to_polyline(
-                expert_xy[-1:], stop_pts, _cumulative_arc(stop_pts)
+                np.asarray(stop_point, dtype=np.float64), stop_pts, _cumulative_arc(stop_pts)
             )
             a_stop = float(stop_proj[0, 0]) + _STOP_ARC_OVERSHOOT_M
             s_floor, _ = _feasible_longitudinal(

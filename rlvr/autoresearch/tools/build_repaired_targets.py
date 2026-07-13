@@ -646,6 +646,7 @@ def build_repaired_targets(
     expert_morph_w_max: float = 1.0,
     expert_morph_max_accel: float = 2.0,
     expert_morph_max_jerk: float = 4.0,
+    expert_stop_anchor: str = "pseudo",
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -784,12 +785,28 @@ def build_repaired_targets(
             if repair_expert_gt_candidate and is_expert:
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
+                stop_anchor_xy = None
+                if expert_stop_anchor == "recorded":
+                    if "ego_recorded_future" not in data:
+                        raise ValueError(
+                            f"{row['scene_path']}: --expert_stop_anchor recorded requires "
+                            "'ego_recorded_future' in the mined scene (re-mine with a "
+                            "reproducer that saves it; no silent fallback)."
+                        )
+                    recorded = _future_to_4col(data["ego_recorded_future"].detach().cpu().numpy())
+                    stop_anchor_xy = recorded[-1, :2]
+                elif expert_stop_anchor != "pseudo":
+                    raise ValueError(
+                        f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
+                        "expected 'pseudo' or 'recorded'"
+                    )
                 morph, morph_diag = build_expert_morph_candidate(
                     det_traj,
                     expert_traj,
                     w_max=expert_morph_w_max,
                     max_accel=expert_morph_max_accel,
                     max_jerk=expert_morph_max_jerk,
+                    stop_anchor_xy=stop_anchor_xy,
                     return_diag=True,
                 )
                 if morph is not None:
@@ -977,6 +994,17 @@ def main() -> None:
         help="Score expert_disagreement scenes against the realized ego future instead.",
     )
     ap.add_argument("--expert_morph_w_max", type=float, default=1.0)
+    ap.add_argument(
+        "--expert_stop_anchor",
+        choices=["pseudo", "recorded"],
+        default="pseudo",
+        help=(
+            "Where a stopped-expert morph stops: 'pseudo' (default) = the expert's "
+            "remaining travel distance applied from the ego pose; 'recorded' = the "
+            "recorded expert's actual stop position projected onto the det path "
+            "(requires ego_recorded_future in the mined scenes)."
+        ),
+    )
     ap.add_argument("--expert_morph_max_accel", type=float, default=2.0)
     ap.add_argument("--expert_morph_max_jerk", type=float, default=4.0)
     args = ap.parse_args()
@@ -1041,6 +1069,7 @@ def main() -> None:
         expert_morph_w_max=float(args.expert_morph_w_max),
         expert_morph_max_accel=float(args.expert_morph_max_accel),
         expert_morph_max_jerk=float(args.expert_morph_max_jerk),
+        expert_stop_anchor=str(args.expert_stop_anchor),
     )
 
 
