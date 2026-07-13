@@ -2622,6 +2622,22 @@ def _dump_precollision_window(
         if 0 < n_expert < fut_len:
             expert_eaf[n_expert:] = expert_eaf[n_expert - 1]
         scene["ego_expert_future"] = expert_eaf
+        # Recorded expert at its ACTUAL positions, in the live-ego frame (for
+        # overlays/analysis — NOT the repair pseudo-target above). Index 0 is
+        # the recorded ego's CURRENT pose, so the live-vs-recorded divergence
+        # offset is visible; the tail holds the last valid pose like above.
+        recorded_eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        n_recorded = 0
+        for j in range(fut_len):
+            ridx = idx + j
+            if ridx >= len(tl.poses):
+                break
+            rx, ry, rh = _world_pose_to_ego(tl.poses[ridx], live_pose)
+            recorded_eaf[j] = (rx, ry, math.cos(rh), math.sin(rh))
+            n_recorded = j + 1
+        if 0 < n_recorded < fut_len:
+            recorded_eaf[n_recorded:] = recorded_eaf[n_recorded - 1]
+        scene["ego_recorded_future"] = recorded_eaf
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
