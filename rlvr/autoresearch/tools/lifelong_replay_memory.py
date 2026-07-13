@@ -49,6 +49,31 @@ def _bucket(row: dict[str, Any], arc_bin_m: float) -> str:
     return f"arc{arc_bin:05d}|{label}|{variant}"
 
 
+def _parse_label_quotas(spec: str | None) -> dict[str, float]:
+    """Parse ``label=frac,label=frac`` into a dict. Fails loudly on bad input."""
+    if not spec:
+        return {}
+    quotas: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"--label_quotas entry {part!r} must be label=fraction")
+        label, frac_text = part.split("=", 1)
+        frac = float(frac_text)
+        if not 0.0 < frac <= 1.0:
+            raise ValueError(f"--label_quotas fraction for {label!r} must be in (0, 1]: {frac}")
+        quotas[label.strip()] = frac
+    if sum(quotas.values()) > 1.0 + 1e-9:
+        raise ValueError(f"--label_quotas fractions sum to > 1: {quotas}")
+    return quotas
+
+
+def _row_label(row: dict[str, Any]) -> str:
+    return str(row.get("label") or row.get("failure_label") or "unknown")
+
+
 def build_memory(
     current_rows: list[dict[str, Any]],
     previous_memory: dict[str, Any],
@@ -58,6 +83,7 @@ def build_memory(
     alpha: float,
     beta: float,
     arc_bin_m: float,
+    label_quotas: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     entries: dict[str, dict[str, Any]] = {}
     for row in previous_memory.get("entries", []):
@@ -95,20 +121,51 @@ def build_memory(
         rows.sort(key=lambda r: (-float(r["priority"]), str(r["scene_path"])))
 
     selected: list[dict[str, Any]] = []
-    # Preserve rare buckets first.
+    selected_paths: set[str] = set()
+
+    def _take(row: dict[str, Any]) -> None:
+        path = str(row["scene_path"])
+        if path in selected_paths:
+            return
+        selected_paths.add(path)
+        selected.append(row)
+
+    # Per-label quotas first: reserve floor(frac * capacity) top-priority slots
+    # per label so a dominant label (rb/collision) cannot evict a rarer behavior
+    # class (expert_disagreement) across rounds.
+    scored_rows = [row for rows in buckets.values() for row in rows]
+    if label_quotas:
+        by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in scored_rows:
+            by_label[_row_label(row)].append(row)
+        for label, frac in sorted(label_quotas.items()):
+            reserve = int(frac * capacity)
+            pool = sorted(
+                by_label.get(label, []),
+                key=lambda r: (-float(r["priority"]), str(r["scene_path"])),
+            )
+            for row in pool[:reserve]:
+                _take(row)
+
+    # Preserve rare buckets next.
     for key in sorted(buckets):
         if len(selected) >= capacity:
             break
-        selected.append(buckets[key].pop(0))
-    remaining = [row for rows in buckets.values() for row in rows]
+        for row in buckets[key]:
+            if str(row["scene_path"]) not in selected_paths:
+                _take(row)
+                break
+    remaining = [row for row in scored_rows if str(row["scene_path"]) not in selected_paths]
     remaining.sort(key=lambda r: (-float(r["priority"]), str(r["scene_path"])))
-    selected.extend(remaining[: max(0, capacity - len(selected))])
+    for row in remaining[: max(0, capacity - len(selected))]:
+        _take(row)
     selected.sort(key=lambda r: (-float(r["priority"]), str(r["scene_path"])))
     return {
         "capacity": capacity,
         "alpha": alpha,
         "beta": beta,
         "arc_bin_m": arc_bin_m,
+        "label_quotas": dict(label_quotas or {}),
         "entries": selected[:capacity],
     }
 
@@ -124,9 +181,21 @@ def main() -> None:
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--beta", type=float, default=0.5)
     parser.add_argument("--arc_bin_m", type=float, default=25.0)
+    parser.add_argument(
+        "--label_quotas",
+        type=str,
+        default=None,
+        help=(
+            "Reserved capacity fractions per event label, e.g. "
+            "'expert_disagreement=0.25,road_border_crossing=0.2'. Each listed label "
+            "keeps at least floor(frac*capacity) of its top-priority entries so a "
+            "dominant label cannot evict a rarer behavior class across rounds."
+        ),
+    )
     args = parser.parse_args()
     if args.capacity < 1:
         raise ValueError("--capacity must be >= 1")
+    label_quotas = _parse_label_quotas(args.label_quotas)
     rows = _load_jsonl(args.current_credit_jsonl)
     prev = (
         _load_json(args.previous_memory, {"entries": []})
@@ -142,6 +211,7 @@ def main() -> None:
         alpha=args.alpha,
         beta=args.beta,
         arc_bin_m=args.arc_bin_m,
+        label_quotas=label_quotas,
     )
     args.out_memory.parent.mkdir(parents=True, exist_ok=True)
     args.out_replay_scenes.parent.mkdir(parents=True, exist_ok=True)

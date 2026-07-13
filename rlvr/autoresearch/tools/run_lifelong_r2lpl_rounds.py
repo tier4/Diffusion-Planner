@@ -402,7 +402,9 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
             "beta": float(_first_non_null(replay.get("beta"), 0.5)),
             "arc_bin_m": float(_first_non_null(replay.get("arc_bin_m"), 25.0)),
+            "label_quotas": replay.get("label_quotas"),
         },
+        "anchor": dict(training_section.get("anchor") or {}),
         "training_config": str(training_source)
         if isinstance(training_source, (str, os.PathLike))
         else training_source,
@@ -942,6 +944,67 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
             seen.add(scene)
             merged.append(scene)
     _write_json(out_path, merged)
+
+
+def _anchor_slice_paths(
+    anchor_cfg: dict[str, Any] | None, n_focus: int, round_idx: int
+) -> list[str]:
+    """Real logged normal scenes unioned into a round's train list.
+
+    Training only on repaired+replay scenes leaves the regularizer with no reach
+    outside the failure distribution — competence drifts on everything the
+    rounds never see. The anchor slice counters this with real logged scenes at
+    ``ratio`` : 1 (anchor : focus), optionally stratified so ``waits_fraction``
+    of the anchors come from a waits/interaction list (scenes where the logged
+    ego stops — the slice most eroded by pro-motion post-training).
+
+    Config (``training.anchor`` in the workflow JSON): ``scene_list`` +
+    ``ratio`` are required when the section is present (fail loudly, no silent
+    defaults); ``waits_scene_list``/``waits_fraction`` must be given together;
+    ``seed`` (default 0) is offset by the round index so each round redraws
+    reproducibly.
+    """
+    if not anchor_cfg:
+        return []
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    ratio = float(anchor_cfg["ratio"])
+    if ratio <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
+    waits_list = anchor_cfg.get("waits_scene_list")
+    waits_fraction = anchor_cfg.get("waits_fraction")
+    if (waits_list is None) != (waits_fraction is None):
+        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+
+    import math as _math
+    import random as _random
+
+    n_anchor = int(_math.ceil(ratio * n_focus))
+    if n_anchor < 1:
+        return []
+    rng = _random.Random(int(anchor_cfg.get("seed", 0)) + round_idx)
+
+    def _sample(pool: list[str], n: int) -> list[str]:
+        if n >= len(pool):
+            return list(pool)
+        return rng.sample(pool, n)
+
+    normal_pool = [str(p) for p in _read_json_list(Path(anchor_cfg["scene_list"]))]
+    if not normal_pool:
+        raise ValueError(f"training.anchor.scene_list is empty: {anchor_cfg['scene_list']}")
+    picked: list[str] = []
+    if waits_list is not None:
+        frac = float(waits_fraction)
+        if not 0.0 < frac < 1.0:
+            raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {frac}")
+        waits_pool = [str(p) for p in _read_json_list(Path(waits_list))]
+        if not waits_pool:
+            raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
+        n_waits = int(round(frac * n_anchor))
+        picked.extend(_sample(waits_pool, n_waits))
+    picked.extend(_sample([p for p in normal_pool if p not in set(picked)], n_anchor - len(picked)))
+    return picked
 
 
 def _repair_cmd(
@@ -1916,6 +1979,11 @@ def main() -> None:
             "--arc_bin_m",
             str(mem_cfg.get("arc_bin_m", 25.0)),
         ]
+        if mem_cfg.get("label_quotas"):
+            quotas = mem_cfg["label_quotas"]
+            if isinstance(quotas, dict):
+                quotas = ",".join(f"{k}={v}" for k, v in sorted(quotas.items()))
+            memory_cmd.extend(["--label_quotas", str(quotas)])
         if previous_memory is not None:
             memory_cmd.extend(["--previous_memory", str(previous_memory)])
 
@@ -1934,7 +2002,15 @@ def main() -> None:
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
-        _union_scene_lists(repaired_paths, replay_paths, train_input_list)
+        anchor_paths = _anchor_slice_paths(
+            cfg.get("anchor"), len(repaired_paths) + len(replay_paths), round_idx
+        )
+        if anchor_paths:
+            print(
+                f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
+                f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"
+            )
+        _union_scene_lists(repaired_paths, [*replay_paths, *anchor_paths], train_input_list)
         if bool(cfg.get("validate_on_repaired_targets", False)):
             cfg["val_scenes"] = str(train_input_list)
 

@@ -46,10 +46,15 @@
     "use_route_cl_guidance": true
   },
   "replay_memory": {
-    "capacity": 16,
+    "capacity": 200,
     "alpha": 0.5,
     "beta": 0.5,
-    "arc_bin_m": 25
+    "arc_bin_m": 25,
+    "label_quotas": {
+      "expert_disagreement": 0.25,
+      "road_border_crossing": 0.2,
+      "moving_collision": 0.2
+    }
   },
   "rounds": {
     "rounds": 1,
@@ -58,6 +63,14 @@
   },
   "training": {
     "backend": "base_sft",
-    "val_scenes": "REPLACE_ME/val_scenes.json"
+    "val_scenes": "REPLACE_ME/val_scenes.json",
+    "anchor": {
+      "_comment": "Real logged normal scenes unioned into every round's train list (ratio : 1 anchor:focus). waits_scene_list = scenes where the logged ego waits (patience anchor); build it with rlvr.autoresearch.tools.build_patience_benchmark --out_pool. Remove this section to train on repaired+replay only (NOT recommended: competence drifts off the failure distribution).",
+      "scene_list": "REPLACE_ME/real_normal_scenes.json",
+      "ratio": 1.6,
+      "waits_scene_list": "REPLACE_ME/waits_interaction_scenes.json",
+      "waits_fraction": 0.25,
+      "seed": 0
+    }
   }
 }
