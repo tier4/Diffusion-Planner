@@ -43,9 +43,26 @@ from rlvr.autoresearch.run_experiment import load_npz_data  # noqa: E402
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model  # noqa: E402
 
 
+def _resample_arc(xy: np.ndarray, m: int) -> np.ndarray:
+    """Resample a polyline [T,2] to m points equally spaced by arc length."""
+    seg = np.linalg.norm(np.diff(xy, axis=0), axis=-1)
+    arc = np.concatenate([[0.0], np.cumsum(seg)])
+    if arc[-1] <= 1e-6:
+        return np.repeat(xy[:1], m, axis=0)
+    s = np.linspace(0.0, arc[-1], m)
+    return np.stack([np.interp(s, arc, xy[:, 0]), np.interp(s, arc, xy[:, 1])], axis=-1)
+
+
 def nearest_prototype(traj_xy: np.ndarray, prototypes: np.ndarray) -> int:
-    """Index of the prototype closest to traj_xy [T,2] by mean per-step L2."""
-    d = np.linalg.norm(prototypes - traj_xy[None], axis=-1).mean(axis=-1)  # (K,)
+    """Index of the prototype closest to traj_xy [T,2] by shape (arc-resampled L2).
+
+    Both sides are arc-length resampled to the prototypes' point count so the
+    comparison is speed-free and works for any (K, M, 2) prototype library.
+    """
+    m = prototypes.shape[1]
+    protos_rs = np.stack([_resample_arc(p, m) for p in prototypes])
+    traj_rs = _resample_arc(traj_xy, m)
+    d = np.linalg.norm(protos_rs - traj_rs[None], axis=-1).mean(axis=-1)  # (K,)
     return int(d.argmin())
 
 
