@@ -405,7 +405,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "arc_bin_m": float(_first_non_null(replay.get("arc_bin_m"), 25.0)),
             "label_quotas": replay.get("label_quotas"),
         },
-        "anchor": dict(training_section.get("anchor") or {}),
+        # Set only when actually configured — an ever-present empty dict would
+        # make "anchor key present but empty" (a misconfiguration the validator
+        # rejects) indistinguishable from "no anchor".
+        **({"anchor": dict(training_section["anchor"])} if training_section.get("anchor") else {}),
         "training_config": str(training_source)
         if isinstance(training_source, (str, os.PathLike))
         else training_source,
@@ -1019,6 +1022,10 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
     rejects loudly instead.
     """
     anchor_cfg = cfg.get("anchor")
+    if "anchor" in cfg and not anchor_cfg:
+        raise ValueError(
+            "config has an empty 'anchor' section; remove it or fill in scene_list/ratio"
+        )
     if not anchor_cfg:
         # Legacy direct configs may carry the template's nested form; a nested
         # training.anchor that is NOT lifted would be silently ignored.

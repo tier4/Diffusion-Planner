@@ -67,6 +67,8 @@ def _parse_label_quotas(spec: str | None) -> dict[str, float]:
         frac = float(frac_text.strip())
         if not 0.0 < frac <= 1.0:
             raise ValueError(f"--label_quotas fraction for {label!r} must be in (0, 1]: {frac}")
+        if label in quotas:
+            raise ValueError(f"--label_quotas has duplicate label {label!r}")
         quotas[label] = frac
     if sum(quotas.values()) > 1.0 + 1e-9:
         raise ValueError(f"--label_quotas fractions sum to > 1: {quotas}")

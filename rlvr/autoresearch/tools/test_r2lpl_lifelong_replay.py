@@ -1277,6 +1277,15 @@ def test_replay_memory_label_quotas_parse_rejects_bad_spec():
         _parse_label_quotas("a=1.5")
     with pytest.raises(ValueError):
         _parse_label_quotas("a=0.7,b=0.7")
+    with pytest.raises(ValueError):
+        _parse_label_quotas("a=0.2,a=0.3")  # duplicate label
+
+
+def test_validate_anchor_config_rejects_empty_section():
+    with pytest.raises(ValueError):
+        round_runner._validate_anchor_config({"anchor": {}})
+    # absent anchor is fine
+    round_runner._validate_anchor_config({})
 
 
 def test_anchor_slice_paths_ratio_and_waits_stratification(tmp_path):
