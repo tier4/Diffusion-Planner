@@ -3407,7 +3407,7 @@ def test_refresh_repair_returns_empty_when_no_unrepaired_rows(monkeypatch, tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Frenet det->GT morph candidate (expert_morph.build_expert_morph_candidate)
+# det-path re-timing morph candidate (expert_morph.build_expert_morph_candidate)
 # ---------------------------------------------------------------------------
 
 _MORPH_T = 80
@@ -3589,6 +3589,160 @@ def _morph_outcome_reward_row(total: float, *, rb_crossing: bool = False) -> Sim
 
 def _morph_outcome_candidate_row(labels: list[str]) -> dict:
     return {"moving_collision_step": None, "expert_disagreement": False, "labels": labels}
+
+
+def test_replay_memory_quota_does_not_double_dip_rare_buckets():
+    # A quota label whose reserved rows already cover its bucket must NOT get a
+    # second row from the rare-bucket pass (that would squeeze the majority
+    # label beyond the quota's promise).
+    rows = [
+        {
+            "scene_path": f"/tmp/rb_{i}.npz",
+            "label": "road_border_crossing",
+            "route_arc_m": 0.0,
+            "variant_kind": "credit",
+            "difficulty": 100.0 + i,
+        }
+        for i in range(6)
+    ]
+    rows += [
+        {
+            "scene_path": f"/tmp/expert_{i}.npz",
+            "label": "expert_disagreement",
+            "route_arc_m": 0.0,
+            "variant_kind": "credit",
+            "difficulty": float(i),
+        }
+        for i in range(3)
+    ]
+    memory = build_memory(
+        rows,
+        {"entries": []},
+        {},
+        capacity=4,
+        alpha=1.0,
+        beta=0.0,
+        arc_bin_m=1000.0,
+        label_quotas={"expert_disagreement": 0.5},
+    )
+    n_expert = sum(1 for r in memory["entries"] if r["label"] == "expert_disagreement")
+    n_rb = sum(1 for r in memory["entries"] if r["label"] == "road_border_crossing")
+    assert n_expert == 2  # exactly the reserve, not reserve + bucket pick
+    assert n_rb == 2
+
+
+def test_replay_memory_label_quotas_rejects_empty_label():
+    from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas
+
+    with pytest.raises(ValueError):
+        _parse_label_quotas("=0.5")
+
+
+def test_kinematic_gate_standstill_noise_passes_turn_in_place_fails():
+    # Pins the low-speed conditioning of compute_kinematic_gate: sub-noise yaw
+    # at standstill must PASS (the fixed false positive), while genuine
+    # turning-in-place above the clamped bound must still FAIL.
+    from planner_metrics.config import RewardConfig
+    from planner_metrics.subscores import compute_kinematic_gate
+
+    cfg = RewardConfig()
+    ego_shape = torch.tensor([3.0, 4.5, 1.9])
+    T = 80
+    # Standstill with tiny heading noise (0.002 rad/s scale) on a fixed point.
+    h = np.cumsum(np.full(T, 0.0002))
+    still = np.stack([np.zeros(T), np.zeros(T), np.cos(h), np.sin(h)], axis=1).astype(np.float32)
+    gate = compute_kinematic_gate(torch.from_numpy(still)[None], cfg, ego_shape)
+    assert float(gate[0]) == 1.0
+    # Standstill turning in place well above kappa_max * 0.1 (but below the
+    # absolute max_yaw_rate cap) must still be caught by the curvature check.
+    kappa_max = cfg.kinematic_margin * np.tan(cfg.max_steer) / 3.0
+    yaw_rate = min(3.0 * kappa_max * 0.1, 0.9 * cfg.max_yaw_rate)
+    h2 = np.cumsum(np.full(T, yaw_rate * 0.1))
+    spin = np.stack([np.zeros(T), np.zeros(T), np.cos(h2), np.sin(h2)], axis=1).astype(np.float32)
+    gate2 = compute_kinematic_gate(torch.from_numpy(spin)[None], cfg, ego_shape)
+    assert float(gate2[0]) == 0.0
+
+
+def test_expert_morph_stops_at_expert_location():
+    # The stop-arc cap must stop the morph AT the expert's stop location
+    # (projected onto the det path), not merely after the expert's traveled
+    # distance. Expert stops at x=20 m, well beyond the braking floor from
+    # 4 m/s, so the projection-based cap is the binding constraint.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # 4 m/s, 32 m
+    s_exp = np.minimum(np.cumsum(np.full(_MORPH_T, 0.4)), 20.0)
+    expert = _straight_traj(s_exp)
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    assert abs(morph[-1, 0] - 20.5) < 1.0  # expert stop arc + overshoot margin
+
+
+def test_expert_morph_preserves_slow_creep():
+    # Sub-centimetre-step snapping must only affect the standstill TAIL —
+    # a slow queue creep (~0.09 m/s) must not be converted into a full park.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.009)))
+    expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.009)))
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    assert morph[-1, 0] > 0.5  # creep distance preserved (~0.7 m), not 0
+
+
+def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:
+    T = len(v_profile) + 1
+    x = np.concatenate([[0.0], np.cumsum(v_profile * 0.1)])
+    fut = np.stack([x, np.zeros(T), np.zeros(T)], axis=1).astype(np.float32)
+    route = np.zeros((2, 20, 33), dtype=np.float32)
+    route[..., 0] = 1.0  # non-zero xy so lanes read as valid
+    if red_route:
+        route[0, :, 10] = 1.0
+    np.savez(
+        path,
+        route_lanes=route,
+        neighbor_agents_past=np.zeros((4, 31, 11), dtype=np.float32),
+        ego_agent_future=fut,
+    )
+
+
+def test_build_patience_benchmark_synthetic(tmp_path):
+    from rlvr.autoresearch.tools.build_patience_benchmark import build_benchmark
+
+    T = 79
+    # Onset offset: moving at t0, stops mid-horizon (red light on route).
+    onset = np.concatenate([np.full(30, 5.0), np.zeros(T - 30)])
+    _patience_npz(tmp_path / "bag_0000000100.npz", red_route=True, v_profile=onset)
+    # Same event 2 s later: already stopped (same bag, same frame bin).
+    _patience_npz(tmp_path / "bag_0000000120.npz", red_route=True, v_profile=np.zeros(T))
+    # No wait: cruises through (never below the wait speed).
+    _patience_npz(tmp_path / "bag_0000005000.npz", red_route=True, v_profile=np.full(T, 5.0))
+
+    scenes = [
+        str(tmp_path / n)
+        for n in ("bag_0000000100.npz", "bag_0000000120.npz", "bag_0000005000.npz")
+    ]
+    benchmark, pool, stats = build_benchmark(
+        scenes,
+        wait_speed_mps=0.5,
+        min_wait_steps=10,
+        ped_near_m=5.0,
+        event_frame_gap=100,
+        max_scenes=10,
+    )
+    assert stats["pool"] == 2  # the two waiting offsets
+    assert stats["events"] == 1  # deduped to one event
+    assert benchmark == [str(tmp_path / "bag_0000000100.npz")]  # onset preferred
+    assert stats["onset_in_benchmark"] == 1
+
+
+def test_eval_patience_onset_stop_metrics():
+    from rlvr.autoresearch.tools.eval_patience_onset import _stop_metrics
+
+    T = 80
+    stop_at_3s = np.concatenate([np.full(30, 0.5), np.zeros(T - 1 - 30)])
+    xy = np.stack([np.concatenate([[0.0], np.cumsum(stop_at_3s)]), np.zeros(T)], axis=1)
+    m = _stop_metrics(xy, stop_speed=0.5)
+    assert m["stops"] and abs(m["stop_onset_s"] - 3.0) < 0.11
+    never = np.stack([np.arange(T, dtype=float), np.zeros(T)], axis=1)
+    m2 = _stop_metrics(never, stop_speed=0.5)
+    assert not m2["stops"] and m2["stop_onset_s"] is None
 
 
 def test_best_safe_candidate_reports_morph_outcome():

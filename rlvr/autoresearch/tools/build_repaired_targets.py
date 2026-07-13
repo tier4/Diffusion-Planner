@@ -743,7 +743,7 @@ def build_repaired_targets(
             args=cls_args,
         )
 
-        # Deterministic plan per scene — only needed to seed the Frenet det->GT
+        # Deterministic plan per scene — only needed to seed the det-path re-timing
         # morph candidate for expert_disagreement scenes.
         want_morph = repair_expert_gt_candidate and any(
             _row_is_expert_disagreement(row) for row in kept_rows
@@ -777,7 +777,7 @@ def build_repaired_targets(
 
             name = _output_name_for_scene(row["scene_path"])
 
-            # Extra Frenet det->GT morph candidate for expert_disagreement scenes.
+            # Extra det-path re-timing morph candidate for expert_disagreement scenes.
             morph_added = False
             morph_index: int | None = None
             morph_diag: dict[str, Any] | None = None
@@ -955,13 +955,13 @@ def main() -> None:
         dest="repair_expert_gt_candidate",
         action="store_true",
         default=True,
-        help="Add a Frenet det->GT morph candidate for expert_disagreement scenes (default on).",
+        help="Add a det-path re-timing morph candidate for expert_disagreement scenes (default on).",
     )
     ap.add_argument(
         "--no_repair_expert_gt_candidate",
         dest="repair_expert_gt_candidate",
         action="store_false",
-        help="Disable the Frenet det->GT morph candidate.",
+        help="Disable the det-path re-timing morph candidate.",
     )
     ap.add_argument(
         "--repair_expert_reference",

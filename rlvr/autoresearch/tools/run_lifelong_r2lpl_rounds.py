@@ -1003,8 +1003,50 @@ def _anchor_slice_paths(
             raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
         n_waits = int(round(frac * n_anchor))
         picked.extend(_sample(waits_pool, n_waits))
-    picked.extend(_sample([p for p in normal_pool if p not in set(picked)], n_anchor - len(picked)))
+    picked_set = set(picked)
+    picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
     return picked
+
+
+def _validate_anchor_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on anchor misconfiguration, not hours into round 1.
+
+    Checks the required fields, the paired waits fields, that the referenced
+    scene lists exist and are non-empty, and that the anchor slice is actually
+    consumable: only the base_sft backend unions the anchor into training —
+    with any other backend the slice would be silently dropped, which this
+    rejects loudly instead.
+    """
+    anchor_cfg = cfg.get("anchor")
+    if not anchor_cfg:
+        # Legacy direct configs may carry the template's nested form; a nested
+        # training.anchor that is NOT lifted would be silently ignored.
+        training_section = cfg.get("training")
+        if isinstance(training_section, dict) and training_section.get("anchor"):
+            raise ValueError(
+                "config has training.anchor but the runner consumes the top-level "
+                "'anchor' key on this config path; move the section to the top level"
+            )
+        return
+    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
+        raise ValueError(
+            "training.anchor is only wired into the base_sft training backend; "
+            "remove the anchor section or use backend 'base_sft'"
+        )
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    if (anchor_cfg.get("waits_scene_list") is None) != (anchor_cfg.get("waits_fraction") is None):
+        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+    for key in ("scene_list", "waits_scene_list"):
+        value = anchor_cfg.get(key)
+        if value is None:
+            continue
+        path = Path(value)
+        if not path.exists():
+            raise ValueError(f"training.anchor.{key} does not exist: {path}")
+        if not _read_json_list(path):
+            raise ValueError(f"training.anchor.{key} is empty: {path}")
 
 
 def _repair_cmd(
@@ -1845,6 +1887,17 @@ def _print_dry_run_plan(
                 f"CUDA_VISIBLE_DEVICES={gpu_id} {' '.join(repair_cmd)}"
             )
     print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
+    anchor_cfg = cfg.get("anchor")
+    if anchor_cfg:
+        print(
+            f"[round {round_idx}] anchor slice: ratio {anchor_cfg['ratio']}:1 from "
+            f"{anchor_cfg['scene_list']}"
+            + (
+                f" (waits {anchor_cfg['waits_fraction']} from {anchor_cfg['waits_scene_list']})"
+                if anchor_cfg.get("waits_scene_list")
+                else ""
+            )
+        )
 
 
 def _derive_event_counts_from_credit_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -1931,6 +1984,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
+    _validate_anchor_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -2003,7 +2057,7 @@ def main() -> None:
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
         anchor_paths = _anchor_slice_paths(
-            cfg.get("anchor"), len(repaired_paths) + len(replay_paths), round_idx
+            cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )
         if anchor_paths:
             print(

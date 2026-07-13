@@ -86,7 +86,11 @@ def evaluate(
             row[label] = m
         rows.append(row)
 
-    summary: dict = {"n_scenes": len(rows), "stop_speed_mps": stop_speed}
+    summary: dict = {
+        "n_scenes": len(rows),
+        "stop_speed_mps": stop_speed,
+        "model_paths": dict(model_paths),
+    }
     for label in model_paths:
         fails = sum(1 for r in rows if r[label]["fail_to_stop"])
         delays = [

@@ -61,10 +61,13 @@ def _parse_label_quotas(spec: str | None) -> dict[str, float]:
         if "=" not in part:
             raise ValueError(f"--label_quotas entry {part!r} must be label=fraction")
         label, frac_text = part.split("=", 1)
-        frac = float(frac_text)
+        label = label.strip()
+        if not label:
+            raise ValueError(f"--label_quotas entry {part!r} has an empty label")
+        frac = float(frac_text.strip())
         if not 0.0 < frac <= 1.0:
             raise ValueError(f"--label_quotas fraction for {label!r} must be in (0, 1]: {frac}")
-        quotas[label.strip()] = frac
+        quotas[label] = frac
     if sum(quotas.values()) > 1.0 + 1e-9:
         raise ValueError(f"--label_quotas fractions sum to > 1: {quotas}")
     return quotas
@@ -122,12 +125,14 @@ def build_memory(
 
     selected: list[dict[str, Any]] = []
     selected_paths: set[str] = set()
+    selected_buckets: set[str] = set()
 
     def _take(row: dict[str, Any]) -> None:
         path = str(row["scene_path"])
         if path in selected_paths:
             return
         selected_paths.add(path)
+        selected_buckets.add(str(row["bucket"]))
         selected.append(row)
 
     # Per-label quotas first: reserve floor(frac * capacity) top-priority slots
@@ -147,10 +152,15 @@ def build_memory(
             for row in pool[:reserve]:
                 _take(row)
 
-    # Preserve rare buckets next.
+    # Preserve rare buckets next — one representative per bucket. Buckets that
+    # already have a member via the quota pass are REPRESENTED and must be
+    # skipped, otherwise a quota label double-dips (its reserve + a second row
+    # per bucket) and squeezes the majority labels beyond the quota's promise.
     for key in sorted(buckets):
         if len(selected) >= capacity:
             break
+        if key in selected_buckets:
+            continue
         for row in buckets[key]:
             if str(row["scene_path"]) not in selected_paths:
                 _take(row)

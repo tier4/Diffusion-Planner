@@ -262,28 +262,40 @@ def build_expert_morph_candidate(
             v0_mps=float(v_det[0]),
         )
     # Numerical standstill hygiene: the tracker's jerk-limited decay leaves a
-    # long tail of sub-centimetre steps. Positions/headings are interpolated
-    # from the arc, so crumb-sized arc motion becomes crumb-sized pose noise —
-    # snap steps below 1 cm to exactly zero so a stop is bit-exact (identical
-    # arcs -> identical interpolated poses -> exact zero yaw and speed, like
-    # logged data).
-    step_arc = np.diff(s_feasible)
-    step_arc[step_arc < 0.01] = 0.0
-    s_feasible = np.concatenate([[s_feasible[0]], s_feasible[0] + np.cumsum(step_arc)])
+    # long TAIL of crumb-sized steps after a stop. Positions/headings are
+    # interpolated from the arc, so crumb-sized arc motion becomes crumb-sized
+    # pose noise. Freeze the suffix with < 1 cm of REMAINING motion so a stop
+    # is bit-exact (identical arcs -> identical interpolated poses -> exact
+    # zero yaw and speed, like logged data). Defining the tail by remaining
+    # motion — not by per-step size — keeps slow-creep profiles intact (a
+    # 0.09 m/s queue creep is all sub-centimetre steps but must not park).
+    remaining = s_feasible[-1] - s_feasible
+    tail = remaining < 0.01
+    if tail.any():
+        tail_start = int(np.argmax(tail))
+        s_feasible[tail_start:] = s_feasible[tail_start]
 
     # --- 2. Sample the det plan's own positions + headings at the new arcs. ---
-    # np.interp needs monotone x; s_det is non-decreasing (ties allowed).
-    base_x = np.interp(s_feasible, s_det, det_xy[:, 0])
-    base_y = np.interp(s_feasible, s_det, det_xy[:, 1])
-    th = np.interp(s_feasible, s_det, th_det)
+    # np.interp needs an increasing grid; s_det has TIES where the det plan is
+    # stationary. Tied arcs share a position, but the det heading channel may
+    # rotate in place, so which tie np.interp lands on would be arbitrary —
+    # dedup to the FIRST sample of each tied arc group for a deterministic grid.
+    grid = np.concatenate([[True], np.diff(s_det) > _EPS])
+    s_grid = s_det[grid]
+    x_grid = det_xy[grid, 0]
+    y_grid = det_xy[grid, 1]
+    th_grid = th_det[grid]
+    base_x = np.interp(s_feasible, s_grid, x_grid)
+    base_y = np.interp(s_feasible, s_grid, y_grid)
+    th = np.interp(s_feasible, s_grid, th_grid)
     # Beyond the det path's end (expert faster than det), continue along the
     # det plan's terminal heading.
-    over = s_feasible > s_det[-1]
+    over = s_feasible > s_grid[-1]
     if over.any():
-        extra = s_feasible[over] - float(s_det[-1])
-        base_x[over] = det_xy[-1, 0] + extra * np.cos(th_det[-1])
-        base_y[over] = det_xy[-1, 1] + extra * np.sin(th_det[-1])
-        th[over] = th_det[-1]
+        extra = s_feasible[over] - float(s_grid[-1])
+        base_x[over] = x_grid[-1] + extra * np.cos(th_grid[-1])
+        base_y[over] = y_grid[-1] + extra * np.sin(th_grid[-1])
+        th[over] = th_grid[-1]
     base = np.stack([base_x, base_y], axis=1)
 
     # --- 3. Lateral merge toward the expert, in the det path's Frenet frame. ---

@@ -46,8 +46,9 @@ def scan_scene(
     wait_speed_mps: float,
     min_wait_steps: int,
     ped_near_m: float,
+    onset_speed_mps: float = 2.0,
 ) -> dict | None:
-    """Classify one NPZ. Returns per-scene flags or None on load failure."""
+    """Classify one NPZ. Returns per-scene flags, or {"error": ...} on load failure."""
     try:
         with np.load(path) as d:
             route = d["route_lanes"]
@@ -75,7 +76,7 @@ def scan_scene(
 
     v0 = float(step_disp[0] / _DT) if step_disp.shape[0] else 0.0
     # Onset: ego moving at t0, GT reaches a stop within the horizon.
-    is_onset = v0 > 2.0 and bool((step_disp / _DT < wait_speed_mps).any())
+    is_onset = v0 > onset_speed_mps and bool((step_disp / _DT < wait_speed_mps).any())
 
     return {
         "gt_waits_interact": gt_waits and (ped_near or red_route),
@@ -103,6 +104,7 @@ def build_benchmark(
     ped_near_m: float,
     event_frame_gap: int,
     max_scenes: int,
+    onset_speed_mps: float = 2.0,
 ) -> tuple[list[str], list[str], dict]:
     pool: list[tuple[str, dict]] = []
     n_err = 0
@@ -112,6 +114,7 @@ def build_benchmark(
             wait_speed_mps=wait_speed_mps,
             min_wait_steps=min_wait_steps,
             ped_near_m=ped_near_m,
+            onset_speed_mps=onset_speed_mps,
         )
         if r is None or "error" in r:
             n_err += 1
@@ -156,6 +159,12 @@ def main() -> None:
     ap.add_argument("--min_wait_s", type=float, default=1.0)
     ap.add_argument("--ped_near_m", type=float, default=5.0)
     ap.add_argument(
+        "--onset_speed_mps",
+        type=float,
+        default=2.0,
+        help="minimum t0 speed for a scene to count as a wait-ONSET offset",
+    )
+    ap.add_argument(
         "--event_frame_gap",
         type=int,
         default=100,
@@ -171,6 +180,7 @@ def main() -> None:
         ped_near_m=args.ped_near_m,
         event_frame_gap=args.event_frame_gap,
         max_scenes=args.max_scenes,
+        onset_speed_mps=args.onset_speed_mps,
     )
     if not benchmark:
         raise RuntimeError(
