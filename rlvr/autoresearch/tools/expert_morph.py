@@ -187,7 +187,10 @@ def build_expert_morph_candidate(
     max_accel: float = 2.0,
     max_jerk: float = 4.0,
     dt: float = 0.1,
-) -> np.ndarray | None:
+    max_yaw_rate: float = 0.6,
+    kappa_max: float | None = None,
+    return_diag: bool = False,
+) -> np.ndarray | None | tuple[np.ndarray | None, dict]:
     """Blend a deterministic plan toward the logged expert in route Frenet frame.
 
     Args:
@@ -198,12 +201,29 @@ def build_expert_morph_candidate(
         max_accel: longitudinal accel cap (m/s^2).
         max_jerk: longitudinal jerk cap (m/s^3).
         dt: timestep (s).
+        max_yaw_rate: absolute per-step yaw-rate cap (rad/s).
+        kappa_max: optional bicycle-model curvature bound (1/m). When given,
+            the per-step yaw rate is ALSO capped to ``kappa_max * speed`` — a
+            stopping morph must not turn at standstill, or the reward's
+            ``compute_kinematic_gate`` (same bound) rejects the candidate.
+            Pass the same ``kinematic_margin * tan(max_steer) / wheelbase`` the
+            reward config uses.
+        return_diag: when True, return ``(morph, diag)`` where ``diag`` records
+            why synthesis failed (``stage``) plus the clamp statistics — the
+            repair pipeline persists it so morph losses are diagnosable.
 
     Returns:
         (T,4) [x,y,cos,sin] ego-frame morphed trajectory, or None when the
         route projection is unreliable or the feasibility clamps had to distort
-        the intended blend too much (see module-level thresholds).
+        the intended blend too much (see module-level thresholds). With
+        ``return_diag`` a ``(morph, diag)`` tuple instead.
     """
+
+    def _ret(morph: np.ndarray | None, stage: str, **extra):
+        if not return_diag:
+            return morph
+        return morph, {"stage": stage, **extra}
+
     det = np.asarray(det_traj, dtype=np.float64)
     expert = np.asarray(expert_traj, dtype=np.float64)
     route = np.asarray(route_xy, dtype=np.float64)
@@ -215,16 +235,16 @@ def build_expert_morph_candidate(
 
     # Route reliability: need at least a segment.
     if route.ndim != 2 or route.shape[1] < 2 or route.shape[0] < 2:
-        return None
+        return _ret(None, "route_unreliable")
     # Drop consecutive duplicate route points (zero-length segments break arc).
     keep = np.concatenate([[True], np.linalg.norm(np.diff(route, axis=0), axis=1) > _EPS])
     route = route[keep]
     if route.shape[0] < 2:
-        return None
+        return _ret(None, "route_unreliable")
 
     T = int(min(det.shape[0], expert.shape[0]))
     if T < 2:
-        return None
+        return _ret(None, "too_short_horizon")
     det = det[:T]
     expert = expert[:T]
 
@@ -247,12 +267,13 @@ def build_expert_morph_candidate(
 
     # Reject if the trajectory extends beyond the route arc by a margin.
     for pt in (det_xy[0], det_xy[-1], expert_xy[0], expert_xy[-1]):
-        if _endpoint_overshoot(pt, route) > _ROUTE_OVERSHOOT_MARGIN_M:
-            return None
+        overshoot = _endpoint_overshoot(pt, route)
+        if overshoot > _ROUTE_OVERSHOOT_MARGIN_M:
+            return _ret(None, "endpoint_overshoot", overshoot_m=float(overshoot))
 
     s_ref = _cumulative_arc(route)
     if s_ref[-1] < _EPS:
-        return None
+        return _ret(None, "route_unreliable")
 
     det_proj = project_points_to_polyline(det_xy, route, s_ref)
     gt_proj = project_points_to_polyline(expert_xy, route, s_ref)
@@ -281,7 +302,13 @@ def build_expert_morph_candidate(
     terminal_err = abs(float(s_feasible[-1] - s_blend[-1]))
     fired_fraction = n_fired / float(max(T - 1, 1))
     if terminal_err > _TERMINAL_PROGRESS_TOL_M or fired_fraction > _CLAMP_FIRE_FRACTION:
-        return None
+        return _ret(
+            None,
+            "infeasible_deceleration",
+            terminal_err_m=terminal_err,
+            clamp_fire_fraction=fired_fraction,
+            v0_mps=v0,
+        )
 
     d_feasible = _feasible_lateral(d_blend, rate_cap=_DEFAULT_LATERAL_RATE_CAP_MPS, dt=dt)
 
@@ -311,9 +338,31 @@ def build_expert_morph_candidate(
     heading = theta_q + beta
 
     # Hard guarantee: cap the per-step yaw rate so no residual spike survives
-    # (e.g. from a route-end tangent edge). max_yaw_rate ~ 0.6 rad/s.
-    max_yaw_step = 0.6 * dt
+    # (e.g. from a route-end tangent edge). Two bounds, matching the reward's
+    # compute_kinematic_gate: the absolute cap AND — when kappa_max is given —
+    # the bicycle-model bound kappa_max * speed (with a safety factor, since the
+    # gate evaluates SG-smoothed signals, not these raw steps). Without the
+    # speed-aware bound a decelerating/stopped morph turns faster than a real
+    # vehicle can at that speed and the gate rejects it (observed: 32/52
+    # expert-waits morphs kinematically gated, all at speed < ~1.3 m/s).
+    # t=0 continuity: start from the det plan's actual heading, not the route
+    # tangent (a tangent snap at t=0 is itself an infeasible yaw step).
+    # The reward gate evaluates SG-SMOOTHED heading vs SG-SMOOTHED speed, so the
+    # raw caps must be conservative: below _HEADING_FREEZE_SPEED_MPS the heading
+    # is frozen outright — SG smoothing bleeds pre-stop heading change into the
+    # stopped region, where the curvature bound collapses to ~0 and even
+    # milli-rad/s residuals fire the gate (observed at SG speeds of 0.06-0.11 m/s).
+    _KAPPA_SAFETY = 0.85
+    _HEADING_FREEZE_SPEED_MPS = 0.5
+    heading[0] = float(np.arctan2(det[0, 3], det[0, 2])) if det.shape[1] >= 4 else heading[0]
     for t in range(1, T):
+        yaw_rate_cap = max_yaw_rate
+        if kappa_max is not None:
+            if float(ds_dt[t]) < _HEADING_FREEZE_SPEED_MPS:
+                yaw_rate_cap = 0.0
+            else:
+                yaw_rate_cap = min(yaw_rate_cap, _KAPPA_SAFETY * kappa_max * float(ds_dt[t]))
+        max_yaw_step = yaw_rate_cap * dt
         dh = (heading[t] - heading[t - 1] + np.pi) % (2 * np.pi) - np.pi
         heading[t] = heading[t - 1] + float(np.clip(dh, -max_yaw_step, max_yaw_step))
 
@@ -322,4 +371,10 @@ def build_expert_morph_candidate(
     out[:, 1] = recon_xy[:, 1]
     out[:, 2] = np.cos(heading)
     out[:, 3] = np.sin(heading)
-    return out
+    return _ret(
+        out,
+        "ok",
+        terminal_err_m=terminal_err,
+        clamp_fire_fraction=fired_fraction,
+        v0_mps=v0,
+    )

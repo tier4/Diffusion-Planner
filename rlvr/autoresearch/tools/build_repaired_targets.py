@@ -485,6 +485,18 @@ def _passes_global_gates(label_row: dict[str, Any], reward_row) -> bool:
     )
 
 
+def _global_gate_flags(label_row: dict[str, Any], reward_row) -> dict[str, bool]:
+    """Which _passes_global_gates condition(s) failed — diagnosis mirror, keep in sync."""
+    return {
+        "collision": reward_row.collision_step is not None,
+        "rb_crossing": bool(reward_row.rb_crossing),
+        "lane_crossing": bool(reward_row.lane_crossing),
+        "static_crossing": bool(reward_row.static_crossing),
+        "kinematic_violated": bool(reward_row.kinematic_violated),
+        "moving_collision": label_row["moving_collision_step"] is not None,
+    }
+
+
 def _repairs_source_labels(
     source_labels: list[str],
     label_row: dict[str, Any],
@@ -524,6 +536,7 @@ def _best_safe_candidate(
     target_gt_disagreement_thresh: float,
     candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
     reference_traj: torch.Tensor | np.ndarray | None = None,
+    morph_index: int | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
     accepted: list[tuple[float, float, float, int]] = []
     candidate_traj_list = None
@@ -543,18 +556,27 @@ def _best_safe_candidate(
             )
             accepted.append((violation_score, deviation_penalty, float(reward_row.total), idx))
 
+    accepted_indices = {item[3] for item in accepted}
     if not accepted:
         best_total = max(float(r.total) for r in reward_rows)
         best_sc = max(float(getattr(r, "sc_min_dist", -99.0)) for r in reward_rows)
-        return None, {
+        meta = {
             "reason": "no_safe_candidate",
             "best_total": best_total,
             "best_sc_min_dist": best_sc,
         }
+        if morph_index is not None:
+            meta["morph_outcome"] = "gate_rejected"
+            meta["morph_labels"] = list(candidate_rows[morph_index].get("labels", []))
+            meta["morph_gate_flags"] = _global_gate_flags(
+                candidate_rows[morph_index], reward_rows[morph_index]
+            )
+        return None, meta
 
     uses_r2lpl_conflict_selection = "expert_disagreement" in set(
         source_row.get("repair_labels", [])
     )
+    morph_r2lpl_score: float | None = None
     if uses_r2lpl_conflict_selection:
         rule_scores = _normalize_values([item[2] for item in accepted])
         state_class = _r2lpl_state_class(source_row)
@@ -564,6 +586,8 @@ def _best_safe_candidate(
             violation_score, deviation_penalty, _reward_total, idx = item
             expert_score = math.exp(-max(deviation_penalty, 0.0) / 4.0)
             r2lpl_score = rule_weight * rule_score + expert_weight * expert_score
+            if morph_index is not None and idx == morph_index:
+                morph_r2lpl_score = float(r2lpl_score)
             ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
         ranked.sort()
         neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
@@ -600,6 +624,19 @@ def _best_safe_candidate(
     if selected_r2lpl_score is not None:
         meta["selected_r2lpl_score"] = float(selected_r2lpl_score)
         meta["selected_r2lpl_state_class"] = selected_state_class
+    if morph_index is not None:
+        if idx == morph_index:
+            meta["morph_outcome"] = "selected"
+        elif morph_index in accepted_indices:
+            meta["morph_outcome"] = "lost_selection"
+            if morph_r2lpl_score is not None:
+                meta["morph_r2lpl_score"] = morph_r2lpl_score
+        else:
+            meta["morph_outcome"] = "gate_rejected"
+            meta["morph_labels"] = list(candidate_rows[morph_index].get("labels", []))
+            meta["morph_gate_flags"] = _global_gate_flags(
+                candidate_rows[morph_index], reward_rows[morph_index]
+            )
     return idx, meta
 
 
@@ -768,19 +805,34 @@ def build_repaired_targets(
             # Extra Frenet det->GT morph candidate for expert_disagreement scenes.
             morph_added = False
             morph_index: int | None = None
+            morph_diag: dict[str, Any] | None = None
             if repair_expert_gt_candidate and is_expert:
                 route_xy = _route_xy_from_data(data)
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
                 morph = None
-                if route_xy is not None:
-                    morph = build_expert_morph_candidate(
+                if route_xy is None:
+                    morph_diag = {"stage": "no_route"}
+                else:
+                    # Yaw-rate bounds mirror the reward's compute_kinematic_gate so
+                    # the morph cannot be synthesized into a kinematically-gated
+                    # rejection (stopping morphs must not turn at standstill).
+                    scene_wheelbase = float(data["ego_shape"].reshape(-1)[0])
+                    scene_kappa_max = (
+                        rcfg.kinematic_margin
+                        * math.tan(rcfg.max_steer)
+                        / max(scene_wheelbase, 1e-3)
+                    )
+                    morph, morph_diag = build_expert_morph_candidate(
                         det_traj,
                         expert_traj,
                         route_xy,
                         w_max=expert_morph_w_max,
                         max_accel=expert_morph_max_accel,
                         max_jerk=expert_morph_max_jerk,
+                        max_yaw_rate=float(rcfg.max_yaw_rate),
+                        kappa_max=scene_kappa_max,
+                        return_diag=True,
                     )
                 if morph is not None:
                     morph_tensor = torch.from_numpy(np.ascontiguousarray(morph)).to(
@@ -815,11 +867,20 @@ def build_repaired_targets(
                 target_gt_disagreement_thresh=target_gt_disagreement_thresh,
                 candidate_trajs=scene_trajs,
                 reference_traj=reference_traj,
+                morph_index=morph_index if morph_added else None,
             )
             morph_selected = bool(morph_added and best_idx == morph_index)
             if is_expert:
                 meta["expert_morph_added"] = bool(morph_added)
                 meta["expert_morph_selected"] = morph_selected
+                # Synthesis diagnostics: why the morph exists / was rejected before
+                # ever reaching the gates ("stage" == "ok" when synthesized). The
+                # gate/selection outcome ("morph_outcome") comes from
+                # _best_safe_candidate; merge the synthesis stage for the full story.
+                if morph_diag is not None:
+                    meta["expert_morph_diag"] = morph_diag
+                    if not morph_added:
+                        meta["morph_outcome"] = f"not_synthesized:{morph_diag['stage']}"
             if morph_added:
                 print(f"  morph candidate {name}: added=True selected={morph_selected}")
             if best_idx is None:
