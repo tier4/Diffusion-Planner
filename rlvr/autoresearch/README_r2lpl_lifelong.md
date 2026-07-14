@@ -190,9 +190,16 @@ Three probes, each optional:
   its danger-window NPZs under `guards/windows/` every round as a byproduct;
   only `credit_windows.jsonl` + `summary.json` feed the metrics.
 - **Open-loop patience onset** (`patience_benchmark`): `eval_patience_onset`
-  on a frozen waits benchmark (`build_patience_benchmark`); reports
-  `fail_to_stop`, stop-onset delay, over-distance. `patience_stop_speed`
-  (default 0.5 m/s) sets the stop threshold.
+  on a frozen waits benchmark (`build_patience_benchmark`); reports BOTH
+  directions — `fail_to_stop` / stop-onset delay (pro-motion drift) and
+  `fail_to_resume` / resume-onset delay (over-conservatism: GT resumes after
+  its stop, the plan parks) — plus over-distance. `patience_stop_speed`
+  (default 0.5 m/s) sets the stop threshold. The frozen-chunk metric reports
+  the same two directions in closed loop via
+  `expert_disagreement_by_reason` (`expert_wait_model_forward` = fail-to-stop,
+  `model_lagging_expert` = fail-to-take-off, `model_ahead_expert` =
+  over-eager) — repair training can move failures between branches, so watch
+  the split, not just the aggregate.
 - **Closed-loop probe** (`closed_loop_npz_root`, optional and expensive):
   `valid_predictor_closed_loop` on route NPZ frames — the creep detector the
   open-loop onset eval is blind to. Knobs go under `guards.closed_loop`
@@ -209,7 +216,8 @@ the standard eval.
 1. *Eligibility filter — regressions are vetoes, not scores:* standard val L2
    within +5% of base (the L2 column comes from the standard eval protocol run
    on the finalist checkpoints — the runner does not compute it), patience
-   held (`fail_to_stop` not above the reference,
+   held in BOTH directions (`fail_to_stop` and `fail_to_resume` not above the
+   reference,
    `over_distance_mean_m` within ~0.5 m of GT-length), no per-label event
    increase on the frozen chunks vs the reference row.
 2. *Selection among eligible checkpoints:* largest drop in total frozen-chunk

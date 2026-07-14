@@ -4502,3 +4502,62 @@ def test_dry_run_round0_guards_respect_partial_configs(tmp_path, monkeypatch, ca
     assert "[round 0] guard_onset:" in output
     assert "guard_mine" not in output
     assert "guard_closed_loop" not in output
+
+
+def test_patience_stop_metrics_cover_both_directions():
+    """fail_to_stop covers only the stopping direction; the take-off direction
+    (GT resumes, plan parks) must be measured too."""
+    from rlvr.autoresearch.tools.eval_patience_onset import _stop_metrics
+
+    dt = 0.1
+
+    def _xy(speeds):
+        x = np.concatenate([[0.0], np.cumsum(np.asarray(speeds) * dt)])
+        return np.column_stack([x, np.zeros_like(x)])
+
+    # stop at 2s, resume at 5s
+    gt = _stop_metrics(_xy([5.0] * 20 + [0.0] * 30 + [5.0] * 30), stop_speed=0.5)
+    assert gt["stops"] and gt["resumes"]
+    assert gt["stop_onset_s"] == pytest.approx(2.0)
+    assert gt["resume_onset_s"] == pytest.approx(5.0)
+    # stop and park forever
+    parker = _stop_metrics(_xy([5.0] * 20 + [0.0] * 60), stop_speed=0.5)
+    assert parker["stops"] and not parker["resumes"]
+    # never stops
+    cruiser = _stop_metrics(_xy([5.0] * 80), stop_speed=0.5)
+    assert not cruiser["stops"] and not cruiser["resumes"]
+
+
+def test_guard_mining_metrics_split_expert_disagreement_by_reason(tmp_path):
+    gdir = tmp_path / "guards"
+    gdir.mkdir()
+    rows = [
+        {
+            "scene_path": "/tmp/a.npz",
+            "label": "expert_disagreement",
+            "event_key": "e1",
+            "expert_disagreement_reason": "expert_wait_model_forward",
+        },
+        {
+            "scene_path": "/tmp/b.npz",
+            "label": "expert_disagreement",
+            "event_key": "e1",
+            "expert_disagreement_reason": "expert_wait_model_forward",
+        },
+        {
+            "scene_path": "/tmp/c.npz",
+            "label": "expert_disagreement",
+            "event_key": "e2",
+            "expert_disagreement_reason": "model_lagging_expert",
+        },
+        {"scene_path": "/tmp/d.npz", "label": "road_border_crossing", "event_key": "e3"},
+    ]
+    round_runner._write_jsonl(gdir / "credit_windows.jsonl", rows)
+    (gdir / "summary.json").write_text(json.dumps({"simulated_chunks": 40}))
+    metrics = round_runner._guard_mining_metrics(gdir)
+    # per-reason counts sum to the label aggregate; fail-to-take-off visible
+    assert metrics["expert_disagreement_by_reason"] == {
+        "expert_wait_model_forward": 1,
+        "model_lagging_expert": 1,
+    }
+    assert metrics["event_count_by_label"]["expert_disagreement"] == 2

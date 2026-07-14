@@ -1323,6 +1323,30 @@ def _closed_loop_probe_cmd(cfg: dict[str, Any], model_path: Path) -> list[str]:
     return cmd
 
 
+def _expert_disagreement_events_by_reason(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Per-branch event counts for the conflict detector's three directions.
+
+    The aggregate expert_disagreement count hides which way the model fails:
+    ``expert_wait_model_forward`` = fail-to-stop, ``model_lagging_expert`` =
+    fail-to-take-off, ``model_ahead_expert`` = over-eager progress. Repair
+    training can move failures between branches (observed: a campaign flipped
+    from stop-dominant to lagging-dominant), so the split must be visible in
+    the per-round tables.
+    """
+    events_by_reason: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        if str(row.get("label")) != "expert_disagreement":
+            continue
+        reason = str(row.get("expert_disagreement_reason") or "unknown")
+        # Same event keying as _derive_event_counts_from_credit_rows, so the
+        # per-reason counts sum to the label's aggregate count.
+        event_key = str(
+            row.get("event_key") or row.get("window_dir") or Path(str(row["scene_path"])).parent
+        )
+        events_by_reason[reason].add(event_key)
+    return {reason: len(events) for reason, events in sorted(events_by_reason.items())}
+
+
 def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
     rows = _read_jsonl(gdir / "credit_windows.jsonl")
     summary = _load_json(gdir / "summary.json")
@@ -1337,12 +1361,16 @@ def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
             "the frozen chunk set is not usable as a metric"
         )
     total_events = int(sum(event_counts.values()))
-    return {
+    metrics: dict[str, Any] = {
         "event_count_by_label": event_counts,
         "total_events": total_events,
         "simulated_chunks": simulated,
         "events_per_1000_chunks": round(1000.0 * total_events / simulated, 3),
     }
+    by_reason = _expert_disagreement_events_by_reason(rows)
+    if by_reason:
+        metrics["expert_disagreement_by_reason"] = by_reason
+    return metrics
 
 
 def _run_guard_phase(

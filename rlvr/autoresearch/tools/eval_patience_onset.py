@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patience-onset evaluation: does the det plan stop when/where the GT stops?
+"""Patience-onset evaluation: does the det plan stop AND resume like the GT?
 
 Runs deterministic inference on a patience benchmark (see
 ``build_patience_benchmark``) for one or two models and reports, per scene and
@@ -7,6 +7,11 @@ aggregated, over the full 8 s horizon:
 
   * fail_to_stop  — GT reaches < ``stop_speed`` m/s but the det plan never does
   * stop_onset_delay_s — det stop-onset time minus GT stop-onset time
+  * fail_to_resume — GT resumes (>= ``stop_speed``) after its stop within the
+    horizon but the det plan, having stopped, never does (the open-loop
+    fail-to-take-off direction — the closed-loop counterpart is the conflict
+    detector's ``model_lagging_expert`` branch)
+  * resume_onset_delay_s — det resume-onset time minus GT resume-onset time
   * over_distance_m — det 8 s path length minus GT's
 
 This is the OPEN-LOOP guard of the patience benchmark; pair it with a
@@ -37,9 +42,18 @@ _DT = 0.1
 def _stop_metrics(xy: np.ndarray, stop_speed: float) -> dict:
     v = np.linalg.norm(np.diff(xy, axis=0), axis=-1) / _DT
     stopped = v < stop_speed
+    stops = bool(stopped.any())
+    resume_onset_s = None
+    if stops:
+        stop_idx = int(np.argmax(stopped))
+        moving_again = v[stop_idx:] >= stop_speed
+        if moving_again.any():
+            resume_onset_s = float((stop_idx + int(np.argmax(moving_again))) * _DT)
     return {
-        "stops": bool(stopped.any()),
-        "stop_onset_s": float(np.argmax(stopped) * _DT) if stopped.any() else None,
+        "stops": stops,
+        "stop_onset_s": float(np.argmax(stopped) * _DT) if stops else None,
+        "resumes": resume_onset_s is not None,
+        "resume_onset_s": resume_onset_s,
         "dist_m": float(v.sum() * _DT),
         "min_v": float(v.min()),
     }
@@ -82,6 +96,14 @@ def evaluate(
                 if g["stops"] and m["stops"] and g["stop_onset_s"] is not None
                 else None
             )
+            # The take-off direction: GT resumes after its stop but the plan,
+            # having stopped, parks for the rest of the horizon.
+            m["fail_to_resume"] = bool(g["resumes"] and m["stops"] and not m["resumes"])
+            m["resume_onset_delay_s"] = (
+                round(m["resume_onset_s"] - g["resume_onset_s"], 2)
+                if g["resumes"] and m["resumes"]
+                else None
+            )
             m["over_distance_m"] = round(m["dist_m"] - g["dist_m"], 2)
             row[label] = m
         rows.append(row)
@@ -93,17 +115,27 @@ def evaluate(
     }
     for label in model_paths:
         fails = sum(1 for r in rows if r[label]["fail_to_stop"])
+        fail_resumes = sum(1 for r in rows if r[label]["fail_to_resume"])
         delays = [
             r[label]["stop_onset_delay_s"]
             for r in rows
             if r[label]["stop_onset_delay_s"] is not None
         ]
+        resume_delays = [
+            r[label]["resume_onset_delay_s"]
+            for r in rows
+            if r[label]["resume_onset_delay_s"] is not None
+        ]
         overs = [r[label]["over_distance_m"] for r in rows]
         summary[label] = {
             "fail_to_stop": fails,
+            "fail_to_resume": fail_resumes,
             "stop_onset_delay_mean_s": round(float(np.mean(delays)), 3) if delays else None,
             "stop_onset_delay_p95_s": round(float(np.percentile(delays, 95)), 3)
             if delays
+            else None,
+            "resume_onset_delay_mean_s": round(float(np.mean(resume_delays)), 3)
+            if resume_delays
             else None,
             "over_distance_mean_m": round(float(np.mean(overs)), 3),
             "over_distance_p95_m": round(float(np.percentile(overs, 95)), 3),
