@@ -330,10 +330,18 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "device": str(_first_non_null(repair.get("device"), "cuda")),
         "use_route_cl_guidance": bool(repair.get("use_route_cl_guidance", True)),
     }
+    if repair.get("prototypes_path"):
+        repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
             f"workflow_config.repair_generation is missing required fields: {missing_repair}"
+        )
+    if str(repair_cfg["variant"]).endswith("_anchor") and not repair_cfg.get("prototypes_path"):
+        raise ValueError(
+            f"repair_generation.variant {repair_cfg['variant']!r} requires "
+            "repair_generation.prototypes_path (build with "
+            "rlvr.autoresearch.tools.build_path_prototypes)"
         )
 
     output_dir = _validate_output_dir(contract["output_dir"])
