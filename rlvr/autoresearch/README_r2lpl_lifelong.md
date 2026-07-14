@@ -168,7 +168,15 @@ Three probes, each optional:
 
 - **Frozen-chunk event rates** (`frozen_chunk_manifest`): the round checkpoint
   is re-mined with `mine_direct_reproducer_chunks` on a FROZEN held-out chunk
-  manifest (build it once with `--plan_only`; never train on it). Reported as
+  manifest (build it once with `--plan_only`; never train on it — the frozen
+  chunks' scenes must also stay out of the anchor pool). **Construction rule:
+  plan chunks over the FULL pool once, then hold out a seeded RANDOM sample of
+  chunks and give the campaign the complement manifest.** Never hold out a
+  contiguous tail — that evaluates a single stretch of a single route and
+  biases the gate toward whatever that stretch contains (observed: a tail
+  frozen set measured 5 road-border events where a route-spread sample of the
+  same corpus measures 2). With a multi-bag corpus, stratify the sample across
+  bags/routes. Reported as
   events per label plus events-per-1000-chunks. This is the free closed-loop
   patience metric: campaign subsampling/sharding knobs are neutralized so
   counts are comparable across rounds (the composite gate additionally rejects
