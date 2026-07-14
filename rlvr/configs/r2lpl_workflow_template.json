@@ -72,7 +72,8 @@
     "composite": {
       "event_tolerance_frac": 0.0,
       "fail_to_stop_tolerance": 0,
-      "over_distance_tolerance_m": 0.5
+      "over_distance_tolerance_m": 0.5,
+      "over_distance_abs_m": 0.5
     }
   },
   "training": {

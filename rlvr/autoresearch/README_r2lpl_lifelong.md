@@ -194,8 +194,12 @@ establish the incumbent reference. After each round the candidate checkpoint is
 accepted iff every label's frozen-chunk event count stays within
 `event_tolerance_frac` of the incumbent's (a label the incumbent never
 triggered must stay at zero), `fail_to_stop` grows by at most
-`fail_to_stop_tolerance`, and `over_distance_mean_m` by at most
-`over_distance_tolerance_m` (defaults 0.0 / 0 / 0.5). A rejected checkpoint is
+`fail_to_stop_tolerance`, and `over_distance_mean_m` stays under
+`max(incumbent + over_distance_tolerance_m, over_distance_abs_m)` (defaults
+0.0 / 0 / 0.5 / 0.5). The absolute floor exists because over-distance is
+GT-anchored: when the incumbent under-drives GT, a purely incumbent-relative
+rule would reject candidates that drive ≈GT length — matching GT within the
+absolute band is never a regression. A rejected checkpoint is
 rolled back: the decision (with reasons) lands in
 `guards/composite_decision.json` and the next round warm-starts from the
 incumbent. Only the WEIGHTS roll back — the rejected round's repaired scenes

@@ -1135,6 +1135,12 @@ _COMPOSITE_TOLERANCE_DEFAULTS = {
     "event_tolerance_frac": 0.0,
     "fail_to_stop_tolerance": 0,
     "over_distance_tolerance_m": 0.5,
+    # over_distance is measured against GT (det 8s path length − GT's), so GT —
+    # not the incumbent — is the true reference. When the incumbent under-drives
+    # GT, an incumbent-relative rule alone would reject candidates that drive
+    # ≈GT length. The bar is max(incumbent + tolerance, this absolute floor):
+    # staying within this band of GT-length driving is never a regression.
+    "over_distance_abs_m": 0.5,
 }
 
 
@@ -1427,8 +1433,10 @@ def _composite_decision(
     ``event_tolerance_frac`` of the incumbent's (a label the incumbent never
     triggered must stay at zero), the patience benchmark holds
     (``fail_to_stop`` within ``fail_to_stop_tolerance``), and the mean
-    over-distance grows by at most ``over_distance_tolerance_m``. Returns
-    (accepted, reasons-for-rejection).
+    over-distance stays under ``max(incumbent + over_distance_tolerance_m,
+    over_distance_abs_m)`` — over-distance is GT-anchored, so driving within
+    the absolute band of GT length is never a regression even when the
+    incumbent under-drives GT. Returns (accepted, reasons-for-rejection).
     """
     reasons: list[str] = []
     cur_mining = current.get("frozen_chunk_mining", {})
@@ -1462,10 +1470,16 @@ def _composite_decision(
             reasons.append(f"patience fail_to_stop {inc_fail} -> {cur_fail}")
         cur_over = float(cur_onset["over_distance_mean_m"])
         inc_over = float(inc_onset["over_distance_mean_m"])
-        if cur_over > inc_over + tolerances["over_distance_tolerance_m"]:
+        over_bar = max(
+            inc_over + tolerances["over_distance_tolerance_m"],
+            tolerances["over_distance_abs_m"],
+        )
+        if cur_over > over_bar:
             reasons.append(
                 f"patience over_distance_mean_m {inc_over:.2f} -> {cur_over:.2f} "
-                f"(tolerance {tolerances['over_distance_tolerance_m']:.2f})"
+                f"(bar {over_bar:.2f} = max(incumbent + "
+                f"{tolerances['over_distance_tolerance_m']:.2f}, "
+                f"abs {tolerances['over_distance_abs_m']:.2f}))"
             )
     return (not reasons), reasons
 

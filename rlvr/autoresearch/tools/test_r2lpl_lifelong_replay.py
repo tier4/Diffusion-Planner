@@ -4477,3 +4477,37 @@ def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
     batch = [dict(np.load(p)) for p in result]
     stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
     assert stacked.shape == (2, 4, 80, 4)
+
+
+def test_composite_over_distance_absolute_floor():
+    """over_distance is GT-anchored: an incumbent that under-drives GT must not
+    force candidates to under-drive too. The bar is max(incumbent + rel_tol,
+    abs floor)."""
+    incumbent = {
+        "frozen_chunk_mining": {"event_count_by_label": {}, "simulated_chunks": 40},
+        # incumbent under-drives GT by 0.63 m -> relative bar alone would be -0.13
+        "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": -0.63},
+    }
+    tolerances = round_runner._composite_tolerances({})
+    assert tolerances["over_distance_abs_m"] == 0.5
+
+    def _cand(over):
+        return {
+            "frozen_chunk_mining": {"event_count_by_label": {}, "simulated_chunks": 40},
+            "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": over},
+        }
+
+    # ~GT-length driving passes via the absolute floor (rejected pre-floor)
+    accepted, reasons = round_runner._composite_decision(_cand(0.06), incumbent, tolerances)
+    assert accepted, reasons
+    # genuine over-driving beyond the floor still rejects
+    accepted, reasons = round_runner._composite_decision(_cand(0.74), incumbent, tolerances)
+    assert not accepted
+    assert any("over_distance" in r for r in reasons)
+    # when the incumbent itself over-drives, the relative bar dominates
+    over_inc = dict(incumbent)
+    over_inc["patience_onset"] = {"fail_to_stop": 0, "over_distance_mean_m": 1.0}
+    accepted, _ = round_runner._composite_decision(_cand(1.4), over_inc, tolerances)
+    assert accepted
+    accepted, _ = round_runner._composite_decision(_cand(1.6), over_inc, tolerances)
+    assert not accepted
