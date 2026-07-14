@@ -22,6 +22,45 @@ generation, replay-memory update, and training.
 
 ## Paper Relationship
 
+### The one architectural caveat to understand first
+
+The paper's planner is a **score-over-anchors model**: it never generates a
+trajectory. It holds a fixed vocabulary of thousands of pre-made candidate
+trajectories (anchors) — including stop/wait anchors — and the network outputs
+a score per anchor; the highest-scoring canned trajectory is executed. All the
+paper's repair machinery leans on that menu:
+
+- **Repairing a scene is re-labeling scores** ("prefer anchor #372"), trained as
+  sparse anchor-score supervision — both the winner and the relative preference
+  among candidates.
+- **A wait/stop candidate always exists** because it is printed in the
+  vocabulary. The model can misjudge *when* to pick it, but it cannot lose the
+  *ability* to wait, and retrieval can always score it.
+
+Our planner is a **diffusion trajectory generator**: it draws a continuous
+trajectory from noise; there is no vocabulary and no per-candidate score head.
+That buys trajectory quality (the reason this project uses a generator at all)
+and costs us the paper's two conveniences:
+
+- **Candidates must be sampled from the model itself** (K guided/temperature
+  samples). If the current policy has drifted away from a behavior — e.g.
+  waiting — none of its K samples express it, and no scorer can select what was
+  never proposed. This is why `expert_disagreement` repair injects the scripted
+  **det-path re-timing morph candidate** (see Repair Generation below): it plays
+  the role of the vocabulary's built-in stop anchor, guaranteeing a
+  waiting/stopping option is on the table regardless of what the model samples.
+- **The training target is a trajectory, not a score distribution.** We
+  translate "prefer this candidate" into "imitate this trajectory" (SFT on the
+  selected candidate). The paper's negative-preference information (scores of
+  rejected candidates) has no direct equivalent here and is dropped.
+
+A possible future extension, if morph coverage ever proves insufficient: keep
+the generator, but retrieve repair targets from an explicit trajectory library
+(path prototypes adapted to the scene) scored with the same rules — the paper's
+retrieval with a real menu, feeding SFT instead of score supervision.
+
+### Stage-by-stage mapping
+
 R2LPL frames policy improvement as a loop over policy rollouts, mistake mining,
 corrective target retrieval, and lifelong replay. This workflow keeps that
 structure but changes the mechanism at each stage:
