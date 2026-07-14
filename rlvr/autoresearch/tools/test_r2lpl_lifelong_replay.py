@@ -1743,7 +1743,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             save_buf=None,
             last_snap_step=None,
             n_snaps=0,
-            turn_hist=None,
+            turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -1858,7 +1858,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             batch = data["dummy"].shape[0]
             return None, {
                 "prediction": torch.zeros((batch, 1, 2, 4), dtype=torch.float32),
-                "turn_indicator_logit": torch.zeros((batch, 2, 3), dtype=torch.float32),
+                "turn_indicator_logit": torch.zeros((batch, 5), dtype=torch.float32),
             }
 
     def _fake_seed_state(
@@ -1892,7 +1892,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             save_buf=None,
             last_snap_step=None,
             n_snaps=0,
-            turn_hist=None,
+            turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -1999,7 +1999,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             batch = data["dummy"].shape[0]
             return None, {
                 "prediction": torch.zeros((batch, 1, 2, 4), dtype=torch.float32),
-                "turn_indicator_logit": torch.zeros((batch, 2, 3), dtype=torch.float32),
+                "turn_indicator_logit": torch.zeros((batch, 5), dtype=torch.float32),
             }
 
     def _fake_seed_state(
@@ -2033,7 +2033,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             save_buf=None,
             last_snap_step=None,
             n_snaps=0,
-            turn_hist=None,
+            turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
