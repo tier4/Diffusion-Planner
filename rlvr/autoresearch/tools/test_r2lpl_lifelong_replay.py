@@ -4124,15 +4124,19 @@ def test_guard_mining_cmd_uses_frozen_manifest_and_neutralizes_subsampling(tmp_p
             "num_shards": 4,
             "shard_index": 1,
             "max_chunks": 100,
+            "allow_existing_out_dir": True,
         },
     }
     gdir = tmp_path / "round" / "guards"
     cmd = round_runner._guard_mining_cmd(cfg, tmp_path / "model.pth", gdir, gpu_id=0)
     assert cmd[cmd.index("--chunk_manifest") + 1] == str(manifest)
-    # the frozen set is mined in full every round: no campaign subsampling
+    # the frozen set is mined in full every round: no campaign subsampling,
+    # and stale guard windows must fail loudly even when the campaign allows
+    # reusing its own out dirs
     for neutralized in ("--sample_fraction", "--sample_seed", "--num_shards", "--max_chunks"):
         assert neutralized not in cmd
     assert "--scene_list" not in cmd
+    assert "--allow_existing_out_dir" not in cmd
     assert cmd[cmd.index("--out_jsonl") + 1] == str(gdir / "credit_windows.jsonl")
 
     onset_cmd = round_runner._patience_onset_cmd(cfg, tmp_path / "model.pth", gdir)
@@ -4265,3 +4269,170 @@ def test_guard_mining_metrics_and_summary_derivation(tmp_path):
     }
     assert metrics["total_events"] == 3
     assert metrics["events_per_1000_chunks"] == 6.0
+
+    # zero simulated chunks means the frozen set is broken, not clean
+    (gdir / "summary.json").write_text(json.dumps({"simulated_chunks": 0}))
+    with pytest.raises(RuntimeError, match="simulated 0 chunks"):
+        round_runner._guard_mining_metrics(gdir)
+
+
+def test_composite_decision_rejects_simulated_chunk_drift():
+    incumbent = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 5},
+            "simulated_chunks": 500,
+        },
+        "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": 0.0},
+    }
+    current = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 3},
+            "simulated_chunks": 400,
+        },
+        "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": 0.0},
+    }
+    tolerances = round_runner._composite_tolerances({})
+    accepted, reasons = round_runner._composite_decision(current, incumbent, tolerances)
+    assert not accepted
+    assert any("simulated_chunks drifted" in r for r in reasons)
+    # equal denominators with improving events accept
+    current["frozen_chunk_mining"]["simulated_chunks"] = 500
+    accepted, reasons = round_runner._composite_decision(current, incumbent, tolerances)
+    assert accepted, reasons
+
+
+def test_shipped_template_guards_pass_validation(tmp_path):
+    """Round-trip the actual shipped template's guards/rounds sections.
+
+    Regression pin: the template carries "_"-prefixed JSON-comment keys inside
+    guards, which the whitelist validator must tolerate (and the contract
+    parser must strip)."""
+    template_path = (
+        Path(round_runner.__file__).resolve().parents[2]
+        / "configs"
+        / "r2lpl_workflow_template.json"
+    )
+    template = json.loads(template_path.read_text())
+    manifest, benchmark = _guard_assets(tmp_path)
+    guards = dict(template["guards"])
+    guards["frozen_chunk_manifest"] = str(manifest)
+    guards["patience_benchmark"] = str(benchmark)
+    cfg = {
+        "checkpoint_policy": template["rounds"]["checkpoint_selection_rule"],
+        "guards": guards,
+    }
+    round_runner._validate_guards_config(cfg)
+    tolerances = round_runner._composite_tolerances(guards)
+    assert set(tolerances) == set(round_runner._COMPOSITE_TOLERANCE_DEFAULTS)
+    # the contract parser strips comment keys from the runtime config
+    stripped = round_runner._strip_comment_keys(guards)
+    assert not [k for k in stripped if k.startswith("_")]
+    assert not [k for k in stripped.get("composite", {}) if k.startswith("_")]
+
+
+def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
+    """End-to-end main() wiring: a rejected round rolls the warm start back to
+    the incumbent; an accepted round promotes its checkpoint."""
+    manifest, benchmark = _guard_assets(tmp_path)
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text(json.dumps(["/tmp/a.npz"]))
+    out_dir = tmp_path / "auto_research" / "out"
+    initial_model = tmp_path / "initial.pth"
+    initial_model.write_bytes(b"")
+    cfg = {
+        "rounds": 2,
+        "epochs_per_round": 1,
+        "model_path": str(initial_model),
+        "val_scenes": "/tmp/valid.json",
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "replay_memory": {"capacity": 10},
+        "training_config": {"train_args": {}},
+        "training_backend": "base_sft",
+        "output_dir": str(out_dir),
+        "checkpoint_policy": "composite",
+        "repair_config": {"ego_shape": "2.7,4.3,1.7", "min_margin": 0.3},
+        "mine_labels": ["expert_disagreement"],
+        "perception_mining": {"scene_list": str(scene_list), "chunk_len": 80},
+        "guards": {
+            "frozen_chunk_manifest": str(manifest),
+            "patience_benchmark": str(benchmark),
+            "composite": {"event_tolerance_frac": 0.0},
+        },
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    def fake_mining(cfg, model_path, rdir, gpu_ids):
+        round_runner._write_jsonl(
+            rdir / "credit_windows.jsonl",
+            [{"scene_path": "/tmp/a.npz", "label": "expert_disagreement", "event_key": "e1"}],
+        )
+        round_runner._write_json(rdir / "perception_direct_summary.json", {"simulated_chunks": 1})
+        round_runner._write_json(rdir / "credit_windows_paths.json", ["/tmp/a.npz"])
+        return 0.0
+
+    def fake_repair(cfg, model_path, rdir, gpu_ids):
+        round_runner._write_json(rdir / "repaired_targets.json", ["/tmp/repaired_a.npz"])
+        round_runner._write_jsonl(
+            rdir / "repaired_targets.jsonl",
+            [{"scene_path": "/tmp/repaired_a.npz", "source_scene_path": "/tmp/a.npz"}],
+        )
+        return 0.0
+
+    def fake_run(cmd, log_path, *, cwd=None, env=None):
+        if "--out_memory" in cmd:
+            round_runner._write_json(Path(cmd[cmd.index("--out_memory") + 1]), {"entries": []})
+            round_runner._write_json(Path(cmd[cmd.index("--out_replay_scenes") + 1]), [])
+        return 0.0
+
+    train_warm_starts: list[str] = []
+
+    def fake_training(cfg, *, model_path, train_input_list, rdir, round_idx, gpu_ids):
+        train_warm_starts.append(str(model_path))
+        ckpt = rdir / "base_train" / "latest.pth"
+        ckpt.parent.mkdir(parents=True, exist_ok=True)
+        ckpt.write_bytes(b"")
+        return 0.0, ckpt
+
+    def _metrics(events, fail):
+        return {
+            "frozen_chunk_mining": {
+                "event_count_by_label": {"expert_disagreement": events},
+                "simulated_chunks": 100,
+            },
+            "patience_onset": {"fail_to_stop": fail, "over_distance_mean_m": 0.0},
+        }
+
+    # round 0 baseline; round 1 regresses (rejected); round 2 improves (accepted)
+    guard_sequence = [_metrics(5, 1), _metrics(9, 1), _metrics(4, 0)]
+    guarded_models: list[str] = []
+
+    def fake_guards(cfg, model_path, gdir, gpu_ids, *, tag):
+        guarded_models.append(str(model_path))
+        return guard_sequence.pop(0)
+
+    monkeypatch.setattr(round_runner, "_run_mining_phase", fake_mining)
+    monkeypatch.setattr(round_runner, "_run_repair_phase", fake_repair)
+    monkeypatch.setattr(round_runner, "_run", fake_run)
+    monkeypatch.setattr(round_runner, "_run_base_sft_training", fake_training)
+    monkeypatch.setattr(round_runner, "_run_guard_phase", fake_guards)
+    monkeypatch.setattr(sys, "argv", ["run_lifelong_r2lpl_rounds", "--config", str(cfg_path)])
+    round_runner.main()
+
+    round1 = json.loads((out_dir / "r2lpl_round_001" / "round_summary.json").read_text())
+    round2 = json.loads((out_dir / "r2lpl_round_002" / "round_summary.json").read_text())
+    round1_ckpt = str(out_dir / "r2lpl_round_001" / "base_train" / "latest.pth")
+    round2_ckpt = str(out_dir / "r2lpl_round_002" / "base_train" / "latest.pth")
+
+    # round 1 rejected -> weights roll back to the initial model
+    assert round1["composite_decision"]["accepted"] is False
+    assert round1["composite_decision"]["candidate_model"] == round1_ckpt
+    assert round1["next_model_path"] == str(initial_model)
+    # round 2 therefore warm-starts (and mines/guards) from the incumbent
+    assert train_warm_starts == [str(initial_model), str(initial_model)]
+    assert guarded_models == [str(initial_model), round1_ckpt, round2_ckpt]
+    # round 2 accepted -> its checkpoint is promoted
+    assert round2["composite_decision"]["accepted"] is True
+    assert round2["next_model_path"] == round2_ckpt

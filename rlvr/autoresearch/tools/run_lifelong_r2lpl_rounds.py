@@ -417,8 +417,13 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         # rejects) indistinguishable from "no anchor".
         **({"anchor": dict(training_section["anchor"])} if training_section.get("anchor") else {}),
         # Same present-but-empty rule as anchor (rejected above), so a set
-        # guards key here is always non-empty.
-        **({"guards": dict(workflow["guards"])} if workflow.get("guards") else {}),
+        # guards key here is always non-empty. "_"-prefixed comment keys are
+        # stripped so the runtime config carries only real knobs.
+        **(
+            {"guards": _strip_comment_keys(dict(workflow["guards"]))}
+            if workflow.get("guards")
+            else {}
+        ),
         "training_config": str(training_source)
         if isinstance(training_source, (str, os.PathLike))
         else training_source,
@@ -1119,7 +1124,9 @@ def _validate_guards_config(cfg: dict[str, Any]) -> None:
                 "frozen_chunk_manifest and patience_benchmark"
             )
         return
-    unknown = sorted(set(guards) - _GUARD_KEYS)
+    # "_"-prefixed keys are JSON comments (template convention) — ignored here
+    # and stripped from the runtime config at contract-parse time.
+    unknown = sorted(k for k in set(guards) - _GUARD_KEYS if not k.startswith("_"))
     if unknown:
         raise ValueError(f"guards has unknown keys {unknown}; allowed: {sorted(_GUARD_KEYS)}")
     if policy == "composite":
@@ -1130,13 +1137,19 @@ def _validate_guards_config(cfg: dict[str, Any]) -> None:
             )
     elif guards.get("composite") is not None:
         raise ValueError(
-            "guards.composite tolerances are set but rounds.checkpoint_selection_rule is "
-            f"{policy!r}; set it to 'composite' or remove the tolerances"
+            "guards.composite tolerances are set but the checkpoint selection rule "
+            f"(rounds.checkpoint_selection_rule / checkpoint_policy) is {policy!r}; "
+            "set it to 'composite' or remove the tolerances"
         )
     for key in ("frozen_chunk_manifest", "closed_loop_npz_root"):
         value = guards.get(key)
         if value is not None and not Path(value).exists():
             raise ValueError(f"guards.{key} does not exist: {value}")
+    manifest = guards.get("frozen_chunk_manifest")
+    if manifest is not None and not _read_jsonl(Path(manifest)):
+        # An empty frozen set yields all-zero event counts — a gate that
+        # trivially accepts every checkpoint. Reject it up front.
+        raise ValueError(f"guards.frozen_chunk_manifest is empty: {manifest}")
     benchmark = guards.get("patience_benchmark")
     if benchmark is not None:
         path = Path(benchmark)
@@ -1159,20 +1172,33 @@ def _validate_guards_config(cfg: dict[str, Any]) -> None:
             )
     composite = guards.get("composite")
     if composite is not None:
-        unknown_tol = sorted(set(composite) - set(_COMPOSITE_TOLERANCE_DEFAULTS))
+        unknown_tol = sorted(
+            k for k in set(composite) - set(_COMPOSITE_TOLERANCE_DEFAULTS) if not k.startswith("_")
+        )
         if unknown_tol:
             raise ValueError(
                 f"guards.composite has unknown keys {unknown_tol}; "
                 f"allowed: {sorted(_COMPOSITE_TOLERANCE_DEFAULTS)}"
             )
         for key, value in composite.items():
+            if key.startswith("_"):
+                continue
             if float(value) < 0.0:
                 raise ValueError(f"guards.composite.{key} must be >= 0: {value}")
 
 
+def _strip_comment_keys(section: dict[str, Any]) -> dict[str, Any]:
+    """Drop "_"-prefixed JSON-comment keys (template convention), recursively."""
+    return {
+        k: _strip_comment_keys(v) if isinstance(v, dict) else v
+        for k, v in section.items()
+        if not k.startswith("_")
+    }
+
+
 def _composite_tolerances(guards: dict[str, Any]) -> dict[str, float]:
     tolerances = dict(_COMPOSITE_TOLERANCE_DEFAULTS)
-    tolerances.update(dict(guards.get("composite") or {}))
+    tolerances.update(_strip_comment_keys(dict(guards.get("composite") or {})))
     return {k: float(v) for k, v in tolerances.items()}
 
 
@@ -1191,6 +1217,9 @@ def _guard_mining_cmd(
         "sample_fraction": None,
         "sample_seed": None,
         "max_chunks": None,
+        # A stale windows dir from an aborted guard run must fail loudly, even
+        # when the campaign mining config allows reusing its own out dirs.
+        "allow_existing_out_dir": False,
     }
     if gpu_id is not None:
         overrides["device"] = "cuda"
@@ -1226,14 +1255,16 @@ def _patience_onset_cmd(cfg: dict[str, Any], model_path: Path, gdir: Path) -> li
 
 def _closed_loop_probe_cmd(cfg: dict[str, Any], model_path: Path) -> list[str]:
     guards = cfg["guards"]
+    # The probe subprocess runs with cwd=diffusion_planner/, so relative paths
+    # that validated against the orchestrator's cwd must be resolved here.
     cmd = [
         sys.executable,
         "-m",
         "valid_predictor_closed_loop",
         "--model_path",
-        str(model_path),
+        str(Path(model_path).resolve()),
         "--npz_root",
-        str(guards["closed_loop_npz_root"]),
+        str(Path(guards["closed_loop_npz_root"]).resolve()),
     ]
     for key, value in sorted(dict(guards.get("closed_loop") or {}).items()):
         cmd.extend([f"--{key}", str(value)])
@@ -1245,14 +1276,20 @@ def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
     summary = _load_json(gdir / "summary.json")
     event_counts = _derive_event_counts_from_credit_rows(rows)
     simulated = int(summary.get("simulated_chunks", 0))
+    if simulated <= 0:
+        # Zero simulated chunks means zero events for every label — the gate
+        # would trivially accept anything. The frozen set is broken (moved
+        # NPZs, bad manifest), not clean.
+        raise RuntimeError(
+            f"guard mining simulated 0 chunks (see {gdir / 'summary.json'}); "
+            "the frozen chunk set is not usable as a gate"
+        )
     total_events = int(sum(event_counts.values()))
     return {
         "event_count_by_label": event_counts,
         "total_events": total_events,
         "simulated_chunks": simulated,
-        "events_per_1000_chunks": round(1000.0 * total_events / simulated, 3)
-        if simulated
-        else None,
+        "events_per_1000_chunks": round(1000.0 * total_events / simulated, 3),
     }
 
 
@@ -1274,6 +1311,9 @@ def _run_guard_phase(
     guards = cfg["guards"]
     gdir.mkdir(parents=True, exist_ok=True)
     gpu_id = gpu_ids[0] if gpu_ids else None
+    # The closed-loop probe runs with a different cwd and writes next to the
+    # checkpoint — a relative checkpoint path would break both.
+    model_path = Path(model_path).resolve()
     metrics: dict[str, Any] = {"tag": tag, "model_path": str(model_path)}
 
     if guards.get("frozen_chunk_manifest"):
@@ -1356,8 +1396,21 @@ def _composite_decision(
     (accepted, reasons-for-rejection).
     """
     reasons: list[str] = []
-    cur_events = dict(current.get("frozen_chunk_mining", {}).get("event_count_by_label", {}))
-    inc_events = dict(incumbent.get("frozen_chunk_mining", {}).get("event_count_by_label", {}))
+    cur_mining = current.get("frozen_chunk_mining", {})
+    inc_mining = incumbent.get("frozen_chunk_mining", {})
+    cur_sim = cur_mining.get("simulated_chunks")
+    inc_sim = inc_mining.get("simulated_chunks")
+    if cur_sim is not None and inc_sim is not None and int(cur_sim) != int(inc_sim):
+        # The frozen set's chunk-validity guards depend only on the logged
+        # data, so the denominator is deterministic. A drift means the frozen
+        # assets or mining knobs changed mid-campaign — event counts are no
+        # longer comparable, so never accept on them.
+        reasons.append(
+            f"frozen-chunk simulated_chunks drifted {inc_sim} -> {cur_sim}; "
+            "the frozen set or mining knobs changed mid-campaign"
+        )
+    cur_events = dict(cur_mining.get("event_count_by_label", {}))
+    inc_events = dict(inc_mining.get("event_count_by_label", {}))
     frac = tolerances["event_tolerance_frac"]
     for label in sorted(set(cur_events) | set(inc_events)):
         cur = int(cur_events.get(label, 0))
@@ -2358,18 +2411,27 @@ def main() -> None:
     materialize_policy = "latest" if composite_gate else checkpoint_policy
     incumbent_model = model_path
     incumbent_metrics: dict[str, Any] | None = None
-    if composite_gate and not args.dry_run:
+    if composite_gate:
         # Round-0 reference: the incumbent every round-1 candidate is compared
         # against. Guard metrics are only comparable to guard metrics from the
         # same frozen assets, so this always runs (no reuse across campaigns).
-        print("[round 0] guards on the starting model (composite incumbent baseline)")
-        incumbent_metrics = _run_guard_phase(
-            cfg,
-            model_path,
-            out / "guard_round_000",
-            _gpu_ids_from_config(cfg),
-            tag="round_000",
-        )
+        gdir0 = out / "guard_round_000"
+        gpu_ids0 = _gpu_ids_from_config(cfg)
+        if args.dry_run:
+            gpu_id0 = gpu_ids0[0] if gpu_ids0 else None
+            print(
+                "[round 0] guard_mine: "
+                f"{' '.join(_guard_mining_cmd(cfg, model_path, gdir0, gpu_id=gpu_id0))}"
+            )
+            print(f"[round 0] guard_onset: {' '.join(_patience_onset_cmd(cfg, model_path, gdir0))}")
+            if cfg["guards"].get("closed_loop_npz_root"):
+                print(
+                    "[round 0] guard_closed_loop: "
+                    f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
+                )
+        else:
+            print("[round 0] guards on the starting model (composite incumbent baseline)")
+            incumbent_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
         cfg["training_config"], (str, os.PathLike)
@@ -2500,7 +2562,8 @@ def main() -> None:
             )
             phase_times["guards"] = time.perf_counter() - t0
             if composite_gate:
-                assert incumbent_metrics is not None
+                if incumbent_metrics is None:
+                    raise RuntimeError("composite gate reached without round-0 guard metrics")
                 accepted, reasons = _composite_decision(
                     guard_metrics, incumbent_metrics, _composite_tolerances(guards_cfg)
                 )

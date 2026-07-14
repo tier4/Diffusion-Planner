@@ -167,7 +167,11 @@ Three probes, each optional:
   manifest (build it once with `--plan_only`; never train on it). Reported as
   events per label plus events-per-1000-chunks. This is the free closed-loop
   patience metric: campaign subsampling/sharding knobs are neutralized so
-  counts are comparable across rounds.
+  counts are comparable across rounds (the composite gate additionally rejects
+  any cross-round `simulated_chunks` drift — it means the frozen assets or
+  mining knobs changed mid-campaign). Guard mining writes its danger-window
+  NPZs under `guards/windows/` every round as a byproduct; only
+  `credit_windows.jsonl` + `summary.json` feed the metrics.
 - **Open-loop patience onset** (`patience_benchmark`): `eval_patience_onset`
   on a frozen waits benchmark (`build_patience_benchmark`); reports
   `fail_to_stop`, stop-onset delay, over-distance. `patience_stop_speed`
@@ -190,9 +194,15 @@ triggered must stay at zero), `fail_to_stop` grows by at most
 `over_distance_tolerance_m` (defaults 0.0 / 0 / 0.5). A rejected checkpoint is
 rolled back: the decision (with reasons) lands in
 `guards/composite_decision.json` and the next round warm-starts from the
-incumbent. With `"latest"` the guards still run and report when configured,
-but never gate — setting `guards.composite` tolerances together with
-`"latest"` is rejected at startup as a misconfiguration.
+incumbent. Only the WEIGHTS roll back — the rejected round's repaired scenes
+stay in the replay-memory lineage (they were mined from the incumbent, so they
+remain valid corrective targets). With `"latest"` the guards still run and
+report when configured, but never gate — setting `guards.composite` tolerances
+together with `"latest"` is rejected at startup as a misconfiguration.
+
+Composite campaigns need a FRESH `output_dir` per run: round-0 guard mining
+fails loudly on a non-empty `guard_round_000/windows/` (same non-resumable
+semantics as the round dirs).
 
 ## Detection Semantics — closed-loop (realized) vs open-loop (predicted)
 
