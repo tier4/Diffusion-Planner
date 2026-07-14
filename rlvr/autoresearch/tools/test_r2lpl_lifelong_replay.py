@@ -4436,3 +4436,44 @@ def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
     # round 2 accepted -> its checkpoint is promoted
     assert round2["composite_decision"]["accepted"] is True
     assert round2["next_model_path"] == round2_ckpt
+
+
+def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
+    """Anchor scenes (3-col logged) must be homogenized to the 4-col schema
+    before unioning with repaired scenes, or collate crashes on mixed batches."""
+    base = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "turn_indicators": np.zeros(31, dtype=np.int64),
+    }
+    three = dict(base)
+    nf3 = np.zeros((4, 80, 3), dtype=np.float32)
+    nf3[0, :, 0] = np.arange(1, 81)  # nonzero xy: (0,0) rows are padding by contract
+    nf3[0, :, 2] = np.pi / 2  # heading -> cos 0 / sin 1
+    # rows 1..3 stay all-zero = padding, must remain zero after conversion
+    three["neighbor_agents_future"] = nf3
+    p3 = tmp_path / "logged_scene.npz"
+    np.savez(p3, **three)
+
+    four = dict(base)
+    four["neighbor_agents_future"] = np.zeros((4, 80, 4), dtype=np.float32)
+    p4 = tmp_path / "repaired_scene.npz"
+    np.savez(p4, **four)
+
+    out_dir = tmp_path / "converted"
+    result = round_runner._ensure_4col_neighbor_futures([str(p3), str(p4)], out_dir)
+
+    # 4-col passes through by original path
+    assert result[1] == str(p4)
+    # 3-col was rewritten to a copy
+    assert result[0] != str(p3)
+    with np.load(result[0]) as d:
+        nf = d["neighbor_agents_future"]
+        assert nf.shape == (4, 80, 4)
+        np.testing.assert_allclose(nf[0, :, 2], 0.0, atol=1e-6)  # cos(pi/2)
+        np.testing.assert_allclose(nf[0, :, 3], 1.0, atol=1e-6)  # sin(pi/2)
+        assert np.abs(nf[1:]).sum() == 0.0  # padding rows preserved as zero
+        assert d["ego_agent_future"].shape == (80, 3)  # other fields verbatim
+    # torch collate over the homogenized pair must now stack
+    batch = [dict(np.load(p)) for p in result]
+    stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
+    assert stacked.shape == (2, 4, 80, 4)

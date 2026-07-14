@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 _CONFIG_REQUIRED = {
@@ -1025,6 +1027,39 @@ def _anchor_slice_paths(
     picked_set = set(picked)
     picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
     return picked
+
+
+def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
+    """Homogenize ``neighbor_agents_future`` to the 4-col training schema.
+
+    Repaired/replay scenes carry 4-col ``[x, y, cos, sin]`` neighbor futures
+    while raw logged anchor scenes carry 3-col ``[x, y, heading]``. Each format
+    trains fine alone, but torch's default collate cannot stack a mixed batch
+    (``[320, 80, 3]`` vs ``[320, 80, 4]``). Convert the 3-col scenes to 4-col
+    copies under ``out_dir`` with the canonical converter (zero padding rows
+    stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
+    through by original path.
+    """
+    from scenario_generation.reproducer_rollout import _future_to_4col
+
+    out: list[str] = []
+    for path in paths:
+        src = Path(path)
+        with np.load(src, allow_pickle=True) as loaded:
+            future = loaded["neighbor_agents_future"]
+            if future.shape[-1] == 4:
+                out.append(str(src))
+                continue
+            data = dict(loaded)
+        data["neighbor_agents_future"] = _future_to_4col(future)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Anchor pools may mix source dirs with colliding basenames — prefix
+        # with a stable hash of the source path.
+        digest = hashlib.sha1(str(src).encode()).hexdigest()[:10]
+        dst = out_dir / f"{digest}_{src.name}"
+        np.savez_compressed(dst, **data)
+        out.append(str(dst))
+    return out
 
 
 def _validate_anchor_config(cfg: dict[str, Any]) -> None:
@@ -2501,6 +2536,7 @@ def main() -> None:
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )
         if anchor_paths:
+            anchor_paths = _ensure_4col_neighbor_futures(anchor_paths, rdir / "anchor_scenes_4col")
             print(
                 f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
                 f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"

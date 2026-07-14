@@ -138,7 +138,11 @@ replay list, plus — when `training.anchor` is configured — a seeded slice of
 real logged normal scenes at `ratio` : 1 (anchor : focus), optionally stratified
 with a waits/interaction list; training on repaired+replay only leaves the model
 unanchored off the failure distribution (base_sft backend only; the runner
-rejects the anchor with any other backend).
+rejects the anchor with any other backend). Raw logged anchor scenes carry
+3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
+`[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the
+3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
+(zero padding rows preserved) before the union.
 
 At a high level:
 
