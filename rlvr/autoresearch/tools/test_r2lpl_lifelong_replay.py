@@ -4000,3 +4000,268 @@ def test_repair_cmd_defaults_expert_knobs_on_and_honors_overrides(tmp_path):
     assert cmd2[cmd2.index("--expert_morph_w_max") + 1] == "0.8"
     assert cmd2[cmd2.index("--expert_morph_max_accel") + 1] == "1.5"
     assert cmd2[cmd2.index("--expert_morph_max_jerk") + 1] == "3.0"
+
+
+# ---------------------------------------------------------------------------
+# Post-round guards + composite checkpoint selection (audit plan R5/R6/R7)
+# ---------------------------------------------------------------------------
+
+
+def _guard_assets(tmp_path):
+    manifest = tmp_path / "frozen_chunks.jsonl"
+    manifest.write_text('{"scene_path": "/tmp/a.npz"}\n')
+    benchmark = tmp_path / "patience_benchmark.json"
+    benchmark.write_text(json.dumps(["/tmp/waits_0.npz"]))
+    return manifest, benchmark
+
+
+def test_validate_guards_config_rejects_empty_and_unknown_keys(tmp_path):
+    with pytest.raises(ValueError, match="empty 'guards'"):
+        round_runner._validate_guards_config({"guards": {}})
+    with pytest.raises(ValueError, match="unknown keys"):
+        round_runner._validate_guards_config({"guards": {"frozen_manifest": "x"}})
+    # absent guards is fine with the default policy
+    round_runner._validate_guards_config({})
+
+
+def test_validate_guards_config_composite_requires_assets(tmp_path):
+    manifest, benchmark = _guard_assets(tmp_path)
+    # composite without any guards section
+    with pytest.raises(ValueError, match="composite"):
+        round_runner._validate_guards_config({"checkpoint_policy": "composite"})
+    # composite missing the benchmark
+    with pytest.raises(ValueError, match="patience_benchmark"):
+        round_runner._validate_guards_config(
+            {
+                "checkpoint_policy": "composite",
+                "guards": {"frozen_chunk_manifest": str(manifest)},
+            }
+        )
+    # missing files fail loudly
+    with pytest.raises(ValueError, match="does not exist"):
+        round_runner._validate_guards_config(
+            {
+                "checkpoint_policy": "composite",
+                "guards": {
+                    "frozen_chunk_manifest": str(tmp_path / "missing.jsonl"),
+                    "patience_benchmark": str(benchmark),
+                },
+            }
+        )
+    # empty benchmark list rejected
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]")
+    with pytest.raises(ValueError, match="is empty"):
+        round_runner._validate_guards_config(
+            {
+                "checkpoint_policy": "composite",
+                "guards": {
+                    "frozen_chunk_manifest": str(manifest),
+                    "patience_benchmark": str(empty),
+                },
+            }
+        )
+    # fully-specified composite config passes
+    round_runner._validate_guards_config(
+        {
+            "checkpoint_policy": "composite",
+            "guards": {
+                "frozen_chunk_manifest": str(manifest),
+                "patience_benchmark": str(benchmark),
+                "composite": {"event_tolerance_frac": 0.1},
+            },
+        }
+    )
+
+
+def test_validate_guards_config_rejects_tolerances_without_composite_rule(tmp_path):
+    manifest, benchmark = _guard_assets(tmp_path)
+    with pytest.raises(ValueError, match="composite"):
+        round_runner._validate_guards_config(
+            {
+                "checkpoint_policy": "latest",
+                "guards": {
+                    "frozen_chunk_manifest": str(manifest),
+                    "patience_benchmark": str(benchmark),
+                    "composite": {"event_tolerance_frac": 0.0},
+                },
+            }
+        )
+    # closed_loop knobs without the npz root are a misconfiguration
+    with pytest.raises(ValueError, match="closed_loop_npz_root"):
+        round_runner._validate_guards_config(
+            {"guards": {"patience_benchmark": str(benchmark), "closed_loop": {"seg_len": 600}}}
+        )
+    with pytest.raises(ValueError, match="unknown keys"):
+        round_runner._validate_guards_config(
+            {
+                "checkpoint_policy": "composite",
+                "guards": {
+                    "frozen_chunk_manifest": str(manifest),
+                    "patience_benchmark": str(benchmark),
+                    "composite": {"event_tol": 0.1},
+                },
+            }
+        )
+
+
+def test_guard_mining_cmd_uses_frozen_manifest_and_neutralizes_subsampling(tmp_path):
+    manifest, benchmark = _guard_assets(tmp_path)
+    cfg = {
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "mine_labels": ["expert_disagreement"],
+        "guards": {
+            "frozen_chunk_manifest": str(manifest),
+            "patience_benchmark": str(benchmark),
+        },
+        "perception_mining": {
+            "scene_list": "/tmp/campaign_scenes.json",
+            "chunk_len": 80,
+            "sample_fraction": 0.25,
+            "sample_seed": 3,
+            "num_shards": 4,
+            "shard_index": 1,
+            "max_chunks": 100,
+        },
+    }
+    gdir = tmp_path / "round" / "guards"
+    cmd = round_runner._guard_mining_cmd(cfg, tmp_path / "model.pth", gdir, gpu_id=0)
+    assert cmd[cmd.index("--chunk_manifest") + 1] == str(manifest)
+    # the frozen set is mined in full every round: no campaign subsampling
+    for neutralized in ("--sample_fraction", "--sample_seed", "--num_shards", "--max_chunks"):
+        assert neutralized not in cmd
+    assert "--scene_list" not in cmd
+    assert cmd[cmd.index("--out_jsonl") + 1] == str(gdir / "credit_windows.jsonl")
+
+    onset_cmd = round_runner._patience_onset_cmd(cfg, tmp_path / "model.pth", gdir)
+    assert onset_cmd[onset_cmd.index("--scenes") + 1] == str(benchmark)
+    assert onset_cmd[onset_cmd.index("--out") + 1] == str(gdir / "patience_onset.json")
+    assert onset_cmd[onset_cmd.index("--stop_speed") + 1] == "0.5"
+
+
+def test_composite_decision_gates_events_and_patience():
+    incumbent = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 10, "road_border_crossing": 4}
+        },
+        "patience_onset": {"fail_to_stop": 2, "over_distance_mean_m": 1.0},
+    }
+    tolerances = round_runner._composite_tolerances({})
+
+    # identical metrics are accepted (improvement too)
+    current = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 8, "road_border_crossing": 4}
+        },
+        "patience_onset": {"fail_to_stop": 2, "over_distance_mean_m": 0.8},
+    }
+    accepted, reasons = round_runner._composite_decision(current, incumbent, tolerances)
+    assert accepted and not reasons
+
+    # any label regression rejects, including a label the incumbent never triggered
+    worse = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 8, "moving_collision": 1}
+        },
+        "patience_onset": {"fail_to_stop": 2, "over_distance_mean_m": 1.0},
+    }
+    accepted, reasons = round_runner._composite_decision(worse, incumbent, tolerances)
+    assert not accepted
+    assert any("moving_collision" in r for r in reasons)
+
+    # patience regression rejects
+    creep = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 10, "road_border_crossing": 4}
+        },
+        "patience_onset": {"fail_to_stop": 3, "over_distance_mean_m": 1.2},
+    }
+    accepted, reasons = round_runner._composite_decision(creep, incumbent, tolerances)
+    assert not accepted
+    assert any("fail_to_stop" in r for r in reasons)
+
+    # tolerances widen the gate
+    wide = round_runner._composite_tolerances(
+        {"composite": {"event_tolerance_frac": 0.5, "fail_to_stop_tolerance": 1}}
+    )
+    lenient = {
+        "frozen_chunk_mining": {
+            "event_count_by_label": {"expert_disagreement": 12, "road_border_crossing": 4}
+        },
+        "patience_onset": {"fail_to_stop": 3, "over_distance_mean_m": 1.0},
+    }
+    accepted, reasons = round_runner._composite_decision(lenient, incumbent, wide)
+    assert accepted, reasons
+
+
+def test_workflow_contract_parses_guards(tmp_path):
+    manifest, benchmark = _guard_assets(tmp_path)
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+
+    def _workflow(guards):
+        payload = {
+            "judgement": {
+                "reward_config": "/tmp/reward.json",
+                "threshold_config": "/tmp/thresholds.json",
+                "credit_window_config": "/tmp/credit.json",
+                "enabled_labels": ["moving_collision"],
+            },
+            "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+            "training": {"val_scenes": "/tmp/valid.json"},
+            "rounds": {"checkpoint_selection_rule": "composite"},
+        }
+        if guards is not None:
+            payload["guards"] = guards
+        path = tmp_path / "workflow.json"
+        path.write_text(json.dumps(payload))
+        return path
+
+    guards = {
+        "frozen_chunk_manifest": str(manifest),
+        "patience_benchmark": str(benchmark),
+        "composite": {"event_tolerance_frac": 0.0},
+    }
+    contract = {
+        "model_path": "/tmp/model.pth",
+        "scene_list": str(scene_list),
+        "workflow_config": str(_workflow(guards)),
+        "training_config": str(training),
+        "output_dir": str(tmp_path / "auto_research" / "out"),
+    }
+    cfg = round_runner._config_from_workflow_contract(contract)
+    assert cfg["guards"] == guards
+    assert cfg["checkpoint_policy"] == "composite"
+    round_runner._validate_guards_config(cfg)
+
+    # present-but-empty guards section is rejected at contract parse time
+    contract["workflow_config"] = str(_workflow({}))
+    with pytest.raises(ValueError, match="guards is present but empty"):
+        round_runner._config_from_workflow_contract(contract)
+
+
+def test_guard_mining_metrics_and_summary_derivation(tmp_path):
+    gdir = tmp_path / "guards"
+    gdir.mkdir()
+    rows = [
+        {"scene_path": "/tmp/a.npz", "label": "expert_disagreement", "event_key": "e1"},
+        {"scene_path": "/tmp/b.npz", "label": "expert_disagreement", "event_key": "e1"},
+        {"scene_path": "/tmp/c.npz", "label": "expert_disagreement", "event_key": "e2"},
+        {"scene_path": "/tmp/d.npz", "label": "road_border_crossing", "event_key": "e3"},
+    ]
+    with open(gdir / "credit_windows.jsonl", "w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    (gdir / "summary.json").write_text(json.dumps({"simulated_chunks": 500}))
+
+    metrics = round_runner._guard_mining_metrics(gdir)
+    assert metrics["event_count_by_label"] == {
+        "expert_disagreement": 2,
+        "road_border_crossing": 1,
+    }
+    assert metrics["total_events"] == 3
+    assert metrics["events_per_1000_chunks"] == 6.0

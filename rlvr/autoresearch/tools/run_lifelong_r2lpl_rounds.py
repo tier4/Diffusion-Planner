@@ -227,6 +227,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "workflow training.anchor is present but empty; remove the section or "
             "fill in scene_list/ratio"
         )
+    if "guards" in workflow and not workflow["guards"]:
+        raise ValueError("workflow guards is present but empty; remove the section or fill it in")
 
     scene_list = _contract_scene_list(contract)
     chunk_manifest = _first_non_null(
@@ -414,6 +416,9 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         # make "anchor key present but empty" (a misconfiguration the validator
         # rejects) indistinguishable from "no anchor".
         **({"anchor": dict(training_section["anchor"])} if training_section.get("anchor") else {}),
+        # Same present-but-empty rule as anchor (rejected above), so a set
+        # guards key here is always non-empty.
+        **({"guards": dict(workflow["guards"])} if workflow.get("guards") else {}),
         "training_config": str(training_source)
         if isinstance(training_source, (str, os.PathLike))
         else training_source,
@@ -1065,6 +1070,316 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
             raise ValueError(f"training.anchor.{key} does not exist: {path}")
         if not _read_json_list(path):
             raise ValueError(f"training.anchor.{key} is empty: {path}")
+
+
+_GUARD_KEYS = {
+    "frozen_chunk_manifest",
+    "patience_benchmark",
+    "patience_stop_speed",
+    "closed_loop_npz_root",
+    "closed_loop",
+    "composite",
+}
+_GUARD_CLOSED_LOOP_KEYS = {
+    "seg_len",
+    "replan_interval",
+    "draw_every",
+    "near_miss_thresh",
+    "search_radius",
+    "warmup_steps",
+    "unstick_after",
+    "unstick_advance_m",
+    "fps",
+}
+_COMPOSITE_TOLERANCE_DEFAULTS = {
+    "event_tolerance_frac": 0.0,
+    "fail_to_stop_tolerance": 0,
+    "over_distance_tolerance_m": 0.5,
+}
+
+
+def _validate_guards_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on guard misconfiguration, not after a full round.
+
+    ``guards`` drives the post-round guard phase: frozen-chunk event-rate
+    mining (the closed-loop patience metric, free — R5), the open-loop patience
+    onset eval (R6), and the optional closed-loop probe (R6). When
+    ``rounds.checkpoint_selection_rule`` is ``"composite"`` (R7) the first two
+    are REQUIRED — the composite decision compares their metrics against the
+    incumbent checkpoint's.
+    """
+    guards = cfg.get("guards")
+    policy = str(cfg.get("checkpoint_policy", "latest"))
+    if "guards" in cfg and not guards:
+        raise ValueError("config has an empty 'guards' section; remove it or fill it in")
+    if guards is None:
+        if policy == "composite":
+            raise ValueError(
+                "checkpoint_selection_rule='composite' requires a 'guards' section with "
+                "frozen_chunk_manifest and patience_benchmark"
+            )
+        return
+    unknown = sorted(set(guards) - _GUARD_KEYS)
+    if unknown:
+        raise ValueError(f"guards has unknown keys {unknown}; allowed: {sorted(_GUARD_KEYS)}")
+    if policy == "composite":
+        missing = [k for k in ("frozen_chunk_manifest", "patience_benchmark") if not guards.get(k)]
+        if missing:
+            raise ValueError(
+                f"checkpoint_selection_rule='composite' requires guards.{missing} to be set"
+            )
+    elif guards.get("composite") is not None:
+        raise ValueError(
+            "guards.composite tolerances are set but rounds.checkpoint_selection_rule is "
+            f"{policy!r}; set it to 'composite' or remove the tolerances"
+        )
+    for key in ("frozen_chunk_manifest", "closed_loop_npz_root"):
+        value = guards.get(key)
+        if value is not None and not Path(value).exists():
+            raise ValueError(f"guards.{key} does not exist: {value}")
+    benchmark = guards.get("patience_benchmark")
+    if benchmark is not None:
+        path = Path(benchmark)
+        if not path.exists():
+            raise ValueError(f"guards.patience_benchmark does not exist: {path}")
+        if not _read_json_list(path):
+            raise ValueError(f"guards.patience_benchmark is empty: {path}")
+    stop_speed = guards.get("patience_stop_speed")
+    if stop_speed is not None and float(stop_speed) <= 0.0:
+        raise ValueError(f"guards.patience_stop_speed must be > 0: {stop_speed}")
+    closed_loop = guards.get("closed_loop")
+    if closed_loop is not None:
+        if guards.get("closed_loop_npz_root") is None:
+            raise ValueError("guards.closed_loop knobs are set without closed_loop_npz_root")
+        unknown_cl = sorted(set(closed_loop) - _GUARD_CLOSED_LOOP_KEYS)
+        if unknown_cl:
+            raise ValueError(
+                f"guards.closed_loop has unknown keys {unknown_cl}; "
+                f"allowed: {sorted(_GUARD_CLOSED_LOOP_KEYS)}"
+            )
+    composite = guards.get("composite")
+    if composite is not None:
+        unknown_tol = sorted(set(composite) - set(_COMPOSITE_TOLERANCE_DEFAULTS))
+        if unknown_tol:
+            raise ValueError(
+                f"guards.composite has unknown keys {unknown_tol}; "
+                f"allowed: {sorted(_COMPOSITE_TOLERANCE_DEFAULTS)}"
+            )
+        for key, value in composite.items():
+            if float(value) < 0.0:
+                raise ValueError(f"guards.composite.{key} must be >= 0: {value}")
+
+
+def _composite_tolerances(guards: dict[str, Any]) -> dict[str, float]:
+    tolerances = dict(_COMPOSITE_TOLERANCE_DEFAULTS)
+    tolerances.update(dict(guards.get("composite") or {}))
+    return {k: float(v) for k, v in tolerances.items()}
+
+
+def _guard_mining_cmd(
+    cfg: dict[str, Any], model_path: Path, gdir: Path, *, gpu_id: int | None
+) -> list[str]:
+    """Mining command for the FROZEN held-out chunk set (guard event rates).
+
+    The frozen set must be mined in full every round so event counts are
+    comparable — campaign-side subsampling/sharding knobs are neutralized.
+    """
+    overrides: dict[str, Any] = {
+        "chunk_manifest": str(cfg["guards"]["frozen_chunk_manifest"]),
+        "num_shards": None,
+        "shard_index": None,
+        "sample_fraction": None,
+        "sample_seed": None,
+        "max_chunks": None,
+    }
+    if gpu_id is not None:
+        overrides["device"] = "cuda"
+    cmd, _ = _perception_mining_cmd(
+        cfg,
+        model_path,
+        gdir,
+        out_dir=gdir / "windows",
+        out_jsonl=gdir / "credit_windows.jsonl",
+        segments_jsonl=gdir / "segments.jsonl",
+        summary_json=gdir / "summary.json",
+        mining_overrides=overrides,
+    )
+    return cmd
+
+
+def _patience_onset_cmd(cfg: dict[str, Any], model_path: Path, gdir: Path) -> list[str]:
+    guards = cfg["guards"]
+    return [
+        sys.executable,
+        "-m",
+        "rlvr.autoresearch.tools.eval_patience_onset",
+        "--model",
+        str(model_path),
+        "--scenes",
+        str(guards["patience_benchmark"]),
+        "--out",
+        str(gdir / "patience_onset.json"),
+        "--stop_speed",
+        str(guards.get("patience_stop_speed", 0.5)),
+    ]
+
+
+def _closed_loop_probe_cmd(cfg: dict[str, Any], model_path: Path) -> list[str]:
+    guards = cfg["guards"]
+    cmd = [
+        sys.executable,
+        "-m",
+        "valid_predictor_closed_loop",
+        "--model_path",
+        str(model_path),
+        "--npz_root",
+        str(guards["closed_loop_npz_root"]),
+    ]
+    for key, value in sorted(dict(guards.get("closed_loop") or {}).items()):
+        cmd.extend([f"--{key}", str(value)])
+    return cmd
+
+
+def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
+    rows = _read_jsonl(gdir / "credit_windows.jsonl")
+    summary = _load_json(gdir / "summary.json")
+    event_counts = _derive_event_counts_from_credit_rows(rows)
+    simulated = int(summary.get("simulated_chunks", 0))
+    total_events = int(sum(event_counts.values()))
+    return {
+        "event_count_by_label": event_counts,
+        "total_events": total_events,
+        "simulated_chunks": simulated,
+        "events_per_1000_chunks": round(1000.0 * total_events / simulated, 3)
+        if simulated
+        else None,
+    }
+
+
+def _run_guard_phase(
+    cfg: dict[str, Any],
+    model_path: Path,
+    gdir: Path,
+    gpu_ids: list[int],
+    *,
+    tag: str,
+) -> dict[str, Any]:
+    """Post-round guards on ``model_path``; returns the metrics dict.
+
+    Frozen-chunk mining and the open-loop patience onset are the composite
+    gate's inputs. The closed-loop probe (when configured) is REPORT-ONLY: it
+    is the expensive creep detector for promising checkpoints, and the
+    frozen-chunk mining already gates closed-loop event rates.
+    """
+    guards = cfg["guards"]
+    gdir.mkdir(parents=True, exist_ok=True)
+    gpu_id = gpu_ids[0] if gpu_ids else None
+    metrics: dict[str, Any] = {"tag": tag, "model_path": str(model_path)}
+
+    if guards.get("frozen_chunk_manifest"):
+        cmd = _guard_mining_cmd(cfg, model_path, gdir, gpu_id=gpu_id)
+        _run(cmd, gdir / "guard_mine.log", env=_env_for_gpu(gpu_id))
+        metrics["frozen_chunk_mining"] = _guard_mining_metrics(gdir)
+
+    if guards.get("patience_benchmark"):
+        cmd = _patience_onset_cmd(cfg, model_path, gdir)
+        _run(cmd, gdir / "patience_onset.log", env=_env_for_gpu(gpu_id))
+        report = _load_json(gdir / "patience_onset.json")
+        onset = dict(report["summary"]["model"])
+        onset["n_scenes"] = report["summary"]["n_scenes"]
+        metrics["patience_onset"] = onset
+
+    if guards.get("closed_loop_npz_root"):
+        metrics["closed_loop"] = _run_closed_loop_probe(cfg, model_path, gdir, gpu_id)
+
+    _write_json(gdir / "guard_metrics.json", metrics)
+    return metrics
+
+
+def _run_closed_loop_probe(
+    cfg: dict[str, Any], model_path: Path, gdir: Path, gpu_id: int | None
+) -> dict[str, Any]:
+    """Run ``valid_predictor_closed_loop`` on the guard NPZ root (report-only).
+
+    The tool writes to ``<ckpt dir>/closed_loop/<timestamp>/`` and offers no
+    --out_dir (diffusion_planner/ is not editable), so the new run dir is
+    detected by diffing and its summary copied into the guard dir. It also
+    requires args.json adjacent to the checkpoint; when the trainer did not
+    leave one there, the nearest one is copied in.
+    """
+    import shutil
+
+    adjacent_args = model_path.parent / "args.json"
+    if not adjacent_args.exists():
+        shutil.copy2(_args_json_for_model(model_path), adjacent_args)
+    cl_root = model_path.parent / "closed_loop"
+    before = set(cl_root.glob("*")) if cl_root.exists() else set()
+    repo_root = Path(__file__).resolve().parents[3]
+    _run(
+        _closed_loop_probe_cmd(cfg, model_path),
+        gdir / "closed_loop_probe.log",
+        cwd=repo_root / "diffusion_planner",
+        env=_env_for_gpu(gpu_id),
+    )
+    new_dirs = sorted(set(cl_root.glob("*")) - before, key=lambda p: p.name)
+    if not new_dirs:
+        raise RuntimeError(f"closed-loop probe produced no new run dir under {cl_root}")
+    summary_path = new_dirs[-1] / "summary.json"
+    summary = _load_json(summary_path)
+    shutil.copy2(summary_path, gdir / "closed_loop_summary.json")
+    keep = (
+        "n_segments",
+        "collision_segment_rate",
+        "collision_step_rate",
+        "near_miss_segment_rate",
+        "global_min_clearance",
+        "mean_segment_min_clearance",
+        "total_snaps",
+    )
+    picked = {k: summary[k] for k in keep if k in summary}
+    picked["run_dir"] = str(new_dirs[-1])
+    return picked
+
+
+def _composite_decision(
+    current: dict[str, Any],
+    incumbent: dict[str, Any],
+    tolerances: dict[str, float],
+) -> tuple[bool, list[str]]:
+    """Accept/reject a round checkpoint against the incumbent's guard metrics.
+
+    Accept iff every enabled label's frozen-chunk event count stays within
+    ``event_tolerance_frac`` of the incumbent's (a label the incumbent never
+    triggered must stay at zero), the patience benchmark holds
+    (``fail_to_stop`` within ``fail_to_stop_tolerance``), and the mean
+    over-distance grows by at most ``over_distance_tolerance_m``. Returns
+    (accepted, reasons-for-rejection).
+    """
+    reasons: list[str] = []
+    cur_events = dict(current.get("frozen_chunk_mining", {}).get("event_count_by_label", {}))
+    inc_events = dict(incumbent.get("frozen_chunk_mining", {}).get("event_count_by_label", {}))
+    frac = tolerances["event_tolerance_frac"]
+    for label in sorted(set(cur_events) | set(inc_events)):
+        cur = int(cur_events.get(label, 0))
+        inc = int(inc_events.get(label, 0))
+        if cur > inc * (1.0 + frac):
+            reasons.append(f"frozen-chunk {label} events {inc} -> {cur} (tolerance {frac:.2f})")
+
+    cur_onset = current.get("patience_onset")
+    inc_onset = incumbent.get("patience_onset")
+    if cur_onset is not None and inc_onset is not None:
+        cur_fail = int(cur_onset["fail_to_stop"])
+        inc_fail = int(inc_onset["fail_to_stop"])
+        if cur_fail > inc_fail + tolerances["fail_to_stop_tolerance"]:
+            reasons.append(f"patience fail_to_stop {inc_fail} -> {cur_fail}")
+        cur_over = float(cur_onset["over_distance_mean_m"])
+        inc_over = float(inc_onset["over_distance_mean_m"])
+        if cur_over > inc_over + tolerances["over_distance_tolerance_m"]:
+            reasons.append(
+                f"patience over_distance_mean_m {inc_over:.2f} -> {cur_over:.2f} "
+                f"(tolerance {tolerances['over_distance_tolerance_m']:.2f})"
+            )
+    return (not reasons), reasons
 
 
 def _repair_cmd(
@@ -1909,6 +2224,22 @@ def _print_dry_run_plan(
                 f"CUDA_VISIBLE_DEVICES={gpu_id} {' '.join(repair_cmd)}"
             )
     print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
+    guards = cfg.get("guards")
+    if guards:
+        gdir = rdir / "guards"
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        if guards.get("frozen_chunk_manifest"):
+            cmd = _guard_mining_cmd(cfg, model_path, gdir, gpu_id=gpu_id)
+            print(f"[round {round_idx}] guard_mine: {' '.join(cmd)}")
+        if guards.get("patience_benchmark"):
+            print(
+                f"[round {round_idx}] guard_onset: {' '.join(_patience_onset_cmd(cfg, model_path, gdir))}"
+            )
+        if guards.get("closed_loop_npz_root"):
+            print(
+                f"[round {round_idx}] guard_closed_loop: "
+                f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
+            )
     anchor_cfg = cfg.get("anchor")
     if anchor_cfg:
         print(
@@ -1942,6 +2273,8 @@ def _summarize_round(
     train_input_list: Path,
     phase_times: dict[str, float],
     next_model_path: Path,
+    guard_metrics: dict[str, Any] | None = None,
+    guard_decision: dict[str, Any] | None = None,
 ) -> None:
     mining_summary = _load_json(rdir / "perception_direct_summary.json")
     credit_rows = _read_jsonl(rdir / "credit_windows.jsonl")
@@ -1990,6 +2323,10 @@ def _summarize_round(
         "phase_peak_memory_mb": {k: None for k in sorted(phase_times)},
         "next_model_path": str(next_model_path),
     }
+    if guard_metrics is not None:
+        summary["guards"] = guard_metrics
+    if guard_decision is not None:
+        summary["composite_decision"] = guard_decision
     _write_json(rdir / "round_summary.json", summary)
 
 
@@ -2007,12 +2344,32 @@ def main() -> None:
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
     _validate_anchor_config(cfg)
+    _validate_guards_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
     model_path = Path(cfg["model_path"])
     previous_memory: Path | None = None
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
+    guards_cfg = cfg.get("guards")
+    composite_gate = checkpoint_policy == "composite"
+    # The composite rule gates ROUND checkpoints; intra-round LoRA
+    # materialization for the rsft backend still takes the latest adapter.
+    materialize_policy = "latest" if composite_gate else checkpoint_policy
+    incumbent_model = model_path
+    incumbent_metrics: dict[str, Any] | None = None
+    if composite_gate and not args.dry_run:
+        # Round-0 reference: the incumbent every round-1 candidate is compared
+        # against. Guard metrics are only comparable to guard metrics from the
+        # same frozen assets, so this always runs (no reuse across campaigns).
+        print("[round 0] guards on the starting model (composite incumbent baseline)")
+        incumbent_metrics = _run_guard_phase(
+            cfg,
+            model_path,
+            out / "guard_round_000",
+            _gpu_ids_from_config(cfg),
+            tag="round_000",
+        )
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
         cfg["training_config"], (str, os.PathLike)
@@ -2131,7 +2488,40 @@ def main() -> None:
             print(f"[round {round_idx}] train: {' '.join(train_cmd)}")
             phase_times["train"] = _run(train_cmd, rdir / "train.log")
             run_dir = _latest_run_dir(out, name)
-            model_path = _checkpoint_for(run_dir, checkpoint_policy, model_path)
+            model_path = _checkpoint_for(run_dir, materialize_policy, model_path)
+
+        guard_metrics: dict[str, Any] | None = None
+        guard_decision: dict[str, Any] | None = None
+        if guards_cfg:
+            print(f"[round {round_idx}] guards")
+            t0 = time.perf_counter()
+            guard_metrics = _run_guard_phase(
+                cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
+            )
+            phase_times["guards"] = time.perf_counter() - t0
+            if composite_gate:
+                assert incumbent_metrics is not None
+                accepted, reasons = _composite_decision(
+                    guard_metrics, incumbent_metrics, _composite_tolerances(guards_cfg)
+                )
+                guard_decision = {
+                    "accepted": accepted,
+                    "reasons": reasons,
+                    "incumbent_model": str(incumbent_model),
+                    "candidate_model": str(model_path),
+                }
+                _write_json(rdir / "guards" / "composite_decision.json", guard_decision)
+                if accepted:
+                    incumbent_model = model_path
+                    incumbent_metrics = guard_metrics
+                    print(f"[round {round_idx}] composite: ACCEPTED {model_path}")
+                else:
+                    print(
+                        f"[round {round_idx}] composite: REJECTED {model_path}; "
+                        f"next round warm-starts from {incumbent_model}. Reasons: "
+                        + "; ".join(reasons)
+                    )
+                    model_path = incumbent_model
 
         previous_memory = memory_json
         _summarize_round(
@@ -2142,6 +2532,8 @@ def main() -> None:
             train_input_list=train_input_list,
             phase_times=phase_times,
             next_model_path=model_path,
+            guard_metrics=guard_metrics,
+            guard_decision=guard_decision,
         )
         workflow_summary.append(_load_json(rdir / "round_summary.json"))
         print(f"[round {round_idx}] next model: {model_path}")

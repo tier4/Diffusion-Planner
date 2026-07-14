@@ -126,6 +126,8 @@ Each round runs:
 2. `build_repaired_targets`
 3. `lifelong_replay_memory`
 4. training through either base SFT or `rlvr.autoresearch.run_experiment`
+5. optional post-round guards on the produced checkpoint (see
+   "Post-Round Guards & Composite Checkpoint Selection")
 
 The miner writes `credit_windows.jsonl` directly. Repair generation consumes that
 file and writes accepted repaired scenes. Replay memory merges current accepted
@@ -149,6 +151,48 @@ scene list or chunk manifest
   -> replay memory update
   -> configured SFT training backend
 ```
+
+## Post-Round Guards & Composite Checkpoint Selection
+
+Configured through a top-level `guards` section in the workflow config (see
+`rlvr/configs/r2lpl_workflow_template.json`). When present, each round ends
+with a guard phase on the round's checkpoint, written to
+`r2lpl_round_NNN/guards/guard_metrics.json` and folded into
+`round_summary.json`. Guards run on the first configured GPU.
+
+Three probes, each optional:
+
+- **Frozen-chunk event rates** (`frozen_chunk_manifest`): the round checkpoint
+  is re-mined with `mine_direct_reproducer_chunks` on a FROZEN held-out chunk
+  manifest (build it once with `--plan_only`; never train on it). Reported as
+  events per label plus events-per-1000-chunks. This is the free closed-loop
+  patience metric: campaign subsampling/sharding knobs are neutralized so
+  counts are comparable across rounds.
+- **Open-loop patience onset** (`patience_benchmark`): `eval_patience_onset`
+  on a frozen waits benchmark (`build_patience_benchmark`); reports
+  `fail_to_stop`, stop-onset delay, over-distance. `patience_stop_speed`
+  (default 0.5 m/s) sets the stop threshold.
+- **Closed-loop probe** (`closed_loop_npz_root`, optional and expensive):
+  `valid_predictor_closed_loop` on route NPZ frames — the creep detector the
+  open-loop onset eval is blind to. REPORT-ONLY: it never gates acceptance
+  (the frozen-chunk mining already gates closed-loop event rates). Knobs go
+  under `guards.closed_loop` (`seg_len`, `replan_interval`, `draw_every`, ...);
+  PNG rendering dominates its cost, so raise `draw_every` for cheap runs.
+
+**Composite checkpoint selection** (`rounds.checkpoint_selection_rule:
+"composite"`): requires `frozen_chunk_manifest` + `patience_benchmark`. Before
+round 1 the guards run once on the starting model (`guard_round_000/`) to
+establish the incumbent reference. After each round the candidate checkpoint is
+accepted iff every label's frozen-chunk event count stays within
+`event_tolerance_frac` of the incumbent's (a label the incumbent never
+triggered must stay at zero), `fail_to_stop` grows by at most
+`fail_to_stop_tolerance`, and `over_distance_mean_m` by at most
+`over_distance_tolerance_m` (defaults 0.0 / 0 / 0.5). A rejected checkpoint is
+rolled back: the decision (with reasons) lands in
+`guards/composite_decision.json` and the next round warm-starts from the
+incumbent. With `"latest"` the guards still run and report when configured,
+but never gate — setting `guards.composite` tolerances together with
+`"latest"` is rejected at startup as a misconfiguration.
 
 ## Detection Semantics — closed-loop (realized) vs open-loop (predicted)
 
@@ -350,6 +394,8 @@ Per round, the workflow reports:
 - discarded unrepaired scene count
 - replay memory size
 - final training scene count
+- guard metrics + the composite accept/reject decision, when guards are
+  configured
 
 Artifacts belong under the SSD `auto_research` area, not inside the git repo.
 
