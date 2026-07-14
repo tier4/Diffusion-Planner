@@ -144,6 +144,7 @@ def filter_scenes(
     variant: str,
     K: int,
     noise_range: tuple[float, float],
+    prototypes_path: str | None = None,
     scene_batch_size: int = 8,
     save_curated_dir: Path | None = None,
 ) -> tuple[list[dict], list[dict]]:
@@ -184,6 +185,7 @@ def filter_scenes(
             noise_range=noise_range,
             device=device,
             generation_variant=variant,
+            prototypes_path=prototypes_path,
             use_route_cl_guidance=True,
         )  # (N, K, T, 4)
 
@@ -301,6 +303,11 @@ def main():
     parser.add_argument(
         "--variant", default="rsft_v2_col4", help="Generation variant (default: rsft_v2_col4)"
     )
+    parser.add_argument(
+        "--prototypes_path",
+        default=None,
+        help="Prototype library .npy for anchor-slot variants (rsft_v2_anchor)",
+    )
     parser.add_argument("--K", type=int, default=16, help="Number of generations per scene")
     parser.add_argument(
         "--noise_range", default="0.5,2.0", help="Noise scale range (default: 0.5,2.0)"
@@ -344,6 +351,7 @@ def main():
         device,
         clearance_thresh=args.clearance_thresh,
         variant=args.variant,
+        prototypes_path=args.prototypes_path,
         K=args.K,
         noise_range=noise_range,
         scene_batch_size=args.scene_batch_size,

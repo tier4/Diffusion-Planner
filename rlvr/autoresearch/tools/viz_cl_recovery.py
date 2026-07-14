@@ -268,9 +268,11 @@ def main():
 
     rcfg = load_reward_config(args.config)
     variant = args.generation_variant
+    with open(args.config) as f:
+        _cfg_json = json.load(f)
+    prototypes_path = _cfg_json.get("prototypes_path")
     if variant is None:
-        with open(args.config) as f:
-            variant = json.load(f).get("generation_variant", "default")
+        variant = _cfg_json.get("generation_variant", "default")
     slot_labels = get_generation_config_labels_for_variant(variant, args.K)
 
     with open(args.scenes) as f:
@@ -337,6 +339,7 @@ def main():
             gen_chunk_size=args.K,
             gt_max_speed=gt_v_high,
             generation_variant=variant,
+            prototypes_path=prototypes_path,
         )[0]  # [K, T, 4]
 
         # Score all K trajs — centerline reward is uncapped.

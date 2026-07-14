@@ -652,6 +652,7 @@ def build_repaired_targets(
     min_static_margin: float,
     K: int,
     variant: str,
+    repair_prototypes_path: str | None = None,
     generation_mode: str,
     grpo_noise_scale: float,
     gt_max_speed: float,
@@ -752,6 +753,7 @@ def build_repaired_targets(
                 gen_chunk_size=K,
                 gt_max_speed=gt_max_speed,
                 generation_variant=variant,
+                prototypes_path=repair_prototypes_path,
                 use_route_cl_guidance=use_route_cl_guidance,
             )
         else:
@@ -961,6 +963,11 @@ def main() -> None:
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--variant", default="rl_cl_soft_sweep_stretch")
     ap.add_argument(
+        "--prototypes_path",
+        default=None,
+        help="Prototype library .npy for anchor-slot variants (rsft_v2_anchor)",
+    )
+    ap.add_argument(
         "--generation_mode",
         choices=[_GENERATION_MODE_GRPO_TEMPERATURE, _GENERATION_MODE_GUIDED_VARIANT],
         default=_GENERATION_MODE_GRPO_TEMPERATURE,
@@ -1084,6 +1091,7 @@ def main() -> None:
         min_static_margin=float(args.min_margin),
         K=int(args.K),
         variant=str(args.variant),
+        repair_prototypes_path=args.prototypes_path,
         generation_mode=str(args.generation_mode),
         grpo_noise_scale=float(args.grpo_noise_scale),
         gt_max_speed=float(args.gt_max_speed),

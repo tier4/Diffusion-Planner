@@ -224,6 +224,7 @@ def main() -> None:
     with open(args.config) as f:
         cfg = json.load(f)
     variant = cfg.get("generation_variant", "default")
+    prototypes_path = cfg.get("prototypes_path")
     use_route_cl = bool(cfg.get("use_route_cl_guidance", False))
     slot_labels = get_generation_config_labels_for_variant(variant, args.K)
 
@@ -303,6 +304,7 @@ def main() -> None:
             gen_chunk_size=args.K,
             gt_max_speed=v_batch,
             generation_variant=variant,
+            prototypes_path=prototypes_path,
             use_route_cl_guidance=use_route_cl,
         )  # [B, K, T, 4]
 
