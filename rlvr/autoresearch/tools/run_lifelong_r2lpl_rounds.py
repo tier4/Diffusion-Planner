@@ -83,6 +83,26 @@ def _first_non_null(*values: Any) -> Any:
     return None
 
 
+def _required_replay_capacity(replay: dict[str, Any]) -> int:
+    """Replay capacity must be sized per campaign — there is no sane default.
+
+    Capacity caps the CARRY-OVER memory between rounds (this round's repaired
+    scenes always train regardless); a too-small value silently evicts earlier
+    rounds' corrections. Rule of thumb: >= 2-3x the expected repaired scenes
+    per round — hundreds for local corpora, thousands+ for server-scale.
+    """
+    capacity = replay.get("capacity")
+    if capacity is None:
+        raise ValueError(
+            "replay_memory.capacity is required (no default): size it to the campaign "
+            "(>= 2-3x expected repaired scenes per round)"
+        )
+    capacity = int(capacity)
+    if capacity < 1:
+        raise ValueError(f"replay_memory.capacity must be >= 1, got {capacity}")
+    return capacity
+
+
 def _workflow_count_rear_end_collisions(judgement: dict[str, Any]) -> bool:
     if "count_rear_end_collisions" in judgement:
         return bool(judgement["count_rear_end_collisions"])
@@ -408,7 +428,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
         "replay_memory": {
-            "capacity": int(_first_non_null(replay.get("capacity"), 200)),
+            "capacity": _required_replay_capacity(replay),
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
             "beta": float(_first_non_null(replay.get("beta"), 0.5)),
             "arc_bin_m": float(_first_non_null(replay.get("arc_bin_m"), 25.0)),
@@ -502,6 +522,7 @@ def _load_config(path: Path) -> dict[str, Any]:
     if missing:
         raise ValueError(f"{path} is missing required fields: {missing}")
     _validate_output_dir(cfg["output_dir"])
+    _required_replay_capacity(dict(cfg.get("replay_memory") or {}))
     mining = dict(cfg.get("perception_mining") or {})
     _validate_mining_tool(mining)
     if not _has_mining_source(cfg):
@@ -1332,6 +1353,56 @@ def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
         "simulated_chunks": simulated,
         "events_per_1000_chunks": round(1000.0 * total_events / simulated, 3),
     }
+
+
+def _dedup_replay_against_current(
+    repaired_rows_jsonl: Path, memory_json: Path, replay_paths: list[str]
+) -> tuple[list[str], int]:
+    """Drop replay scenes whose SOURCE is re-repaired in the current round.
+
+    After a rejected round the retry re-repairs the same mined windows, while
+    the replay memory still carries the rejected round's repaired versions of
+    those very sources — training would see each failure scene twice with two
+    near-identical targets, double-weighting exactly the slice that just
+    caused a rejection. Keep the CURRENT repair (fresh draw) and drop the
+    stale replay twin. Replay of sources NOT re-repaired this round (true
+    rehearsal from accepted history) is untouched.
+    """
+    current_sources = {
+        row.get("source_scene_path")
+        for row in _read_jsonl(repaired_rows_jsonl)
+        if row.get("source_scene_path")
+    }
+    if not current_sources:
+        return list(replay_paths), 0
+    source_by_scene = {
+        str(entry["scene_path"]): entry.get("source_scene_path")
+        for entry in _load_json(memory_json).get("entries", [])
+    }
+    kept = [p for p in replay_paths if source_by_scene.get(str(p)) not in current_sources]
+    return kept, len(replay_paths) - len(kept)
+
+
+def _reuse_mining_outputs(src_rdir: Path, rdir: Path) -> None:
+    """Copy a previous round's canonical mining artifacts into this round.
+
+    Window NPZs stay in the source round dir — credit rows reference them by
+    absolute path, so repair consumes them in place.
+    """
+    import shutil
+
+    credit = src_rdir / "credit_windows.jsonl"
+    if not credit.exists():
+        raise FileNotFoundError(f"cannot reuse mining: {credit} does not exist")
+    for name in (
+        "credit_windows.jsonl",
+        "perception_reproducer_hits.jsonl",
+        "perception_direct_summary.json",
+        "credit_windows_paths.json",
+    ):
+        src = src_rdir / name
+        if src.exists():
+            shutil.copy2(src, rdir / name)
 
 
 def _run_guard_phase(
@@ -2481,6 +2552,8 @@ def main() -> None:
         else:
             print("[round 0] guards on the starting model (composite incumbent baseline)")
             incumbent_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+    # (model that produced the last real mining pass, its round dir)
+    last_mining: tuple[Path, Path] | None = None
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
         cfg["training_config"], (str, os.PathLike)
@@ -2515,7 +2588,7 @@ def main() -> None:
             "--out_replay_scenes",
             str(replay_json),
             "--capacity",
-            str(mem_cfg.get("capacity", 200)),
+            str(_required_replay_capacity(mem_cfg)),
             "--alpha",
             str(mem_cfg.get("alpha", 0.5)),
             "--beta",
@@ -2537,8 +2610,25 @@ def main() -> None:
             _print_dry_run_plan(cfg, model_path, rdir, gpu_ids, memory_cmd, round_idx)
             continue
 
-        print(f"[round {round_idx}] perception_mine")
-        phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
+        if last_mining is not None and _canonical_path(model_path) == _canonical_path(
+            last_mining[0]
+        ):
+            # Mining is deterministic in the model over the fixed campaign
+            # list, so after a rejected round the unchanged incumbent would
+            # re-mine byte-identical events. Reuse the previous outputs
+            # (repair still reruns — its K-generation is stochastic and a
+            # fresh draw can produce better targets).
+            src = last_mining[1]
+            print(
+                f"[round {round_idx}] perception_mine: reusing {src.name} outputs "
+                "(incumbent unchanged after rejection)"
+            )
+            _reuse_mining_outputs(src, rdir)
+            phase_times["perception_mine"] = 0.0
+        else:
+            print(f"[round {round_idx}] perception_mine")
+            phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
+            last_mining = (Path(model_path), rdir)
         print(f"[round {round_idx}] repair")
         phase_times["repair"] = _run_repair_phase(cfg, model_path, rdir, gpu_ids)
         print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
@@ -2546,6 +2636,14 @@ def main() -> None:
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
+        replay_paths, n_replay_dupes = _dedup_replay_against_current(
+            repaired_rows_jsonl, memory_json, replay_paths
+        )
+        if n_replay_dupes:
+            print(
+                f"[round {round_idx}] replay: dropped {n_replay_dupes} scene(s) whose "
+                "source is re-repaired this round"
+            )
         anchor_paths = _anchor_slice_paths(
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )

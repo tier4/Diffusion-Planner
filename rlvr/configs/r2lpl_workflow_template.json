@@ -56,7 +56,8 @@
       "expert_disagreement": 0.25,
       "road_border_crossing": 0.2,
       "moving_collision": 0.2
-    }
+    },
+    "_comment_capacity": "REQUIRED, no default. Capacity caps the carry-over replay memory between rounds (the current round's repaired scenes always train regardless). Size it to the campaign: >= 2-3x the expected repaired scenes per round \u2014 hundreds for local corpora, thousands+ for server-scale datasets."
   },
   "rounds": {
     "rounds": 1,

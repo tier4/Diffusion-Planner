@@ -512,6 +512,7 @@ def test_workflow_contract_preserves_repaired_target_validation_flag(tmp_path):
                     "enabled_labels": ["moving_collision"],
                 },
                 "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+                "replay_memory": {"capacity": 200},
                 "training": {"val_scenes": "/tmp/valid.json"},
                 "validate_on_repaired_targets": True,
             }
@@ -1352,7 +1353,7 @@ def test_round_runner_requires_perception_mining_source(tmp_path):
                 "reward_config": "/tmp/reward.json",
                 "threshold_config": "/tmp/thresholds.json",
                 "credit_window_config": "/tmp/credit.json",
-                "replay_memory": {},
+                "replay_memory": {"capacity": 200},
                 "training_config": "/tmp/train.json",
                 "repair_config": {"ego_shape": "4.76,7.24,2.29", "min_margin": 0.3},
                 "perception_mining": {"tool": "direct_reproducer_chunks"},
@@ -1442,6 +1443,7 @@ def test_round_runner_defaults_enable_expert_disagreement_repair(tmp_path):
                     "ego_shape": "from_npz",
                     "min_margin": 0.3,
                 },
+                "replay_memory": {"capacity": 200},
                 "training": {"val_scenes": "/tmp/val.json"},
             }
         )
@@ -4216,6 +4218,7 @@ def test_workflow_contract_parses_guards(tmp_path):
                 "enabled_labels": ["moving_collision"],
             },
             "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+            "replay_memory": {"capacity": 200},
             "training": {"val_scenes": "/tmp/valid.json"},
             "rounds": {"checkpoint_selection_rule": "composite"},
         }
@@ -4364,7 +4367,10 @@ def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps(cfg))
 
+    mining_calls: list[str] = []
+
     def fake_mining(cfg, model_path, rdir, gpu_ids):
+        mining_calls.append(str(model_path))
         round_runner._write_jsonl(
             rdir / "credit_windows.jsonl",
             [{"scene_path": "/tmp/a.npz", "label": "expert_disagreement", "event_key": "e1"}],
@@ -4430,8 +4436,11 @@ def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
     assert round1["composite_decision"]["accepted"] is False
     assert round1["composite_decision"]["candidate_model"] == round1_ckpt
     assert round1["next_model_path"] == str(initial_model)
-    # round 2 therefore warm-starts (and mines/guards) from the incumbent
+    # round 2 therefore warm-starts (and guards) from the incumbent — and its
+    # mining is REUSED, not re-run (the incumbent is unchanged)
     assert train_warm_starts == [str(initial_model), str(initial_model)]
+    assert mining_calls == [str(initial_model)]
+    assert (out_dir / "r2lpl_round_002" / "credit_windows.jsonl").exists()
     assert guarded_models == [str(initial_model), round1_ckpt, round2_ckpt]
     # round 2 accepted -> its checkpoint is promoted
     assert round2["composite_decision"]["accepted"] is True
@@ -4511,3 +4520,36 @@ def test_composite_over_distance_absolute_floor():
     assert accepted
     accepted, _ = round_runner._composite_decision(_cand(1.6), over_inc, tolerances)
     assert not accepted
+
+
+def test_replay_capacity_is_required():
+    with pytest.raises(ValueError, match="capacity is required"):
+        round_runner._required_replay_capacity({})
+    with pytest.raises(ValueError, match=">= 1"):
+        round_runner._required_replay_capacity({"capacity": 0})
+    assert round_runner._required_replay_capacity({"capacity": 5000}) == 5000
+
+
+def test_dedup_replay_against_current_round(tmp_path):
+    """A retry re-repairs the same sources the replay memory already carries —
+    the stale replay twins must be dropped, true rehearsal kept."""
+    repaired_rows = tmp_path / "repaired.jsonl"
+    round_runner._write_jsonl(
+        repaired_rows,
+        [{"scene_path": "/r2/rep_a.npz", "source_scene_path": "/mine/src_a.npz"}],
+    )
+    memory = tmp_path / "memory.json"
+    round_runner._write_json(
+        memory,
+        {
+            "entries": [
+                {"scene_path": "/r1/rep_a.npz", "source_scene_path": "/mine/src_a.npz"},
+                {"scene_path": "/r1/rep_b.npz", "source_scene_path": "/mine/src_b.npz"},
+            ]
+        },
+    )
+    kept, dropped = round_runner._dedup_replay_against_current(
+        repaired_rows, memory, ["/r1/rep_a.npz", "/r1/rep_b.npz"]
+    )
+    assert kept == ["/r1/rep_b.npz"]  # rehearsal of a source NOT re-repaired stays
+    assert dropped == 1
