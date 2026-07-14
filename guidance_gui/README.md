@@ -25,18 +25,18 @@ The app launches on port 7860 and opens a browser tab automatically.
 
 ## Prototypes
 
-`prototypes_k16.npy` is a KMeans clustering of ego future trajectories from the training set.
+`prototypes_k16.npy` is an arc-length (speed-free) path clustering of ego future trajectories from the training set, shape (K, M, 2). Build with `python -m rlvr.autoresearch.tools.build_path_prototypes`.
 It captures the dataset's distribution of motion patterns (straight, left turn, right turn, etc.)
 and is used by the **Anchor Following** guidance function to steer the model toward a chosen
 prototype shape.
 
-The committed `prototypes_k16.npy` was generated from the Shinagawa-Odaiba training dataset.
+The committed `prototypes_k16.npy` was generated from a project training dataset.
 If you use a different dataset, regenerate it:
 
 ```bash
-python guidance_gui/scripts/generate_prototypes.py \
-  --npz_list /path/to/train.json \
-  --k 16 \
+python -m rlvr.autoresearch.tools.build_path_prototypes \
+  --data_list /path/to/train.json \
+  --num_clusters 16 --max_samples 50000 \
   --output guidance_gui/prototypes_k16.npy
 ```
 

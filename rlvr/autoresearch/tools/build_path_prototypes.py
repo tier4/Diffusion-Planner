@@ -83,12 +83,13 @@ def load_path_features(paths, num_points, min_arc, max_samples, seed):
             tqdm.write(f"  [warn] skipping {path}: {e}")
             continue
         xy = fut[:, :2]
-        # GT futures pad invalid steps with zeros after the valid prefix; keep
-        # the prefix up to the last step that moves.
+        # GT futures pad invalid steps with zeros. Drop zero rows OUTRIGHT
+        # (not just the trailing pad): an interior (0,0) row would add a
+        # spurious detour-to-origin to the arc.
         valid = ~((xy[:, 0] == 0.0) & (xy[:, 1] == 0.0))
         if valid.sum() < 10:
             continue
-        xy = xy[: int(np.nonzero(valid)[0][-1]) + 1]
+        xy = xy[valid]
         rs = resample_by_arclength(xy, num_points)
         if rs is None:
             continue

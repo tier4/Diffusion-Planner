@@ -64,9 +64,6 @@ from rlvr.reward import (
 _DIVERGING_CMAP = plt.get_cmap("RdYlGn")
 
 _DEFAULT_PROTOTYPES_PATH = str(Path(__file__).parent / "prototypes_k16.npy")
-_GENERATE_SCRIPT = (
-    Path(__file__).parent.parent / "guidance_gui" / "scripts" / "generate_prototypes.py"
-)
 
 ALL_GUIDANCE_NAMES = [
     "centerline_following",
@@ -252,20 +249,18 @@ def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = Fa
     if not force and Path(prototypes_path).exists():
         print(f"Using existing prototypes: {prototypes_path}")
         return prototypes_path
-    if not _GENERATE_SCRIPT.exists():
-        print(f"Warning: generate_prototypes.py not found at {_GENERATE_SCRIPT}")
-        return prototypes_path
-    print(f"Generating prototypes from {npz_list_path} -> {prototypes_path} ...")
+    print(f"Generating path prototypes from {npz_list_path} -> {prototypes_path} ...")
     try:
         subprocess.run(
             [
                 sys.executable,
-                str(_GENERATE_SCRIPT),
-                "--npz_list",
+                "-m",
+                "rlvr.autoresearch.tools.build_path_prototypes",
+                "--data_list",
                 npz_list_path,
                 "--output",
                 prototypes_path,
-                "--k",
+                "--num_clusters",
                 "16",
                 "--max_samples",
                 "50000",

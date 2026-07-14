@@ -201,6 +201,8 @@ def main():
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)[: args.num_scenes]
+    if not scene_paths:
+        raise ValueError(f"--scenes {args.scenes} yielded no scenes (num_scenes={args.num_scenes})")
 
     model, model_args = load_model(args.model_path, device)
 

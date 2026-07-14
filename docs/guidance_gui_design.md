@@ -61,7 +61,14 @@ Prototypes are extracted from `ego_agent_future` (80, 3) → first 2 columns (x,
 
 ### 3.3 Prototype Generation Script
 
-File: `guidance_gui/scripts/generate_prototypes.py`
+> **Historical note:** the raw-xy generator below was REMOVED. Build prototype
+> libraries with `python -m rlvr.autoresearch.tools.build_path_prototypes`
+> (arc-length, speed-free path clustering; output `(K, M, 2)`), and see
+> `diffusion_planner/model/guidance/anchor_following.py` for the current
+> path-following energy (nearest-point Huber, time-compensated) — the
+> per-timestep squared-distance formula in this design doc no longer exists.
+
+File (removed): `guidance_gui/scripts/generate_prototypes.py`
 
 ```
 python guidance_gui/scripts/generate_prototypes.py \

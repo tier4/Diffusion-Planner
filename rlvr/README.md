@@ -439,7 +439,7 @@ Controlled by per-type checkboxes (GUI) or `SamplerConfig` booleans:
 | Type | Default | Source |
 |------|---------|--------|
 | Centerline following | Enabled | `diffusion_planner/model/guidance/centerline_following.py` |
-| Anchor following | Enabled | `diffusion_planner/model/guidance/anchor_following.py` |
+| Anchor following (path mode: nearest-point Huber to a prototype polyline, time-compensated; build libraries with `build_path_prototypes`) | Enabled | `diffusion_planner/model/guidance/anchor_following.py` |
 | Collision | Disabled | `diffusion_planner/model/guidance/collision.py` |
 | Route following | Disabled | `diffusion_planner/model/guidance/route_following.py` |
 | Lane keeping | Disabled | `diffusion_planner/model/guidance/lane_keeping.py` |

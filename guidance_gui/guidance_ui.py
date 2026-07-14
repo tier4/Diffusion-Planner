@@ -265,7 +265,7 @@ def build_guidance_panel(
             anchor_path = gr.Textbox(
                 value=default_prototypes_path,
                 label="Prototypes Path",
-                info="Path to prototypes .npy file (K, 80, 2)",
+                info="Path to prototypes .npy file (K, M, 2)",
             )
 
     with gr.Accordion("Prototype Gallery — click to select anchor", open=False):
