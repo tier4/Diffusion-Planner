@@ -4026,84 +4026,66 @@ def test_validate_guards_config_rejects_empty_and_unknown_keys(tmp_path):
     round_runner._validate_guards_config({})
 
 
-def test_validate_guards_config_composite_requires_assets(tmp_path):
+def test_validate_guards_config_rejects_composite_policy(tmp_path):
     manifest, benchmark = _guard_assets(tmp_path)
-    # composite without any guards section
-    with pytest.raises(ValueError, match="composite"):
+    # the removed automatic gate must fail loudly, with or without guards
+    with pytest.raises(ValueError, match="report-only"):
         round_runner._validate_guards_config({"checkpoint_policy": "composite"})
-    # composite missing the benchmark
-    with pytest.raises(ValueError, match="patience_benchmark"):
-        round_runner._validate_guards_config(
-            {
-                "checkpoint_policy": "composite",
-                "guards": {"frozen_chunk_manifest": str(manifest)},
-            }
-        )
-    # missing files fail loudly
-    with pytest.raises(ValueError, match="does not exist"):
-        round_runner._validate_guards_config(
-            {
-                "checkpoint_policy": "composite",
-                "guards": {
-                    "frozen_chunk_manifest": str(tmp_path / "missing.jsonl"),
-                    "patience_benchmark": str(benchmark),
-                },
-            }
-        )
-    # empty benchmark list rejected
-    empty = tmp_path / "empty.json"
-    empty.write_text("[]")
-    with pytest.raises(ValueError, match="is empty"):
+    with pytest.raises(ValueError, match="report-only"):
         round_runner._validate_guards_config(
             {
                 "checkpoint_policy": "composite",
                 "guards": {
                     "frozen_chunk_manifest": str(manifest),
-                    "patience_benchmark": str(empty),
+                    "patience_benchmark": str(benchmark),
                 },
             }
         )
-    # fully-specified composite config passes
+    # missing frozen assets fail loudly
+    with pytest.raises(ValueError, match="does not exist"):
+        round_runner._validate_guards_config(
+            {"guards": {"frozen_chunk_manifest": str(tmp_path / "missing.jsonl")}}
+        )
+    # empty benchmark / frozen manifest rejected
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]")
+    with pytest.raises(ValueError, match="is empty"):
+        round_runner._validate_guards_config({"guards": {"patience_benchmark": str(empty)}})
+    empty_manifest = tmp_path / "empty.jsonl"
+    empty_manifest.write_text("")
+    with pytest.raises(ValueError, match="is empty"):
+        round_runner._validate_guards_config(
+            {"guards": {"frozen_chunk_manifest": str(empty_manifest)}}
+        )
+    # fully-specified report-only config passes
     round_runner._validate_guards_config(
         {
-            "checkpoint_policy": "composite",
+            "checkpoint_policy": "latest",
             "guards": {
                 "frozen_chunk_manifest": str(manifest),
                 "patience_benchmark": str(benchmark),
-                "composite": {"event_tolerance_frac": 0.1},
             },
         }
     )
 
 
-def test_validate_guards_config_rejects_tolerances_without_composite_rule(tmp_path):
+def test_validate_guards_config_rejects_unknown_sections(tmp_path):
     manifest, benchmark = _guard_assets(tmp_path)
-    with pytest.raises(ValueError, match="composite"):
+    # the removed composite tolerance section is now an unknown key
+    with pytest.raises(ValueError, match="unknown keys"):
         round_runner._validate_guards_config(
             {
-                "checkpoint_policy": "latest",
                 "guards": {
                     "frozen_chunk_manifest": str(manifest),
                     "patience_benchmark": str(benchmark),
                     "composite": {"event_tolerance_frac": 0.0},
-                },
+                }
             }
         )
     # closed_loop knobs without the npz root are a misconfiguration
     with pytest.raises(ValueError, match="closed_loop_npz_root"):
         round_runner._validate_guards_config(
             {"guards": {"patience_benchmark": str(benchmark), "closed_loop": {"seg_len": 600}}}
-        )
-    with pytest.raises(ValueError, match="unknown keys"):
-        round_runner._validate_guards_config(
-            {
-                "checkpoint_policy": "composite",
-                "guards": {
-                    "frozen_chunk_manifest": str(manifest),
-                    "patience_benchmark": str(benchmark),
-                    "composite": {"event_tol": 0.1},
-                },
-            }
         )
 
 
@@ -4147,61 +4129,6 @@ def test_guard_mining_cmd_uses_frozen_manifest_and_neutralizes_subsampling(tmp_p
     assert onset_cmd[onset_cmd.index("--stop_speed") + 1] == "0.5"
 
 
-def test_composite_decision_gates_events_and_patience():
-    incumbent = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 10, "road_border_crossing": 4}
-        },
-        "patience_onset": {"fail_to_stop": 2, "over_distance_mean_m": 1.0},
-    }
-    tolerances = round_runner._composite_tolerances({})
-
-    # identical metrics are accepted (improvement too)
-    current = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 8, "road_border_crossing": 4}
-        },
-        "patience_onset": {"fail_to_stop": 2, "over_distance_mean_m": 0.8},
-    }
-    accepted, reasons = round_runner._composite_decision(current, incumbent, tolerances)
-    assert accepted and not reasons
-
-    # any label regression rejects, including a label the incumbent never triggered
-    worse = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 8, "moving_collision": 1}
-        },
-        "patience_onset": {"fail_to_stop": 2, "over_distance_mean_m": 1.0},
-    }
-    accepted, reasons = round_runner._composite_decision(worse, incumbent, tolerances)
-    assert not accepted
-    assert any("moving_collision" in r for r in reasons)
-
-    # patience regression rejects
-    creep = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 10, "road_border_crossing": 4}
-        },
-        "patience_onset": {"fail_to_stop": 3, "over_distance_mean_m": 1.2},
-    }
-    accepted, reasons = round_runner._composite_decision(creep, incumbent, tolerances)
-    assert not accepted
-    assert any("fail_to_stop" in r for r in reasons)
-
-    # tolerances widen the gate
-    wide = round_runner._composite_tolerances(
-        {"composite": {"event_tolerance_frac": 0.5, "fail_to_stop_tolerance": 1}}
-    )
-    lenient = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 12, "road_border_crossing": 4}
-        },
-        "patience_onset": {"fail_to_stop": 3, "over_distance_mean_m": 1.0},
-    }
-    accepted, reasons = round_runner._composite_decision(lenient, incumbent, wide)
-    assert accepted, reasons
-
-
 def test_workflow_contract_parses_guards(tmp_path):
     manifest, benchmark = _guard_assets(tmp_path)
     scene_list = tmp_path / "scenes.json"
@@ -4220,7 +4147,6 @@ def test_workflow_contract_parses_guards(tmp_path):
             "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
             "replay_memory": {"capacity": 200},
             "training": {"val_scenes": "/tmp/valid.json"},
-            "rounds": {"checkpoint_selection_rule": "composite"},
         }
         if guards is not None:
             payload["guards"] = guards
@@ -4231,7 +4157,7 @@ def test_workflow_contract_parses_guards(tmp_path):
     guards = {
         "frozen_chunk_manifest": str(manifest),
         "patience_benchmark": str(benchmark),
-        "composite": {"event_tolerance_frac": 0.0},
+        "_comment": "stripped at parse time",
     }
     contract = {
         "model_path": "/tmp/model.pth",
@@ -4241,8 +4167,10 @@ def test_workflow_contract_parses_guards(tmp_path):
         "output_dir": str(tmp_path / "auto_research" / "out"),
     }
     cfg = round_runner._config_from_workflow_contract(contract)
-    assert cfg["guards"] == guards
-    assert cfg["checkpoint_policy"] == "composite"
+    assert cfg["guards"] == {
+        "frozen_chunk_manifest": str(manifest),
+        "patience_benchmark": str(benchmark),
+    }
     round_runner._validate_guards_config(cfg)
 
     # present-but-empty guards section is rejected at contract parse time
@@ -4279,31 +4207,6 @@ def test_guard_mining_metrics_and_summary_derivation(tmp_path):
         round_runner._guard_mining_metrics(gdir)
 
 
-def test_composite_decision_rejects_simulated_chunk_drift():
-    incumbent = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 5},
-            "simulated_chunks": 500,
-        },
-        "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": 0.0},
-    }
-    current = {
-        "frozen_chunk_mining": {
-            "event_count_by_label": {"expert_disagreement": 3},
-            "simulated_chunks": 400,
-        },
-        "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": 0.0},
-    }
-    tolerances = round_runner._composite_tolerances({})
-    accepted, reasons = round_runner._composite_decision(current, incumbent, tolerances)
-    assert not accepted
-    assert any("simulated_chunks drifted" in r for r in reasons)
-    # equal denominators with improving events accept
-    current["frozen_chunk_mining"]["simulated_chunks"] = 500
-    accepted, reasons = round_runner._composite_decision(current, incumbent, tolerances)
-    assert accepted, reasons
-
-
 def test_shipped_template_guards_pass_validation(tmp_path):
     """Round-trip the actual shipped template's guards/rounds sections.
 
@@ -4325,17 +4228,16 @@ def test_shipped_template_guards_pass_validation(tmp_path):
         "guards": guards,
     }
     round_runner._validate_guards_config(cfg)
-    tolerances = round_runner._composite_tolerances(guards)
-    assert set(tolerances) == set(round_runner._COMPOSITE_TOLERANCE_DEFAULTS)
+    assert template["rounds"]["checkpoint_selection_rule"] == "latest"
     # the contract parser strips comment keys from the runtime config
     stripped = round_runner._strip_comment_keys(guards)
     assert not [k for k in stripped if k.startswith("_")]
-    assert not [k for k in stripped.get("composite", {}) if k.startswith("_")]
 
 
-def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
-    """End-to-end main() wiring: a rejected round rolls the warm start back to
-    the incumbent; an accepted round promotes its checkpoint."""
+def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
+    """End-to-end main() wiring: guards run on the starting model (reference
+    row) and on every round checkpoint, metrics land in the round summaries,
+    and checkpoints always advance (no gating, no rollback)."""
     manifest, benchmark = _guard_assets(tmp_path)
     scene_list = tmp_path / "scenes.json"
     scene_list.write_text(json.dumps(["/tmp/a.npz"]))
@@ -4354,14 +4256,13 @@ def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
         "training_config": {"train_args": {}},
         "training_backend": "base_sft",
         "output_dir": str(out_dir),
-        "checkpoint_policy": "composite",
+        "checkpoint_policy": "latest",
         "repair_config": {"ego_shape": "2.7,4.3,1.7", "min_margin": 0.3},
         "mine_labels": ["expert_disagreement"],
         "perception_mining": {"scene_list": str(scene_list), "chunk_len": 80},
         "guards": {
             "frozen_chunk_manifest": str(manifest),
             "patience_benchmark": str(benchmark),
-            "composite": {"event_tolerance_frac": 0.0},
         },
     }
     cfg_path = tmp_path / "config.json"
@@ -4402,22 +4303,11 @@ def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
         ckpt.write_bytes(b"")
         return 0.0, ckpt
 
-    def _metrics(events, fail):
-        return {
-            "frozen_chunk_mining": {
-                "event_count_by_label": {"expert_disagreement": events},
-                "simulated_chunks": 100,
-            },
-            "patience_onset": {"fail_to_stop": fail, "over_distance_mean_m": 0.0},
-        }
-
-    # round 0 baseline; round 1 regresses (rejected); round 2 improves (accepted)
-    guard_sequence = [_metrics(5, 1), _metrics(9, 1), _metrics(4, 0)]
-    guarded_models: list[str] = []
+    guarded: list[tuple[str, str]] = []
 
     def fake_guards(cfg, model_path, gdir, gpu_ids, *, tag):
-        guarded_models.append(str(model_path))
-        return guard_sequence.pop(0)
+        guarded.append((tag, str(model_path)))
+        return {"tag": tag, "model_path": str(model_path)}
 
     monkeypatch.setattr(round_runner, "_run_mining_phase", fake_mining)
     monkeypatch.setattr(round_runner, "_run_repair_phase", fake_repair)
@@ -4427,23 +4317,22 @@ def test_main_composite_rollback_and_accept(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_lifelong_r2lpl_rounds", "--config", str(cfg_path)])
     round_runner.main()
 
-    round1 = json.loads((out_dir / "r2lpl_round_001" / "round_summary.json").read_text())
-    round2 = json.loads((out_dir / "r2lpl_round_002" / "round_summary.json").read_text())
     round1_ckpt = str(out_dir / "r2lpl_round_001" / "base_train" / "latest.pth")
     round2_ckpt = str(out_dir / "r2lpl_round_002" / "base_train" / "latest.pth")
-
-    # round 1 rejected -> weights roll back to the initial model
-    assert round1["composite_decision"]["accepted"] is False
-    assert round1["composite_decision"]["candidate_model"] == round1_ckpt
-    assert round1["next_model_path"] == str(initial_model)
-    # round 2 therefore warm-starts (and guards) from the incumbent — and its
-    # mining is REUSED, not re-run (the incumbent is unchanged)
-    assert train_warm_starts == [str(initial_model), str(initial_model)]
-    assert mining_calls == [str(initial_model)]
-    assert (out_dir / "r2lpl_round_002" / "credit_windows.jsonl").exists()
-    assert guarded_models == [str(initial_model), round1_ckpt, round2_ckpt]
-    # round 2 accepted -> its checkpoint is promoted
-    assert round2["composite_decision"]["accepted"] is True
+    # reference row + one guard pass per round checkpoint
+    assert guarded == [
+        ("round_000", str(initial_model)),
+        ("round_001", round1_ckpt),
+        ("round_002", round2_ckpt),
+    ]
+    # checkpoints always advance; each round mines with the previous checkpoint
+    assert train_warm_starts == [str(initial_model), round1_ckpt]
+    assert mining_calls == [str(initial_model), round1_ckpt]
+    round1 = json.loads((out_dir / "r2lpl_round_001" / "round_summary.json").read_text())
+    round2 = json.loads((out_dir / "r2lpl_round_002" / "round_summary.json").read_text())
+    assert round1["guards"]["tag"] == "round_001"
+    assert round1["next_model_path"] == round1_ckpt
+    assert "composite_decision" not in round1
     assert round2["next_model_path"] == round2_ckpt
 
 
@@ -4488,68 +4377,9 @@ def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
     assert stacked.shape == (2, 4, 80, 4)
 
 
-def test_composite_over_distance_absolute_floor():
-    """over_distance is GT-anchored: an incumbent that under-drives GT must not
-    force candidates to under-drive too. The bar is max(incumbent + rel_tol,
-    abs floor)."""
-    incumbent = {
-        "frozen_chunk_mining": {"event_count_by_label": {}, "simulated_chunks": 40},
-        # incumbent under-drives GT by 0.63 m -> relative bar alone would be -0.13
-        "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": -0.63},
-    }
-    tolerances = round_runner._composite_tolerances({})
-    assert tolerances["over_distance_abs_m"] == 0.5
-
-    def _cand(over):
-        return {
-            "frozen_chunk_mining": {"event_count_by_label": {}, "simulated_chunks": 40},
-            "patience_onset": {"fail_to_stop": 0, "over_distance_mean_m": over},
-        }
-
-    # ~GT-length driving passes via the absolute floor (rejected pre-floor)
-    accepted, reasons = round_runner._composite_decision(_cand(0.06), incumbent, tolerances)
-    assert accepted, reasons
-    # genuine over-driving beyond the floor still rejects
-    accepted, reasons = round_runner._composite_decision(_cand(0.74), incumbent, tolerances)
-    assert not accepted
-    assert any("over_distance" in r for r in reasons)
-    # when the incumbent itself over-drives, the relative bar dominates
-    over_inc = dict(incumbent)
-    over_inc["patience_onset"] = {"fail_to_stop": 0, "over_distance_mean_m": 1.0}
-    accepted, _ = round_runner._composite_decision(_cand(1.4), over_inc, tolerances)
-    assert accepted
-    accepted, _ = round_runner._composite_decision(_cand(1.6), over_inc, tolerances)
-    assert not accepted
-
-
 def test_replay_capacity_is_required():
     with pytest.raises(ValueError, match="capacity is required"):
         round_runner._required_replay_capacity({})
     with pytest.raises(ValueError, match=">= 1"):
         round_runner._required_replay_capacity({"capacity": 0})
     assert round_runner._required_replay_capacity({"capacity": 5000}) == 5000
-
-
-def test_dedup_replay_against_current_round(tmp_path):
-    """A retry re-repairs the same sources the replay memory already carries —
-    the stale replay twins must be dropped, true rehearsal kept."""
-    repaired_rows = tmp_path / "repaired.jsonl"
-    round_runner._write_jsonl(
-        repaired_rows,
-        [{"scene_path": "/r2/rep_a.npz", "source_scene_path": "/mine/src_a.npz"}],
-    )
-    memory = tmp_path / "memory.json"
-    round_runner._write_json(
-        memory,
-        {
-            "entries": [
-                {"scene_path": "/r1/rep_a.npz", "source_scene_path": "/mine/src_a.npz"},
-                {"scene_path": "/r1/rep_b.npz", "source_scene_path": "/mine/src_b.npz"},
-            ]
-        },
-    )
-    kept, dropped = round_runner._dedup_replay_against_current(
-        repaired_rows, memory, ["/r1/rep_a.npz", "/r1/rep_b.npz"]
-    )
-    assert kept == ["/r1/rep_b.npz"]  # rehearsal of a source NOT re-repaired stays
-    assert dropped == 1

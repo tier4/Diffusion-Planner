@@ -1147,7 +1147,6 @@ _GUARD_KEYS = {
     "patience_stop_speed",
     "closed_loop_npz_root",
     "closed_loop",
-    "composite",
 }
 _GUARD_CLOSED_LOOP_KEYS = {
     "seg_len",
@@ -1160,65 +1159,43 @@ _GUARD_CLOSED_LOOP_KEYS = {
     "unstick_advance_m",
     "fps",
 }
-_COMPOSITE_TOLERANCE_DEFAULTS = {
-    "event_tolerance_frac": 0.0,
-    "fail_to_stop_tolerance": 0,
-    "over_distance_tolerance_m": 0.5,
-    # over_distance is measured against GT (det 8s path length − GT's), so GT —
-    # not the incumbent — is the true reference. When the incumbent under-drives
-    # GT, an incumbent-relative rule alone would reject candidates that drive
-    # ≈GT length. The bar is max(incumbent + tolerance, this absolute floor):
-    # staying within this band of GT-length driving is never a regression.
-    "over_distance_abs_m": 0.5,
-}
 
 
 def _validate_guards_config(cfg: dict[str, Any]) -> None:
     """Fail at STARTUP on guard misconfiguration, not after a full round.
 
-    ``guards`` drives the post-round guard phase: frozen-chunk event-rate
-    mining (the closed-loop patience metric, free — R5), the open-loop patience
-    onset eval (R6), and the optional closed-loop probe (R6). When
-    ``rounds.checkpoint_selection_rule`` is ``"composite"`` (R7) the first two
-    are REQUIRED — the composite decision compares their metrics against the
-    incumbent checkpoint's.
+    ``guards`` drives the post-round guard phase — REPORT-ONLY evaluation:
+    frozen-chunk event-rate mining (the cheap closed-loop metric), the
+    open-loop patience onset eval, and the optional closed-loop probe. Guards
+    never take checkpoint decisions; select checkpoints from the per-round
+    tables (see the README's selection recipe).
     """
     guards = cfg.get("guards")
     policy = str(cfg.get("checkpoint_policy", "latest"))
+    if policy == "composite":
+        raise ValueError(
+            "checkpoint_selection_rule='composite' was removed: automatic "
+            "reject/rollback never recovered a round (retries just re-roll the same "
+            "distribution). Guards are report-only — use 'latest' and select "
+            "checkpoints from the per-round guard tables"
+        )
     if "guards" in cfg and not guards:
         raise ValueError("config has an empty 'guards' section; remove it or fill it in")
     if guards is None:
-        if policy == "composite":
-            raise ValueError(
-                "checkpoint_selection_rule='composite' requires a 'guards' section with "
-                "frozen_chunk_manifest and patience_benchmark"
-            )
         return
     # "_"-prefixed keys are JSON comments (template convention) — ignored here
     # and stripped from the runtime config at contract-parse time.
     unknown = sorted(k for k in set(guards) - _GUARD_KEYS if not k.startswith("_"))
     if unknown:
         raise ValueError(f"guards has unknown keys {unknown}; allowed: {sorted(_GUARD_KEYS)}")
-    if policy == "composite":
-        missing = [k for k in ("frozen_chunk_manifest", "patience_benchmark") if not guards.get(k)]
-        if missing:
-            raise ValueError(
-                f"checkpoint_selection_rule='composite' requires guards.{missing} to be set"
-            )
-    elif guards.get("composite") is not None:
-        raise ValueError(
-            "guards.composite tolerances are set but the checkpoint selection rule "
-            f"(rounds.checkpoint_selection_rule / checkpoint_policy) is {policy!r}; "
-            "set it to 'composite' or remove the tolerances"
-        )
     for key in ("frozen_chunk_manifest", "closed_loop_npz_root"):
         value = guards.get(key)
         if value is not None and not Path(value).exists():
             raise ValueError(f"guards.{key} does not exist: {value}")
     manifest = guards.get("frozen_chunk_manifest")
     if manifest is not None and not _read_jsonl(Path(manifest)):
-        # An empty frozen set yields all-zero event counts — a gate that
-        # trivially accepts every checkpoint. Reject it up front.
+        # An empty frozen set yields all-zero event counts — a metric that
+        # can only mislead. Reject it up front.
         raise ValueError(f"guards.frozen_chunk_manifest is empty: {manifest}")
     benchmark = guards.get("patience_benchmark")
     if benchmark is not None:
@@ -1240,21 +1217,6 @@ def _validate_guards_config(cfg: dict[str, Any]) -> None:
                 f"guards.closed_loop has unknown keys {unknown_cl}; "
                 f"allowed: {sorted(_GUARD_CLOSED_LOOP_KEYS)}"
             )
-    composite = guards.get("composite")
-    if composite is not None:
-        unknown_tol = sorted(
-            k for k in set(composite) - set(_COMPOSITE_TOLERANCE_DEFAULTS) if not k.startswith("_")
-        )
-        if unknown_tol:
-            raise ValueError(
-                f"guards.composite has unknown keys {unknown_tol}; "
-                f"allowed: {sorted(_COMPOSITE_TOLERANCE_DEFAULTS)}"
-            )
-        for key, value in composite.items():
-            if key.startswith("_"):
-                continue
-            if float(value) < 0.0:
-                raise ValueError(f"guards.composite.{key} must be >= 0: {value}")
 
 
 def _strip_comment_keys(section: dict[str, Any]) -> dict[str, Any]:
@@ -1264,12 +1226,6 @@ def _strip_comment_keys(section: dict[str, Any]) -> dict[str, Any]:
         for k, v in section.items()
         if not k.startswith("_")
     }
-
-
-def _composite_tolerances(guards: dict[str, Any]) -> dict[str, float]:
-    tolerances = dict(_COMPOSITE_TOLERANCE_DEFAULTS)
-    tolerances.update(_strip_comment_keys(dict(guards.get("composite") or {})))
-    return {k: float(v) for k, v in tolerances.items()}
 
 
 def _guard_mining_cmd(
@@ -1347,12 +1303,12 @@ def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
     event_counts = _derive_event_counts_from_credit_rows(rows)
     simulated = int(summary.get("simulated_chunks", 0))
     if simulated <= 0:
-        # Zero simulated chunks means zero events for every label — the gate
-        # would trivially accept anything. The frozen set is broken (moved
-        # NPZs, bad manifest), not clean.
+        # Zero simulated chunks means zero events for every label — a metric
+        # that can only mislead. The frozen set is broken (moved NPZs, bad
+        # manifest), not clean.
         raise RuntimeError(
             f"guard mining simulated 0 chunks (see {gdir / 'summary.json'}); "
-            "the frozen chunk set is not usable as a gate"
+            "the frozen chunk set is not usable as a metric"
         )
     total_events = int(sum(event_counts.values()))
     return {
@@ -1363,56 +1319,6 @@ def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
     }
 
 
-def _dedup_replay_against_current(
-    repaired_rows_jsonl: Path, memory_json: Path, replay_paths: list[str]
-) -> tuple[list[str], int]:
-    """Drop replay scenes whose SOURCE is re-repaired in the current round.
-
-    After a rejected round the retry re-repairs the same mined windows, while
-    the replay memory still carries the rejected round's repaired versions of
-    those very sources — training would see each failure scene twice with two
-    near-identical targets, double-weighting exactly the slice that just
-    caused a rejection. Keep the CURRENT repair (fresh draw) and drop the
-    stale replay twin. Replay of sources NOT re-repaired this round (true
-    rehearsal from accepted history) is untouched.
-    """
-    current_sources = {
-        row.get("source_scene_path")
-        for row in _read_jsonl(repaired_rows_jsonl)
-        if row.get("source_scene_path")
-    }
-    if not current_sources:
-        return list(replay_paths), 0
-    source_by_scene = {
-        str(entry["scene_path"]): entry.get("source_scene_path")
-        for entry in _load_json(memory_json).get("entries", [])
-    }
-    kept = [p for p in replay_paths if source_by_scene.get(str(p)) not in current_sources]
-    return kept, len(replay_paths) - len(kept)
-
-
-def _reuse_mining_outputs(src_rdir: Path, rdir: Path) -> None:
-    """Copy a previous round's canonical mining artifacts into this round.
-
-    Window NPZs stay in the source round dir — credit rows reference them by
-    absolute path, so repair consumes them in place.
-    """
-    import shutil
-
-    credit = src_rdir / "credit_windows.jsonl"
-    if not credit.exists():
-        raise FileNotFoundError(f"cannot reuse mining: {credit} does not exist")
-    for name in (
-        "credit_windows.jsonl",
-        "perception_reproducer_hits.jsonl",
-        "perception_direct_summary.json",
-        "credit_windows_paths.json",
-    ):
-        src = src_rdir / name
-        if src.exists():
-            shutil.copy2(src, rdir / name)
-
-
 def _run_guard_phase(
     cfg: dict[str, Any],
     model_path: Path,
@@ -1421,12 +1327,11 @@ def _run_guard_phase(
     *,
     tag: str,
 ) -> dict[str, Any]:
-    """Post-round guards on ``model_path``; returns the metrics dict.
+    """Report-only guard evaluation of ``model_path``; returns the metrics dict.
 
-    Frozen-chunk mining and the open-loop patience onset are the composite
-    gate's inputs. The closed-loop probe (when configured) is REPORT-ONLY: it
-    is the expensive creep detector for promising checkpoints, and the
-    frozen-chunk mining already gates closed-loop event rates.
+    Guards never take checkpoint decisions — they produce the per-round tables
+    (frozen-chunk event rates, patience onset, optional closed-loop probe)
+    that checkpoint selection reads.
     """
     guards = cfg["guards"]
     gdir.mkdir(parents=True, exist_ok=True)
@@ -1499,68 +1404,6 @@ def _run_closed_loop_probe(
     picked = {k: summary[k] for k in keep if k in summary}
     picked["run_dir"] = str(new_dirs[-1])
     return picked
-
-
-def _composite_decision(
-    current: dict[str, Any],
-    incumbent: dict[str, Any],
-    tolerances: dict[str, float],
-) -> tuple[bool, list[str]]:
-    """Accept/reject a round checkpoint against the incumbent's guard metrics.
-
-    Accept iff every enabled label's frozen-chunk event count stays within
-    ``event_tolerance_frac`` of the incumbent's (a label the incumbent never
-    triggered must stay at zero), the patience benchmark holds
-    (``fail_to_stop`` within ``fail_to_stop_tolerance``), and the mean
-    over-distance stays under ``max(incumbent + over_distance_tolerance_m,
-    over_distance_abs_m)`` — over-distance is GT-anchored, so driving within
-    the absolute band of GT length is never a regression even when the
-    incumbent under-drives GT. Returns (accepted, reasons-for-rejection).
-    """
-    reasons: list[str] = []
-    cur_mining = current.get("frozen_chunk_mining", {})
-    inc_mining = incumbent.get("frozen_chunk_mining", {})
-    cur_sim = cur_mining.get("simulated_chunks")
-    inc_sim = inc_mining.get("simulated_chunks")
-    if cur_sim is not None and inc_sim is not None and int(cur_sim) != int(inc_sim):
-        # The frozen set's chunk-validity guards depend only on the logged
-        # data, so the denominator is deterministic. A drift means the frozen
-        # assets or mining knobs changed mid-campaign — event counts are no
-        # longer comparable, so never accept on them.
-        reasons.append(
-            f"frozen-chunk simulated_chunks drifted {inc_sim} -> {cur_sim}; "
-            "the frozen set or mining knobs changed mid-campaign"
-        )
-    cur_events = dict(cur_mining.get("event_count_by_label", {}))
-    inc_events = dict(inc_mining.get("event_count_by_label", {}))
-    frac = tolerances["event_tolerance_frac"]
-    for label in sorted(set(cur_events) | set(inc_events)):
-        cur = int(cur_events.get(label, 0))
-        inc = int(inc_events.get(label, 0))
-        if cur > inc * (1.0 + frac):
-            reasons.append(f"frozen-chunk {label} events {inc} -> {cur} (tolerance {frac:.2f})")
-
-    cur_onset = current.get("patience_onset")
-    inc_onset = incumbent.get("patience_onset")
-    if cur_onset is not None and inc_onset is not None:
-        cur_fail = int(cur_onset["fail_to_stop"])
-        inc_fail = int(inc_onset["fail_to_stop"])
-        if cur_fail > inc_fail + tolerances["fail_to_stop_tolerance"]:
-            reasons.append(f"patience fail_to_stop {inc_fail} -> {cur_fail}")
-        cur_over = float(cur_onset["over_distance_mean_m"])
-        inc_over = float(inc_onset["over_distance_mean_m"])
-        over_bar = max(
-            inc_over + tolerances["over_distance_tolerance_m"],
-            tolerances["over_distance_abs_m"],
-        )
-        if cur_over > over_bar:
-            reasons.append(
-                f"patience over_distance_mean_m {inc_over:.2f} -> {cur_over:.2f} "
-                f"(bar {over_bar:.2f} = max(incumbent + "
-                f"{tolerances['over_distance_tolerance_m']:.2f}, "
-                f"abs {tolerances['over_distance_abs_m']:.2f}))"
-            )
-    return (not reasons), reasons
 
 
 def _repair_cmd(
@@ -2455,7 +2298,6 @@ def _summarize_round(
     phase_times: dict[str, float],
     next_model_path: Path,
     guard_metrics: dict[str, Any] | None = None,
-    guard_decision: dict[str, Any] | None = None,
 ) -> None:
     mining_summary = _load_json(rdir / "perception_direct_summary.json")
     credit_rows = _read_jsonl(rdir / "credit_windows.jsonl")
@@ -2506,8 +2348,6 @@ def _summarize_round(
     }
     if guard_metrics is not None:
         summary["guards"] = guard_metrics
-    if guard_decision is not None:
-        summary["composite_decision"] = guard_decision
     _write_json(rdir / "round_summary.json", summary)
 
 
@@ -2533,16 +2373,9 @@ def main() -> None:
     previous_memory: Path | None = None
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
     guards_cfg = cfg.get("guards")
-    composite_gate = checkpoint_policy == "composite"
-    # The composite rule gates ROUND checkpoints; intra-round LoRA
-    # materialization for the rsft backend still takes the latest adapter.
-    materialize_policy = "latest" if composite_gate else checkpoint_policy
-    incumbent_model = model_path
-    incumbent_metrics: dict[str, Any] | None = None
-    if composite_gate:
-        # Round-0 reference: the incumbent every round-1 candidate is compared
-        # against. Guard metrics are only comparable to guard metrics from the
-        # same frozen assets, so this always runs (no reuse across campaigns).
+    if guards_cfg:
+        # Round-0 reference row of the per-round guard tables: the starting
+        # model measured on the same frozen assets as every round checkpoint.
         gdir0 = out / "guard_round_000"
         gpu_ids0 = _gpu_ids_from_config(cfg)
         if args.dry_run:
@@ -2552,16 +2385,14 @@ def main() -> None:
                 f"{' '.join(_guard_mining_cmd(cfg, model_path, gdir0, gpu_id=gpu_id0))}"
             )
             print(f"[round 0] guard_onset: {' '.join(_patience_onset_cmd(cfg, model_path, gdir0))}")
-            if cfg["guards"].get("closed_loop_npz_root"):
+            if guards_cfg.get("closed_loop_npz_root"):
                 print(
                     "[round 0] guard_closed_loop: "
                     f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
                 )
         else:
-            print("[round 0] guards on the starting model (composite incumbent baseline)")
-            incumbent_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
-    # (model that produced the last real mining pass, its round dir)
-    last_mining: tuple[Path, Path] | None = None
+            print("[round 0] guards on the starting model (reference row)")
+            _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
         cfg["training_config"], (str, os.PathLike)
@@ -2618,25 +2449,8 @@ def main() -> None:
             _print_dry_run_plan(cfg, model_path, rdir, gpu_ids, memory_cmd, round_idx)
             continue
 
-        if last_mining is not None and _canonical_path(model_path) == _canonical_path(
-            last_mining[0]
-        ):
-            # Mining is deterministic in the model over the fixed campaign
-            # list, so after a rejected round the unchanged incumbent would
-            # re-mine byte-identical events. Reuse the previous outputs
-            # (repair still reruns — its K-generation is stochastic and a
-            # fresh draw can produce better targets).
-            src = last_mining[1]
-            print(
-                f"[round {round_idx}] perception_mine: reusing {src.name} outputs "
-                "(incumbent unchanged after rejection)"
-            )
-            _reuse_mining_outputs(src, rdir)
-            phase_times["perception_mine"] = 0.0
-        else:
-            print(f"[round {round_idx}] perception_mine")
-            phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
-            last_mining = (Path(model_path), rdir)
+        print(f"[round {round_idx}] perception_mine")
+        phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
         print(f"[round {round_idx}] repair")
         phase_times["repair"] = _run_repair_phase(cfg, model_path, rdir, gpu_ids)
         print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
@@ -2644,14 +2458,6 @@ def main() -> None:
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
-        replay_paths, n_replay_dupes = _dedup_replay_against_current(
-            repaired_rows_jsonl, memory_json, replay_paths
-        )
-        if n_replay_dupes:
-            print(
-                f"[round {round_idx}] replay: dropped {n_replay_dupes} scene(s) whose "
-                "source is re-repaired this round"
-            )
         anchor_paths = _anchor_slice_paths(
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )
@@ -2706,10 +2512,9 @@ def main() -> None:
             print(f"[round {round_idx}] train: {' '.join(train_cmd)}")
             phase_times["train"] = _run(train_cmd, rdir / "train.log")
             run_dir = _latest_run_dir(out, name)
-            model_path = _checkpoint_for(run_dir, materialize_policy, model_path)
+            model_path = _checkpoint_for(run_dir, checkpoint_policy, model_path)
 
         guard_metrics: dict[str, Any] | None = None
-        guard_decision: dict[str, Any] | None = None
         if guards_cfg:
             print(f"[round {round_idx}] guards")
             t0 = time.perf_counter()
@@ -2717,30 +2522,6 @@ def main() -> None:
                 cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
             )
             phase_times["guards"] = time.perf_counter() - t0
-            if composite_gate:
-                if incumbent_metrics is None:
-                    raise RuntimeError("composite gate reached without round-0 guard metrics")
-                accepted, reasons = _composite_decision(
-                    guard_metrics, incumbent_metrics, _composite_tolerances(guards_cfg)
-                )
-                guard_decision = {
-                    "accepted": accepted,
-                    "reasons": reasons,
-                    "incumbent_model": str(incumbent_model),
-                    "candidate_model": str(model_path),
-                }
-                _write_json(rdir / "guards" / "composite_decision.json", guard_decision)
-                if accepted:
-                    incumbent_model = model_path
-                    incumbent_metrics = guard_metrics
-                    print(f"[round {round_idx}] composite: ACCEPTED {model_path}")
-                else:
-                    print(
-                        f"[round {round_idx}] composite: REJECTED {model_path}; "
-                        f"next round warm-starts from {incumbent_model}. Reasons: "
-                        + "; ".join(reasons)
-                    )
-                    model_path = incumbent_model
 
         previous_memory = memory_json
         _summarize_round(
@@ -2752,7 +2533,6 @@ def main() -> None:
             phase_times=phase_times,
             next_model_path=model_path,
             guard_metrics=guard_metrics,
-            guard_decision=guard_decision,
         )
         workflow_summary.append(_load_json(rdir / "round_summary.json"))
         print(f"[round {round_idx}] next model: {model_path}")

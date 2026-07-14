@@ -56,12 +56,26 @@ def test_each_variant_has_unique_labels():
 
 
 def test_total_slots_fit_in_K16():
-    """det + cl_spd + noise must leave room for at least 0 random slots in K=16."""
-    K = 16
+    """det + cl_spd + noise must leave room for at least 0 random slots in K=16.
+
+    Variants deliberately larger than K=16 must be listed here explicitly with
+    their minimum K, so slot bloat stays a loud decision."""
+    larger = {"anchor_fan_16": 17}
     for name in list_variants():
         v = get_variant(name)
         used = 1 + len(v.cl_spd_configs) + len(v.noise_configs)
+        K = larger.get(name, 16)
         assert used <= K, f"variant {name!r} uses {used} slots, exceeds K={K}"
+
+
+def test_anchor_fan_16_is_pure_prototype_fan():
+    v = get_variant("anchor_fan_16")
+    assert len(v.cl_spd_configs) == 16
+    assert v.noise_configs == []
+    for i, slot in enumerate(v.cl_spd_configs):
+        assert slot["anchor"]["index"] == i
+        assert slot["cl"] == 0.0 and slot["spd"] == 0.0
+        assert slot["noise"] == (0.0, 0.0)
 
 
 def test_dominant_component_returns_none_when_no_positive_delta():

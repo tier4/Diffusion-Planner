@@ -126,8 +126,8 @@ Each round runs:
 2. `build_repaired_targets`
 3. `lifelong_replay_memory`
 4. training through either base SFT or `rlvr.autoresearch.run_experiment`
-5. optional post-round guards on the produced checkpoint (see
-   "Post-Round Guards & Composite Checkpoint Selection")
+5. optional post-round guard evaluation on the produced checkpoint (see
+   "Post-Round Guard Evaluation")
 
 The miner writes `credit_windows.jsonl` directly. Repair generation consumes that
 file and writes accepted repaired scenes. Replay memory merges current accepted
@@ -156,13 +156,19 @@ scene list or chunk manifest
   -> configured SFT training backend
 ```
 
-## Post-Round Guards & Composite Checkpoint Selection
+## Post-Round Guard Evaluation (report-only)
 
 Configured through a top-level `guards` section in the workflow config (see
-`rlvr/configs/r2lpl_workflow_template.json`). When present, each round ends
-with a guard phase on the round's checkpoint, written to
-`r2lpl_round_NNN/guards/guard_metrics.json` and folded into
-`round_summary.json`. Guards run on the first configured GPU.
+`rlvr/configs/r2lpl_workflow_template.json`). Guards are EVALUATION ONLY:
+they never take checkpoint decisions. When present, they run once on the
+starting model (`guard_round_000/`, the reference row) and again on each
+round's checkpoint, written to `r2lpl_round_NNN/guards/guard_metrics.json` and
+folded into `round_summary.json`. Guards run on the first configured GPU.
+
+(An automatic accept/reject gate with rollback existed briefly and was
+removed: rejection retries only re-roll the same data distribution — across
+six rejected rounds of E2E testing not one retry recovered — and a hard gate
+inherits every flaw of its thresholds. Evaluate, then select.)
 
 Three probes, each optional:
 
@@ -173,65 +179,44 @@ Three probes, each optional:
   plan chunks over the FULL pool once, then hold out a seeded RANDOM sample of
   chunks and give the campaign the complement manifest.** Never hold out a
   contiguous tail — that evaluates a single stretch of a single route and
-  biases the gate toward whatever that stretch contains (observed: a tail
+  biases the metric toward whatever that stretch contains (observed: a tail
   frozen set measured 5 road-border events where a route-spread sample of the
   same corpus measures 2). With a multi-bag corpus, stratify the sample across
-  bags/routes. Reported as
-  events per label plus events-per-1000-chunks. This is the free closed-loop
-  patience metric: campaign subsampling/sharding knobs are neutralized so
-  counts are comparable across rounds (the composite gate additionally rejects
-  any cross-round `simulated_chunks` drift — it means the frozen assets or
-  mining knobs changed mid-campaign). Guard mining writes its danger-window
-  NPZs under `guards/windows/` every round as a byproduct; only
-  `credit_windows.jsonl` + `summary.json` feed the metrics.
+  bags/routes. Reported as events per label plus events-per-1000-chunks. This
+  is the cheap closed-loop metric: campaign subsampling/sharding knobs are
+  neutralized so counts are comparable across rounds (`simulated_chunks` must
+  stay constant — a drift means the frozen assets or mining knobs changed
+  mid-campaign and the numbers are no longer comparable). Guard mining writes
+  its danger-window NPZs under `guards/windows/` every round as a byproduct;
+  only `credit_windows.jsonl` + `summary.json` feed the metrics.
 - **Open-loop patience onset** (`patience_benchmark`): `eval_patience_onset`
   on a frozen waits benchmark (`build_patience_benchmark`); reports
   `fail_to_stop`, stop-onset delay, over-distance. `patience_stop_speed`
   (default 0.5 m/s) sets the stop threshold.
 - **Closed-loop probe** (`closed_loop_npz_root`, optional and expensive):
   `valid_predictor_closed_loop` on route NPZ frames — the creep detector the
-  open-loop onset eval is blind to. REPORT-ONLY: it never gates acceptance
-  (the frozen-chunk mining already gates closed-loop event rates). Knobs go
-  under `guards.closed_loop` (`seg_len`, `replan_interval`, `draw_every`, ...);
-  PNG rendering dominates its cost, so raise `draw_every` for cheap runs.
+  open-loop onset eval is blind to. Knobs go under `guards.closed_loop`
+  (`seg_len`, `replan_interval`, `draw_every`, ...); PNG rendering dominates
+  its cost, so raise `draw_every` for cheap runs.
 
-**Recommended mode = report-only** (`checkpoint_selection_rule: "latest"` with
-guards configured, the template default): guards run per round and produce the
-metric tables; review them and select checkpoints yourself, per the standard
-sweep-don't-assume eval culture. These guard metrics exist because the standard
-open-loop eval (global L2, avoidance sc-dist) is blind to exactly the
-regressions they measure — held-out closed-loop event rates and patience onset
-— so they complement, not replace, the standard eval.
+These metrics exist because the standard open-loop eval (global L2, avoidance
+sc-dist) is blind to exactly the regressions they measure — held-out
+closed-loop event rates and patience onset — so they complement, not replace,
+the standard eval.
 
-**Composite checkpoint selection** (`rounds.checkpoint_selection_rule:
-"composite"`) is the opt-in AUTOMATIC gate — a circuit breaker for long
-unattended campaigns where rounds chain on each other's weights and a degraded
-round would poison every later round before a human looks. Its decisions are
-only as fair as the thresholds (prefer loose tolerances); for attended
-campaigns, report-only + human selection is strictly more flexible. It
-requires `frozen_chunk_manifest` + `patience_benchmark`. Before
-round 1 the guards run once on the starting model (`guard_round_000/`) to
-establish the incumbent reference. After each round the candidate checkpoint is
-accepted iff every label's frozen-chunk event count stays within
-`event_tolerance_frac` of the incumbent's (a label the incumbent never
-triggered must stay at zero), `fail_to_stop` grows by at most
-`fail_to_stop_tolerance`, and `over_distance_mean_m` stays under
-`max(incumbent + over_distance_tolerance_m, over_distance_abs_m)` (defaults
-0.0 / 0 / 0.5 / 0.5). The absolute floor exists because over-distance is
-GT-anchored: when the incumbent under-drives GT, a purely incumbent-relative
-rule would reject candidates that drive ≈GT length — matching GT within the
-absolute band is never a regression. A rejected checkpoint is
-rolled back: the decision (with reasons) lands in
-`guards/composite_decision.json` and the next round warm-starts from the
-incumbent. Only the WEIGHTS roll back — the rejected round's repaired scenes
-stay in the replay-memory lineage (they were mined from the incumbent, so they
-remain valid corrective targets). With `"latest"` the guards still run and
-report when configured, but never gate — setting `guards.composite` tolerances
-together with `"latest"` is rejected at startup as a misconfiguration.
+**Checkpoint selection recipe** (human, from the per-round tables):
 
-Composite campaigns need a FRESH `output_dir` per run: round-0 guard mining
-fails loudly on a non-empty `guard_round_000/windows/` (same non-resumable
-semantics as the round dirs).
+1. *Eligibility filter — regressions are vetoes, not scores:* standard val L2
+   within +5% of base, patience held (`fail_to_stop` not above the reference,
+   `over_distance_mean_m` within ~0.5 m of GT-length), no per-label event
+   increase on the frozen chunks vs the reference row.
+2. *Selection among eligible checkpoints:* largest drop in total frozen-chunk
+   event rate (the campaign objective).
+3. *Tie-break:* best L2.
+
+Guard mining fails loudly on a non-empty `guard_round_000/windows/`, so give
+each campaign a FRESH `output_dir` (same non-resumable semantics as the round
+dirs).
 
 ## Detection Semantics — closed-loop (realized) vs open-loop (predicted)
 

@@ -275,6 +275,9 @@ def _anchor_slot(i: int, scale: float = 3.0, noise: tuple = (0.0, 0.0)) -> dict:
 # 6 anchor-mode slots (prototype rows 0-5) for multimodal exploration.
 _ANCHOR_SLOTS_6 = [_anchor_slot(i) for i in range(6)]
 
+# The full prototype library (rows 0-15) as a pure anchor fan.
+_ANCHOR_SLOTS_16 = [_anchor_slot(i) for i in range(16)]
+
 # Noise sweeps
 _NOISE_SWEEP_FULL = [
     {"noise": (0.1, 0.3), "label": "noise_n0103"},
@@ -320,6 +323,14 @@ _VARIANTS: dict[str, GenerationVariant] = {
         "noise. Multimodal exploration via prototype paths.",
         cl_spd_configs=_GUIDED_RSFT_V2 + _ANCHOR_SLOTS_6,
         noise_configs=_NOISE_SWEEP_FULL[2:5],
+    ),
+    "anchor_fan_16": GenerationVariant(
+        description="Pure prototype fan: det + one anchor-mode slot per "
+        "prototype row 0-15 (requires prototypes_path), no guided-CL and no "
+        "noise slots — K=17. The repair candidate set is exactly the det plan "
+        "plus the 16 path modes (plus the expert morph where injected).",
+        cl_spd_configs=_ANCHOR_SLOTS_16,
+        noise_configs=[],
     ),
     # ====== Runner-up / honorable mentions (kept for comparison) ======
     "rsft_v2_legacy": GenerationVariant(
