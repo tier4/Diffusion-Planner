@@ -39,6 +39,18 @@ Noise scale controls the magnitude of the initial noise tensor `xT` fed to the D
 
 ## 3. New Feature: MTR-Style Anchor Guidance
 
+> **Historical note — this whole section (and every mention of the
+> per-timestep anchor energy elsewhere in this design doc) is OUTDATED.**
+> The raw-xy generator below was REMOVED, and the per-timestep
+> squared-distance anchor energy the doc describes no longer exists. Build
+> prototype libraries with `python -m rlvr.autoresearch.tools.build_path_prototypes`
+> (arc-length, speed-free path clustering; output `(K, M, 2)`), and see
+> `diffusion_planner/model/guidance/anchor_following.py` for the current
+> path-following energy (nearest-point Huber to the prototype polyline,
+> time-compensated, active across the mode-forming high-noise steps). The
+> commands and shapes below are kept only as a record of the original design.
+
+
 ### 3.1 Concept
 
 MTR (Motion Transformer) maintains a file of K prototype trajectories obtained by K-means clustering of the training set. Each prototype is a representative shape for a common motion mode (straight, gentle left, sharp right, etc.) in the vehicle's own frame.
@@ -61,16 +73,6 @@ Prototypes are extracted from `ego_agent_future` (80, 3) → first 2 columns (x,
 
 ### 3.3 Prototype Generation Script
 
-> **Historical note — this whole section (and every mention of the
-> per-timestep anchor energy elsewhere in this design doc) is OUTDATED.**
-> The raw-xy generator below was REMOVED, and the per-timestep
-> squared-distance anchor energy the doc describes no longer exists. Build
-> prototype libraries with `python -m rlvr.autoresearch.tools.build_path_prototypes`
-> (arc-length, speed-free path clustering; output `(K, M, 2)`), and see
-> `diffusion_planner/model/guidance/anchor_following.py` for the current
-> path-following energy (nearest-point Huber to the prototype polyline,
-> time-compensated, active across the mode-forming high-noise steps). The
-> commands and shapes below are kept only as a record of the original design.
 
 File (removed): `guidance_gui/scripts/generate_prototypes.py`
 

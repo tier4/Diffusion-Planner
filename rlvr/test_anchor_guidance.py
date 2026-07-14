@@ -3,6 +3,8 @@
 Run: python -m pytest rlvr/test_anchor_guidance.py -q
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -183,3 +185,22 @@ class TestReward:
         traj4 = torch.cat([traj, torch.zeros(2, T, 2)], dim=-1)
         r = g.reward(traj4, {})
         assert r[0] > r[1]
+
+
+class TestCommittedLibrary:
+    _LIB = Path(__file__).parent / "prototypes_k16.npy"
+
+    def test_committed_library_shape_and_energy(self):
+        protos = np.load(self._LIB)
+        assert protos.ndim == 3 and protos.shape[0] == 16 and protos.shape[2] == 2
+        assert np.isfinite(protos).all()
+        counts = np.load(str(self._LIB).replace(".npy", "_counts.npy"))
+        assert counts.shape == (protos.shape[0],) and (counts > 0).all()
+        g = make_guidance(str(self._LIB), idx=0, scale=1.0)
+        x = torch.zeros(1, 1, 81, 4, requires_grad=True)
+        e = g.energy(x + 0.5, torch.full((1,), 0.5), {})
+        assert torch.isfinite(e).all()
+
+    def test_unknown_params_rejected(self):
+        with pytest.raises(ValueError, match="unknown params"):
+            make_guidance(str(self._LIB), idx=0, step_gian=2.0)

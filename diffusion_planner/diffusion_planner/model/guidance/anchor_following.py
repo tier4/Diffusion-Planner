@@ -91,6 +91,18 @@ class AnchorFollowingGuidance(BaseGuidance):
                 "behaviour had no usable operating point and path following is now "
                 "the only behaviour. Drop the param."
             )
+        unknown = set(config.params) - {
+            "prototypes_path",
+            "anchor_index",
+            "dist_cap",
+            "extend_len",
+            "step_gain",
+            "t_min",
+            "t_max",
+            "state_std_xy",
+        }
+        if unknown:
+            raise ValueError(f"anchor_following got unknown params: {sorted(unknown)}")
         protos = _load_prototypes(config.params["prototypes_path"])  # (K, M, 2)
         idx = config.params["anchor_index"]
         self._anchor = torch.tensor(protos[idx], dtype=torch.float32)  # (M, 2)

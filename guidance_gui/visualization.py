@@ -167,7 +167,7 @@ def plot_trajectory(
     Args:
         samples: (N, T, 4) array of ego trajectories [x, y, cos, sin].
         data: Observation dict with tensors (on any device); used for map viz.
-        anchor: (80, 2) prototype xy to show as dotted orange line, or None.
+        anchor: (M, 2) prototype polyline xy to show as dotted orange line, or None.
         anchor_enabled: Whether anchor guidance is active (controls visibility).
         time_step: If set, draws vehicle footprints at that step.
         view_range: Half-range for axis limits in metres.
@@ -472,7 +472,7 @@ def compute_stats(
     Args:
         samples: (N, T, 4) trajectories.
         gt_trajectory: (T, 3) ground-truth [x, y, yaw] or None.
-        anchor: (T, 2) anchor prototype xy or None.
+        anchor: (M, 2) anchor prototype polyline xy or None (any M).
 
     Returns:
         Dict with keys: min_ade_gt, max_ade_gt, ade_anchor, spread_fde_std.
@@ -496,12 +496,20 @@ def compute_stats(
         result["max_ade_gt"] = float(np.max(ades))
 
     if anchor is not None:
-        anchor_xy = anchor[:T, :2]
-        ades_anc = []
+        # The anchor is an arc-length path polyline (any point count), not
+        # per-timestep waypoints: measure mean distance from each sample point
+        # to its NEAREST polyline segment instead of index-aligned L2.
+        a, b = anchor[:-1, :2], anchor[1:, :2]
+        ab = b - a
+        ab_sq = np.maximum((ab * ab).sum(-1), 1e-8)
+        dists = []
         for traj in samples:
-            ade = float(np.mean(np.linalg.norm(traj[:, :2] - anchor_xy, axis=1)))
-            ades_anc.append(ade)
-        result["ade_anchor"] = float(np.mean(ades_anc))
+            ap = traj[:, None, :2] - a  # (T, S-1, 2)
+            t_proj = np.clip((ap * ab).sum(-1) / ab_sq, 0.0, 1.0)
+            closest = a + t_proj[..., None] * ab
+            d = np.linalg.norm(traj[:, None, :2] - closest, axis=-1).min(axis=-1)
+            dists.append(float(d.mean()))
+        result["ade_anchor"] = float(np.mean(dists))
 
     # Spread: std of final-position distances across samples
     final_positions = samples[:, -1, :2]  # (N, 2)

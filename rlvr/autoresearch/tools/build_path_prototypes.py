@@ -178,6 +178,11 @@ def main():
 
     np.save(args.output, prototypes)
     print(f"Saved path prototypes {prototypes.shape} to {args.output}")
+    # Sidecar counts file: the guidance GUI reads <output>_counts.npy for the
+    # per-cluster frequency shown in the prototype gallery.
+    counts_path = str(args.output).replace(".npy", "_counts.npy")
+    np.save(counts_path, counts)
+    print(f"Saved cluster counts to {counts_path}")
     print(
         f"  endpoint y spread over modes: "
         f"[{prototypes[:, -1, 1].min():.1f}, {prototypes[:, -1, 1].max():.1f}] m; "

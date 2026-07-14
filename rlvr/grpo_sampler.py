@@ -40,7 +40,10 @@ class SamplerConfig:
     guidance_prob: float = 0.5
 
     centerline_scale_range: tuple[float, float] = (0.5, 3.0)
-    anchor_scale_range: tuple[float, float] = (0.5, 3.0)
+    anchor_scale_range: tuple[float, float] = (
+        0.5,
+        3.0,
+    )  # path-mode semantics: metres of x0 nudge per active solver step per metre of capped offset
     collision_scale_range: tuple[float, float] = (0.1, 1.0)
     route_following_scale_range: tuple[float, float] = (0.5, 2.0)
     lane_keeping_scale_range: tuple[float, float] = (0.5, 2.0)

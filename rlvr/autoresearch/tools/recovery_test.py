@@ -618,6 +618,7 @@ def k_predict(
     noise_range: tuple[float, float],
     gt_max_speed: float,
     use_route_cl: bool,
+    prototypes_path: str | None = None,
 ) -> np.ndarray:
     """Generate K trajectories using the training variant. Returns [K, T, 4]."""
     device = next(model.parameters()).device
@@ -944,6 +945,7 @@ def main():
                     noise_range=(args.noise_min, args.noise_max),
                     gt_max_speed=v_high,
                     use_route_cl=use_route_cl,
+                    prototypes_path=prototypes_path,
                 )  # [K, T, 4]
 
                 k_t79 = []
