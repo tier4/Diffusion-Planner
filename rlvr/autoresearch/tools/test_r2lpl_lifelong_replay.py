@@ -4005,7 +4005,7 @@ def test_repair_cmd_defaults_expert_knobs_on_and_honors_overrides(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Post-round guards + composite checkpoint selection (audit plan R5/R6/R7)
+# Post-round guard evaluation (report-only; includes removed-gate regression pins)
 # ---------------------------------------------------------------------------
 
 
@@ -4383,3 +4383,122 @@ def test_replay_capacity_is_required():
     with pytest.raises(ValueError, match=">= 1"):
         round_runner._required_replay_capacity({"capacity": 0})
     assert round_runner._required_replay_capacity({"capacity": 5000}) == 5000
+
+
+def test_workflow_contract_forwards_prototypes_path_to_repair_cmd(tmp_path):
+    """Regression pin: the contract parser used to silently drop
+    repair_generation.prototypes_path, so anchor variants generated without
+    their prototype library."""
+    protos = tmp_path / "prototypes.npy"
+    protos.write_bytes(b"")
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "repair_generation": {
+                    "ego_shape": "2.7,4.3,1.7",
+                    "min_margin": 0.3,
+                    "generation_mode": "guided_variant",
+                    "variant": "anchor_fan_16",
+                    "candidate_count_per_scene": 17,
+                    "prototypes_path": str(protos),
+                },
+                "replay_memory": {"capacity": 200},
+                "training": {"val_scenes": "/tmp/valid.json"},
+            }
+        )
+    )
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "out"),
+        }
+    )
+    assert cfg["repair_config"]["prototypes_path"] == str(protos)
+    round_runner._validate_repair_generation_config(cfg)
+    cmd = round_runner._repair_cmd(
+        cfg, tmp_path / "model.pth", tmp_path / "credit.jsonl", tmp_path / "round"
+    )
+    assert cmd[cmd.index("--prototypes_path") + 1] == str(protos)
+    assert cmd[cmd.index("--variant") + 1] == "anchor_fan_16"
+    assert cmd[cmd.index("--K") + 1] == "17"
+
+
+def test_validate_repair_generation_config_is_slot_derived():
+    """Anchor-slot variants need prototypes and enough K at STARTUP, for both
+    config paths — derived from the variant's slots, not its name."""
+    base = {"generation_mode": "guided_variant", "K": 17}
+    with pytest.raises(ValueError, match="prototypes_path"):
+        round_runner._validate_repair_generation_config(
+            {"repair_config": {**base, "variant": "anchor_fan_16"}}
+        )
+    with pytest.raises(ValueError, match="K >= 17"):
+        round_runner._validate_repair_generation_config(
+            {
+                "repair_config": {
+                    "generation_mode": "guided_variant",
+                    "K": 8,
+                    "variant": "anchor_fan_16",
+                    "prototypes_path": "/tmp/p.npy",
+                }
+            }
+        )
+    with pytest.raises(ValueError):  # unknown variant names fail at startup too
+        round_runner._validate_repair_generation_config(
+            {"repair_config": {**base, "variant": "no_such_variant"}}
+        )
+    # valid anchor config passes; non-anchor variants need no prototypes
+    round_runner._validate_repair_generation_config(
+        {"repair_config": {**base, "variant": "anchor_fan_16", "prototypes_path": "/tmp/p.npy"}}
+    )
+    round_runner._validate_repair_generation_config(
+        {"repair_config": {"generation_mode": "grpo_temperature", "K": 8, "variant": "rsft_v2"}}
+    )
+
+
+def test_dry_run_round0_guards_respect_partial_configs(tmp_path, monkeypatch, capsys):
+    """A validator-passing guards section with only some probes must dry-run
+    without crashing, printing exactly the configured probes."""
+    _, benchmark = _guard_assets(tmp_path)
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text(json.dumps(["/tmp/a.npz"]))
+    cfg = {
+        "rounds": 1,
+        "epochs_per_round": 1,
+        "model_path": "/tmp/model.pth",
+        "val_scenes": "/tmp/valid.json",
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "replay_memory": {"capacity": 10},
+        "training_config": {"train_args": {}},
+        "training_backend": "base_sft",
+        "output_dir": str(tmp_path / "auto_research" / "out"),
+        "repair_config": {"ego_shape": "2.7,4.3,1.7", "min_margin": 0.3},
+        "mine_labels": ["expert_disagreement"],
+        "perception_mining": {"scene_list": str(scene_list), "chunk_len": 80},
+        "guards": {"patience_benchmark": str(benchmark)},
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(
+        sys, "argv", ["run_lifelong_r2lpl_rounds", "--config", str(cfg_path), "--dry_run"]
+    )
+    round_runner.main()
+    output = capsys.readouterr().out
+    assert "[round 0] guard_onset:" in output
+    assert "guard_mine" not in output
+    assert "guard_closed_loop" not in output

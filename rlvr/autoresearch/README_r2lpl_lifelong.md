@@ -207,7 +207,9 @@ the standard eval.
 **Checkpoint selection recipe** (human, from the per-round tables):
 
 1. *Eligibility filter — regressions are vetoes, not scores:* standard val L2
-   within +5% of base, patience held (`fail_to_stop` not above the reference,
+   within +5% of base (the L2 column comes from the standard eval protocol run
+   on the finalist checkpoints — the runner does not compute it), patience
+   held (`fail_to_stop` not above the reference,
    `over_distance_mean_m` within ~0.5 m of GT-length), no per-label event
    increase on the frozen chunks vs the reference row.
 2. *Selection among eligible checkpoints:* largest drop in total frozen-chunk

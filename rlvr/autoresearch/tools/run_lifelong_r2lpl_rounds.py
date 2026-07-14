@@ -337,12 +337,6 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"workflow_config.repair_generation is missing required fields: {missing_repair}"
         )
-    if str(repair_cfg["variant"]).endswith("_anchor") and not repair_cfg.get("prototypes_path"):
-        raise ValueError(
-            f"repair_generation.variant {repair_cfg['variant']!r} requires "
-            "repair_generation.prototypes_path (build with "
-            "rlvr.autoresearch.tools.build_path_prototypes)"
-        )
 
     output_dir = _validate_output_dir(contract["output_dir"])
     val_scenes = _first_non_null(
@@ -1159,6 +1153,38 @@ _GUARD_CLOSED_LOOP_KEYS = {
     "unstick_advance_m",
     "fps",
 }
+
+
+def _validate_repair_generation_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on repair-generation misconfiguration, not mid-round.
+
+    Runs for BOTH config paths (workflow contract and direct config). Checks
+    are slot-derived, not name-derived: any variant containing anchor-mode
+    slots needs a prototype library, and K must cover det + every fixed slot —
+    otherwise the failure surfaces only at repair time, after a full mining
+    phase.
+    """
+    from rlvr.generation_variants import get_variant
+
+    repair_cfg = dict(cfg.get("repair_config") or {})
+    variant_name = str(repair_cfg.get("variant", ""))
+    if not variant_name:
+        return
+    variant = get_variant(variant_name)  # unknown variant names raise here
+    if any("anchor" in slot for slot in variant.cl_spd_configs) and not repair_cfg.get(
+        "prototypes_path"
+    ):
+        raise ValueError(
+            f"repair variant {variant_name!r} has anchor-mode slots and requires "
+            "prototypes_path (build with rlvr.autoresearch.tools.build_path_prototypes)"
+        )
+    min_k = 1 + len(variant.cl_spd_configs) + len(variant.noise_configs)
+    k = int(repair_cfg.get("K", 8))
+    if str(repair_cfg.get("generation_mode", "")) == "guided_variant" and k < min_k:
+        raise ValueError(
+            f"repair variant {variant_name!r} needs K >= {min_k} "
+            f"(det + {min_k - 1} fixed slots), got K={k}"
+        )
 
 
 def _validate_guards_config(cfg: dict[str, Any]) -> None:
@@ -2366,6 +2392,7 @@ def main() -> None:
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
     _validate_anchor_config(cfg)
     _validate_guards_config(cfg)
+    _validate_repair_generation_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -2380,11 +2407,18 @@ def main() -> None:
         gpu_ids0 = _gpu_ids_from_config(cfg)
         if args.dry_run:
             gpu_id0 = gpu_ids0[0] if gpu_ids0 else None
-            print(
-                "[round 0] guard_mine: "
-                f"{' '.join(_guard_mining_cmd(cfg, model_path, gdir0, gpu_id=gpu_id0))}"
-            )
-            print(f"[round 0] guard_onset: {' '.join(_patience_onset_cmd(cfg, model_path, gdir0))}")
+            # Every probe is individually optional — gate each print exactly
+            # like _run_guard_phase gates the execution.
+            if guards_cfg.get("frozen_chunk_manifest"):
+                print(
+                    "[round 0] guard_mine: "
+                    f"{' '.join(_guard_mining_cmd(cfg, model_path, gdir0, gpu_id=gpu_id0))}"
+                )
+            if guards_cfg.get("patience_benchmark"):
+                print(
+                    "[round 0] guard_onset: "
+                    f"{' '.join(_patience_onset_cmd(cfg, model_path, gdir0))}"
+                )
             if guards_cfg.get("closed_loop_npz_root"):
                 print(
                     "[round 0] guard_closed_loop: "
