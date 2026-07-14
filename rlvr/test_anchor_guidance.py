@@ -105,7 +105,7 @@ class TestEnergy:
         g = make_guidance(prototypes_path, idx=0, dist_cap=2.0)
         far = straight_traj(speed=3.0, lateral=50.0)
         x = make_x(far, requires_grad=True)
-        raw = g._compute_path(x)
+        raw = g._compute(x, {})
         grad = torch.autograd.grad(raw.sum(), x)[0][0, 0, 1:, :2]
         assert grad.norm(dim=-1).max() <= 2.0 + 1e-4
 
@@ -138,26 +138,25 @@ class TestEnergy:
         assert torch.allclose(shift, torch.full_like(shift, 2.0), atol=0.02)
 
 
-class TestLegacyWaypointMode:
-    def test_waypoint_energy_matches_legacy_formula(self, prototypes_path):
-        g = make_guidance(prototypes_path, idx=0, mode="waypoint", scale=3.0)
-        traj = straight_traj(speed=5.0)
-        x = make_x(traj)
-        e = g.energy(x, torch.tensor([0.05]), {})
-        anchor = torch.from_numpy(np.load(prototypes_path)[0])
-        expected = -0.05 * 3.0 * ((traj - anchor) ** 2).sum()
-        assert torch.isclose(e[0], expected, atol=1e-3)
-
-    def test_waypoint_keeps_legacy_window(self, prototypes_path):
-        """Legacy mode must still be gated to (0.005, 0.1)."""
-        g = make_guidance(prototypes_path, idx=0, mode="waypoint")
-        x = make_x(straight_traj(), requires_grad=True)
-        e = g.energy(x, torch.tensor([0.5]), {})
-        assert not e.requires_grad or torch.autograd.grad(e.sum(), x)[0].abs().max() == 0
-
-    def test_invalid_mode_raises(self, prototypes_path):
+class TestWaypointModeRemoved:
+    def test_mode_param_rejected_loudly(self, prototypes_path):
+        with pytest.raises(ValueError, match="mode.*removed|removed.*mode"):
+            make_guidance(prototypes_path, idx=0, mode="waypoint")
         with pytest.raises(ValueError, match="mode"):
-            make_guidance(prototypes_path, idx=0, mode="bogus")
+            make_guidance(prototypes_path, idx=0, mode="path")
+
+
+class TestWindowBoundary:
+    def test_first_solver_step_at_t1_is_active(self, prototypes_path):
+        # The DPM solver's first model evaluation sits at exactly t = 1.0 —
+        # the most mode-forming step. The window must include it.
+        g = make_guidance(prototypes_path, idx=0, scale=1.0)
+        x = torch.zeros(1, 1, 81, 4, requires_grad=True)
+        x_off = x + torch.tensor([0.0, 1.0, 0.0, 0.0])  # 1 m lateral offset
+        t = torch.full((1,), 1.0)
+        e = g.energy(x_off, t, {})
+        (grad,) = torch.autograd.grad(e.sum(), x)
+        assert grad.abs().sum() > 0.0
 
 
 class TestAnchorVariant:
