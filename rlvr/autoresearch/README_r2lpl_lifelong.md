@@ -187,8 +187,21 @@ Three probes, each optional:
   under `guards.closed_loop` (`seg_len`, `replan_interval`, `draw_every`, ...);
   PNG rendering dominates its cost, so raise `draw_every` for cheap runs.
 
+**Recommended mode = report-only** (`checkpoint_selection_rule: "latest"` with
+guards configured, the template default): guards run per round and produce the
+metric tables; review them and select checkpoints yourself, per the standard
+sweep-don't-assume eval culture. These guard metrics exist because the standard
+open-loop eval (global L2, avoidance sc-dist) is blind to exactly the
+regressions they measure — held-out closed-loop event rates and patience onset
+— so they complement, not replace, the standard eval.
+
 **Composite checkpoint selection** (`rounds.checkpoint_selection_rule:
-"composite"`): requires `frozen_chunk_manifest` + `patience_benchmark`. Before
+"composite"`) is the opt-in AUTOMATIC gate — a circuit breaker for long
+unattended campaigns where rounds chain on each other's weights and a degraded
+round would poison every later round before a human looks. Its decisions are
+only as fair as the thresholds (prefer loose tolerances); for attended
+campaigns, report-only + human selection is strictly more flexible. It
+requires `frozen_chunk_manifest` + `patience_benchmark`. Before
 round 1 the guards run once on the starting model (`guard_round_000/`) to
 establish the incumbent reference. After each round the candidate checkpoint is
 accepted iff every label's frozen-chunk event count stays within

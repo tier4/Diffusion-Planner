@@ -62,20 +62,14 @@
   "rounds": {
     "rounds": 1,
     "epochs_per_round": 1,
-    "checkpoint_selection_rule": "composite",
-    "_comment_checkpoint_selection_rule": "'latest' takes each round's checkpoint unconditionally. 'composite' gates each round's checkpoint on the post-round guards (requires the 'guards' section below with frozen_chunk_manifest + patience_benchmark): a rejected checkpoint is rolled back and the next round warm-starts from the incumbent."
+    "checkpoint_selection_rule": "latest",
+    "_comment_checkpoint_selection_rule": "'latest' (recommended default) takes each round's checkpoint and runs the guards REPORT-ONLY: review the per-round guard tables and select checkpoints yourself (sweep, don't assume). 'composite' turns the guards into an automatic accept/reject gate with rollback \u2014 an opt-in circuit breaker for long UNATTENDED campaigns; add a guards.composite tolerance section when enabling it (see README), and prefer loose tolerances: the gate is only as fair as its thresholds."
   },
   "guards": {
     "_comment": "Post-round guard phase, run on each round's checkpoint (and once on the starting model when checkpoint_selection_rule='composite'). frozen_chunk_manifest = held-out chunk set (build once with mine_direct_reproducer_chunks --plan_only), NEVER trained on: the round checkpoint is re-mined on it and events/label reported (the free closed-loop patience metric). patience_benchmark = frozen waits benchmark (build_patience_benchmark), open-loop stop-onset eval. closed_loop_npz_root (optional, expensive) runs valid_predictor_closed_loop as a REPORT-ONLY creep probe. composite tolerances gate acceptance: per-label frozen-chunk events within event_tolerance_frac of the incumbent, fail_to_stop within fail_to_stop_tolerance, over_distance_mean_m within over_distance_tolerance_m. Remove this whole section to skip guards (only valid with checkpoint_selection_rule='latest').",
     "frozen_chunk_manifest": "REPLACE_ME/frozen_heldout_chunks.jsonl",
     "patience_benchmark": "REPLACE_ME/patience_benchmark.json",
-    "patience_stop_speed": 0.5,
-    "composite": {
-      "event_tolerance_frac": 0.0,
-      "fail_to_stop_tolerance": 0,
-      "over_distance_tolerance_m": 0.5,
-      "over_distance_abs_m": 0.5
-    }
+    "patience_stop_speed": 0.5
   },
   "training": {
     "backend": "base_sft",
