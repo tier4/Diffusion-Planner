@@ -418,8 +418,7 @@ Per round, the workflow reports:
 - discarded unrepaired scene count
 - replay memory size
 - final training scene count
-- guard metrics + the composite accept/reject decision, when guards are
-  configured
+- guard metrics, when guards are configured
 
 Artifacts belong under the SSD `auto_research` area, not inside the git repo.
 
