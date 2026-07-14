@@ -270,12 +270,14 @@ def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = Fa
         )
         print(f"Prototypes saved to {prototypes_path}")
     except subprocess.CalledProcessError as e:
-        print(f"Warning: prototype generation failed: {e}")
-    except subprocess.TimeoutExpired:
-        print("Warning: prototype generation timed out")
+        raise RuntimeError(f"prototype generation failed: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("prototype generation timed out") from e
     if not Path(prototypes_path).exists():
-        print(f"Warning: prototypes file not created at {prototypes_path}")
-        return None
+        # Fail loudly: downstream (GRPO sampler anchor pool, anchor guidance)
+        # treats the returned path as usable — a None/absent file would only
+        # surface later as a silently anchor-less run or a load error.
+        raise RuntimeError(f"prototypes file not created at {prototypes_path}")
     return prototypes_path
 
 

@@ -42,7 +42,15 @@ def _load_torch_kmeans():
     import diffusion_planner
 
     src = Path(diffusion_planner.__file__).parent.parent / "sampling" / "build_prototypes.py"
+    if not src.exists():
+        raise FileNotFoundError(
+            f"{src} not found: torch_kmeans lives in the repo's sampling/ dir, which "
+            "is not shipped in the diffusion_planner wheel — run from a source "
+            "checkout / editable install."
+        )
     spec = importlib.util.spec_from_file_location("_dp_build_prototypes", src)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not build an import spec for {src}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.torch_kmeans

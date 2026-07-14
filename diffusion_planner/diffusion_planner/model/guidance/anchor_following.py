@@ -114,10 +114,10 @@ class AnchorFollowingGuidance(BaseGuidance):
         seg_len = seg.norm(dim=-1)
         valid = seg_len > 0.05
         if valid.any():
-            last = int(torch.nonzero(valid)[-1])
+            last = torch.nonzero(valid, as_tuple=True)[0][-1].item()
             direction = seg[last] / seg_len[last]
         else:
-            direction = torch.tensor([1.0, 0.0])
+            direction = anchor.new_tensor([1.0, 0.0])
         tail = anchor[-1] + direction * self._extend_len
         return torch.cat([anchor, tail.unsqueeze(0)], dim=0)
 
