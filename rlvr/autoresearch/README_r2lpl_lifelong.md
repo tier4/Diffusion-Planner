@@ -212,10 +212,11 @@ closed-loop event rates and patience onset — so they complement, not replace,
 the standard eval.
 
 **Checkpoint selection recipe** (from the per-round tables — the runner also
-applies steps 1–2 mechanically at campaign end and writes an ADVISORY
-`selection_report.json` naming the recommended checkpoint with per-round veto
-reasons; it never feeds a checkpoint back into training, and the L2 leg still
-has to be run on the finalists):
+applies steps 1–2 mechanically at campaign end, except step 1's L2 and
+over-distance clauses, and writes an ADVISORY `selection_report.json` naming
+the recommended checkpoint with per-round veto reasons; it never feeds a
+checkpoint back into training, and the L2 leg still has to be run on the
+finalists):
 
 1. *Eligibility filter — regressions are vetoes, not scores:* standard val L2
    within +5% of base (the L2 column comes from the standard eval protocol run
