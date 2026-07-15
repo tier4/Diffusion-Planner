@@ -1068,11 +1068,16 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     out: list[str] = []
     for path in paths:
         src = Path(path)
-        with np.load(src, allow_pickle=True) as loaded:
+        with np.load(src) as loaded:
             future = loaded["neighbor_agents_future"]
             if future.shape[-1] == 4:
                 out.append(str(src))
                 continue
+            if future.shape[-1] != 3:
+                raise ValueError(
+                    f"{src}: neighbor_agents_future has {future.shape[-1]} channels; "
+                    "expected 3 [x, y, heading] or 4 [x, y, cos, sin]"
+                )
             data = dict(loaded)
         data["neighbor_agents_future"] = _future_to_4col(future)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1237,7 +1242,9 @@ def _validate_guards_config(cfg: dict[str, Any]) -> None:
     if closed_loop is not None:
         if guards.get("closed_loop_npz_root") is None:
             raise ValueError("guards.closed_loop knobs are set without closed_loop_npz_root")
-        unknown_cl = sorted(set(closed_loop) - _GUARD_CLOSED_LOOP_KEYS)
+        unknown_cl = sorted(
+            k for k in set(closed_loop) - _GUARD_CLOSED_LOOP_KEYS if not k.startswith("_")
+        )
         if unknown_cl:
             raise ValueError(
                 f"guards.closed_loop has unknown keys {unknown_cl}; "
@@ -1318,7 +1325,9 @@ def _closed_loop_probe_cmd(cfg: dict[str, Any], model_path: Path) -> list[str]:
         "--npz_root",
         str(Path(guards["closed_loop_npz_root"]).resolve()),
     ]
-    for key, value in sorted(dict(guards.get("closed_loop") or {}).items()):
+    # Direct configs may carry template-style "_comment*" keys (the workflow
+    # path strips them at parse time) — never forward those as CLI flags.
+    for key, value in sorted(_strip_comment_keys(dict(guards.get("closed_loop") or {})).items()):
         cmd.extend([f"--{key}", str(value)])
     return cmd
 

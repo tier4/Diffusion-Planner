@@ -4561,3 +4561,28 @@ def test_guard_mining_metrics_split_expert_disagreement_by_reason(tmp_path):
         "model_lagging_expert": 1,
     }
     assert metrics["event_count_by_label"]["expert_disagreement"] == 2
+
+
+def test_closed_loop_guard_section_tolerates_comment_keys(tmp_path):
+    """The '_'-comment convention must hold in nested sections too: validator
+    tolerance and no --_comment* leaking into the probe command."""
+    manifest, benchmark = _guard_assets(tmp_path)
+    npz_root = tmp_path / "cl_root"
+    npz_root.mkdir()
+    guards = {
+        "frozen_chunk_manifest": str(manifest),
+        "patience_benchmark": str(benchmark),
+        "closed_loop_npz_root": str(npz_root),
+        "closed_loop": {"seg_len": 600, "_comment": "throttle rendering"},
+    }
+    round_runner._validate_guards_config({"guards": guards})
+    cmd = round_runner._closed_loop_probe_cmd({"guards": guards}, tmp_path / "model.pth")
+    assert "--seg_len" in cmd
+    assert not [arg for arg in cmd if arg.startswith("--_")]
+
+
+def test_ensure_4col_rejects_unexpected_channel_count(tmp_path):
+    bad = tmp_path / "bad.npz"
+    np.savez(bad, neighbor_agents_future=np.zeros((2, 80, 5), dtype=np.float32))
+    with pytest.raises(ValueError, match="5 channels"):
+        round_runner._ensure_4col_neighbor_futures([str(bad)], tmp_path / "out")
