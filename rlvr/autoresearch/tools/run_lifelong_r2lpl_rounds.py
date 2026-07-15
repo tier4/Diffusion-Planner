@@ -1382,6 +1382,78 @@ def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
     return metrics
 
 
+def _selection_report(
+    reference: dict[str, Any], candidates: list[tuple[int, dict[str, Any]]]
+) -> dict[str, Any]:
+    """ADVISORY checkpoint recommendation from the per-round guard tables.
+
+    Applies the README selection recipe mechanically: a round is vetoed on any
+    per-label frozen-event increase vs the reference row, any
+    ``fail_to_stop`` / ``fail_to_resume`` increase, or an incomparable frozen
+    denominator; eligible rounds are ranked by total frozen events (then
+    ``fail_to_resume``, then ``fail_to_stop``). This REPORTS a recommendation —
+    it never feeds a checkpoint back into training, and the standard val L2
+    leg of the recipe still has to be run on the finalists by hand.
+    """
+    ref_mining = reference.get("frozen_chunk_mining") or {}
+    ref_events = dict(ref_mining.get("event_count_by_label") or {})
+    ref_onset = reference.get("patience_onset") or {}
+    rows: list[dict[str, Any]] = []
+    for round_idx, metrics in candidates:
+        row: dict[str, Any] = {
+            "round_idx": round_idx,
+            "checkpoint": metrics.get("model_path"),
+            "veto_reasons": [],
+        }
+        mining = metrics.get("frozen_chunk_mining")
+        onset = metrics.get("patience_onset")
+        if mining and ref_mining:
+            if int(mining.get("simulated_chunks", -1)) != int(
+                ref_mining.get("simulated_chunks", -1)
+            ):
+                row["veto_reasons"].append("frozen denominator differs from reference")
+            events = dict(mining.get("event_count_by_label") or {})
+            for label in sorted(set(events) | set(ref_events)):
+                cur, ref = int(events.get(label, 0)), int(ref_events.get(label, 0))
+                if cur > ref:
+                    row["veto_reasons"].append(f"{label} events {ref} -> {cur}")
+            row["total_frozen_events"] = int(mining.get("total_events", 0))
+        else:
+            row["veto_reasons"].append("no frozen-chunk metrics")
+        if onset and ref_onset:
+            for key in ("fail_to_stop", "fail_to_resume"):
+                cur, ref = int(onset.get(key, 0)), int(ref_onset.get(key, 0))
+                if cur > ref:
+                    row["veto_reasons"].append(f"{key} {ref} -> {cur}")
+            row["fail_to_stop"] = int(onset.get("fail_to_stop", 0))
+            row["fail_to_resume"] = int(onset.get("fail_to_resume", 0))
+        row["eligible"] = not row["veto_reasons"]
+        rows.append(row)
+    eligible = [r for r in rows if r["eligible"] and "total_frozen_events" in r]
+    eligible.sort(
+        key=lambda r: (
+            r["total_frozen_events"],
+            r.get("fail_to_resume", 0),
+            r.get("fail_to_stop", 0),
+            r["round_idx"],
+        )
+    )
+    recommended = eligible[0] if eligible else None
+    return {
+        "note": (
+            "Advisory only — apply the standard val L2 eval to the finalists before "
+            "shipping; the runner does not compute L2."
+        ),
+        "reference_checkpoint": reference.get("model_path"),
+        "rounds": rows,
+        "recommended": (
+            {"round_idx": recommended["round_idx"], "checkpoint": recommended["checkpoint"]}
+            if recommended
+            else None
+        ),
+    }
+
+
 def _run_guard_phase(
     cfg: dict[str, Any],
     model_path: Path,
@@ -2437,6 +2509,7 @@ def main() -> None:
     previous_memory: Path | None = None
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
     guards_cfg = cfg.get("guards")
+    reference_metrics: dict[str, Any] | None = None
     if guards_cfg:
         # Round-0 reference row of the per-round guard tables: the starting
         # model measured on the same frozen assets as every round checkpoint.
@@ -2463,7 +2536,8 @@ def main() -> None:
                 )
         else:
             print("[round 0] guards on the starting model (reference row)")
-            _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+            reference_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+    guard_rows: list[tuple[int, dict[str, Any]]] = []
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
         cfg["training_config"], (str, os.PathLike)
@@ -2593,6 +2667,7 @@ def main() -> None:
                 cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
             )
             phase_times["guards"] = time.perf_counter() - t0
+            guard_rows.append((round_idx, guard_metrics))
 
         previous_memory = memory_json
         _summarize_round(
@@ -2610,6 +2685,20 @@ def main() -> None:
 
     if not args.dry_run:
         _write_json(out / "workflow_summary.json", {"rounds": workflow_summary})
+        if reference_metrics is not None and guard_rows:
+            report = _selection_report(reference_metrics, guard_rows)
+            _write_json(out / "selection_report.json", report)
+            rec = report["recommended"]
+            if rec is None:
+                print(
+                    "[selection] no round improved without a regression — "
+                    "keep the starting model (see selection_report.json)"
+                )
+            else:
+                print(
+                    f"[selection] recommended checkpoint (advisory, L2 pending): "
+                    f"round {rec['round_idx']} -> {rec['checkpoint']}"
+                )
 
 
 if __name__ == "__main__":

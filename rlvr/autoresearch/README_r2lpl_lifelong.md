@@ -211,7 +211,11 @@ sc-dist) is blind to exactly the regressions they measure — held-out
 closed-loop event rates and patience onset — so they complement, not replace,
 the standard eval.
 
-**Checkpoint selection recipe** (human, from the per-round tables):
+**Checkpoint selection recipe** (from the per-round tables — the runner also
+applies steps 1–2 mechanically at campaign end and writes an ADVISORY
+`selection_report.json` naming the recommended checkpoint with per-round veto
+reasons; it never feeds a checkpoint back into training, and the L2 leg still
+has to be run on the finalists):
 
 1. *Eligibility filter — regressions are vetoes, not scores:* standard val L2
    within +5% of base (the L2 column comes from the standard eval protocol run

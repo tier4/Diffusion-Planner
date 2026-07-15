@@ -4305,9 +4305,36 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
 
     guarded: list[tuple[str, str]] = []
 
+    guard_metric_seq = [
+        {
+            "frozen_chunk_mining": {
+                "event_count_by_label": {"expert_disagreement": 5},
+                "total_events": 5,
+                "simulated_chunks": 40,
+            },
+            "patience_onset": {"fail_to_stop": 0, "fail_to_resume": 10},
+        },
+        {
+            "frozen_chunk_mining": {
+                "event_count_by_label": {"expert_disagreement": 6},
+                "total_events": 6,
+                "simulated_chunks": 40,
+            },
+            "patience_onset": {"fail_to_stop": 0, "fail_to_resume": 10},
+        },
+        {
+            "frozen_chunk_mining": {
+                "event_count_by_label": {"expert_disagreement": 3},
+                "total_events": 3,
+                "simulated_chunks": 40,
+            },
+            "patience_onset": {"fail_to_stop": 0, "fail_to_resume": 8},
+        },
+    ]
+
     def fake_guards(cfg, model_path, gdir, gpu_ids, *, tag):
         guarded.append((tag, str(model_path)))
-        return {"tag": tag, "model_path": str(model_path)}
+        return {"tag": tag, "model_path": str(model_path), **guard_metric_seq.pop(0)}
 
     monkeypatch.setattr(round_runner, "_run_mining_phase", fake_mining)
     monkeypatch.setattr(round_runner, "_run_repair_phase", fake_repair)
@@ -4334,6 +4361,12 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
     assert round1["next_model_path"] == round1_ckpt
     assert "composite_decision" not in round1
     assert round2["next_model_path"] == round2_ckpt
+    # advisory selection report: round 1 regressed (5->6 events) and is
+    # vetoed; round 2 improved and is recommended — with NO effect on the
+    # training chain (warm starts asserted above are still latest-chained)
+    report = json.loads((out_dir / "selection_report.json").read_text())
+    assert report["recommended"] == {"round_idx": 2, "checkpoint": round2_ckpt}
+    assert not [r for r in report["rounds"] if r["round_idx"] == 1][0]["eligible"]
 
 
 def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
@@ -4586,3 +4619,41 @@ def test_ensure_4col_rejects_unexpected_channel_count(tmp_path):
     np.savez(bad, neighbor_agents_future=np.zeros((2, 80, 5), dtype=np.float32))
     with pytest.raises(ValueError, match="5 channels"):
         round_runner._ensure_4col_neighbor_futures([str(bad)], tmp_path / "out")
+
+
+def test_selection_report_vetoes_and_ranks():
+    def _m(path, events, fail_stop, fail_resume, sim=40):
+        return {
+            "model_path": path,
+            "frozen_chunk_mining": {
+                "event_count_by_label": dict(events),
+                "total_events": sum(events.values()),
+                "simulated_chunks": sim,
+            },
+            "patience_onset": {"fail_to_stop": fail_stop, "fail_to_resume": fail_resume},
+        }
+
+    reference = _m("/m/base.pth", {"moving_collision": 5, "road_border_crossing": 2}, 0, 16)
+    candidates = [
+        (1, _m("/m/r1.pth", {"moving_collision": 3, "road_border_crossing": 1}, 0, 5)),
+        (2, _m("/m/r2.pth", {"moving_collision": 3}, 0, 7)),
+        (3, _m("/m/r3.pth", {"moving_collision": 6}, 0, 7)),  # mc regression
+        (4, _m("/m/r4.pth", {"moving_collision": 3}, 1, 6)),  # fail_to_stop regression
+    ]
+    report = round_runner._selection_report(reference, candidates)
+    by_round = {r["round_idx"]: r for r in report["rounds"]}
+    assert by_round[1]["eligible"] and by_round[2]["eligible"]
+    assert not by_round[3]["eligible"] and any(
+        "moving_collision" in v for v in by_round[3]["veto_reasons"]
+    )
+    assert not by_round[4]["eligible"] and any(
+        "fail_to_stop" in v for v in by_round[4]["veto_reasons"]
+    )
+    # fewest total frozen events wins (r2: 3 < r1: 4)
+    assert report["recommended"] == {"round_idx": 2, "checkpoint": "/m/r2.pth"}
+
+    # denominator drift vetoes; nothing eligible -> no recommendation
+    drifted = [(1, _m("/m/r1.pth", {"moving_collision": 3}, 0, 5, sim=39))]
+    report = round_runner._selection_report(reference, drifted)
+    assert report["recommended"] is None
+    assert any("denominator" in v for v in report["rounds"][0]["veto_reasons"])
