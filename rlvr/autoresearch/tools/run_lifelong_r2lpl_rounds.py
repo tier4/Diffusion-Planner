@@ -1172,9 +1172,11 @@ def _validate_repair_generation_config(cfg: dict[str, Any]) -> None:
     from rlvr.generation_variants import get_variant
 
     repair_cfg = dict(cfg.get("repair_config") or {})
-    variant_name = str(repair_cfg.get("variant", ""))
-    if not variant_name:
+    # None / empty mean "not set" — don't turn null into the literal "None".
+    variant_value = repair_cfg.get("variant")
+    if variant_value is None or not str(variant_value).strip():
         return
+    variant_name = str(variant_value)
     variant = get_variant(variant_name)  # unknown variant names raise here
     if any("anchor" in slot for slot in variant.cl_spd_configs) and not repair_cfg.get(
         "prototypes_path"
@@ -1205,10 +1207,12 @@ def _validate_guards_config(cfg: dict[str, Any]) -> None:
     policy = str(cfg.get("checkpoint_policy", "latest"))
     if policy == "composite":
         raise ValueError(
-            "checkpoint_selection_rule='composite' was removed: automatic "
-            "reject/rollback never recovered a round (retries just re-roll the same "
-            "distribution). Guards are report-only — use 'latest' and select "
-            "checkpoints from the per-round guard tables"
+            "the 'composite' checkpoint selection rule "
+            "(rounds.checkpoint_selection_rule in workflow configs, checkpoint_policy "
+            "in direct configs) was removed: automatic reject/rollback never recovered "
+            "a round (retries just re-roll the same distribution). Guards are "
+            "report-only — use 'latest' and select checkpoints from the per-round "
+            "guard tables / selection_report.json"
         )
     if "guards" in cfg and not guards:
         raise ValueError("config has an empty 'guards' section; remove it or fill it in")

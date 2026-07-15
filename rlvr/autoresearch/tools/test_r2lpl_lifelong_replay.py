@@ -4493,6 +4493,9 @@ def test_validate_repair_generation_config_is_slot_derived():
         round_runner._validate_repair_generation_config(
             {"repair_config": {**base, "variant": "no_such_variant"}}
         )
+    # a null/empty variant means "not set", never the literal string "None"
+    round_runner._validate_repair_generation_config({"repair_config": {**base, "variant": None}})
+    round_runner._validate_repair_generation_config({"repair_config": {**base, "variant": " "}})
     # valid anchor config passes; non-anchor variants need no prototypes
     round_runner._validate_repair_generation_config(
         {"repair_config": {**base, "variant": "anchor_fan_16", "prototypes_path": "/tmp/p.npy"}}
