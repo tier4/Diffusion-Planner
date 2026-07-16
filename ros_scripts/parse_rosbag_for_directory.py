@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import shutil
 import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -67,8 +68,15 @@ def process_single_bag(args_tuple):
 
     logging.info(f"Processing bag: {bag_path}")
 
+    # bag_path layout: <proj_id>/<map_id>/<split>/<date>/<time>
     date = bag_path.parent.name
     time = bag_path.name
+    split = bag_path.parent.parent.name
+    map_id = bag_path.parent.parent.parent.name
+    proj_id = bag_path.parent.parent.parent.parent.name
+
+    # train/valid are human-driven -> manual, auto stays auto
+    mode = "auto" if split == "auto" else "manual"
 
     map_dir = bag_path.parent.parent.parent / "map" / date
     vector_map_path = map_dir / "lanelet2_map.osm"
@@ -77,12 +85,13 @@ def process_single_bag(args_tuple):
     if (map_dir / time).is_dir():
         vector_map_path = map_dir / time / "lanelet2_map.osm"
 
-    (save_root / date).mkdir(parents=True, exist_ok=True)
-    save_dir = (save_root / date / time).resolve()
+    save_dir = (save_root / proj_id / map_id / mode / date / time / "routes").resolve()
 
     if save_dir.is_dir():
         logging.info(f"Already exists: {save_dir}")
         return f"Skipped (already exists): {save_dir}"
+
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         parse_rosbag_main_cpp(
@@ -109,6 +118,14 @@ def process_single_bag(args_tuple):
             offlane_time_stride=offlane_time_stride,
             write_skipped_npz=write_skipped_npz,
         )
+        # The C++ converter writes the per-frame npz/json directly under save_dir
+        # but emits the per-sequence route json into a nested "routes" subdir.
+        # Flatten it so save_dir does not end up with a redundant routes/routes level.
+        nested_routes = save_dir / "routes"
+        if nested_routes.is_dir():
+            for entry in nested_routes.iterdir():
+                shutil.move(str(entry), str(save_dir / entry.name))
+            nested_routes.rmdir()
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
