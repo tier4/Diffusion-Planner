@@ -13,6 +13,9 @@ DEFAULT_CPP_BINARY = (
     PROJECT_ROOT / "cpp_tools" / "build" / "autoware_diffusion_planner_tools" / "data_converter"
 )
 
+# train/valid are human-driven -> manual, auto stays auto
+SPLIT_TO_MODE = {"train": "manual", "valid": "manual", "auto": "auto"}
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -75,8 +78,15 @@ def process_single_bag(args_tuple):
     map_id = bag_path.parent.parent.parent.name
     proj_id = bag_path.parent.parent.parent.parent.name
 
-    # train/valid are human-driven -> manual, auto stays auto
-    mode = "auto" if split == "auto" else "manual"
+    if split not in SPLIT_TO_MODE or not map_id or not proj_id:
+        logging.warning(
+            f"Unexpected bag path layout for {bag_path}: expected "
+            f"<proj_id>/<map_id>/<split>/<date>/<time> with split in "
+            f"{sorted(SPLIT_TO_MODE)}. Skipping."
+        )
+        return f"Skipped (unexpected layout): {bag_path}"
+
+    mode = SPLIT_TO_MODE[split]
 
     map_dir = bag_path.parent.parent.parent / "map" / date
     vector_map_path = map_dir / "lanelet2_map.osm"
@@ -118,18 +128,28 @@ def process_single_bag(args_tuple):
             offlane_time_stride=offlane_time_stride,
             write_skipped_npz=write_skipped_npz,
         )
-        # The C++ converter writes the per-frame npz/json directly under save_dir
-        # but emits the per-sequence route json into a nested "routes" subdir.
-        # Flatten it so save_dir does not end up with a redundant routes/routes level.
+    except Exception as e:
+        error_msg = f"Error processing {bag_path}: {str(e)}"
+        logging.error(error_msg)
+        return error_msg
+
+    # The C++ converter writes the per-frame npz/json directly under save_dir but
+    # emits the per-sequence route json into a nested "routes" subdir. Flatten it
+    # so save_dir does not end up with a redundant routes/routes level. This runs
+    # only after a successful conversion, and its own failures are reported
+    # separately so a completed conversion is not mislabeled as a failure.
+    try:
         nested_routes = save_dir / "routes"
         if nested_routes.is_dir():
             for entry in nested_routes.iterdir():
                 shutil.move(str(entry), str(save_dir / entry.name))
             nested_routes.rmdir()
-        logging.info(f"Completed: {save_dir}")
     except Exception as e:
-        error_msg = f"Error processing {bag_path}: {str(e)}"
+        error_msg = f"Error flattening routes for {save_dir}: {str(e)}"
         logging.error(error_msg)
+        return error_msg
+
+    logging.info(f"Completed: {save_dir}")
 
 
 if __name__ == "__main__":
