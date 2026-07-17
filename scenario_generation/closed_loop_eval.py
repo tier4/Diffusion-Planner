@@ -123,9 +123,9 @@ def run_closed_loop_eval(
     unstick_after: int,
     unstick_advance_m: float,
     fps: float,
-    replan_interval: int,
     draw_every: int,
     neighbor_history_mode: str,
+    replan_interval: int = 10,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
@@ -180,9 +180,9 @@ def run_closed_loop_eval(
                     unstick_advance_m=unstick_advance_m,
                     unstick_radius_mult=unstick_radius_mult,
                     unstick_teleport_after=unstick_teleport_after,
-                    replan_interval=replan_interval,
                     draw_every=draw_every,
                     neighbor_history_mode=neighbor_history_mode,
+                    replan_interval=replan_interval,
                     tracker_mode=tracker_mode,
                 )
                 row = {"route": key, **metrics}

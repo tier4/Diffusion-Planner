@@ -206,6 +206,7 @@ def run_validation(valid_cfg: ValidConfig):
         None,  # scheduler is not needed
         model_ema,
         valid_cfg.device,
+        use_ddp=valid_cfg.ddp,
     )
 
     if valid_cfg.ddp:

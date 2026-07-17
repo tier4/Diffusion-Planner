@@ -95,6 +95,81 @@ def _ego_pred_to_world(pred_xy, pred_cos_sin, ex, ey, eyaw):
     return np.stack([wx, wy], axis=-1).astype(np.float32), wh.astype(np.float32)
 
 
+def _closed_loop_replan_step(
+    k: int,
+    replan_interval: int,
+    plan_world,
+    live_pose: np.ndarray,
+    np_dict,
+    model,
+    model_args,
+    device: str,
+    *,
+    timers: Timers | None = None,
+    profile_sync_gpu: bool = False,
+):
+    """Run model inference on replan steps; execute cached world plan between replans.
+
+    Returns ``(pred_cur, plan_world, override, outputs)`` where ``override`` is passed to
+    ``_advance_step`` on cached-plan steps (open-loop pose from the pinned world trajectory).
+    """
+    offset = k % replan_interval
+    override = None
+    outputs = None
+    if plan_world is None or offset == 0:
+        if timers is not None:
+            with timers("to_torch"):
+                data = _to_torch_batch([np_dict], model_args, device)
+            with timers("model_forward"):
+                _, outputs = model(data)
+                if profile_sync_gpu and device.startswith("cuda"):
+                    torch.cuda.synchronize()
+        else:
+            data = _to_torch_batch([np_dict], model_args, device)
+            _, outputs = model(data)
+        pred = outputs["prediction"][0, 0].cpu().numpy()
+        plan_world = _ego_pred_to_world(
+            pred[:, :2], pred[:, 2:4], live_pose[0], live_pose[1], live_pose[2]
+        )
+        pred_cur = pred
+    else:
+        if timers is not None:
+            with timers("replan_plan_cache"):
+                off = min(offset, len(plan_world[0]) - 1)
+                tx, ty, th = (
+                    float(plan_world[0][off, 0]),
+                    float(plan_world[0][off, 1]),
+                    float(plan_world[1][off]),
+                )
+                spd = float(np.hypot(tx - live_pose[0], ty - live_pose[1]) / DT)
+                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                pred_cur = _world_plan_to_ego(
+                    plan_world[0][off:],
+                    plan_world[1][off:],
+                    live_pose[0],
+                    live_pose[1],
+                    live_pose[2],
+                )
+            timers.add("model_forward_cached", 0.0, 1)
+        else:
+            off = min(offset, len(plan_world[0]) - 1)
+            tx, ty, th = (
+                float(plan_world[0][off, 0]),
+                float(plan_world[0][off, 1]),
+                float(plan_world[1][off]),
+            )
+            spd = float(np.hypot(tx - live_pose[0], ty - live_pose[1]) / DT)
+            override = (np.array([tx, ty, th], dtype=np.float64), spd)
+            pred_cur = _world_plan_to_ego(
+                plan_world[0][off:],
+                plan_world[1][off:],
+                live_pose[0],
+                live_pose[1],
+                live_pose[2],
+            )
+    return pred_cur, plan_world, override, outputs
+
+
 def _world_plan_to_ego(world_xy, world_h, ex, ey, eyaw):
     """Inverse of ``_ego_pred_to_world``: express a fixed world-frame plan in the ego frame at
     pose ``(ex, ey, eyaw)``.
@@ -1307,8 +1382,7 @@ def render_segment(
 
     ``replan_interval``: re-run the model every N steps (1 = every step). Between inferences the
     cached plan keeps being executed — pinned in the world frame and re-expressed in the current
-    ego frame each step (``_world_plan_to_ego``), so the ego advances along the trajectory. The
-    ego still single-steps at 10 Hz; only the model call is throttled.
+    ego frame each step (``_world_plan_to_ego``), so the ego advances along the trajectory.
 
     ``draw_every``: write a PNG only every N steps (1 = every step). The rollout still single-steps
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
@@ -1434,42 +1508,21 @@ def render_segment(
             )
             + "\n"
         )
-        # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
-        # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
-        # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-        # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-        # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-        # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
-        offset = k % replan_interval
-        override = None
-        if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-            plan_world = _ego_pred_to_world(
-                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
-            )
-            pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+        pred_cur, plan_world, override, outputs = _closed_loop_replan_step(
+            k,
+            replan_interval,
+            plan_world,
+            s.live_pose,
+            np_dict,
+            model,
+            model_args,
+            device,
+        )
+        if outputs is not None:
             _feed_turn_indicator(s, outputs)
         else:
-            # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
-            off = min(offset, len(plan_world[0]) - 1)
-            tx, ty, th = (
-                float(plan_world[0][off, 0]),
-                float(plan_world[0][off, 1]),
-                float(plan_world[1][off]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-            pred_cur = _world_plan_to_ego(
-                plan_world[0][off:],
-                plan_world[1][off:],
-                s.live_pose[0],
-                s.live_pose[1],
-                s.live_pose[2],
-            )
-            # No fresh inference this step: hold the last decoded turn indicator so the
-            # 10 Hz turn_indicators history keeps scrolling with the same signal.
+            # Cached-plan step: _closed_loop_replan_step already set override/pred_cur; only
+            # scroll turn_indicators history with the last decoded signal (tier4-main #e88e54c).
             _hold_turn_indicator(s)
         # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
         # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
@@ -1505,9 +1558,7 @@ def render_segment(
         snaps_before = s.n_snaps
         _advance_step(s, pred_cur, idx, device, timers, override=override)
         if s.n_snaps > snaps_before:
-            # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
-            # world location, so executing it next step would drag the ego right back. Invalidate
-            # it to force a fresh inference at the snapped pose (else the snap never sticks).
+            # Unstick teleport: cached plan is pinned pre-snap — force a fresh inference.
             plan_world = None
     dbg.close()
     return _finalize(s, timers).metrics

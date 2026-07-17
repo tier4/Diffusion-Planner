@@ -278,6 +278,27 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     """return: ave_loss_ego, ave_loss_neighbor"""
     device = args.device
     model.eval()
+
+    if len(val_loader) == 0:
+        empty = {
+            "avg_loss_ego": 0.0,
+            "avg_loss_neighbor": 0.0,
+            "loss_ego": torch.zeros(0, OUTPUT_T, POSE_DIM),
+            "predictions": [],
+            "turn_indicators": [],
+            "turn_indicator_accuracy": 0.0,
+            "turn_indicator_change_accuracy": 0.0,
+            "turn_indicator_change_total": 0,
+            "_loss_ego_sum": 0.0,
+            "_samples_ego": 0,
+            "_loss_neighbor_sum": 0.0,
+            "_samples_neighbor": 0,
+            "_turn_correct": 0.0,
+            "_turn_total": 0,
+            "_turn_change_correct": 0.0,
+        }
+        return empty
+
     total_loss_ego = 0.0
     total_loss_neighbor = 0.0
     total_samples_ego = 0
@@ -422,7 +443,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
                 pbar.refresh()
     pbar.close()
 
-    avg_loss_ego = total_loss_ego / total_samples_ego
+    avg_loss_ego = total_loss_ego / max(total_samples_ego, 1)
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
     loss_ego = torch.cat(loss_ego_list, dim=0)
 

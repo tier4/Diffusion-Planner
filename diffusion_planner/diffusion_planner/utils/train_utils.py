@@ -1,5 +1,6 @@
 import json
 import random
+from typing import Any
 
 import numpy as np
 import torch
@@ -81,17 +82,46 @@ def get_epoch_mean_loss(epoch_loss):
     return epoch_mean_loss
 
 
-def resume_model(path: str, model, optimizer, scheduler, ema, device):
+def strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Remove DDP ``module.`` prefix from checkpoint keys."""
+    return {
+        k.replace("module.", "", 1) if k.startswith("module.") else k: v
+        for k, v in state_dict.items()
+    }
+
+
+def train_config_defaults_from_args_json(path: str) -> dict[str, Any]:
+    """Load saved training hyperparameters for argparse defaults (architecture + dims)."""
+    from diffusion_planner.train_config import TrainConfig
+
+    data = openjson(path)
+    skip = frozenset({"state_normalizer", "observation_normalizer"})
+    defaults: dict[str, Any] = {}
+    for key in TrainConfig.__dataclass_fields__:
+        if key in skip:
+            continue
+        if key in data:
+            defaults[key] = data[key]
+    return defaults
+
+
+def resume_model(path: str, model, optimizer, scheduler, ema, device, use_ddp: bool = False):
     """
     load ckpt from path
     """
     ckpt = torch.load(path, map_location=device)
 
     # load model
-    try:
-        model.load_state_dict(ckpt["model"])
-    except:
-        model.load_state_dict(ckpt)
+    if use_ddp:
+        try:
+            model.load_state_dict(ckpt["model"])
+        except:
+            model.load_state_dict(ckpt)
+    else:
+        try:
+            model.load_state_dict(strip_module_prefix(ckpt["model"]))
+        except:
+            model.load_state_dict(strip_module_prefix(ckpt))
     print("Model load done")
 
     # load optimizer
@@ -123,7 +153,10 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device):
         wandb_id = None
 
     try:
-        ema.ema.load_state_dict(ckpt["ema_state_dict"])
+        ema_state = ckpt["ema_state_dict"]
+        if not use_ddp:
+            ema_state = strip_module_prefix(ema_state)
+        ema.ema.load_state_dict(ema_state)
         ema.ema.eval()
         for p in ema.ema.parameters():
             p.requires_grad_(False)

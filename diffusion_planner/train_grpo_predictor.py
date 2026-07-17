@@ -336,12 +336,6 @@ def get_args():
         help="frames per segment; large => one route = one segment = one trial",
     )
     parser.add_argument(
-        "--closed_loop_replan_interval",
-        type=int,
-        default=4,
-        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
-    )
-    parser.add_argument(
         "--closed_loop_draw_every",
         type=int,
         default=4,
@@ -353,6 +347,12 @@ def get_args():
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
+    parser.add_argument(
+        "--closed_loop_replan_interval",
+        type=int,
+        default=10,
+        help="re-run the model every N closed-loop steps (1=every step)",
+    )
 
     args = parser.parse_args()
 
@@ -521,7 +521,13 @@ def model_training(args):
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
         diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            use_ddp=args.ddp,
         )
         # GRPO restarts the LR schedule from the configured base rate.
         for param_group in optimizer.param_groups:

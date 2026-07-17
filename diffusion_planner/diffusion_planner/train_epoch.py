@@ -33,6 +33,10 @@ def heading_to_cos_sin(x):
 
 
 def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+    if len(data_loader) == 0:
+        empty = {"loss": 0.0, "turn_indicator_accuracy": 0.0}
+        return empty, 0.0
+
     epoch_loss = []
 
     model.train()
