@@ -78,15 +78,15 @@ def process_single_bag(args_tuple):
     map_id = bag_path.parent.parent.parent.name
     proj_id = bag_path.parent.parent.parent.parent.name
 
-    if split not in SPLIT_TO_MODE or not map_id or not proj_id:
+    if not map_id or not proj_id:
         logging.warning(
             f"Unexpected bag path layout for {bag_path}: expected "
-            f"<proj_id>/<map_id>/<split>/<date>/<time> with split in "
-            f"{sorted(SPLIT_TO_MODE)}. Skipping."
+            f"<proj_id>/<map_id>/<split>/<date>/<time>. Skipping."
         )
         return f"Skipped (unexpected layout): {bag_path}"
 
-    mode = SPLIT_TO_MODE[split]
+    # split が train/valid/auto のいずれでもない場合 (例: psim) は manual にフォールバック
+    mode = SPLIT_TO_MODE.get(split, "manual")
 
     map_dir = bag_path.parent.parent.parent / "map" / date
     vector_map_path = map_dir / "lanelet2_map.osm"
@@ -95,7 +95,7 @@ def process_single_bag(args_tuple):
     if (map_dir / time).is_dir():
         vector_map_path = map_dir / time / "lanelet2_map.osm"
 
-    save_dir = (save_root / proj_id / map_id / mode / date / time / "routes").resolve()
+    save_dir = (save_root / proj_id / map_id / mode / date / time).resolve()
 
     if save_dir.is_dir():
         logging.info(f"Already exists: {save_dir}")

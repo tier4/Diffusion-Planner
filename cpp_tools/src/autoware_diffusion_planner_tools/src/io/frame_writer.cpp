@@ -156,14 +156,14 @@ void save_route_json(
 {
   namespace fs = std::filesystem;
 
-  const std::string routes_dir = output_path + "/routes";
-  fs::create_directories(routes_dir);
+  fs::create_directories(output_path);
 
   const nlohmann::json j = build_route_json(
     num_frames, traveled_distance_m, start_timestamp, end_timestamp, skipping_info,
     timestamp_stats_map, goal_pose_overwritten, bag_metadata);
 
-  const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
+  const std::string json_filename =
+    output_path + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);
   if (!json_file.is_open()) {
     std::cerr << "Failed to open route JSON file for writing: " << json_filename << std::endl;

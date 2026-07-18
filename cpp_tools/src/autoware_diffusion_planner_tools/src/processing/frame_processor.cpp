@@ -72,6 +72,11 @@ void process_sequence(
   std::ostringstream seq_id_stream;
   seq_id_stream << "sequence_" << std::setfill('0') << std::setw(8) << seq_id;
   const std::string sequence_id_str = seq_id_stream.str();
+
+  // Per-route output subdirectory: <save_dir>/route_<seq_id (8 digits)>
+  std::ostringstream route_dir_stream;
+  route_dir_stream << "route_" << std::setfill('0') << std::setw(8) << seq_id;
+  const std::string route_save_dir = paths.save_dir + "/" + route_dir_stream.str();
   const int64_t start_ts = seq.data_list.empty() ? 0 : seq.data_list.front().timestamp;
   const int64_t end_ts = seq.data_list.empty() ? 0 : seq.data_list.back().timestamp;
 
@@ -89,7 +94,7 @@ void process_sequence(
     std::cout << "Skipping sequence with only " << n << " frames (min: " << options.min_frames
               << ")" << std::endl;
     save_route_json(
-      paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
+      route_save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
       SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false,
       bag_metadata);
     return;
@@ -100,7 +105,7 @@ void process_sequence(
     std::cout << "Skipping sequence with traveled distance " << traveled_distance
               << " meters (min: " << options.min_distance << " meters)" << std::endl;
     save_route_json(
-      paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
+      route_save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
       SkippingInfo::insufficient_distance(traveled_distance, options.min_distance),
       timestamp_stats_map, false, bag_metadata);
     return;
@@ -117,7 +122,7 @@ void process_sequence(
   }
 
   save_route_json(
-    paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
+    route_save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
     SkippingInfo::accepted(), timestamp_stats_map, goal_pose_overwritten, bag_metadata);
 
   // Pack-sequence accumulators: in pack mode every frame is collected here (gap-free) and
@@ -326,13 +331,13 @@ void process_sequence(
       // no npz is written at all (the sidecar below still carries the exact neighbor_ids/skip).
       if (!options.sidecar_only && (!is_skipped || options.write_skipped_npz)) {
         save_frame_data_npz(
-          paths.save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
+          route_save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
           neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
           route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings,
           goal_pose_vec, turn_indicators, ego_shape);
       }
       save_frame_json(
-        paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
+        route_save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
         seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids, bag_metadata);
     }
 
@@ -343,8 +348,8 @@ void process_sequence(
 
   // Flush the packed sequence once all frames are collected.
   if (options.pack_sequence && sequence_npz.num_frames > 0) {
-    save_sequence_data_npz(paths.save_dir, rosbag_dir_name, sequence_id_str, sequence_npz);
+    save_sequence_data_npz(route_save_dir, rosbag_dir_name, sequence_id_str, sequence_npz);
     save_sequence_frames_json(
-      paths.save_dir, rosbag_dir_name, sequence_id_str, sequence_frames_json);
+      route_save_dir, rosbag_dir_name, sequence_id_str, sequence_frames_json);
   }
 }

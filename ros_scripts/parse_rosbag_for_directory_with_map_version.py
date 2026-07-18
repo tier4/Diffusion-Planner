@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -126,14 +127,18 @@ def process_single_bag(args_tuple):
     date = bag_path.parent.name
     time = bag_path.name
 
+    # train/valid are human-driven -> manual, auto stays auto
+    mode = "auto" if train_or_val == "auto" else "manual"
+
     vector_map_path = _resolve_vector_map_path(bag_path)
 
-    save_dir = (save_root / project_name / map_name / train_or_val / date / time).resolve()
-    save_dir.parent.mkdir(parents=True, exist_ok=True)
+    save_dir = (save_root / project_name / map_name / mode / date / time).resolve()
 
     if save_dir.is_dir():
         logging.info(f"Already exists: {save_dir}")
         return f"Skipped (already exists): {save_dir}"
+
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         parse_rosbag_main_cpp(
@@ -160,6 +165,13 @@ def process_single_bag(args_tuple):
             offlane_time_stride=offlane_time_stride,
             write_skipped_npz=write_skipped_npz,
         )
+        # Flatten the nested routes/ subdir emitted by the C++ converter so
+        # save_dir does not end up with a redundant routes/routes level.
+        nested_routes = save_dir / "routes"
+        if nested_routes.is_dir():
+            for entry in nested_routes.iterdir():
+                shutil.move(str(entry), str(save_dir / entry.name))
+            nested_routes.rmdir()
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
