@@ -28,6 +28,16 @@ _SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
     {"moving_collision", "static_collision", "road_border_crossing", "expert_disagreement"}
 )
 
+# Realized-lag (closed-loop) fail-to-resume detection: the paper-faithful Conflict above
+# compares the model's OPEN-LOOP proposal against the expert future, which is blind to a
+# dithering model whose plans keep promising a departure the closed loop never executes,
+# and whose lag flags at chunk START fall before the rollout so their credit windows can
+# never be saved. The realized branch instead compares where the ego ACTUALLY is against
+# where the expert clock is, on the same route polyline. The gap must be sustained this
+# many consecutive sim steps (1 s at 10 Hz) before flagging, so a transient gap while the
+# recorded expert decelerates into a stop the model already reached does not fire.
+REALIZED_LAG_SUSTAIN_STEPS = 10
+
 
 def load_credit_windows(path: Path | None) -> dict[str, dict[str, int | float]] | None:
     if path is None:
@@ -206,6 +216,8 @@ def build_realized_event_scorer(
         expert_future_world: np.ndarray | None = None,
         expert_future_speed: np.ndarray | None = None,
         ref_polyline_world: np.ndarray | None = None,
+        realized_lag_streak: int = 0,
+        realized_lag_gap_m: float | None = None,
     ) -> dict[str, Any]:
         labels: list[str] = []
         row: dict[str, Any] = {
@@ -357,8 +369,37 @@ def build_realized_event_scorer(
                 row["expert_disagreement_step"] = step
                 labels.append("expert_disagreement")
 
+            # Realized-lag branch (see REALIZED_LAG_SUSTAIN_STEPS). The rollout loop
+            # tracks the streak per segment and passes it in; the thresholds live on
+            # this scorer (expert_lag_thresholds attribute) so both sides use one
+            # source. Reason string matches the frozen 3-branch port so the repair
+            # side's depart-morph gate fires without changes.
+            row["expert_disagreement_realized_lag"] = False
+            if realized_lag_gap_m is not None:
+                row["expert_disagreement_realized_gap_m"] = float(realized_lag_gap_m)
+            if (
+                not row["expert_disagreement"]
+                and realized_lag_streak >= REALIZED_LAG_SUSTAIN_STEPS
+            ):
+                row["expert_disagreement"] = True
+                row["expert_disagreement_step"] = step
+                row["expert_disagreement_reason"] = "model_lagging_expert"
+                row["expert_disagreement_realized_lag"] = True
+                labels.append("expert_disagreement")
+
         row["labels"] = labels or ["clean"]
         row["label"] = labels[0] if labels else "clean"
         return row
 
+    # Single source for the realized-lag thresholds: the rollout loop reads these to
+    # maintain the per-segment streak it passes back into the scorer above. None when
+    # expert_disagreement is not an allowed label (the loop then skips the tracking).
+    _scorer.expert_lag_thresholds = (
+        {
+            "lag_progress_gap_m": float(thresholds["expert_disagreement_lag_progress_gap_m"]),
+            "moving_speed_mps": float(thresholds["expert_disagreement_moving_speed_mps"]),
+        }
+        if "expert_disagreement" in allowed
+        else None
+    )
     return _scorer

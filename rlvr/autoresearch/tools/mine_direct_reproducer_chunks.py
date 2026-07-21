@@ -340,6 +340,8 @@ def _credit_row_from_saved_scene(scene_path: Path, manifest: dict, label: str) -
         "expert_disagreement_expert_end_progress",
         "expert_disagreement_model_end_speed",
         "expert_disagreement_expert_end_speed",
+        "expert_disagreement_realized_lag",
+        "expert_disagreement_realized_gap_m",
     ):
         if key in manifest:
             row[key] = manifest[key]

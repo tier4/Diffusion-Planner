@@ -42,6 +42,7 @@ from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
+from scenario_generation.tools._heatmap_common import project_points_to_polyline
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
@@ -72,6 +73,8 @@ _CREDIT_EVENT_METADATA_KEYS = (
     "expert_disagreement_expert_end_progress",
     "expert_disagreement_model_end_speed",
     "expert_disagreement_expert_end_speed",
+    "expert_disagreement_realized_lag",
+    "expert_disagreement_realized_gap_m",
     # Propagate the rear-end tag into the credit-window manifest so downstream
     # (mining / repair filters) can drop a rear-end moving-collision if desired
     # instead of it being indistinguishable from a genuine forward collision.
@@ -575,6 +578,12 @@ class _SegState:
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
+    # Realized-lag tracking (clock mode): consecutive steps the realized ego has been
+    # >= lag_progress_gap_m behind the moving expert clock on the route polyline. The
+    # realized-event scorer flags model_lagging_expert when the streak reaches its
+    # sustain threshold. route_arc_s caches tl.poses cumulative arc length (lazy).
+    realized_lag_streak: int = 0
+    route_arc_s: object = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -1816,12 +1825,45 @@ def run_segments_batched(
                         expert_future_world = None
                         expert_future_speed = None
                         ref_polyline_world = None
+                        realized_lag_gap_m = None
                         if hasattr(_s.tl, "poses") and hasattr(_s.tl, "speeds"):
                             H = int(pred_row.shape[0])
                             idx_i = int(_idx)
                             expert_future_world = _s.tl.poses[idx_i : idx_i + 1 + H, :2]
                             expert_future_speed = _s.tl.speeds[idx_i : idx_i + 1 + H]
                             ref_polyline_world = _s.tl.poses[:, :2]
+                            # Realized-lag streak (clock mode only: in pose mode the
+                            # cursor advances WITH the ego, so the clock gap is ~0 by
+                            # construction). Compare the realized ego arc position to
+                            # the expert clock arc position on the recorded polyline;
+                            # the scorer flags once the gap sustains long enough.
+                            lag_thr = getattr(
+                                realized_event_scorer, "expert_lag_thresholds", None
+                            )
+                            if lag_thr is not None and _s.replay_mode == "clock":
+                                if _s.route_arc_s is None:
+                                    seg_d = np.linalg.norm(
+                                        np.diff(ref_polyline_world, axis=0), axis=1
+                                    )
+                                    _s.route_arc_s = np.concatenate(
+                                        [[0.0], np.cumsum(seg_d)]
+                                    )
+                                ego_arc = float(
+                                    project_points_to_polyline(
+                                        _s.live_pose[None, :2],
+                                        ref_polyline_world,
+                                        _s.route_arc_s,
+                                    )[0, 0]
+                                )
+                                expert_arc = float(_s.route_arc_s[idx_i])
+                                realized_lag_gap_m = expert_arc - ego_arc
+                                if (
+                                    float(_s.tl.speeds[idx_i]) >= lag_thr["moving_speed_mps"]
+                                    and realized_lag_gap_m >= lag_thr["lag_progress_gap_m"]
+                                ):
+                                    _s.realized_lag_streak += 1
+                                else:
+                                    _s.realized_lag_streak = 0
                         realized_rows.append(
                             realized_event_scorer(
                                 np_dict,
@@ -1831,6 +1873,8 @@ def run_segments_batched(
                                 expert_future_world=expert_future_world,
                                 expert_future_speed=expert_future_speed,
                                 ref_polyline_world=ref_polyline_world,
+                                realized_lag_streak=_s.realized_lag_streak,
+                                realized_lag_gap_m=realized_lag_gap_m,
                             )
                         )
                     for row_idx, (
@@ -2105,6 +2149,10 @@ def run_segments_batched(
                         if s.save_buf is not None and s.snap_count > prev_snaps:
                             s.save_buf.clear()
                             s.last_snap_step = s.k
+                        # A teleport also invalidates the realized-lag streak: the snap
+                        # closes the gap artificially, so restart the sustain count.
+                        if s.n_snaps > prev_snaps:
+                            s.realized_lag_streak = 0
                 active = [s for s in active if not s.done]
             results.extend(_finalize(s, timers) for s in states)
     finally:

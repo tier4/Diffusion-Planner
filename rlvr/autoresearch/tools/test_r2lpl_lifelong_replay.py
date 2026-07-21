@@ -50,7 +50,10 @@ from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
     iter_direct_chunks,
     iter_manifest_chunks,
 )
-from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
+from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    REALIZED_LAG_SUSTAIN_STEPS,
+    build_realized_event_scorer,
+)
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _apply_repair_refresh_config,
     _base_train_invocation,
@@ -1756,6 +1759,8 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1906,6 +1911,8 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -2048,6 +2055,8 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -2738,6 +2747,90 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
     # sits at the route origin (s0=0), so the model keeps its ~10 m end arc.
     assert row["expert_disagreement_model_end_progress"] == pytest.approx(10.0, abs=0.1)
     assert row["expert_disagreement_expert_end_progress"] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_realized_event_scorer_realized_lag_flags_on_sustained_streak(tmp_path):
+    # Closed-loop fail-to-resume: the model's open-loop proposal keeps pace with the
+    # expert schedule (no projected-branch flag — the dithering blindspot), but the
+    # rollout loop reports a sustained realized gap -> the realized branch must flag
+    # model_lagging_expert so the depart repair can fire.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+    ref_polyline_world = np.stack([np.linspace(0.0, 100.0, 101), np.zeros(101)], axis=1).astype(
+        np.float32
+    )
+    # Expert drives 5 -> 15 m; the proposal matches its schedule exactly, so none of
+    # the frozen 3 branches fires on its own.
+    expert_future_world = np.stack(
+        [np.linspace(5.0, 15.0, 81), np.zeros(81)], axis=1
+    ).astype(np.float32)
+    expert_future_speed = np.full((81,), 1.25, dtype=np.float32)
+    model_pred_world = expert_future_world[1:].copy()
+
+    common = dict(
+        collided=False,
+        model_pred_world=model_pred_world,
+        expert_future_world=expert_future_world,
+        expert_future_speed=expert_future_speed,
+        ref_polyline_world=ref_polyline_world,
+    )
+    below = scorer(
+        np_dict,
+        step=7,
+        realized_lag_streak=REALIZED_LAG_SUSTAIN_STEPS - 1,
+        realized_lag_gap_m=4.2,
+        **common,
+    )
+    assert "expert_disagreement" not in below["labels"]
+    assert below["expert_disagreement_realized_lag"] is False
+    assert below["expert_disagreement_realized_gap_m"] == pytest.approx(4.2)
+
+    flagged = scorer(
+        np_dict,
+        step=8,
+        realized_lag_streak=REALIZED_LAG_SUSTAIN_STEPS,
+        realized_lag_gap_m=4.5,
+        **common,
+    )
+    assert "expert_disagreement" in flagged["labels"]
+    assert flagged["expert_disagreement_reason"] == "model_lagging_expert"
+    assert flagged["expert_disagreement_realized_lag"] is True
+    assert flagged["expert_disagreement_step"] == 8
+
+
+def test_realized_event_scorer_exposes_expert_lag_thresholds(tmp_path):
+    # The rollout loop maintains the streak using the SAME thresholds the scorer was
+    # built with — exposed as an attribute so there is a single source of truth.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    thr = scorer.expert_lag_thresholds
+    assert thr is not None
+    assert set(thr) == {"lag_progress_gap_m", "moving_speed_mps"}
+    assert thr["lag_progress_gap_m"] > 0
+    assert thr["moving_speed_mps"] > 0
+
+    no_ed = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"moving_collision"},
+    )
+    assert no_ed.expert_lag_thresholds is None
 
 
 def test_realized_event_scorer_expert_disagreement_requires_inputs(tmp_path):
@@ -4938,3 +5031,70 @@ def test_selection_report_vetoes_and_ranks():
     report = round_runner._selection_report(reference, drifted)
     assert report["recommended"] is None
     assert any("denominator" in v for v in report["rounds"][0]["veto_reasons"])
+
+
+def test_rb_gate_expert_relative_floor():
+    # Shoulder-stop experts: the logged expert's own future crosses the absolute rb
+    # gate, so candidates are gated against the EXPERT's clearance (floor) instead
+    # of the absolute bar. Without a floor the old behavior is preserved.
+    from rlvr.autoresearch.tools.build_repaired_targets import _rb_gate_ok
+
+    clean = _morph_outcome_reward_row(1.0)
+    crossing_near = SimpleNamespace(**{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.02})
+    crossing_deep = SimpleNamespace(**{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": -0.40})
+
+    # No floor: any crossing is rejected (old behavior).
+    assert _rb_gate_ok(clean, None) is True
+    assert _rb_gate_ok(crossing_near, None) is False
+
+    # Expert crossed at 0.015 m -> floor = 0.015 - slack. A candidate matching the
+    # expert's clearance passes; one going substantially deeper does not.
+    floor = 0.015 - 0.05
+    assert _rb_gate_ok(crossing_near, floor) is True
+    assert _rb_gate_ok(crossing_deep, floor) is False
+
+
+def test_best_safe_candidate_rb_floor_admits_expert_hugging_depart():
+    # A depart candidate flagged rb_crossing (because the expert path hugs the
+    # border) must be selectable when rb_dist_floor admits it, and the source
+    # label rb gate must honor the same floor.
+    source_row = {
+        "repair_labels": ["expert_disagreement", "road_border_crossing"],
+        "expert_disagreement_max_dev": 0.5,
+    }
+    T = 20
+    expert = np.zeros((T, 4), dtype=np.float32)
+    depart = np.zeros((T, 4), dtype=np.float32)
+    depart_reward = SimpleNamespace(
+        **{**vars(_morph_outcome_reward_row(2.0, rb_crossing=True)), "rb_min_dist": 0.02}
+    )
+
+    # Without the floor: gate-rejected (no safe candidate at all).
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [_morph_outcome_candidate_row(["road_border_crossing"])],
+        [depart_reward],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[depart],
+        reference_traj=expert,
+        depart_index=0,
+    )
+    assert idx is None
+    assert meta["depart_outcome"] == "gate_rejected"
+    assert meta["depart_gate_flags"]["rb_crossing"] is True
+
+    # With the expert-relative floor: accepted and selected.
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [_morph_outcome_candidate_row(["road_border_crossing"])],
+        [depart_reward],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[depart],
+        reference_traj=expert,
+        depart_index=0,
+        rb_dist_floor=0.015 - 0.05,
+    )
+    assert idx == 0
+    assert meta["depart_outcome"] == "selected"
