@@ -102,74 +102,90 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
-    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+def _is_grouped_closed_loop_summary(summary: dict) -> bool:
+    """Grouped summaries use ``grouped_summary`` / ``n_episodes``, not ``n_segments``."""
+    if summary.get("mode") == "grouped":
+        return True
+    return summary.get("grouped_summary") is not None
 
-    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
-    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
-    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
-    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
-    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
-    and restored afterwards.
+
+def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + videos to wandb.
+
+    Discovery and workflow live in :class:`ResolvedClosedLoopEvaluation`.
     """
     if not args.closed_loop_npz_root:
         return
-    import math
 
-    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+    from scenario_generation.closed_loop_ddp import ddp_device_for_rank
+    from scenario_generation.closed_loop_evaluation import RolloutParams
+    from scenario_generation.grouped_closed_loop_eval import ResolvedClosedLoopEvaluation
+    from scenario_generation.wandb_closed_loop import (
+        build_full_closed_loop_wandb_log,
+        build_grouped_closed_loop_wandb_log,
+    )
+
+    rank = ddp.get_rank()
+    world_size = ddp.get_world_size()
+    ddp_active = args.ddp and ddp.is_dist_avail_and_initialized() and world_size > 1
+    cl_device = ddp_device_for_rank(args.device) if ddp_active else args.device
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
+    log: dict = {}
     try:
-        summary = run_closed_loop_eval(
+        evaluator = ResolvedClosedLoopEvaluation.from_training(
             net,
             args,
-            args.closed_loop_npz_root,
             out_dir,
+            npz_root=args.closed_loop_npz_root,
+            params=RolloutParams(
+                device=cl_device,
+                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                search_radius=args.closed_loop_search_radius,
+                warmup_steps=args.closed_loop_warmup_steps,
+                unstick_after=args.closed_loop_unstick_after,
+                unstick_advance_m=args.closed_loop_unstick_advance_m,
+                draw_every=args.closed_loop_draw_every,
+                replan_interval=args.closed_loop_replan_interval,
+                profile_sync_gpu=args.closed_loop_profile_sync_gpu,
+            ),
+            fps=float(args.closed_loop_fps),
             seg_len=args.closed_loop_seg_len,
-            device=args.device,
-            near_miss_thresh=args.closed_loop_near_miss_thresh,
-            search_radius=args.closed_loop_search_radius,
-            warmup_steps=args.closed_loop_warmup_steps,
-            unstick_after=args.closed_loop_unstick_after,
-            unstick_advance_m=args.closed_loop_unstick_advance_m,
-            fps=args.closed_loop_fps,
-            replan_interval=args.closed_loop_replan_interval,
-            draw_every=args.closed_loop_draw_every,
-            neighbor_history_mode="recorded",
-            verbose=False,
+            classification_json_root=args.closed_loop_classification_json_root or None,
+            classification_json=args.closed_loop_classification_json or None,
+            dataset_name=args.closed_loop_scenario_dataset_name or None,
+            verbose=args.closed_loop_profile and (rank == 0 or not ddp_active),
+            profile=args.closed_loop_profile,
+            ddp_rank=rank,
+            ddp_world_size=world_size if ddp_active else 1,
         )
+        summary = evaluator.run_distributed() if ddp_active else evaluator.run()
+        if rank == 0 and summary:
+            if _is_grouped_closed_loop_summary(summary):
+                log = build_grouped_closed_loop_wandb_log(summary)
+                totals = (summary.get("grouped_summary") or {}).get("totals") or {}
+                print(
+                    f"grouped closed-loop @epoch {epoch + 1}: "
+                    f"{totals.get('n_steps_run', 0)} steps, "
+                    f"coll={totals.get('collision_steps', 0)}, "
+                    f"near_miss={totals.get('n_near_miss_steps', 0)} "
+                    f"in {summary['elapsed_sec']:.1f}s"
+                    + (f" (DDP x{world_size})" if ddp_active else "")
+                )
+            else:
+                log = build_full_closed_loop_wandb_log(summary)
+                print(
+                    f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
+                    f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+                    f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+                )
     finally:
         net.train(was_training)
 
-    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-    ]
-    log = {
-        f"closed_loop/{k}": summary[k]
-        for k in scalar_keys
-        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
-    }
-    for mp4 in summary["video_mp4s"]:
-        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
-    wandb.log(log, step=epoch + 1)
-    print(
-        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
-    )
+    if rank == 0 and log:
+        wandb.log(log, step=epoch + 1)
 
 
 def model_training(args: TrainConfig):
