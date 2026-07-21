@@ -98,7 +98,7 @@ def main(
 
     print("C++ binary execution completed successfully.")
 
-    npz_files = list(save_dir.glob("*.npz"))
+    npz_files = list(save_dir.rglob("*.npz"))
     print(f"Generated {len(npz_files)} .npz files in {save_dir}")
 
 
