@@ -40,7 +40,7 @@ from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
-from scenario_generation.simulate import decode_turn_indicator
+from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
@@ -751,7 +751,9 @@ def _feed_turn_indicator(s: _SegState, outputs) -> None:
     per-batch feedback in ``run_segments_batched`` so a single-segment rollout evolves the
     turn signal identically instead of holding the seed."""
     ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-    s.last_turn_indicator = int(np.asarray(ti).reshape(-1)[0])
+    s.last_turn_indicator = resolve_keep_turn_indicator(
+        int(np.asarray(ti).reshape(-1)[0]), s.last_turn_indicator
+    )
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
@@ -2066,7 +2068,9 @@ def run_segments_batched(
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
-                        s.last_turn_indicator = int(ti_pred[i])
+                        s.last_turn_indicator = resolve_keep_turn_indicator(
+                            int(ti_pred[i]), s.last_turn_indicator
+                        )
                         s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
