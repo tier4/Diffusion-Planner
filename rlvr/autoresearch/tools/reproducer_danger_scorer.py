@@ -403,3 +403,81 @@ def build_realized_event_scorer(
         else None
     )
     return _scorer
+
+
+def build_realized_reward_scorer(
+    *,
+    reward_config: Path,
+    device: str,
+    horizon: int,
+    sample_step: int = 10,
+):
+    """Realized closed-loop reward, computed natively during a mining rollout.
+
+    Returned as ``(hook, finalize)``:
+      - ``hook(built, preds, data, _device)`` is installed as the rollout's per-step
+        ``danger_scorer`` (free in the mining path). It only RECORDS — each segment's
+        realized world pose every step, and (every ``sample_step`` steps) the scene
+        scoring tensors — keeping everything in memory. It returns all-clean rows so it
+        never perturbs event mining.
+      - ``finalize()`` scores the REALIZED trajectory: at each sampled pose ``t`` it
+        expresses the realized future ``poses[t+1 : t+1+H]`` in the ego frame at ``t``
+        and rewards it against the context captured at ``t``. Returns
+        ``(mean_reward, n_poses)``.
+
+    Reward is per-pose (the reward function shapes an H-step trajectory), so the
+    realized DRIVE is rewarded — not the model's per-step plan. Contexts are captured
+    once during the single rollout the miner already runs; there is no disk save/reload
+    and no second simulation.
+    """
+    from rlvr.reward import compute_reward_batch  # local: avoid module-load cycle
+
+    reward_cfg = load_reward_config(reward_config)
+    tdev = torch.device(device)
+    poses: dict[int, dict[int, np.ndarray]] = {}
+    contexts: dict[int, dict[int, dict]] = {}
+
+    def hook(built, preds, data, _device):
+        rows = []
+        for s, np_dict, *_rest in built:
+            k = int(s.k)
+            poses.setdefault(id(s), {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
+            if k % sample_step == 0:
+                # keep scoring tensors on CPU; moved to GPU in one batch at finalize
+                sd = _np_dict_to_scoring_tensors(np_dict, device="cpu")
+                contexts.setdefault(id(s), {})[k] = sd
+            rows.append({"labels": ["clean"], "label": "clean"})
+        return rows
+
+    def _ego_future(world: np.ndarray, t: int) -> np.ndarray:
+        x0, y0, yaw0 = world[t]
+        c, s = np.cos(-yaw0), np.sin(-yaw0)
+        fut = world[t + 1 : t + 1 + horizon]
+        dx = fut[:, 0] - x0
+        dy = fut[:, 1] - y0
+        xe = dx * c - dy * s
+        ye = dx * s + dy * c
+        dyaw = fut[:, 2] - yaw0
+        return np.column_stack([xe, ye, np.cos(dyaw), np.sin(dyaw)]).astype(np.float32)
+
+    def finalize() -> tuple[float, int]:
+        tot, n = 0.0, 0
+        for sid, kmap in poses.items():
+            ks = sorted(kmap)
+            world = np.stack([kmap[k] for k in ks])
+            kmin = ks[0]
+            for k, sd in sorted(contexts.get(sid, {}).items()):
+                t = k - kmin
+                if t + 1 + horizon > len(ks):
+                    continue
+                fut = _ego_future(world, t)
+                if fut.shape[0] < horizon:
+                    continue
+                ego = torch.from_numpy(fut[None]).to(tdev)
+                sd_gpu = {kk: (vv.to(tdev) if torch.is_tensor(vv) else vv) for kk, vv in sd.items()}
+                rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
+                tot += float(rb[0].total)
+                n += 1
+        return (tot / n if n else float("nan")), n
+
+    return hook, finalize

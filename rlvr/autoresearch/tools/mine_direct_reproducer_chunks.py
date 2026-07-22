@@ -24,6 +24,7 @@ import torch
 
 from rlvr.autoresearch.tools.reproducer_danger_scorer import (
     build_realized_event_scorer,
+    build_realized_reward_scorer,
     load_credit_windows,
 )
 from scenario_generation.perf_timer import Timers
@@ -463,6 +464,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out_jsonl", type=Path, default=None)
     parser.add_argument("--segments_jsonl", type=Path, required=True)
     parser.add_argument("--summary_json", type=Path, default=None)
+    parser.add_argument(
+        "--realized_reward",
+        action="store_true",
+        help=(
+            "also compute the realized closed-loop reward (reward.py total on the driven "
+            "trajectory, per pose) during this same rollout and write it to the summary. "
+            "Uses --danger_reward_config. No extra simulation, no disk save/reload."
+        ),
+    )
+    parser.add_argument("--realized_reward_sample_step", type=int, default=10)
     parser.add_argument("--plan_only", action="store_true")
     parser.add_argument("--chunk_len", type=int, default=80)
     parser.add_argument("--start_stride", type=int, default=80)
@@ -635,6 +646,18 @@ def main() -> None:
             )
         danger_credit_windows = load_credit_windows(args.danger_credit_window_config)
 
+    realized_reward_finalize = None
+    if not args.plan_only and args.realized_reward:
+        # Piggyback the otherwise-free per-step danger_scorer hook to capture the
+        # realized trajectory + contexts in memory during THIS rollout, then score
+        # reward once at the end. No second simulation, no disk save/reload.
+        danger_scorer, realized_reward_finalize = build_realized_reward_scorer(
+            reward_config=args.danger_reward_config,
+            device=device,
+            horizon=int(model_args.future_len),
+            sample_step=int(args.realized_reward_sample_step),
+        )
+
     args.segments_jsonl.parent.mkdir(parents=True, exist_ok=True)
     skipped_path = args.segments_jsonl.with_suffix(".skipped.jsonl")
     summary_path = args.summary_json or args.segments_jsonl.with_suffix(".summary.json")
@@ -788,6 +811,16 @@ def main() -> None:
         if credit_f is not None:
             credit_f.close()
 
+    realized_cl_reward = None
+    realized_cl_reward_poses = 0
+    if realized_reward_finalize is not None:
+        t_rew = time.perf_counter()
+        realized_cl_reward, realized_cl_reward_poses = realized_reward_finalize()
+        print(
+            f"[realized_reward] mean={realized_cl_reward:.4f} over "
+            f"{realized_cl_reward_poses} poses ({time.perf_counter() - t_rew:.1f}s)"
+        )
+
     elapsed = time.perf_counter() - t0
     summary = {
         "scene_list": None if args.scene_list is None else str(args.scene_list),
@@ -807,6 +840,8 @@ def main() -> None:
         "simulated_chunks": int(n_simulated),
         "skipped_chunks": int(n_skipped),
         "credit_rows": int(n_credit_rows),
+        "realized_cl_reward": realized_cl_reward,
+        "realized_cl_reward_poses": int(realized_cl_reward_poses),
         "elapsed_sec": round(elapsed, 3),
         "chunks_per_sec": n_simulated / elapsed if elapsed > 0 and n_simulated else 0.0,
         "timers": timers.report(max(1, n_simulated)) if n_simulated else "",

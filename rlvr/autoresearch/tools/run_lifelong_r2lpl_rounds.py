@@ -485,6 +485,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         ),
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
+        "realized_reward": bool(workflow.get("realized_reward", False)),
+        "final_round_mining": bool(
+            workflow.get("final_round_mining", workflow.get("realized_reward", False))
+        ),
         "perception_mining": perception_mining,
         "repair_refresh_every_epochs": int(
             _first_non_null(
@@ -901,6 +905,11 @@ def _perception_mining_cmd(
     if bool(cfg.get("count_rear_end_collisions", False)):
         # Keep realized-event mining rear-end-consistent with the repair side.
         cmd.append("--count_rear_end_collisions")
+    if bool(cfg.get("realized_reward", False)) or bool(mining.get("realized_reward", False)):
+        # Compute the realized closed-loop reward on the driven trajectory in the
+        # same rollout (no extra sim, no disk save/reload) and write it to the
+        # mining summary. The reward reflects the checkpoint THIS mine ran with.
+        cmd.append("--realized_reward")
     return cmd, danger_save_dir
 
 
@@ -2801,6 +2810,23 @@ def main() -> None:
         )
         workflow_summary.append(_load_json(rdir / "round_summary.json"))
         print(f"[round {round_idx}] next model: {model_path}")
+
+    # Final-round mining: one closed-loop mine with the LAST round's checkpoint so
+    # its residual problem-scene count AND realized closed-loop reward are recorded
+    # (every earlier round's final model is already covered by the next round's mine;
+    # the last round has no successor, so it needs this pass). Enabled whenever
+    # realized-reward is on, or explicitly via final_round_mining.
+    want_final_mine = bool(cfg.get("final_round_mining", cfg.get("realized_reward", False)))
+    if not args.dry_run and want_final_mine and not str(cfg.get("training_backend")) == "none":
+        fdir = out / "final_round_mine"
+        fdir.mkdir(parents=True, exist_ok=True)
+        print(f"[final] mining residual problems + realized reward with {model_path}")
+        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        fsum = _load_json(fdir / "perception_direct_summary.json")
+        print(
+            f"[final] residual credit_rows={fsum.get('credit_rows')} "
+            f"realized_cl_reward={fsum.get('realized_cl_reward')}"
+        )
 
     if not args.dry_run:
         _write_json(out / "workflow_summary.json", {"rounds": workflow_summary})
