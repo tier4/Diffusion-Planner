@@ -381,6 +381,7 @@ def model_training(args: TrainConfig):
         valid_loss_ego = agg["avg_loss_ego"]
         valid_loss_neighbor = agg["avg_loss_neighbor"]
         mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+        mean_plantf_metric_dict = {f"valid_mode/{k}": v for k, v in agg["plantf_means"].items()}
         mean_epdms_dict = wandb_epdms_metrics(agg["epdms_means"])
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lat_loss", 0.0
@@ -400,6 +401,8 @@ def model_training(args: TrainConfig):
             f"{turn_indicator_change_accuracy=:.3f}\n"
             f"{turn_indicator_change_total=:.3f}"
         )
+        for key, value in mean_plantf_metric_dict.items():
+            print(f"{key}={value:.4f}")
         if replan_agg.get("replan_consistency_count", 0) > 0:
             print(
                 "replan_position_consistency={:.3f}\n"
@@ -445,6 +448,7 @@ def model_training(args: TrainConfig):
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
             mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+            mean_plantf_metric_dict = {f"valid_mode/{k}": v for k, v in agg["plantf_means"].items()}
             replan_loss_dict = {f"valid_loss/{k}": v for k, v in replan_agg.items()}
             mean_epdms_dict = wandb_epdms_metrics(agg["epdms_means"])
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
@@ -466,6 +470,8 @@ def model_training(args: TrainConfig):
                 f"{turn_indicator_change_accuracy=:.3f}\n"
                 f"{turn_indicator_change_total=:.3f}"
             )
+            for key, value in mean_plantf_metric_dict.items():
+                print(f"{key}={value:.4f}")
             if replan_agg.get("replan_consistency_count", 0) > 0:
                 print(
                     "replan_position_consistency={:.3f}\n"
@@ -487,6 +493,7 @@ def model_training(args: TrainConfig):
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
+                    **mean_plantf_metric_dict,
                     **replan_loss_dict,
                     **mean_epdms_dict,
                 },
@@ -500,6 +507,7 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                **{k.replace("/", "_"): v for k, v in mean_plantf_metric_dict.items()},
                 **replan_agg,
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }

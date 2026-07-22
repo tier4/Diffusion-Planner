@@ -27,6 +27,7 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.normalizer import StateNormalizer
 from planner_metrics.temporal_stability import (
     compute_curvature_rate_batch,
     compute_mean_abs_jerk_batch,
@@ -44,6 +45,54 @@ class _PreparedValidationBatch:
     ego_current: torch.Tensor
     neighbors_current: torch.Tensor
     turn_indicator_seq: torch.Tensor
+
+
+def compute_plantf_mode_metrics(
+    trajectory: torch.Tensor,
+    probability: torch.Tensor,
+    ego_future: torch.Tensor,
+    state_normalizer: StateNormalizer,
+    miss_threshold_m: float = 2.0,
+) -> dict[str, torch.Tensor]:
+    """Compute per-sample metrics for a PlAnTF multi-modal trajectory head.
+
+    ``trajectory`` is in the normalized model space while ``ego_future`` is in
+    ego-centric metres.  The returned tensors all have shape ``[B]`` so they can
+    be concatenated and averaged across validation batches/ranks.
+    """
+    trajectory_world = trajectory * state_normalizer.std[0].to(
+        trajectory.device
+    ) + state_normalizer.mean[0].to(trajectory.device)
+    position_error = torch.linalg.vector_norm(
+        trajectory_world[..., :2] - ego_future[:, None, :, :2], dim=-1
+    )  # [B, K, T]
+    ade = position_error.mean(dim=-1)
+    fde = position_error[..., -1]
+
+    oracle_mode = ade.argmin(dim=-1)
+    selected_mode = probability.argmax(dim=-1)
+    batch_index = torch.arange(trajectory.shape[0], device=trajectory.device)
+    top1_ade = ade[batch_index, selected_mode]
+    top1_fde = fde[batch_index, selected_mode]
+    min_ade = ade.min(dim=-1).values
+    min_fde = fde.min(dim=-1).values
+
+    mode_prob = probability.softmax(dim=-1)
+    mode_entropy = -(mode_prob * mode_prob.clamp_min(1e-12).log()).sum(dim=-1)
+
+    metrics = {
+        "plantf_top1_ade": top1_ade,
+        "plantf_top1_fde": top1_fde,
+        "plantf_min_ade_k": min_ade,
+        "plantf_min_fde_k": min_fde,
+        "plantf_miss_rate_2m": (min_fde > miss_threshold_m).float(),
+        "plantf_top1_oracle_ade_gap": top1_ade - min_ade,
+        "plantf_mode_accuracy": (selected_mode == oracle_mode).float(),
+        "plantf_mode_entropy": mode_entropy,
+    }
+    for mode in range(trajectory.shape[1]):
+        metrics[f"plantf_mode_usage_{mode}"] = (selected_mode == mode).float()
+    return metrics
 
 
 def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValidationBatch:
@@ -334,6 +383,15 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         all_gt[:, 1:][neighbor_mask] = 0.0
 
         prediction = outputs["prediction"]
+        if "trajectory" in outputs and "probability" in outputs:
+            mode_metrics = compute_plantf_mode_metrics(
+                outputs["trajectory"],
+                outputs["probability"],
+                ego_future,
+                args.state_normalizer,
+            )
+            for key, val in mode_metrics.items():
+                total_result_dict[key].append(val.cpu())
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
         turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
@@ -585,6 +643,14 @@ def aggregate_valid_metrics(valid_dict, device):
         epdms_means[f"{metric}_coverage"] = local_cnt / max(local_total, 1)
         epdms_means[metric] = local_sum / local_cnt if local_cnt > 0 else float("nan")
 
+    plantf_means = {}
+    for key, val in valid_dict.items():
+        if not key.startswith("plantf_"):
+            continue
+        local_sum = ddp.all_reduce_sum(val.sum().item(), device)
+        local_cnt = ddp.all_reduce_sum(val.numel(), device)
+        plantf_means[key.removeprefix("plantf_")] = local_sum / max(local_cnt, 1)
+
     return {
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
         "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
@@ -595,4 +661,5 @@ def aggregate_valid_metrics(valid_dict, device):
         "turn_indicator_change_total": int(turn_change_total),
         "ego_means": ego_means,
         "epdms_means": epdms_means,
+        "plantf_means": plantf_means,
     }

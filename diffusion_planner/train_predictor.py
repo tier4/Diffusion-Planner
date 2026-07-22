@@ -151,6 +151,12 @@ def get_args(args_list=None):
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
+    parser.add_argument(
+        "--alpha_mode_cls_loss",
+        type=float,
+        default=1.0,
+        help="mode classification loss weight (decoder_type='plantf' only)",
+    )
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
     parser.add_argument(
@@ -188,6 +194,19 @@ def get_args(args_list=None):
         type=str,
         choices=["x_start", "flow_matching"],
         default="x_start",
+    )
+    parser.add_argument(
+        "--decoder_type",
+        type=str,
+        choices=["diffusion", "plantf"],
+        default="diffusion",
+        help="'plantf' swaps the diffusion decoder for a one-shot multi-modal regression head",
+    )
+    parser.add_argument(
+        "--num_modes",
+        type=int,
+        default=6,
+        help="number of ego trajectory modes (decoder_type='plantf' only)",
     )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 

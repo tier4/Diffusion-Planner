@@ -25,6 +25,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume_model_path", default=None, help="optional: resume from this .pth")
     p.add_argument("--wandb_run_id", default=None, help="optional: existing wandb run id")
     p.add_argument("--wandb_project_name", default=None, help="optional: wandb project name")
+    p.add_argument(
+        "--decoder_type",
+        default="diffusion",
+        choices=["diffusion", "plantf"],
+        help="optional: 'plantf' trains the one-shot multi-modal regression head",
+    )
+    p.add_argument(
+        "--num_modes",
+        type=int,
+        default=6,
+        help="optional: number of ego trajectory modes (decoder_type='plantf' only)",
+    )
     return p.parse_args()
 
 
@@ -50,6 +62,8 @@ def main() -> None:
         optional += ["--wandb_run_id", args.wandb_run_id]
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
+    if args.decoder_type != "diffusion":
+        optional += ["--decoder_type", args.decoder_type, "--num_modes", str(args.num_modes)]
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 

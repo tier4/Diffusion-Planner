@@ -3,6 +3,7 @@ from torch import nn
 from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
+from diffusion_planner.model.module.plantf_decoder import compute_plantf_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
@@ -65,7 +66,12 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # call the model
         optimizer.zero_grad()
 
-        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+        if getattr(args, "decoder_type", "diffusion") == "plantf":
+            loss = compute_plantf_training_loss(
+                model, inputs, (ego_future, neighbors_future, mask), args
+            )
+        else:
+            loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
 
         loss["loss"] = (
             args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
@@ -75,6 +81,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
             + args.coeff_road_border_loss * loss["road_border_loss"]
             + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
         )
+        if "mode_cls_loss" in loss:
+            loss["loss"] = loss["loss"] + args.alpha_mode_cls_loss * loss["mode_cls_loss"]
 
         # loss backward
         loss["loss"].backward()

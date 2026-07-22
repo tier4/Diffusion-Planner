@@ -178,6 +178,28 @@ def validate_full_model(
     )
 
 
+def validate_plantf_split_models(
+    wrappers: ModelWrappers,
+    inputs: TensorDict,
+    encoder_onnx_path: Path,
+    decoder_onnx_path: Path,
+) -> None:
+    with torch.no_grad():
+        torch_encoding = wrappers.encoder(*(inputs[name] for name in ENCODER_INPUT_NAMES))
+        torch_prediction, torch_probability, torch_turn_indicator = wrappers.decoder(torch_encoding)
+
+    encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
+    onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
+    compare("encoding", torch_encoding.cpu().numpy(), onnx_encoding)
+
+    onnx_prediction, onnx_probability, onnx_turn_indicator = run_ort_in_subprocess(
+        decoder_onnx_path, {"encoding": onnx_encoding}
+    )
+    compare("prediction", torch_prediction.cpu().numpy(), onnx_prediction)
+    compare("probability", torch_probability.cpu().numpy(), onnx_probability)
+    compare("turn_indicator_logit", torch_turn_indicator.cpu().numpy(), onnx_turn_indicator)
+
+
 def validate_split_models(
     wrappers: ModelWrappers,
     inputs: TensorDict,
@@ -265,29 +287,35 @@ def convert_model(
     print("\nORT validation")
     wrappers = build_wrappers(model)
     validation_inputs = load_validation_inputs(eval_npz_path)
-    with torch.no_grad():
-        validation_encoding = wrappers.encoder(
-            *(validation_inputs[name] for name in ENCODER_INPUT_NAMES)
-        )
-    validation_decoder_inputs = build_decoder_inputs(validation_inputs, validation_encoding)
 
     validate_full_model(wrappers, validation_inputs, full_onnx_path)
-    validate_split_models(
-        wrappers,
-        validation_inputs,
-        validation_decoder_inputs,
-        encoder_onnx_path,
-        decoder_onnx_path,
-        turn_indicator_onnx_path,
-    )
 
-    print(
-        "\nSuccessfully converted to ONNX:"
-        f"\n  {full_onnx_path}"
-        f"\n  {encoder_onnx_path}"
-        f"\n  {decoder_onnx_path}"
-        f"\n  {turn_indicator_onnx_path}\n"
-    )
+    if wrappers.turn_indicator is None:  # planTF head: no denoising loop
+        validate_plantf_split_models(
+            wrappers,
+            validation_inputs,
+            encoder_onnx_path,
+            decoder_onnx_path,
+        )
+        exported = [full_onnx_path, encoder_onnx_path, decoder_onnx_path]
+    else:
+        with torch.no_grad():
+            validation_encoding = wrappers.encoder(
+                *(validation_inputs[name] for name in ENCODER_INPUT_NAMES)
+            )
+        validation_decoder_inputs = build_decoder_inputs(validation_inputs, validation_encoding)
+        validate_split_models(
+            wrappers,
+            validation_inputs,
+            validation_decoder_inputs,
+            encoder_onnx_path,
+            decoder_onnx_path,
+            turn_indicator_onnx_path,
+        )
+        exported = [full_onnx_path, encoder_onnx_path, decoder_onnx_path, turn_indicator_onnx_path]
+
+    paths = "".join(f"\n  {p}" for p in exported)
+    print(f"\nSuccessfully converted to ONNX:{paths}\n")
 
 
 if __name__ == "__main__":

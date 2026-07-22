@@ -108,6 +108,8 @@ class TrainConfig:
 
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
+    # Mode classification loss weight (decoder_type="plantf" only)
+    alpha_mode_cls_loss: float = 1.0
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
@@ -127,6 +129,11 @@ class TrainConfig:
     num_heads: int = 8
     hidden_dim: int = 256
     diffusion_model_type: Literal["x_start", "flow_matching"] = "x_start"
+    # "plantf" replaces the diffusion decoder with a one-shot multi-modal
+    # regression head (planTF, Cheng et al. ICRA 2024) on the same encoder.
+    decoder_type: Literal["diffusion", "plantf"] = "diffusion"
+    # Number of ego trajectory modes (decoder_type="plantf" only)
+    num_modes: int = 6
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
     resume_model_path: Optional[str] = None
 
