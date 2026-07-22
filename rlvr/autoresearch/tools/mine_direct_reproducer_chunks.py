@@ -136,11 +136,8 @@ def iter_direct_chunks(
 ) -> Iterator[Chunk]:
     if chunk_len < 2:
         raise ValueError(f"chunk_len must be >= 2, got {chunk_len}")
-    if start_stride < chunk_len:
-        raise ValueError(
-            f"start_stride ({start_stride}) must be >= chunk_len ({chunk_len}); "
-            "overlapping chunks are intentionally unsupported in the streaming direct miner"
-        )
+    if start_stride < 1:
+        raise ValueError(f"start_stride must be >= 1, got {start_stride}")
     if expected_frame_step < 1:
         raise ValueError(f"expected_frame_step must be >= 1, got {expected_frame_step}")
     if min_chunk_len is None:
@@ -160,27 +157,37 @@ def iter_direct_chunks(
     candidate_idx = 0
     seen = 0
     yielded = 0
-    while max_scenes is None or seen < max_scenes:
-        block: list[Path] = []
-        for _ in range(start_stride):
+    # Sliding read-ahead buffer: each candidate window needs chunk_len paths, and the
+    # cursor advances by start_stride between candidates. With start_stride >= chunk_len
+    # this degenerates to the original block reader (window read, tail skipped); with
+    # start_stride < chunk_len the buffer retains the overlap so consecutive windows
+    # share paths — still a single pass over the scene list.
+    read_ahead = max(chunk_len, start_stride)
+    buf: list[Path] = []
+    exhausted = False
+    while True:
+        while len(buf) < read_ahead and not exhausted:
             if max_scenes is not None and seen >= max_scenes:
+                exhausted = True
                 break
             try:
-                block.append(next(paths))
+                buf.append(next(paths))
             except StopIteration:
+                exhausted = True
                 break
             seen += 1
-        if not block:
+        if not buf:
             break
 
         global_start = candidate_idx * start_stride
         candidate_idx += 1
+        window = buf[:chunk_len]
+        buf = buf[start_stride:]
         if (global_start // start_stride) % num_shards != shard_index:
             continue
         if sample_fraction < 1.0 and _sample_value(global_start, sample_seed) >= sample_fraction:
             continue
 
-        window = block[:chunk_len]
         kept = [window[0]]
         end_reason = "chunk_len"
         for next_path in window[1:]:

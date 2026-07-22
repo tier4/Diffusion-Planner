@@ -5098,3 +5098,49 @@ def test_best_safe_candidate_rb_floor_admits_expert_hugging_depart():
     )
     assert idx == 0
     assert meta["depart_outcome"] == "selected"
+
+
+def test_direct_reproducer_chunks_support_overlapping_stride(tmp_path):
+    # start_stride < chunk_len: consecutive windows overlap (sliding read-ahead
+    # buffer). Anchor density and chunk runway become independent knobs — needed
+    # for long expert wait cycles where an 80-step chunk has no post-departure
+    # runway but a 160 stride would halve the anchors.
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 400)],
+    )
+
+    chunks = list(iter_direct_chunks(scene_list, chunk_len=160, start_stride=80))
+
+    # Tail window (start 320) is only 80 frames -> dropped by the default
+    # min_chunk_len == chunk_len.
+    assert [c.global_start_index for c in chunks] == [0, 80, 160, 240]
+    assert [c.n_frames for c in chunks] == [160, 160, 160, 160]
+    assert chunks[0].start_frame == 31
+    assert chunks[0].end_frame == 31 + 159
+    assert chunks[1].start_frame == 31 + 80  # overlaps chunk 0 by 80 frames
+
+    with_tail = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, min_chunk_len=80)
+    )
+    assert [c.global_start_index for c in with_tail] == [0, 80, 160, 240, 320]
+    assert with_tail[-1].n_frames == 80
+    assert with_tail[-1].end_reason == "scene_list_tail"
+
+
+def test_direct_reproducer_chunks_overlap_preserves_sharding(tmp_path):
+    # Sharding/sampling still key off global_start // start_stride with overlap.
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 400)],
+    )
+
+    shard0 = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, num_shards=2, shard_index=0)
+    )
+    shard1 = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, num_shards=2, shard_index=1)
+    )
+
+    assert [c.global_start_index for c in shard0] == [0, 160]
+    assert [c.global_start_index for c in shard1] == [80, 240]
