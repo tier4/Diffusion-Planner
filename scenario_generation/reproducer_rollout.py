@@ -115,69 +115,6 @@ def _world_plan_to_ego(world_xy, world_h, ex, ey, eyaw):
     return np.stack([px, py, np.cos(he), np.sin(he)], axis=-1).astype(np.float32)
 
 
-def _plan_override_speeds(
-    plan_xy: np.ndarray,
-    dt: float = DT,
-    *,
-    vel_smooth_window: int = 8,
-) -> np.ndarray:
-    """Per-waypoint cruise speeds for perfect-track / cached-plan overrides.
-
-    Perfect tracking snaps pose to ``plan_xy[offset]`` each step. Using
-    ``||live - target|| / dt`` as ``dyn.speed`` injects single-step chord noise
-    (and a systematic dip on every replan whose first waypoint is short). The
-    next ``(Δv)/dt`` then looks like a multi-g brake even when the plan's
-    speed profile is nearly constant — which floods strong-brake / accel
-    consumers under ``replan_interval > 1``.
-
-    Instead, derive speeds from the plan polyline the same way
-    ``postprocess_reference`` does for the MPC path: segment length / dt, then
-    a forward-looking moving average. Pose still snaps to the raw waypoints;
-    only the reported speed (and thus ``dyn.accel``) follows the smoothed
-    profile. Callers should still pass the looked-up value through
-    ``_blend_override_speed`` so a replan cannot jump harder than one EMA step.
-    """
-    xy = np.asarray(plan_xy, dtype=np.float64).reshape(-1, 2)
-    n = int(xy.shape[0])
-    if n == 0:
-        return np.zeros(0, dtype=np.float64)
-    if n == 1:
-        return np.zeros(1, dtype=np.float64)
-    diffs = np.diff(xy, axis=0)
-    velocities = np.hypot(diffs[:, 0], diffs[:, 1]) / float(dt)
-    # Same prepend alignment as ``postprocess_reference``: speed[i] is the
-    # inbound segment into waypoint i (speed[0] mirrors the first segment).
-    velocities = np.concatenate([[velocities[0]], velocities])
-    smoothed = velocities.copy()
-    w = int(vel_smooth_window)
-    if w > 1:
-        # Forward-looking MA at every index (shrinking window near the tail).
-        # ``postprocess_reference`` leaves the last w-1 samples raw; that is fine
-        # for an 80-step MPC reference, but override speeds are read at small
-        # replan offsets and must not keep a raw short-hop spike at index 1.
-        for i in range(n):
-            smoothed[i] = velocities[i : min(i + w, n)].mean()
-    return smoothed
-
-
-def _blend_override_speed(
-    prev_speed: float,
-    target_speed: float,
-    *,
-    alpha: float = 1.0 / 8.0,
-) -> float:
-    """EMA-blend plan target speed with the previous ego speed.
-
-    Smoothed plan speeds remove *within*-plan chord jitter, but a fresh plan at
-    a replan boundary can still sit a bit below the previous cycle's cruise
-    (short first hop → forward-MA still < prev). A raw adopt of that target
-    makes ``(Δv)/dt`` look like a hard brake. One EMA step toward the target
-    keeps continuity; sustained real decelerations still accumulate over frames.
-    """
-    a = float(np.clip(alpha, 0.0, 1.0))
-    return float((1.0 - a) * float(prev_speed) + a * float(target_speed))
-
-
 def _rel_pose(recorded_pose: np.ndarray, live_pose: np.ndarray) -> tuple[float, float, float]:
     """Live ego pose expressed in the recorded-ego frame (dx, dy, dyaw)."""
     R = _rotation_matrix(float(recorded_pose[2]))  # rotates world delta by -recorded_yaw
@@ -1434,8 +1371,10 @@ def render_segment(
         if interpolate and neighbor_history_mode != "sim"
         else {}
     )
+    from scenario_generation.mpc_tracker import polyline_speeds
+
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
-    plan_speeds = None  # smoothed per-waypoint speeds for overrides; see ``_plan_override_speeds``
+    plan_speeds = None  # ``polyline_speeds(plan_world[0])`` for overrides (not live-target chords)
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
@@ -1515,7 +1454,9 @@ def render_segment(
             plan_world = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
             )
-            plan_speeds = _plan_override_speeds(plan_world[0], DT)
+            # Same smoothed polyline speeds as the MPC ``postprocess_reference`` path — not
+            # ``||live - target||/dt``, which invents hard-brake spikes under replan_interval>1.
+            plan_speeds = polyline_speeds(plan_world[0], DT)
             pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
             _feed_turn_indicator(s, outputs)
         else:
@@ -1526,7 +1467,7 @@ def render_segment(
                 float(plan_world[0][off, 1]),
                 float(plan_world[1][off]),
             )
-            spd = _blend_override_speed(s.dyn.speed, float(plan_speeds[off]))
+            spd = float(plan_speeds[off])
             override = (np.array([tx, ty, th], dtype=np.float64), spd)
             pred_cur = _world_plan_to_ego(
                 plan_world[0][off:],
@@ -1544,15 +1485,13 @@ def render_segment(
         # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
         # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
         # override path implements). Every step then lands on the predicted polyline point.
-        # Speed comes from the smoothed plan profile (EMA-blended with the previous ego speed),
-        # not ``||live-plan[0]||/dt``, so replan-boundary chord dips do not masquerade as hard brakes.
         if tracker_mode == "perfect" and override is None:
             tx, ty, th = (
                 float(plan_world[0][0, 0]),
                 float(plan_world[0][0, 1]),
                 float(plan_world[1][0]),
             )
-            spd = _blend_override_speed(s.dyn.speed, float(plan_speeds[0]))
+            spd = float(plan_speeds[0])
             override = (np.array([tx, ty, th], dtype=np.float64), spd)
         nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:

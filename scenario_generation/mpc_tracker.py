@@ -457,6 +457,36 @@ class MPCTracker:
 # ----------------------------------------------------------------------
 
 
+def polyline_speeds(
+    ref_xy: np.ndarray,
+    dt: float = 0.1,
+    *,
+    vel_smooth_window: int = 8,
+) -> np.ndarray:
+    """Per-waypoint speeds from polyline spacing + forward-looking MA.
+
+    Shared by ``postprocess_reference`` (MPC path) and perfect-track / cached-plan
+    overrides (which must not use ``||live - target|| / dt`` chord speeds). Same
+    velocity extraction as the C++ postprocess port: segment length / ``dt``,
+    prepend for index alignment, then a forward-looking moving average.
+    """
+    xy = np.asarray(ref_xy, dtype=np.float64).reshape(-1, 2)
+    n = len(xy)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    if n < 2:
+        return np.zeros(1, dtype=np.float64)
+    diffs = np.diff(xy, axis=0)
+    velocities = np.hypot(diffs[:, 0], diffs[:, 1]) / float(dt)
+    velocities = np.concatenate([[velocities[0]], velocities])
+    smoothed = velocities.copy()
+    w = int(vel_smooth_window)
+    if w > 1:
+        for i in range(max(0, n - w + 1)):
+            smoothed[i] = velocities[i : i + w].mean()
+    return smoothed
+
+
 def postprocess_reference(
     ref_xy: np.ndarray,
     ref_h: np.ndarray,
@@ -491,18 +521,9 @@ def postprocess_reference(
     if N < 2:
         return ref
 
-    # Step 1: velocity from position differences
-    diffs = np.diff(ref_xy, axis=0)
-    velocities = np.hypot(diffs[:, 0], diffs[:, 1]) / dt
-    velocities = np.concatenate([[velocities[0]], velocities])  # prepend for index alignment
+    smoothed = polyline_speeds(ref_xy, dt, vel_smooth_window=vel_smooth_window)
 
-    # Step 2: forward-looking moving average
-    smoothed = velocities.copy()
-    w = vel_smooth_window
-    for i in range(N - w + 1):
-        smoothed[i] = velocities[i : i + w].mean()
-
-    # Step 3: force-stop
+    # Force-stop
     force_stop = False
     for i in range(1, N):
         if not force_stop:

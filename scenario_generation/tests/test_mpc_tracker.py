@@ -13,6 +13,7 @@ import pytest
 from scenario_generation.mpc_tracker import (
     MPCTracker,
     PerfectTracker,
+    polyline_speeds,
     postprocess_reference,
 )
 
@@ -142,7 +143,30 @@ class TestPerfectTracker:
         tracker.reset()  # should not raise
 
 
-# ── postprocess_reference ───────────────────────────────────────────────────
+# ── postprocess_reference / polyline_speeds ─────────────────────────────────
+
+
+class TestPolylineSpeeds:
+    def test_constant_cruise(self):
+        n = 20
+        xy = np.stack([np.arange(n, dtype=np.float64) * 0.8, np.zeros(n)], axis=1)
+        spd = polyline_speeds(xy, dt=0.1, vel_smooth_window=8)
+        assert spd.shape == (n,)
+        np.testing.assert_allclose(spd, 8.0, atol=1e-6)
+
+    def test_empty_and_singleton(self):
+        assert polyline_speeds(np.zeros((0, 2)), dt=0.1).shape == (0,)
+        np.testing.assert_array_equal(polyline_speeds(np.zeros((1, 2)), dt=0.1), [0.0])
+
+    def test_damps_short_first_hop_vs_chord(self):
+        """Short first hop: raw chord is 4 m/s; forward MA is pulled toward cruise."""
+        segs = np.array([0.40, 0.80, 0.81, 0.79, 0.80, 0.80, 0.80, 0.80], dtype=np.float64)
+        xy = np.zeros((len(segs) + 1, 2), dtype=np.float64)
+        xy[1:, 0] = np.cumsum(segs)
+        chord0 = float(segs[0] / 0.1)
+        spd0 = float(polyline_speeds(xy, dt=0.1, vel_smooth_window=8)[0])
+        assert chord0 == pytest.approx(4.0)
+        assert spd0 > chord0 + 2.0
 
 
 class TestPostprocessReference:
