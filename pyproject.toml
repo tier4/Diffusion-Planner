@@ -22,22 +22,25 @@ dependencies = [
 dev = ["pre-commit==4.6.0", "pytest>=8.0.0", "ruff==0.15.16"]
 
 [tool.uv]
-exclude-newer = "7 days"
-constraint-dependencies = ["idna==3.15", "aiohttp==3.14.1", "starlette==1.0.1"]
+# Timestamp form required by uv 0.7.x (relative "7 days" is unsupported).
+exclude-newer = "2026-07-17T00:00:00Z"
+constraint-dependencies = [
+    "idna==3.15",
+    "aiohttp==3.14.1",
+    "starlette==1.0.1",
+    # Driver 550 supports CUDA 12.4 only; PyPI/flatt torch defaults to CUDA 13.
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+]
 
 [[tool.uv.index]]
 name = "flatt"
 url = "https://pypi.flatt.tech/simple/"
 default = true
 
-# onnxruntime-gpu is built against CUDA 12, while PyPI's default torch wheel is the CUDA 13
-# build: it pulls cuda-toolkit 13 and the *-cu13 wheels, leaving ORT without the libraries it
-# loads. Nothing else here asks for CUDA 13, so torch comes from the CUDA 12.8 index and one
-# CUDA sits under the whole environment. torchvision ships compiled ops against a specific
-# torch build and must come from the same place, or its operators fail to register.
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.uv.workspace]
@@ -54,8 +57,8 @@ members = [
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
 diffusion-planner = { workspace = true }
 exploration-policy = { workspace = true }
 planner-metrics = { workspace = true }
