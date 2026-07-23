@@ -429,7 +429,7 @@ def build_realized_reward_scorer(
     ``finalize()`` after each batch: this bounds memory to one batch of contexts and —
     because ``_SegState`` objects (and their ``id``) are freed and reused between
     batches — prevents cross-batch ``id(s)`` aliasing from merging poses of different
-    chunks. Windows that cross an unstick teleport (detected via ``s.n_snaps``) are
+    chunks. Windows that cross an unstick teleport (detected via ``s.snap_count``) are
     skipped so the discontinuous jump is not baked into a "realized future".
 
     Reward is per-pose (the reward function shapes an H-step trajectory), so the
@@ -454,7 +454,7 @@ def build_realized_reward_scorer(
             k = int(s.k)
             sid = id(s)
             poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
-            snaps = int(getattr(s, "n_snaps", 0))
+            snaps = int(getattr(s, "snap_count", 0))
             if snaps > last_snaps.get(sid, 0):
                 teleport_ks.setdefault(sid, set()).add(k)  # a teleport landed at this step
             last_snaps[sid] = snaps

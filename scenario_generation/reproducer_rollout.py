@@ -2151,7 +2151,7 @@ def run_segments_batched(
                             s.last_snap_step = s.k
                         # A teleport also invalidates the realized-lag streak: the snap
                         # closes the gap artificially, so restart the sustain count.
-                        if s.n_snaps > prev_snaps:
+                        if s.snap_count > prev_snaps:
                             s.realized_lag_streak = 0
                 active = [s for s in active if not s.done]
             results.extend(_finalize(s, timers) for s in states)

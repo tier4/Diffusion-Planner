@@ -5179,12 +5179,12 @@ def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypat
             }
 
         # Batch 1: one segment, 6 steps, straight line, a teleport lands at k=3.
-        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), n_snaps=0)
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
         for k in range(6):
             seg.k = k
             seg.live_pose = np.array([float(k), 0.0, 0.0])  # 1 m/step forward
             if k == 3:
-                seg.n_snaps = 1  # teleport landed here
+                seg.snap_count = 1  # teleport landed here
             hook([(seg, _np_dict())], None, None, "cpu")
         mean1, n1 = finalize()
         # horizon=3 → sampled poses t need t+1..t+3 present AND no teleport in that window.
@@ -5193,7 +5193,7 @@ def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypat
         assert n1 == 0, f"all windows cross the teleport, expected 0 scored, got {n1}"
 
         # Batch 2: fresh segment (id reused is fine — buffers were cleared), 5 steps, no teleport.
-        seg2 = SimpleNamespace(k=0, live_pose=np.zeros(3), n_snaps=0)
+        seg2 = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
         for k in range(5):
             seg2.k = k
             seg2.live_pose = np.array([float(k), 0.0, 0.0])
@@ -5222,7 +5222,7 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
               "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
               "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
               "ego_agent_past": np.zeros((21, 3), dtype=np.float32)}
-        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), n_snaps=0)
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
         for k in range(4):
             seg.k = k; seg.live_pose = np.array([float(k), 0.0, 0.0])
             hook([(seg, nd)], None, None, "cpu")
