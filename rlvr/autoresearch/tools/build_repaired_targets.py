@@ -457,6 +457,12 @@ def _load_rows(
 # expert did (minus numerical slack) instead of beating an absolute bar the ground
 # truth already fails.
 _EXPERT_RB_FLOOR_SLACK_M = 0.05
+# The expert-relative floor only applies when the expert's OWN crossing is shallow — a
+# genuine shoulder-stop that skims the border. If the logged expert is deeper than this
+# below the border, the scene is pathological (not a legitimate hug) and the absolute rb
+# gate is kept, so the floor can never admit a candidate that hugs the border by more
+# than ~this much.
+_EXPERT_RB_FLOOR_MAX_DEPTH_M = 0.15
 
 
 def _rb_gate_ok(reward_row, rb_dist_floor: float | None) -> bool:
@@ -906,12 +912,23 @@ def build_repaired_targets(
                 )
                 expert_reward = compute_reward_batch(expert_tensor[None], scoring_data, rcfg)[0]
                 if expert_reward.rb_crossing:
-                    rb_dist_floor = float(expert_reward.rb_min_dist) - _EXPERT_RB_FLOOR_SLACK_M
-                    print(
-                        f"  expert rb floor {name}: expert future crosses rb "
-                        f"(min dist {expert_reward.rb_min_dist:.3f} m) -> candidate floor "
-                        f"{rb_dist_floor:.3f} m"
-                    )
+                    expert_rb = float(expert_reward.rb_min_dist)
+                    # Only relax for a SHALLOW expert crossing (a real shoulder-stop hug);
+                    # if the expert is deeply over the border the scene is pathological, so
+                    # keep the absolute gate rather than admit near-as-deep candidates.
+                    if expert_rb >= -_EXPERT_RB_FLOOR_MAX_DEPTH_M:
+                        rb_dist_floor = expert_rb - _EXPERT_RB_FLOOR_SLACK_M
+                        print(
+                            f"  expert rb floor {name}: expert future crosses rb "
+                            f"(min dist {expert_rb:.3f} m) -> candidate floor "
+                            f"{rb_dist_floor:.3f} m"
+                        )
+                    else:
+                        print(
+                            f"  expert rb floor {name}: expert crosses deeply "
+                            f"(min dist {expert_rb:.3f} m < -{_EXPERT_RB_FLOOR_MAX_DEPTH_M} m) "
+                            "-> keeping absolute rb gate"
+                        )
             scripted_kwargs = dict(
                 scene_path=str(row["scene_path"]),
                 data=data,

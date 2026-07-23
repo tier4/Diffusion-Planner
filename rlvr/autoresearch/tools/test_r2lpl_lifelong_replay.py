@@ -5144,3 +5144,89 @@ def test_direct_reproducer_chunks_overlap_preserves_sharding(tmp_path):
 
     assert [c.global_start_index for c in shard0] == [0, 160]
     assert [c.global_start_index for c in shard1] == [80, 240]
+
+
+def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypatch):
+    """The realized-reward scorer must: score the driven future per sampled pose,
+    accumulate across finalize() calls (one per mining batch) while clearing its
+    buffers each time (bounds memory + avoids cross-batch id(s) aliasing), and skip
+    any window that crosses an unstick teleport."""
+    import rlvr.reward as _reward
+
+    # Deterministic stand-in reward = the future's total forward displacement, so we can
+    # predict which poses get scored and that teleport windows are excluded.
+    def fake_reward(ego, data, cfg):
+        xy = ego[0, :, :2].cpu().numpy()
+        return [SimpleNamespace(total=float(abs(xy[-1, 0] - xy[0, 0])))]
+
+    monkeypatch.setattr(_reward, "compute_reward_batch", fake_reward)
+
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as td:
+        rc, _tc = _write_realized_scorer_configs(_P(td))
+        hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
+            reward_config=rc, device="cpu", horizon=3, sample_step=1
+        )
+
+        def _np_dict():
+            return {
+                "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+                "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+                "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+                "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
+            }
+
+        # Batch 1: one segment, 6 steps, straight line, a teleport lands at k=3.
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), n_snaps=0)
+        for k in range(6):
+            seg.k = k
+            seg.live_pose = np.array([float(k), 0.0, 0.0])  # 1 m/step forward
+            if k == 3:
+                seg.n_snaps = 1  # teleport landed here
+            hook([(seg, _np_dict())], None, None, "cpu")
+        mean1, n1 = finalize()
+        # horizon=3 → sampled poses t need t+1..t+3 present AND no teleport in that window.
+        # k can be 0,1,2 (k+3<=5). k=0 window {1,2,3} contains teleport@3 -> skip.
+        # k=1 window {2,3,4} contains 3 -> skip. k=2 window {3,4,5} contains 3 -> skip.
+        assert n1 == 0, f"all windows cross the teleport, expected 0 scored, got {n1}"
+
+        # Batch 2: fresh segment (id reused is fine — buffers were cleared), 5 steps, no teleport.
+        seg2 = SimpleNamespace(k=0, live_pose=np.zeros(3), n_snaps=0)
+        for k in range(5):
+            seg2.k = k
+            seg2.live_pose = np.array([float(k), 0.0, 0.0])
+            hook([(seg2, _np_dict())], None, None, "cpu")
+        mean2, n2 = finalize()
+        # k=0 {1,2,3}, k=1 {2,3,4} valid; k=2 needs {3,4,5} -> 5 absent -> skip. So 2 scored.
+        assert n2 == 2, f"expected 2 scored poses in batch 2, got {n2}"
+        # running total accumulates across batches (n2 is cumulative), reward ~3.0 each
+        assert mean2 == pytest.approx(2.0, abs=1e-6)  # fake reward = intra-window forward disp
+
+
+def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
+    """finalize() must clear its internal buffers so a second finalize on no new data
+    does not re-score the same poses."""
+    import rlvr.reward as _reward
+    monkeypatch.setattr(_reward, "compute_reward_batch",
+                        lambda ego, data, cfg: [SimpleNamespace(total=1.0)])
+    import tempfile
+    from pathlib import Path as _P
+    with tempfile.TemporaryDirectory() as td:
+        rc, _ = _write_realized_scorer_configs(_P(td))
+        hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
+            reward_config=rc, device="cpu", horizon=2, sample_step=1
+        )
+        nd = {"ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+              "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+              "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+              "ego_agent_past": np.zeros((21, 3), dtype=np.float32)}
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), n_snaps=0)
+        for k in range(4):
+            seg.k = k; seg.live_pose = np.array([float(k), 0.0, 0.0])
+            hook([(seg, nd)], None, None, "cpu")
+        _, n_first = finalize()
+        _, n_second = finalize()  # no new data
+        assert n_first > 0
+        assert n_second == n_first, "second finalize must not re-score cleared buffers"

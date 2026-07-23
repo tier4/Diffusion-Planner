@@ -418,34 +418,49 @@ def build_realized_reward_scorer(
       - ``hook(built, preds, data, _device)`` is installed as the rollout's per-step
         ``danger_scorer`` (free in the mining path). It only RECORDS — each segment's
         realized world pose every step, and (every ``sample_step`` steps) the scene
-        scoring tensors — keeping everything in memory. It returns all-clean rows so it
-        never perturbs event mining.
-      - ``finalize()`` scores the REALIZED trajectory: at each sampled pose ``t`` it
-        expresses the realized future ``poses[t+1 : t+1+H]`` in the ego frame at ``t``
-        and rewards it against the context captured at ``t``. Returns
-        ``(mean_reward, n_poses)``.
+        scoring tensors. It returns all-clean rows so it never perturbs event mining.
+      - ``finalize()`` scores the REALIZED trajectory for the segments buffered SINCE
+        the last call: at each sampled pose ``t`` it expresses the realized future
+        ``poses[t+1 : t+1+H]`` in the ego frame at ``t`` and rewards it against the
+        context captured at ``t``; it then ACCUMULATES into a persistent running total
+        and CLEARS the buffers. Returns the running ``(mean_reward, n_poses)``.
+
+    ``run_segments_batched`` is invoked once per mining batch, so the caller must call
+    ``finalize()`` after each batch: this bounds memory to one batch of contexts and —
+    because ``_SegState`` objects (and their ``id``) are freed and reused between
+    batches — prevents cross-batch ``id(s)`` aliasing from merging poses of different
+    chunks. Windows that cross an unstick teleport (detected via ``s.n_snaps``) are
+    skipped so the discontinuous jump is not baked into a "realized future".
 
     Reward is per-pose (the reward function shapes an H-step trajectory), so the
-    realized DRIVE is rewarded — not the model's per-step plan. Contexts are captured
-    once during the single rollout the miner already runs; there is no disk save/reload
-    and no second simulation.
+    realized DRIVE is rewarded — not the model's per-step plan. No disk save/reload,
+    no second simulation.
     """
     from rlvr.reward import compute_reward_batch  # local: avoid module-load cycle
 
     reward_cfg = load_reward_config(reward_config)
     tdev = torch.device(device)
+    # Per-BATCH buffers (cleared by finalize); id(s) is unique within a single
+    # run_segments_batched call, so it is a safe within-batch key.
     poses: dict[int, dict[int, np.ndarray]] = {}
     contexts: dict[int, dict[int, dict]] = {}
+    teleport_ks: dict[int, set] = {}  # seg -> step indices where an unstick teleport fired
+    last_snaps: dict[int, int] = {}
+    acc = {"sum": 0.0, "n": 0}  # persistent running total across batches
 
     def hook(built, preds, data, _device):
         rows = []
         for s, np_dict, *_rest in built:
             k = int(s.k)
-            poses.setdefault(id(s), {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
+            sid = id(s)
+            poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
+            snaps = int(getattr(s, "n_snaps", 0))
+            if snaps > last_snaps.get(sid, 0):
+                teleport_ks.setdefault(sid, set()).add(k)  # a teleport landed at this step
+            last_snaps[sid] = snaps
             if k % sample_step == 0:
                 # keep scoring tensors on CPU; moved to GPU in one batch at finalize
-                sd = _np_dict_to_scoring_tensors(np_dict, device="cpu")
-                contexts.setdefault(id(s), {})[k] = sd
+                contexts.setdefault(sid, {})[k] = _np_dict_to_scoring_tensors(np_dict, device="cpu")
             rows.append({"labels": ["clean"], "label": "clean"})
         return rows
 
@@ -461,23 +476,31 @@ def build_realized_reward_scorer(
         return np.column_stack([xe, ye, np.cos(dyaw), np.sin(dyaw)]).astype(np.float32)
 
     def finalize() -> tuple[float, int]:
-        tot, n = 0.0, 0
         for sid, kmap in poses.items():
             ks = sorted(kmap)
+            kpos = {k: i for i, k in enumerate(ks)}  # step index -> contiguous row
             world = np.stack([kmap[k] for k in ks])
-            kmin = ks[0]
+            tps = teleport_ks.get(sid, set())
             for k, sd in sorted(contexts.get(sid, {}).items()):
-                t = k - kmin
-                if t + 1 + horizon > len(ks):
+                if k not in kpos:
                     continue
-                fut = _ego_future(world, t)
+                # need the H future steps present AND no teleport within (k, k+H]
+                if any((k + j) not in kpos for j in range(1, horizon + 1)):
+                    continue
+                if any((k + j) in tps for j in range(1, horizon + 1)):
+                    continue
+                fut = _ego_future(world, kpos[k])
                 if fut.shape[0] < horizon:
                     continue
                 ego = torch.from_numpy(fut[None]).to(tdev)
                 sd_gpu = {kk: (vv.to(tdev) if torch.is_tensor(vv) else vv) for kk, vv in sd.items()}
                 rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
-                tot += float(rb[0].total)
-                n += 1
-        return (tot / n if n else float("nan")), n
+                acc["sum"] += float(rb[0].total)
+                acc["n"] += 1
+        poses.clear()
+        contexts.clear()
+        teleport_ks.clear()
+        last_snaps.clear()
+        return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]
 
     return hook, finalize

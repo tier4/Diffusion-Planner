@@ -759,6 +759,11 @@ def main() -> None:
             unstick_after=args.unstick_after,
             unstick_advance_m=args.unstick_advance_m,
         )
+        # Realized reward is scored + accumulated + buffers cleared PER BATCH: this
+        # run_segments_batched call owns a fresh set of _SegState objects, so finalizing
+        # here bounds context memory to one batch and avoids cross-batch id(s) aliasing.
+        if realized_reward_finalize is not None:
+            realized_reward_finalize()
         for chunk, result in zip(kept_chunks, results):
             row = {**_chunk_row(chunk), **result.metrics}
             fout.write(json.dumps(row, sort_keys=True, default=float) + "\n")
