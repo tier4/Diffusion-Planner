@@ -437,6 +437,7 @@ def build_realized_reward_scorer(
     no second simulation.
     """
     from rlvr.reward import compute_reward_batch  # local: avoid module-load cycle
+    from scenario_generation.transforms import _rotation_matrix
 
     reward_cfg = load_reward_config(reward_config)
     tdev = torch.device(device)
@@ -444,16 +445,28 @@ def build_realized_reward_scorer(
     # run_segments_batched call, so it is a safe within-batch key.
     poses: dict[int, dict[int, np.ndarray]] = {}
     contexts: dict[int, dict[int, dict]] = {}
+    # Shown neighbor world poses per step (uuid -> (wx, wy, wh)); captured EVERY step so a
+    # sampled pose t can assemble the realized neighbor FUTURE over t+1..t+H. Slot order at
+    # a sampled step mirrors sim_nb's nearest-first ordering, so the reconstructed future
+    # aligns slot-for-slot with the captured neighbor_agents_past.
+    nbr_world: dict[int, dict[int, dict]] = {}
+    slot_uuids_at: dict[int, dict[int, list]] = {}
     teleport_ks: dict[int, set] = {}  # seg -> step indices where an unstick teleport fired
     last_snaps: dict[int, int] = {}
     acc = {"sum": 0.0, "n": 0}  # persistent running total across batches
 
     def hook(built, preds, data, _device):
         rows = []
-        for s, np_dict, *_rest in built:
+        for item in built:
+            s, np_dict = item[0], item[1]
+            rest = item[2:]
+            suuid = rest[2] if len(rest) > 2 else None  # slot -> uuid (sim mode)
+            wbu = rest[3] if len(rest) > 3 else None  # uuid -> current shown world pose
             k = int(s.k)
             sid = id(s)
             poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
+            if wbu:
+                nbr_world.setdefault(sid, {})[k] = {u: np.asarray(p, dtype=np.float64) for u, p in wbu.items()}
             snaps = int(getattr(s, "snap_count", 0))
             if snaps > last_snaps.get(sid, 0):
                 teleport_ks.setdefault(sid, set()).add(k)  # a teleport landed at this step
@@ -461,8 +474,9 @@ def build_realized_reward_scorer(
             if k % sample_step == 0:
                 # keep scoring tensors on CPU; moved to GPU in one batch at finalize
                 contexts.setdefault(sid, {})[k] = _np_dict_to_scoring_tensors(np_dict, device="cpu")
-            rows.append({"labels": ["clean"], "label": "clean"})
-        return rows
+                if suuid is not None:
+                    slot_uuids_at.setdefault(sid, {})[k] = list(suuid)
+        return [{"labels": ["clean"], "label": "clean"} for _ in built]
 
     def _ego_future(world: np.ndarray, t: int) -> np.ndarray:
         x0, y0, yaw0 = world[t]
@@ -474,6 +488,28 @@ def build_realized_reward_scorer(
         ye = dx * s + dy * c
         dyaw = fut[:, 2] - yaw0
         return np.column_stack([xe, ye, np.cos(dyaw), np.sin(dyaw)]).astype(np.float32)
+
+    def _neighbor_future(sid: int, k: int, ego_pose: np.ndarray, n_slots: int) -> np.ndarray | None:
+        """Realized neighbor future in the ego frame at step k: for each slot's uuid, its
+        SHOWN world pose at k+1..k+H (from nbr_world), transformed like sim_nb's past block
+        so slots align with neighbor_agents_past. Returns (n_slots, H, 4) or None if no
+        neighbor telemetry was captured (non-sim mode)."""
+        slots = slot_uuids_at.get(sid, {}).get(k)
+        wmap = nbr_world.get(sid)
+        if slots is None or wmap is None:
+            return None
+        x0, y0, yaw0 = float(ego_pose[0]), float(ego_pose[1]), float(ego_pose[2])
+        rot = _rotation_matrix(yaw0)  # world delta -> ego frame (matches SimNeighborTracker.build)
+        nf = np.zeros((n_slots, horizon, 4), dtype=np.float32)
+        for i, u in enumerate(slots[:n_slots]):
+            for j in range(1, horizon + 1):
+                wp = wmap.get(k + j, {}).get(u)
+                if wp is None:
+                    continue  # neighbor absent that step -> zero (slot/step-invalid downstream)
+                dxy = (wp[:2] - np.array([x0, y0])) @ rot.T
+                lh = wp[2] - yaw0
+                nf[i, j - 1] = (dxy[0], dxy[1], np.cos(lh), np.sin(lh))
+        return nf
 
     def finalize() -> tuple[float, int]:
         for sid, kmap in poses.items():
@@ -492,13 +528,22 @@ def build_realized_reward_scorer(
                 fut = _ego_future(world, kpos[k])
                 if fut.shape[0] < horizon:
                     continue
-                ego = torch.from_numpy(fut[None]).to(tdev)
                 sd_gpu = {kk: (vv.to(tdev) if torch.is_tensor(vv) else vv) for kk, vv in sd.items()}
+                # Realized neighbor future: score collision/TTC against where neighbors
+                # ACTUALLY were over k+1..k+H (the shown motion), not an empty set.
+                nap = sd_gpu.get("neighbor_agents_past")
+                n_slots = int(nap.shape[-3]) if nap is not None and nap.dim() >= 3 else 0
+                nf = _neighbor_future(sid, k, world[kpos[k]], n_slots) if n_slots else None
+                if nf is not None:
+                    sd_gpu["neighbor_agents_future"] = torch.from_numpy(nf[None]).to(tdev)
+                ego = torch.from_numpy(fut[None]).to(tdev)
                 rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
                 acc["sum"] += float(rb[0].total)
                 acc["n"] += 1
         poses.clear()
         contexts.clear()
+        nbr_world.clear()
+        slot_uuids_at.clear()
         teleport_ks.clear()
         last_snaps.clear()
         return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]

@@ -648,13 +648,24 @@ def main() -> None:
 
     realized_reward_finalize = None
     if not args.plan_only and args.realized_reward:
+        # The realized reward scores each sampled pose's H-step DRIVEN future, so a chunk
+        # must contain at least H+1 steps or no pose ever has a full future and the metric
+        # would silently be NaN over 0 poses. Fail loudly instead (the default chunk_len ==
+        # future_len == 80 hits exactly this).
+        horizon = int(model_args.future_len)
+        if int(args.chunk_len) <= horizon:
+            raise ValueError(
+                f"--realized_reward requires chunk_len > model future_len ({horizon}); got "
+                f"chunk_len={args.chunk_len}. Use e.g. --chunk_len {horizon * 2} so each pose "
+                "has a full realized future to score."
+            )
         # Piggyback the otherwise-free per-step danger_scorer hook to capture the
         # realized trajectory + contexts in memory during THIS rollout, then score
         # reward once at the end. No second simulation, no disk save/reload.
         danger_scorer, realized_reward_finalize = build_realized_reward_scorer(
             reward_config=args.danger_reward_config,
             device=device,
-            horizon=int(model_args.future_len),
+            horizon=horizon,
             sample_step=int(args.realized_reward_sample_step),
         )
 

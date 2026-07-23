@@ -457,12 +457,6 @@ def _load_rows(
 # expert did (minus numerical slack) instead of beating an absolute bar the ground
 # truth already fails.
 _EXPERT_RB_FLOOR_SLACK_M = 0.05
-# The expert-relative floor only applies when the expert's OWN crossing is shallow — a
-# genuine shoulder-stop that skims the border. If the logged expert is deeper than this
-# below the border, the scene is pathological (not a legitimate hug) and the absolute rb
-# gate is kept, so the floor can never admit a candidate that hugs the border by more
-# than ~this much.
-_EXPERT_RB_FLOOR_MAX_DEPTH_M = 0.15
 
 
 def _rb_gate_ok(reward_row, rb_dist_floor: float | None) -> bool:
@@ -558,6 +552,13 @@ def _best_safe_candidate(
         for prefix, idx_s in (("morph", morph_index), ("depart", depart_index))
         if idx_s is not None
     }
+    # The expert-relative rb floor is applied ONLY to the scripted expert-following
+    # candidates (morph / depart). They are constructed from the expert path, so allowing
+    # them to skim the border as much as the expert does is the intent; they cannot run
+    # far outside. Model / fan candidates always face the absolute rb gate — rb_min_dist is
+    # unsigned, so an unrestricted floor would also admit a candidate that crossed and
+    # continued far outside (large unsigned distance on the wrong side).
+    scripted_idx = set(scripted.values())
     accepted: list[tuple[float, float, float, int]] = []
     candidate_traj_list = None
     if candidate_trajs is not None:
@@ -568,7 +569,7 @@ def _best_safe_candidate(
             label_row,
             reward_row,
             min_static_margin=min_static_margin,
-            rb_dist_floor=rb_dist_floor,
+            rb_dist_floor=rb_dist_floor if idx in scripted_idx else None,
         ):
             violation_score = _candidate_violation_score(label_row, reward_row)
             deviation_penalty = _candidate_deviation_penalty(
@@ -912,23 +913,18 @@ def build_repaired_targets(
                 )
                 expert_reward = compute_reward_batch(expert_tensor[None], scoring_data, rcfg)[0]
                 if expert_reward.rb_crossing:
-                    expert_rb = float(expert_reward.rb_min_dist)
-                    # Only relax for a SHALLOW expert crossing (a real shoulder-stop hug);
-                    # if the expert is deeply over the border the scene is pathological, so
-                    # keep the absolute gate rather than admit near-as-deep candidates.
-                    if expert_rb >= -_EXPERT_RB_FLOOR_MAX_DEPTH_M:
-                        rb_dist_floor = expert_rb - _EXPERT_RB_FLOOR_SLACK_M
-                        print(
-                            f"  expert rb floor {name}: expert future crosses rb "
-                            f"(min dist {expert_rb:.3f} m) -> candidate floor "
-                            f"{rb_dist_floor:.3f} m"
-                        )
-                    else:
-                        print(
-                            f"  expert rb floor {name}: expert crosses deeply "
-                            f"(min dist {expert_rb:.3f} m < -{_EXPERT_RB_FLOOR_MAX_DEPTH_M} m) "
-                            "-> keeping absolute rb gate"
-                        )
+                    # rb_min_dist is the UNSIGNED min distance to the border (crossing =
+                    # < rb_cross_thresh). The floor "candidate stays at least as far from
+                    # the border as the expert" is only safe for the scripted expert-
+                    # following candidates (see _best_safe_candidate), which track the
+                    # expert path and cannot run far outside; it is NOT applied to model/
+                    # fan candidates.
+                    rb_dist_floor = float(expert_reward.rb_min_dist) - _EXPERT_RB_FLOOR_SLACK_M
+                    print(
+                        f"  expert rb floor {name}: expert future crosses rb "
+                        f"(min dist {expert_reward.rb_min_dist:.3f} m) -> scripted-candidate "
+                        f"floor {rb_dist_floor:.3f} m"
+                    )
             scripted_kwargs = dict(
                 scene_path=str(row["scene_path"]),
                 data=data,

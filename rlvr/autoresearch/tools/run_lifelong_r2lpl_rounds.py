@@ -2080,6 +2080,18 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         "elapsed_sec": max((float(s.get("elapsed_sec", 0.0)) for s in summaries), default=0.0),
         "shards": summaries,
     }
+    # Realized closed-loop reward: pose-count-weighted mean across shards (each shard
+    # scored a disjoint set of poses). Without this the sharded/multi-GPU summary would
+    # drop the field the single-GPU path emits.
+    rr_poses = sum(int(s.get("realized_cl_reward_poses", 0)) for s in summaries)
+    if rr_poses > 0:
+        rr_sum = sum(
+            float(s.get("realized_cl_reward", 0.0)) * int(s.get("realized_cl_reward_poses", 0))
+            for s in summaries
+            if s.get("realized_cl_reward") is not None
+        )
+        aggregate["realized_cl_reward"] = rr_sum / rr_poses
+        aggregate["realized_cl_reward_poses"] = rr_poses
     _write_json(output, aggregate)
     return aggregate
 
