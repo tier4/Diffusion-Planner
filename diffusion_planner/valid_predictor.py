@@ -140,6 +140,8 @@ def run_validation(valid_cfg: ValidConfig):
         num_workers=valid_cfg.num_workers,
         pin_memory=valid_cfg.pin_mem,
         drop_last=False,
+        persistent_workers=valid_cfg.num_workers > 0,
+        prefetch_factor=4 if valid_cfg.num_workers > 0 else None,
     )
     valid_pair_loader = None
     if valid_cfg.enable_replan_consistency_eval:
@@ -161,6 +163,8 @@ def run_validation(valid_cfg: ValidConfig):
                 num_workers=valid_cfg.num_workers,
                 pin_memory=valid_cfg.pin_mem,
                 drop_last=False,
+                persistent_workers=valid_cfg.num_workers > 0,
+                prefetch_factor=4 if valid_cfg.num_workers > 0 else None,
             )
 
     if global_rank == 0:

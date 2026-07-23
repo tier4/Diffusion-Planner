@@ -64,6 +64,9 @@ class TrainConfig:
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
+    # Gradient diagnostics are expensive (they reduce every parameter gradient to
+    # host scalars). Sample them periodically instead of every training step.
+    grad_stats_interval: int = 100
 
     # ---------------------------------------------------------
     # Training Parameters

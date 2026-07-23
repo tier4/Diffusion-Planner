@@ -79,6 +79,12 @@ def get_args(args_list=None):
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
+    parser.add_argument(
+        "--grad_stats_interval",
+        type=int,
+        default=_train_config_default("grad_stats_interval"),
+        help="Collect gradient diagnostics every N batches; 0 disables them.",
+    )
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)

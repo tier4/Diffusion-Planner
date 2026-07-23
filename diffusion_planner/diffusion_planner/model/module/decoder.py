@@ -116,9 +116,12 @@ def compute_training_loss(
     all_gt[:, 1:][neighbor_mask] = 0.0
 
     if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+        sde = VPSDE_linear()
+        future_t = t[..., 1:, :]
+        alpha = sde.marginal_alpha(future_t)
+        std = sde.marginal_prob_std(future_t)
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
-        xT = mean + std * z
+        xT = alpha * all_gt[..., 1:, :] + std * z
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]

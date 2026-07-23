@@ -36,15 +36,18 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     epoch_loss = []
 
     model.train()
-
-    if args.ddp:
-        torch.cuda.synchronize()
+    grad_stats_interval = getattr(args, "grad_stats_interval", 100)
+    if grad_stats_interval < 0:
+        raise ValueError("grad_stats_interval must be >= 0")
+    num_batches = len(data_loader)
 
     if ddp.get_rank() == 0:
         data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
-    for inputs in data_loader:
-        inputs = {key: value.to(args.device) for key, value in inputs.items()}
+    for batch_idx, inputs in enumerate(data_loader, start=1):
+        # DataLoader uses pinned host memory in the default training setup.  Let
+        # the copy overlap with the previous GPU step instead of synchronizing it.
+        inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
@@ -78,18 +81,26 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # loss backward
         loss["loss"].backward()
 
-        # Gradient statistics (computed before clipping so that exploding
-        # gradients are not masked by clip_grad_norm_).
-        loss.update(compute_grad_stats(model.parameters()))
+        # Gradient statistics are diagnostics only.  Computing them every step
+        # reduces every parameter gradient to host scalars and stalls the GPU.
+        # Sample at a fixed interval, plus the final batch, consistently on all
+        # DDP ranks.
+        if grad_stats_interval > 0 and (
+            batch_idx % grad_stats_interval == 0 or batch_idx == num_batches
+        ):
+            loss.update(compute_grad_stats(model.parameters()))
 
         nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
 
         ema.update(model)
 
-        if args.ddp:
-            torch.cuda.synchronize()
-        epoch_loss.append(loss)
+        epoch_loss.append(
+            {
+                key: value.detach() if torch.is_tensor(value) else value
+                for key, value in loss.items()
+            }
+        )
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
 

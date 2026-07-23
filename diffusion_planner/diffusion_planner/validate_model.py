@@ -47,7 +47,9 @@ class _PreparedValidationBatch:
 
 
 def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValidationBatch:
-    inputs = {key: value.to(device) for key, value in inputs.items()}
+    # Validation loaders use pinned host memory when enabled; keep H2D copies
+    # asynchronous so metric-side CPU work can overlap with the next batch.
+    inputs = {key: value.to(device, non_blocking=True) for key, value in inputs.items()}
     batch_size = inputs["ego_current_state"].shape[0]
     turn_indicator_seq = inputs["turn_indicators"]
     inputs["sampled_trajectories"] = torch.zeros(
@@ -483,7 +485,7 @@ def validate_replan_consistency(model, pair_loader, args) -> dict[str, float]:
     for step, batch in enumerate(pair_loader):
         pred_a, future_a = _predict_ego_for_temporal_metrics(model, batch["current"], args, device)
         pred_b, _ = _predict_ego_for_temporal_metrics(model, batch["next"], args, device)
-        frame_gap = batch["frame_gap"].to(device=device, dtype=torch.long)
+        frame_gap = batch["frame_gap"].to(device=device, dtype=torch.long, non_blocking=True)
         valid_gap = (
             (frame_gap > 0) & (frame_gap < pred_a.shape[1]) & (frame_gap <= future_a.shape[1])
         )

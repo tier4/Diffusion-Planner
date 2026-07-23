@@ -325,22 +325,21 @@ class DPM_Solver:
             A pytorch tensor of the time steps, with the shape (N + 1,).
         """
         if skip_type == "logSNR":
-            lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
-            lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
-            logSNR_steps = torch.linspace(lambda_T.cpu().item(), lambda_0.cpu().item(), N + 1).to(
-                device
-            )
+            lambda_T = self.noise_schedule.marginal_lambda(torch.as_tensor(t_T, device=device))
+            lambda_0 = self.noise_schedule.marginal_lambda(torch.as_tensor(t_0, device=device))
+            unit_steps = torch.linspace(0.0, 1.0, N + 1, device=device, dtype=lambda_T.dtype)
+            logSNR_steps = lambda_T + (lambda_0 - lambda_T) * unit_steps
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == "time_uniform":
-            return torch.linspace(t_T, t_0, N + 1).to(device)
+            return torch.linspace(t_T, t_0, N + 1, device=device)
         elif skip_type == "time_quadratic":
             t_order = 2
-            t = (
-                torch.linspace(t_T ** (1.0 / t_order), t_0 ** (1.0 / t_order), N + 1)
-                .pow(t_order)
-                .to(device)
-            )
-            return t
+            return torch.linspace(
+                t_T ** (1.0 / t_order),
+                t_0 ** (1.0 / t_order),
+                N + 1,
+                device=device,
+            ).pow(t_order)
         else:
             raise ValueError(
                 "Unsupported skip_type {}, need to be 'logSNR' or 'time_uniform' or 'time_quadratic'".format(

@@ -96,6 +96,11 @@ class VPSDE_linear(SDE):
         std = torch.sqrt(1 - torch.exp(2.0 * mean_log_coeff))
         return mean, std
 
+    def marginal_alpha(self, t):
+        """Return the scalar mean coefficient without materializing ``alpha * x``."""
+        mean_log_coeff = -0.25 * t**2 * (self._beta_max - self._beta_min) - 0.5 * self._beta_min * t
+        return torch.exp(mean_log_coeff)
+
     def diffusion_coeff(self, t):
         beta_t = (self._beta_max - self._beta_min) * t + self._beta_min
         diffusion = torch.sqrt(beta_t)
