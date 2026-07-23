@@ -2614,6 +2614,12 @@ def _summarize_round(
         "phase_peak_memory_mb": {k: None for k in sorted(phase_times)},
         "next_model_path": str(next_model_path),
     }
+    # Propagate the realized closed-loop reward (from this round's mining, i.e. the
+    # incoming checkpoint) into the round summary so workflow_summary.json can compare
+    # per-round checkpoints. None when --realized_reward was not enabled.
+    if mining_summary.get("realized_cl_reward") is not None:
+        summary["realized_cl_reward"] = mining_summary["realized_cl_reward"]
+        summary["realized_cl_reward_poses"] = int(mining_summary.get("realized_cl_reward_poses", 0))
     if guard_metrics is not None:
         summary["guards"] = guard_metrics
     _write_json(rdir / "round_summary.json", summary)
@@ -2829,19 +2835,35 @@ def main() -> None:
     # the last round has no successor, so it needs this pass). Enabled whenever
     # realized-reward is on, or explicitly via final_round_mining.
     want_final_mine = bool(cfg.get("final_round_mining", cfg.get("realized_reward", False)))
+    final_round = None
     if not args.dry_run and want_final_mine and not str(cfg.get("training_backend")) == "none":
         fdir = out / "final_round_mine"
         fdir.mkdir(parents=True, exist_ok=True)
         print(f"[final] mining residual problems + realized reward with {model_path}")
         _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
         fsum = _load_json(fdir / "perception_direct_summary.json")
+        # Represent the final-round mine in the operator-facing summary contract, not
+        # just stdout: the last round's checkpoint has no successor mine, so this is the
+        # only place its residual counts + realized reward appear.
+        final_round = {
+            "checkpoint": str(model_path),
+            "residual_credit_rows": int(fsum.get("credit_rows", 0)),
+            "residual_event_count_by_label": _derive_event_counts_from_credit_rows(
+                _read_jsonl(fdir / "credit_windows.jsonl")
+            ),
+            "realized_cl_reward": fsum.get("realized_cl_reward"),
+            "realized_cl_reward_poses": int(fsum.get("realized_cl_reward_poses", 0)),
+        }
         print(
-            f"[final] residual credit_rows={fsum.get('credit_rows')} "
-            f"realized_cl_reward={fsum.get('realized_cl_reward')}"
+            f"[final] residual credit_rows={final_round['residual_credit_rows']} "
+            f"realized_cl_reward={final_round['realized_cl_reward']}"
         )
 
     if not args.dry_run:
-        _write_json(out / "workflow_summary.json", {"rounds": workflow_summary})
+        workflow_out = {"rounds": workflow_summary}
+        if final_round is not None:
+            workflow_out["final_round_mine"] = final_round
+        _write_json(out / "workflow_summary.json", workflow_out)
         if reference_metrics is not None and guard_rows:
             report = _selection_report(reference_metrics, guard_rows)
             _write_json(out / "selection_report.json", report)

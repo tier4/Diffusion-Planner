@@ -5033,38 +5033,11 @@ def test_selection_report_vetoes_and_ranks():
     assert any("denominator" in v for v in report["rounds"][0]["veto_reasons"])
 
 
-def test_rb_gate_expert_relative_floor():
-    # rb_min_dist is the UNSIGNED min distance to the border (>= 0); a crossing has a
-    # small value (near the border). The expert-relative floor admits a crossing candidate
-    # only if it stays at least (expert_clearance - slack) from the border, and rejects a
-    # candidate that dips CLOSER than the expert did.
-    from rlvr.autoresearch.tools.build_repaired_targets import _rb_gate_ok
-
-    clean = _morph_outcome_reward_row(1.0)  # not crossing
-    at_expert = SimpleNamespace(
-        **{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.15}
-    )
-    closer = SimpleNamespace(
-        **{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.05}
-    )
-
-    # No floor: any crossing is rejected (absolute gate).
-    assert _rb_gate_ok(clean, None) is True
-    assert _rb_gate_ok(at_expert, None) is False
-
-    # Expert crossed at 0.15 m -> floor = 0.10. A candidate as far as the expert passes;
-    # one that dips closer to the border does not.
-    floor = 0.15 - 0.05
-    assert _rb_gate_ok(at_expert, floor) is True
-    assert _rb_gate_ok(closer, floor) is False
-
-
-def test_best_safe_candidate_rb_floor_only_relaxes_scripted_candidates():
-    # The expert-relative floor must apply ONLY to the scripted expert-following candidate
-    # (depart/morph), never to a model/fan candidate — since rb_min_dist is unsigned, an
-    # unrestricted floor would also admit a model candidate that crossed and ran far
-    # outside. Here a depart (scripted, idx 0) and a model (idx 1) both cross at the same
-    # clearance; with the floor set, only the depart is admitted.
+def test_road_border_gate_is_absolute():
+    # The road-border gate is absolute: ANY crossing candidate is rejected, scripted
+    # (depart/morph) or model/fan alike. rb_min_dist is an UNSIGNED distance to the border,
+    # so it cannot tell a shoulder skim from a trajectory that crossed to the wrong side and
+    # ran far outside — an earlier expert-relative distance floor was removed as unsafe.
     source_row = {
         "repair_labels": ["expert_disagreement", "road_border_crossing"],
         "expert_disagreement_max_dev": 0.5,
@@ -5081,7 +5054,7 @@ def test_best_safe_candidate_rb_floor_only_relaxes_scripted_candidates():
         _morph_outcome_candidate_row(["road_border_crossing"]),
     ]
 
-    # No floor: both crossing candidates gate-rejected.
+    # Both crossing candidates gate-rejected, including the scripted depart (idx 0).
     idx, meta = _best_safe_candidate(
         source_row,
         rows,
@@ -5093,22 +5066,7 @@ def test_best_safe_candidate_rb_floor_only_relaxes_scripted_candidates():
         depart_index=0,
     )
     assert idx is None and meta["depart_outcome"] == "gate_rejected"
-
-    # Floor set (0.10): the scripted depart (idx 0, clearance 0.12 >= 0.10) is admitted and
-    # selected; the model candidate (idx 1) is NOT relaxed and stays rejected.
-    idx, meta = _best_safe_candidate(
-        source_row,
-        rows,
-        [xrow(), xrow()],
-        min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0,
-        candidate_trajs=[depart, model],
-        reference_traj=expert,
-        depart_index=0,
-        rb_dist_floor=0.15 - 0.05,
-    )
-    assert idx == 0
-    assert meta["depart_outcome"] == "selected"
+    assert meta["depart_gate_flags"]["rb_crossing"] is True
 
 
 def test_direct_reproducer_chunks_support_overlapping_stride(tmp_path):

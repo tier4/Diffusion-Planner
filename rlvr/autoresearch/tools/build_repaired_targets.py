@@ -452,34 +452,10 @@ def _load_rows(
     return rows
 
 
-# Slack subtracted from the expert's own road-border clearance when the expert itself
-# crosses: candidates then only need to stay at least as far from the border as the
-# expert did (minus numerical slack) instead of beating an absolute bar the ground
-# truth already fails.
-_EXPERT_RB_FLOOR_SLACK_M = 0.05
-
-
-def _rb_gate_ok(reward_row, rb_dist_floor: float | None) -> bool:
-    """Road-border gate, optionally expert-relative.
-
-    Some logged experts legitimately hug the road edge (e.g. a stop at the road
-    shoulder), so their own future fails the absolute rb_crossing gate — which
-    made EVERY expert-following repair (stop morph, depart morph, expert GT
-    candidate) unrepairable on those scenes. When ``rb_dist_floor`` is set (only
-    when the expert itself crosses), a crossing candidate still passes as long as
-    it keeps at least the expert's own border clearance.
-    """
-    if not reward_row.rb_crossing:
-        return True
-    return rb_dist_floor is not None and float(reward_row.rb_min_dist) >= rb_dist_floor
-
-
-def _passes_global_gates(
-    label_row: dict[str, Any], reward_row, *, rb_dist_floor: float | None = None
-) -> bool:
+def _passes_global_gates(label_row: dict[str, Any], reward_row) -> bool:
     return (
         reward_row.collision_step is None
-        and _rb_gate_ok(reward_row, rb_dist_floor)
+        and not reward_row.rb_crossing
         and not reward_row.lane_crossing
         and not reward_row.static_crossing
         and not reward_row.kinematic_violated
@@ -487,13 +463,11 @@ def _passes_global_gates(
     )
 
 
-def _global_gate_flags(
-    label_row: dict[str, Any], reward_row, *, rb_dist_floor: float | None = None
-) -> dict[str, bool]:
+def _global_gate_flags(label_row: dict[str, Any], reward_row) -> dict[str, bool]:
     """Which _passes_global_gates condition(s) failed — diagnosis mirror, keep in sync."""
     return {
         "collision": reward_row.collision_step is not None,
-        "rb_crossing": not _rb_gate_ok(reward_row, rb_dist_floor),
+        "rb_crossing": bool(reward_row.rb_crossing),
         "lane_crossing": bool(reward_row.lane_crossing),
         "static_crossing": bool(reward_row.static_crossing),
         "kinematic_violated": bool(reward_row.kinematic_violated),
@@ -507,7 +481,6 @@ def _repairs_source_labels(
     reward_row,
     *,
     min_static_margin: float,
-    rb_dist_floor: float | None = None,
 ) -> bool:
     # Paper-faithful recoverability (R2LPL Eq. recoverability): a candidate is valid iff
     # it is RULE-FEASIBLE (q_i > 0) — safety / drivable / route / static-margin. Expert /
@@ -515,10 +488,16 @@ def _repairs_source_labels(
     # soft, deviation-class-weighted term (c_E, dropped entirely for far-off states,
     # w_E=0). So expert_disagreement is handled by the soft r2lpl_score ranking in
     # _best_safe_candidate, not by rejecting conflict-flagged candidates here.
-    if not _passes_global_gates(label_row, reward_row, rb_dist_floor=rb_dist_floor):
+    #
+    # NOTE: the road-border gate is ABSOLUTE (any crossing is rejected). An earlier
+    # expert-relative relaxation for shoulder-stop scenes was removed: rb_min_dist is an
+    # unsigned distance to the border, so it cannot distinguish a shoulder skim from a
+    # trajectory that crossed to the wrong side and ran far outside, making any distance
+    # floor unsafe. Re-enabling it needs a signed / side-aware containment metric.
+    if not _passes_global_gates(label_row, reward_row):
         return False
     for label in source_labels:
-        if label == "road_border_crossing" and not _rb_gate_ok(reward_row, rb_dist_floor):
+        if label == "road_border_crossing" and reward_row.rb_crossing:
             return False
         if label == "static_collision":
             if reward_row.static_crossing or float(reward_row.sc_min_dist) < min_static_margin:
@@ -543,7 +522,6 @@ def _best_safe_candidate(
     reference_traj: torch.Tensor | np.ndarray | None = None,
     morph_index: int | None = None,
     depart_index: int | None = None,
-    rb_dist_floor: float | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
     # Scripted candidates get a per-candidate outcome taxonomy in the meta
     # (selected / lost_selection / gate_rejected) keyed by their prefix.
@@ -552,13 +530,6 @@ def _best_safe_candidate(
         for prefix, idx_s in (("morph", morph_index), ("depart", depart_index))
         if idx_s is not None
     }
-    # The expert-relative rb floor is applied ONLY to the scripted expert-following
-    # candidates (morph / depart). They are constructed from the expert path, so allowing
-    # them to skim the border as much as the expert does is the intent; they cannot run
-    # far outside. Model / fan candidates always face the absolute rb gate — rb_min_dist is
-    # unsigned, so an unrestricted floor would also admit a candidate that crossed and
-    # continued far outside (large unsigned distance on the wrong side).
-    scripted_idx = set(scripted.values())
     accepted: list[tuple[float, float, float, int]] = []
     candidate_traj_list = None
     if candidate_trajs is not None:
@@ -569,7 +540,6 @@ def _best_safe_candidate(
             label_row,
             reward_row,
             min_static_margin=min_static_margin,
-            rb_dist_floor=rb_dist_floor if idx in scripted_idx else None,
         ):
             violation_score = _candidate_violation_score(label_row, reward_row)
             deviation_penalty = _candidate_deviation_penalty(
@@ -587,13 +557,11 @@ def _best_safe_candidate(
             "best_total": best_total,
             "best_sc_min_dist": best_sc,
         }
-        if rb_dist_floor is not None:
-            meta["rb_dist_floor"] = float(rb_dist_floor)
         for prefix, idx_s in scripted.items():
             meta[f"{prefix}_outcome"] = "gate_rejected"
             meta[f"{prefix}_labels"] = list(candidate_rows[idx_s].get("labels", []))
             meta[f"{prefix}_gate_flags"] = _global_gate_flags(
-                candidate_rows[idx_s], reward_rows[idx_s], rb_dist_floor=rb_dist_floor
+                candidate_rows[idx_s], reward_rows[idx_s]
             )
         return None, meta
 
@@ -900,31 +868,9 @@ def build_repaired_targets(
             name = _output_name_for_scene(row["scene_path"])
 
             expert_traj = det_traj = None
-            rb_dist_floor = None
             if is_expert and (repair_expert_gt_candidate or enable_depart_morph):
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
-                # Expert-relative road-border floor: when the logged expert's own
-                # future crosses the absolute rb gate (e.g. shoulder stops), gate
-                # candidates against the expert's clearance instead — otherwise no
-                # expert-following repair can ever be accepted on these scenes.
-                expert_tensor = torch.from_numpy(np.ascontiguousarray(expert_traj)).to(
-                    device=device, dtype=scene_trajs.dtype
-                )
-                expert_reward = compute_reward_batch(expert_tensor[None], scoring_data, rcfg)[0]
-                if expert_reward.rb_crossing:
-                    # rb_min_dist is the UNSIGNED min distance to the border (crossing =
-                    # < rb_cross_thresh). The floor "candidate stays at least as far from
-                    # the border as the expert" is only safe for the scripted expert-
-                    # following candidates (see _best_safe_candidate), which track the
-                    # expert path and cannot run far outside; it is NOT applied to model/
-                    # fan candidates.
-                    rb_dist_floor = float(expert_reward.rb_min_dist) - _EXPERT_RB_FLOOR_SLACK_M
-                    print(
-                        f"  expert rb floor {name}: expert future crosses rb "
-                        f"(min dist {expert_reward.rb_min_dist:.3f} m) -> scripted-candidate "
-                        f"floor {rb_dist_floor:.3f} m"
-                    )
             scripted_kwargs = dict(
                 scene_path=str(row["scene_path"]),
                 data=data,
@@ -1015,7 +961,6 @@ def build_repaired_targets(
                 reference_traj=reference_traj,
                 morph_index=morph_index if morph_added else None,
                 depart_index=depart_index if depart_added else None,
-                rb_dist_floor=rb_dist_floor,
             )
             morph_selected = bool(morph_added and best_idx == morph_index)
             depart_selected = bool(depart_added and best_idx == depart_index)

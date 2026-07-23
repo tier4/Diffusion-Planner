@@ -659,6 +659,16 @@ def main() -> None:
                 f"chunk_len={args.chunk_len}. Use e.g. --chunk_len {horizon * 2} so each pose "
                 "has a full realized future to score."
             )
+        # The realized reward reconstructs the shown neighbor future from the sim tracker;
+        # in `recorded` mode there is no shown-motion telemetry, so the reward would be
+        # scored with neighbors dropped (collision/TTC/static neutralized) and be
+        # misleadingly safety-blind. Require `sim` rather than silently mis-score.
+        if str(args.neighbor_history_mode) != "sim":
+            raise ValueError(
+                "--realized_reward requires --neighbor_history_mode sim (got "
+                f"{args.neighbor_history_mode!r}); the recorded path cannot supply the shown "
+                "neighbor future, so the reward would drop all neighbor-safety terms."
+            )
         # Piggyback the otherwise-free per-step danger_scorer hook to capture the
         # realized trajectory + contexts in memory during THIS rollout, then score
         # reward once at the end. No second simulation, no disk save/reload.
