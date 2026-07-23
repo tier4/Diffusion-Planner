@@ -7,6 +7,15 @@ import torch
 
 
 def openjson(path):
+    """Load a json file; transparently handles zstd-compressed ``*.zst`` files."""
+    if str(path).endswith(".zst"):
+        import io
+
+        import zstandard
+
+        with open(path, "rb") as f:
+            reader = zstandard.ZstdDecompressor().stream_reader(f)
+            return json.load(io.TextIOWrapper(reader, encoding="utf-8"))
     with open(path, "r", encoding="utf-8") as f:
         dict = json.load(f)
     return dict
