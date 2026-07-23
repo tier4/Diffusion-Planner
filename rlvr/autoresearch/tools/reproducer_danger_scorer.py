@@ -377,10 +377,7 @@ def build_realized_event_scorer(
             row["expert_disagreement_realized_lag"] = False
             if realized_lag_gap_m is not None:
                 row["expert_disagreement_realized_gap_m"] = float(realized_lag_gap_m)
-            if (
-                not row["expert_disagreement"]
-                and realized_lag_streak >= REALIZED_LAG_SUSTAIN_STEPS
-            ):
+            if not row["expert_disagreement"] and realized_lag_streak >= REALIZED_LAG_SUSTAIN_STEPS:
                 row["expert_disagreement"] = True
                 row["expert_disagreement_step"] = step
                 row["expert_disagreement_reason"] = "model_lagging_expert"
@@ -466,7 +463,9 @@ def build_realized_reward_scorer(
             sid = id(s)
             poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
             if wbu:
-                nbr_world.setdefault(sid, {})[k] = {u: np.asarray(p, dtype=np.float64) for u, p in wbu.items()}
+                nbr_world.setdefault(sid, {})[k] = {
+                    u: np.asarray(p, dtype=np.float64) for u, p in wbu.items()
+                }
             snaps = int(getattr(s, "snap_count", 0))
             if snaps > last_snaps.get(sid, 0):
                 teleport_ks.setdefault(sid, set()).add(k)  # a teleport landed at this step

@@ -1837,17 +1837,13 @@ def run_segments_batched(
                             # construction). Compare the realized ego arc position to
                             # the expert clock arc position on the recorded polyline;
                             # the scorer flags once the gap sustains long enough.
-                            lag_thr = getattr(
-                                realized_event_scorer, "expert_lag_thresholds", None
-                            )
+                            lag_thr = getattr(realized_event_scorer, "expert_lag_thresholds", None)
                             if lag_thr is not None and _s.replay_mode == "clock":
                                 if _s.route_arc_s is None:
                                     seg_d = np.linalg.norm(
                                         np.diff(ref_polyline_world, axis=0), axis=1
                                     )
-                                    _s.route_arc_s = np.concatenate(
-                                        [[0.0], np.cumsum(seg_d)]
-                                    )
+                                    _s.route_arc_s = np.concatenate([[0.0], np.cumsum(seg_d)])
                                 ego_arc = float(
                                     project_points_to_polyline(
                                         _s.live_pose[None, :2],

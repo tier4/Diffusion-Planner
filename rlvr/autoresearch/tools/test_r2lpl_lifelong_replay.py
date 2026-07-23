@@ -2771,9 +2771,9 @@ def test_realized_event_scorer_realized_lag_flags_on_sustained_streak(tmp_path):
     )
     # Expert drives 5 -> 15 m; the proposal matches its schedule exactly, so none of
     # the frozen 3 branches fires on its own.
-    expert_future_world = np.stack(
-        [np.linspace(5.0, 15.0, 81), np.zeros(81)], axis=1
-    ).astype(np.float32)
+    expert_future_world = np.stack([np.linspace(5.0, 15.0, 81), np.zeros(81)], axis=1).astype(
+        np.float32
+    )
     expert_future_speed = np.full((81,), 1.25, dtype=np.float32)
     model_pred_world = expert_future_world[1:].copy()
 
@@ -5041,8 +5041,12 @@ def test_rb_gate_expert_relative_floor():
     from rlvr.autoresearch.tools.build_repaired_targets import _rb_gate_ok
 
     clean = _morph_outcome_reward_row(1.0)  # not crossing
-    at_expert = SimpleNamespace(**{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.15})
-    closer = SimpleNamespace(**{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.05})
+    at_expert = SimpleNamespace(
+        **{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.15}
+    )
+    closer = SimpleNamespace(
+        **{**vars(_morph_outcome_reward_row(1.0, rb_crossing=True)), "rb_min_dist": 0.05}
+    )
 
     # No floor: any crossing is rejected (absolute gate).
     assert _rb_gate_ok(clean, None) is True
@@ -5072,23 +5076,36 @@ def test_best_safe_candidate_rb_floor_only_relaxes_scripted_candidates():
     xrow = lambda: SimpleNamespace(  # noqa: E731
         **{**vars(_morph_outcome_reward_row(2.0, rb_crossing=True)), "rb_min_dist": 0.12}
     )
-    rows = [_morph_outcome_candidate_row(["road_border_crossing"]),
-            _morph_outcome_candidate_row(["road_border_crossing"])]
+    rows = [
+        _morph_outcome_candidate_row(["road_border_crossing"]),
+        _morph_outcome_candidate_row(["road_border_crossing"]),
+    ]
 
     # No floor: both crossing candidates gate-rejected.
     idx, meta = _best_safe_candidate(
-        source_row, rows, [xrow(), xrow()], min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0, candidate_trajs=[depart, model],
-        reference_traj=expert, depart_index=0,
+        source_row,
+        rows,
+        [xrow(), xrow()],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[depart, model],
+        reference_traj=expert,
+        depart_index=0,
     )
     assert idx is None and meta["depart_outcome"] == "gate_rejected"
 
     # Floor set (0.10): the scripted depart (idx 0, clearance 0.12 >= 0.10) is admitted and
     # selected; the model candidate (idx 1) is NOT relaxed and stays rejected.
     idx, meta = _best_safe_candidate(
-        source_row, rows, [xrow(), xrow()], min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0, candidate_trajs=[depart, model],
-        reference_traj=expert, depart_index=0, rb_dist_floor=0.15 - 0.05,
+        source_row,
+        rows,
+        [xrow(), xrow()],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[depart, model],
+        reference_traj=expert,
+        depart_index=0,
+        rb_dist_floor=0.15 - 0.05,
     )
     assert idx == 0
     assert meta["depart_outcome"] == "selected"
@@ -5203,22 +5220,28 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
     """finalize() must clear its internal buffers so a second finalize on no new data
     does not re-score the same poses."""
     import rlvr.reward as _reward
-    monkeypatch.setattr(_reward, "compute_reward_batch",
-                        lambda ego, data, cfg: [SimpleNamespace(total=1.0)])
+
+    monkeypatch.setattr(
+        _reward, "compute_reward_batch", lambda ego, data, cfg: [SimpleNamespace(total=1.0)]
+    )
     import tempfile
     from pathlib import Path as _P
+
     with tempfile.TemporaryDirectory() as td:
         rc, _ = _write_realized_scorer_configs(_P(td))
         hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
             reward_config=rc, device="cpu", horizon=2, sample_step=1
         )
-        nd = {"ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-              "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
-              "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
-              "ego_agent_past": np.zeros((21, 3), dtype=np.float32)}
+        nd = {
+            "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+            "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+            "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+            "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
+        }
         seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
         for k in range(4):
-            seg.k = k; seg.live_pose = np.array([float(k), 0.0, 0.0])
+            seg.k = k
+            seg.live_pose = np.array([float(k), 0.0, 0.0])
             hook([(seg, nd)], None, None, "cpu")
         _, n_first = finalize()
         _, n_second = finalize()  # no new data
