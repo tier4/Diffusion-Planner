@@ -4,6 +4,7 @@ version = "4.0.0"
 description = "Diffusion Planner workspace"
 requires-python = ">=3.10,<3.11"
 dependencies = [
+    "dataset-curation",
     "diffusion-planner",
     "exploration-policy",
     "guidance-gui",
@@ -28,6 +29,7 @@ default = true
 
 [tool.uv.workspace]
 members = [
+    "dataset_curation",
     "diffusion_planner",
     "exploration_policy",
     "planner_metrics",
@@ -39,6 +41,7 @@ members = [
 ]
 
 [tool.uv.sources]
+dataset-curation = { workspace = true }
 diffusion-planner = { workspace = true }
 exploration-policy = { workspace = true }
 planner-metrics = { workspace = true }
