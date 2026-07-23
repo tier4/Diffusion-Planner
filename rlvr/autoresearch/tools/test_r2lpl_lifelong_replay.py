@@ -5201,7 +5201,7 @@ def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypat
         mean2, n2 = finalize()
         # k=0 {1,2,3}, k=1 {2,3,4} valid; k=2 needs {3,4,5} -> 5 absent -> skip. So 2 scored.
         assert n2 == 2, f"expected 2 scored poses in batch 2, got {n2}"
-        # running total accumulates across batches (n2 is cumulative), reward ~3.0 each
+        # running total accumulates across batches (n2 cumulative); fake reward = intra-window fwd disp
         assert mean2 == pytest.approx(2.0, abs=1e-6)  # fake reward = intra-window forward disp
 
 

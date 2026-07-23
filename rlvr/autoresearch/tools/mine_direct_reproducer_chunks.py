@@ -762,6 +762,9 @@ def main() -> None:
         # Realized reward is scored + accumulated + buffers cleared PER BATCH: this
         # run_segments_batched call owns a fresh set of _SegState objects, so finalizing
         # here bounds context memory to one batch and avoids cross-batch id(s) aliasing.
+        # Invariant this relies on: len(work_units) <= args.batch_size (guaranteed above),
+        # and the same batch_size is passed to run_segments_batched, so its internal
+        # sub-batch loop runs exactly once per call -> no id(s) reuse within one finalize().
         if realized_reward_finalize is not None:
             realized_reward_finalize()
         for chunk, result in zip(kept_chunks, results):
