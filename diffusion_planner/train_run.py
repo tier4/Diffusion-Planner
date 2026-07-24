@@ -9,6 +9,7 @@ train_predictor.py under torch.distributed.run. train_predictor.py itself is unc
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -32,6 +33,16 @@ def parse_args() -> argparse.Namespace:
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
         "list of such dirs (like --train_set_list). Empty = disabled.",
     )
+    p.add_argument(
+        "--override_open_loop_list",
+        default="",
+        help="optional JSON mapping override Open-loop metric names to NPZ path lists. Empty = disabled.",
+    )
+    p.add_argument(
+        "--override_open_loop_config",
+        default="",
+        help="optional JSON containing Override Open-loop validation interval and metric parameters.",
+    )
     return p.parse_args()
 
 
@@ -41,6 +52,21 @@ def main() -> None:
     here = Path(__file__).resolve().parent
     save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
+
+    if bool(args.override_open_loop_list) != bool(args.override_open_loop_config):
+        raise ValueError(
+            "--override_open_loop_list and --override_open_loop_config must be supplied together"
+        )
+    if args.override_open_loop_config:
+        override_list = Path(args.override_open_loop_list).resolve()
+        if not override_list.is_file():
+            raise FileNotFoundError(f"Override Open-loop list not found: {override_list}")
+        override_config = Path(args.override_open_loop_config).resolve()
+        if not override_config.is_file():
+            raise FileNotFoundError(f"Override Open-loop config not found: {override_config}")
+        # Preserve the evaluation settings with the run, but deliberately do not copy the
+        # (potentially large and externally managed) NPZ-list JSON.
+        shutil.copy2(override_config, save_path / override_config.name)
 
     # Save git info next to the run.
     for name, cmd in (("git_show.txt", ["git", "show", "-s"]), ("git_diff.txt", ["git", "diff"])):
@@ -86,6 +112,10 @@ def main() -> None:
         "10",
         "--closed_loop_npz_root",
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
+        "--override_open_loop_list",
+        str(Path(args.override_open_loop_list).resolve()) if args.override_open_loop_list else "",
+        "--override_open_loop_config",
+        str(Path(args.override_open_loop_config).resolve()) if args.override_open_loop_config else "",
         *optional,
     ]
     rc = tee_run(

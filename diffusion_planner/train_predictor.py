@@ -261,6 +261,21 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
 
+    # Override Open-loop validation. The list selects samples per metric; the config supplies
+    # the validation cadence and metric-specific parameters.
+    parser.add_argument(
+        "--override_open_loop_list",
+        type=str,
+        default="",
+        help="JSON mapping Override Open-loop metric names to NPZ path lists. Empty = disabled.",
+    )
+    parser.add_argument(
+        "--override_open_loop_config",
+        type=str,
+        default="",
+        help="JSON containing Override Open-loop validation interval and metric parameters.",
+    )
+
     # Deterministic
     parser.add_argument(
         "--deterministic",

@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.override_validation.validate import override_open_loop_validate
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
@@ -519,6 +520,8 @@ def model_training(args: TrainConfig):
                 },
                 step=epoch + 1,
             )
+
+            override_open_loop_validate(diffusion_planner, args, epoch)
 
             curr_data = {
                 "epoch": epoch + 1,
