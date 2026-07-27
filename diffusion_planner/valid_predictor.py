@@ -1,10 +1,12 @@
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.override_validation.open_loop import run_override_open_loop_validation
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
@@ -57,6 +59,9 @@ def get_args(args_list=None):
     parser.add_argument("--resume_model_path", type=str, required=True)
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
+    parser.add_argument("--override_open_loop_list", type=str, default=None)
+    parser.add_argument("--override_open_loop_config", type=str, default=None)
+    parser.add_argument("--override_only", action="store_true")
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
@@ -102,6 +107,13 @@ def get_args(args_list=None):
 def run_validation(valid_cfg: ValidConfig):
     """Core logic for validation."""
 
+    if bool(valid_cfg.override_open_loop_list) != bool(valid_cfg.override_open_loop_config):
+        raise ValueError(
+            "--override_open_loop_list and --override_open_loop_config must be supplied together"
+        )
+    if valid_cfg.override_only and not valid_cfg.override_open_loop_list:
+        raise ValueError("--override_only requires Override Open-loop list and config")
+
     # 1. Restore model configuration from training settings (args.json)
     config_obj = Config(valid_cfg.args_json_path)
 
@@ -127,6 +139,77 @@ def run_validation(valid_cfg: ValidConfig):
 
     # set seed
     set_seed(valid_cfg.seed + global_rank)
+
+    # set up model (restore structure using training config_obj)
+    diffusion_planner = Diffusion_Planner(config_obj)
+    diffusion_planner = diffusion_planner.to(
+        rank if valid_cfg.device == "cuda" else valid_cfg.device
+    )
+
+    if valid_cfg.ddp:
+        diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
+
+    if global_rank == 0:
+        print(
+            "Model Params: {}".format(
+                sum(p.numel() for p in ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters())
+            )
+        )
+
+    # optimizer (dummy)
+    params = [{"params": ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters(), "lr": 0.0}]
+    optimizer = optim.AdamW(params)
+
+    # load weights
+    print(f"Model loaded from {valid_cfg.resume_model_path}")
+    model_ema = ModelEma(diffusion_planner, decay=0.999, device=valid_cfg.device)
+
+    diffusion_planner, _, _, _, _, _ = resume_model(
+        valid_cfg.resume_model_path,
+        diffusion_planner,
+        optimizer,
+        None,  # scheduler is not needed
+        model_ema,
+        valid_cfg.device,
+        use_ddp=valid_cfg.ddp,
+    )
+
+    if valid_cfg.ddp:
+        torch.distributed.barrier()
+
+    if valid_cfg.override_open_loop_list:
+        if global_rank == 0:
+            output_root = (
+                Path(valid_cfg.save_predictions_dir).parent
+                if valid_cfg.save_predictions_dir
+                else Path(valid_cfg.args_json_path).parent
+            )
+            summary_path = output_root / "override_open_loop" / "summary.json"
+            override_args = SimpleNamespace(
+                override_open_loop_list=valid_cfg.override_open_loop_list,
+                override_open_loop_config=valid_cfg.override_open_loop_config,
+                batch_size=valid_cfg.batch_size,
+                num_workers=valid_cfg.num_workers,
+                pin_mem=valid_cfg.pin_mem,
+                device=valid_cfg.device,
+                observation_normalizer=config_obj.observation_normalizer,
+                ddp=False,
+            )
+            summary = run_override_open_loop_validation(
+                ddp.get_model(diffusion_planner, valid_cfg.ddp),
+                override_args,
+            )
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+            print(f"override-open-loop summary: {summary_path}")
+
+        if valid_cfg.ddp:
+            torch.distributed.barrier()
+        if valid_cfg.override_only:
+            return
+
+    if valid_cfg.valid_set_list is None:
+        raise ValueError("--valid_set_list is required for standard validation")
 
     # set up data loaders
     valid_set = DiffusionPlannerData(valid_cfg.valid_set_list)
@@ -171,43 +254,6 @@ def run_validation(valid_cfg: ValidConfig):
                     0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
                 )
             )
-
-    if valid_cfg.ddp:
-        torch.distributed.barrier()
-
-    # set up model (restore structure using training config_obj)
-    diffusion_planner = Diffusion_Planner(config_obj)
-    diffusion_planner = diffusion_planner.to(
-        rank if valid_cfg.device == "cuda" else valid_cfg.device
-    )
-
-    if valid_cfg.ddp:
-        diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
-
-    if global_rank == 0:
-        print(
-            "Model Params: {}".format(
-                sum(p.numel() for p in ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters())
-            )
-        )
-
-    # optimizer (dummy)
-    params = [{"params": ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters(), "lr": 0.0}]
-    optimizer = optim.AdamW(params)
-
-    # load weights
-    print(f"Model loaded from {valid_cfg.resume_model_path}")
-    model_ema = ModelEma(diffusion_planner, decay=0.999, device=valid_cfg.device)
-
-    diffusion_planner, _, _, _, _, _ = resume_model(
-        valid_cfg.resume_model_path,
-        diffusion_planner,
-        optimizer,
-        None,  # scheduler is not needed
-        model_ema,
-        valid_cfg.device,
-        use_ddp=valid_cfg.ddp,
-    )
 
     if valid_cfg.ddp:
         torch.distributed.barrier()
