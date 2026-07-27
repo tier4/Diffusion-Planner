@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="checkpoint .pth to validate; defaults to <model_dir>/best_model.pth",
     )
+    p.add_argument(
+        "--output_dir",
+        default="",
+        help="validation output root; defaults to a timestamped directory under --model_dir",
+    )
     p.add_argument("--valid_set_list", default="")
     p.add_argument("--override_open_loop_list", default="")
     p.add_argument("--override_open_loop_config", default="")
@@ -51,7 +56,13 @@ def main() -> None:
         raise FileNotFoundError(f"Validation checkpoint not found: {model_path}")
     if not args_json_path.is_file():
         raise FileNotFoundError(f"Validation args.json not found: {args_json_path}")
-    save_dir = model_dir / f"validation_result_{datetime.now():%Y%m%d_%H%M%S}" / "predictions"
+    output_root = (
+        Path(args.output_dir)
+        if args.output_dir
+        else model_dir / f"validation_result_{datetime.now():%Y%m%d_%H%M%S}"
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    save_dir = output_root / "predictions"
 
     here = Path(__file__).resolve().parent
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
@@ -90,7 +101,7 @@ def main() -> None:
         )
     if args.override_only:
         cmd.append("--override_only")
-    rc = tee_run(cmd, cwd=here, log_path=save_dir.parent / "valid_log.txt")
+    rc = tee_run(cmd, cwd=here, log_path=output_root / "valid_log.txt")
     sys.exit(rc)
 
 
