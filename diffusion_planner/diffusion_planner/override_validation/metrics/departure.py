@@ -36,9 +36,7 @@ def evaluate_departure(
 
     horizon_seconds, minimum_displacement_m = _parameters(parameters)
     _, available_steps, _ = prediction.shape
-    horizon_steps = min(
-        int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), available_steps
-    )
+    horizon_steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), available_steps)
     if horizon_steps < 1:
         raise ValueError("departure horizon selects zero prediction steps")
 
@@ -52,5 +50,7 @@ def evaluate_departure(
         )
     displacement_m = (prediction[:, :horizon_steps, :2] - initial_xy[:, None]).norm(dim=-1)
     max_displacement_m = displacement_m.max(dim=1).values
-    failure_rate_percent = (max_displacement_m < minimum_displacement_m).to(prediction.dtype) * 100.0
+    failure_rate_percent = (max_displacement_m < minimum_displacement_m).to(
+        prediction.dtype
+    ) * 100.0
     return {"failure_rate_percent": failure_rate_percent}

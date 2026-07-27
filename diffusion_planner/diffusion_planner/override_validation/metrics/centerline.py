@@ -12,7 +12,9 @@ def _horizon_seconds(parameters: dict) -> float:
     return horizon_seconds
 
 
-def _lane_batch(inputs: dict[str, torch.Tensor], batch_size: int, device: torch.device) -> torch.Tensor:
+def _lane_batch(
+    inputs: dict[str, torch.Tensor], batch_size: int, device: torch.device
+) -> torch.Tensor:
     """Extract route-centerline tensors as ``(B, lane, point, feature)``."""
     lanes = inputs.get("route_lanes")
     if lanes is None:
@@ -25,7 +27,9 @@ def _lane_batch(inputs: dict[str, torch.Tensor], batch_size: int, device: torch.
     # DataLoader collates it to [B, 1, lane, point, feature].
     if lanes.ndim == 5:
         if lanes.shape[1] != 1:
-            raise ValueError(f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}")
+            raise ValueError(
+                f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}"
+            )
         lanes = lanes[:, 0]
     elif lanes.ndim == 3:
         lanes = lanes.unsqueeze(0)
@@ -90,9 +94,7 @@ def evaluate_centerline(
         # at the ego origin valid, unlike an x/y-only nonzero check.
         valid_points = lane_features[..., :4].abs().sum(dim=-1) > 1e-6
         distances.append(
-            _point_to_polylines_min_dist(
-                prediction_xy[batch_index], centerlines, valid_points
-            )
+            _point_to_polylines_min_dist(prediction_xy[batch_index], centerlines, valid_points)
         )
     per_timestep_distance = torch.stack(distances, dim=0)
     return {

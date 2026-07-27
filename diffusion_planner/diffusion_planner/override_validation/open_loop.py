@@ -39,7 +39,9 @@ def _load_json_object(path: str, label: str) -> dict:
     return payload
 
 
-def load_override_open_loop_settings(list_path: str, config_path: str) -> tuple[dict[str, list[str]], dict]:
+def load_override_open_loop_settings(
+    list_path: str, config_path: str
+) -> tuple[dict[str, list[str]], dict]:
     """Load and validate the metric-to-NPZ list plus its shared configuration."""
     if bool(list_path) != bool(config_path):
         raise ValueError(
@@ -55,7 +57,9 @@ def load_override_open_loop_settings(list_path: str, config_path: str) -> tuple[
         raise ValueError("Override Open-loop config field 'metrics' must be an object")
     interval = raw_config.get("interval_epochs", 1)
     if not isinstance(interval, int) or interval < 1:
-        raise ValueError("Override Open-loop config field 'interval_epochs' must be an integer >= 1")
+        raise ValueError(
+            "Override Open-loop config field 'interval_epochs' must be an integer >= 1"
+        )
 
     lists: dict[str, list[str]] = {}
     for metric_name, paths in raw_lists.items():
@@ -65,7 +69,9 @@ def load_override_open_loop_settings(list_path: str, config_path: str) -> tuple[
                 f"supported: {sorted(METRICS)}"
             )
         if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-            raise ValueError(f"Override Open-loop list for {metric_name!r} must be a list of strings")
+            raise ValueError(
+                f"Override Open-loop list for {metric_name!r} must be a list of strings"
+            )
         if not isinstance(metric_parameters.get(metric_name, {}), dict):
             raise ValueError(f"Override Open-loop parameters for {metric_name!r} must be an object")
         lists[metric_name] = paths
@@ -119,7 +125,11 @@ def run_override_open_loop_validation(model, args) -> dict[str, dict[str, float]
                 for key, value in scorer(
                     outputs["prediction"][:, 0], metric_inputs, parameters
                 ).items():
-                    if not torch.is_tensor(value) or value.ndim != 1 or value.shape[0] != batch_size:
+                    if (
+                        not torch.is_tensor(value)
+                        or value.ndim != 1
+                        or value.shape[0] != batch_size
+                    ):
                         raise ValueError(
                             f"Override metric {metric_name!r} output {key!r} must be a "
                             f"per-sample 1-D tensor of length {batch_size}"

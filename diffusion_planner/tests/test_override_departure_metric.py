@@ -1,5 +1,4 @@
 import torch
-
 from diffusion_planner.override_validation.metrics.departure import evaluate_departure
 
 

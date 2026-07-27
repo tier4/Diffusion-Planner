@@ -115,7 +115,9 @@ def main() -> None:
         "--override_open_loop_list",
         str(Path(args.override_open_loop_list).resolve()) if args.override_open_loop_list else "",
         "--override_open_loop_config",
-        str(Path(args.override_open_loop_config).resolve()) if args.override_open_loop_config else "",
+        str(Path(args.override_open_loop_config).resolve())
+        if args.override_open_loop_config
+        else "",
         *optional,
     ]
     rc = tee_run(
