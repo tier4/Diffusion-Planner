@@ -34,7 +34,19 @@ def evaluate_departure(
     if "ego_current_state" not in inputs:
         raise ValueError("departure metric requires ego_current_state in the NPZ")
 
-    horizon_seconds, minimum_displacement_m = _parameters(parameters)
+    _, minimum_displacement_m = _parameters(parameters)
+    max_displacement_m = departure_max_displacement(prediction, inputs, parameters)
+    failure_rate_percent = (max_displacement_m < minimum_displacement_m).to(
+        prediction.dtype
+    ) * 100.0
+    return {"failure_rate_percent": failure_rate_percent}
+
+
+def departure_max_displacement(
+    prediction: torch.Tensor, inputs: dict[str, torch.Tensor], parameters: dict
+) -> torch.Tensor:
+    """Return each sample's maximum displacement within the departure horizon."""
+    horizon_seconds, _ = _parameters(parameters)
     _, available_steps, _ = prediction.shape
     horizon_steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), available_steps)
     if horizon_steps < 1:
@@ -49,8 +61,4 @@ def evaluate_departure(
             f"current={tuple(initial_xy.shape)}, prediction={tuple(prediction.shape)}"
         )
     displacement_m = (prediction[:, :horizon_steps, :2] - initial_xy[:, None]).norm(dim=-1)
-    max_displacement_m = displacement_m.max(dim=1).values
-    failure_rate_percent = (max_displacement_m < minimum_displacement_m).to(
-        prediction.dtype
-    ) * 100.0
-    return {"failure_rate_percent": failure_rate_percent}
+    return displacement_m.max(dim=1).values

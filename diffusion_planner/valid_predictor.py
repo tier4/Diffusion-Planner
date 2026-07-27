@@ -198,6 +198,8 @@ def run_validation(valid_cfg: ValidConfig):
             summary = run_override_open_loop_validation(
                 ddp.get_model(diffusion_planner, valid_cfg.ddp),
                 override_args,
+                visualization_dir=output_root / "override_open_loop" / "visualization",
+                details_dir=output_root / "override_open_loop" / "details",
             )
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.write_text(json.dumps(summary, indent=2) + "\n")

@@ -47,7 +47,6 @@ def main() -> None:
         raise ValueError("--override_only requires Override Open-loop list and config")
     if args.batch_size < 1:
         raise ValueError("--batch_size must be at least 1")
-
     model_dir = Path(args.model_dir)
     valid_set_list = args.valid_set_list
     model_path = Path(args.checkpoint) if args.checkpoint else model_dir / "best_model.pth"

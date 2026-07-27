@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from diffusion_planner.override_validation.metrics import METRICS
+from diffusion_planner.override_validation.metrics.departure import departure_max_displacement
 
 
 class _NpzPathDataset(Dataset):
@@ -80,7 +81,12 @@ def load_override_open_loop_settings(
 
 
 @torch.no_grad()
-def run_override_open_loop_validation(model, args) -> dict[str, dict[str, float]]:
+def run_override_open_loop_validation(
+    model,
+    args,
+    visualization_dir: str | Path | None = None,
+    details_dir: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
     """Run configured Override Open-loop metrics once and return scalar summaries.
 
     This intentionally runs on one process only.  Callers own rank selection and
@@ -101,6 +107,16 @@ def run_override_open_loop_validation(model, args) -> dict[str, dict[str, float]
     try:
         summaries: dict[str, dict[str, float]] = {}
         metric_parameters = config.get("metrics", {})
+        visualization_root = Path(visualization_dir) if visualization_dir is not None else None
+        details_root = Path(details_dir) if details_dir is not None else None
+        if visualization_root is not None:
+            visualization_root.mkdir(parents=True, exist_ok=True)
+            from diffusion_planner.override_validation.visualize import (
+                visualize_override_prediction,
+            )
+        for root in (details_root,):
+            if root is not None:
+                root.mkdir(parents=True, exist_ok=True)
         for metric_name, paths in metric_lists.items():
             loader = DataLoader(
                 _NpzPathDataset(paths),
@@ -114,17 +130,28 @@ def run_override_open_loop_validation(model, args) -> dict[str, dict[str, float]
             count = 0
             scorer = METRICS[metric_name]
             parameters = metric_parameters.get(metric_name, {})
+            details: list[dict] = []
             for inputs in loader:
+                raw_inputs = {
+                    key: value.detach().clone() if torch.is_tensor(value) else value
+                    for key, value in inputs.items()
+                }
                 prepared = _prepare_validation_inputs(inputs, args, args.device)
                 _, outputs = model(prepared.inputs)
                 # Match validate_model's metric convention: model predictions are
                 # physical coordinates and metrics receive denormalized inputs.
                 metric_inputs = args.observation_normalizer.inverse(prepared.inputs)
                 batch_size = int(outputs["prediction"].shape[0])
+                ego_prediction = outputs["prediction"][:, 0]
+                batch_start = count
                 count += batch_size
-                for key, value in scorer(
-                    outputs["prediction"][:, 0], metric_inputs, parameters
-                ).items():
+                per_sample_scores = scorer(ego_prediction, metric_inputs, parameters)
+                departure_displacements = (
+                    departure_max_displacement(ego_prediction, metric_inputs, parameters)
+                    if metric_name == "departure"
+                    else None
+                )
+                for key, value in per_sample_scores.items():
                     if (
                         not torch.is_tensor(value)
                         or value.ndim != 1
@@ -135,6 +162,58 @@ def run_override_open_loop_validation(model, args) -> dict[str, dict[str, float]
                             f"per-sample 1-D tensor of length {batch_size}"
                         )
                     totals[key] += float(value.detach().float().sum().item())
+
+                for batch_index in range(batch_size):
+                    sample_index = batch_start + batch_index
+                    detail = {
+                        "sample_index": sample_index,
+                        "source_npz": str(paths[sample_index]),
+                        "metrics": {
+                            key: float(value[batch_index].detach().float().item())
+                            for key, value in per_sample_scores.items()
+                        },
+                    }
+                    if metric_name == "departure":
+                        horizon_seconds = float(parameters["horizon_seconds"])
+                        minimum_displacement_m = float(parameters["minimum_displacement_m"])
+                        max_displacement_m = departure_displacements[batch_index].item()
+                        detail["departure"] = {
+                            "horizon_seconds": horizon_seconds,
+                            "minimum_displacement_m": minimum_displacement_m,
+                            "max_displacement_m": max_displacement_m,
+                            "departed": max_displacement_m >= minimum_displacement_m,
+                        }
+                    if visualization_root is not None:
+                        sample_inputs = {
+                            key: value[batch_index : batch_index + 1]
+                            if torch.is_tensor(value)
+                            else value
+                            for key, value in raw_inputs.items()
+                        }
+                        visualize_override_prediction(
+                            sample_inputs,
+                            ego_prediction[batch_index],
+                            visualization_root
+                            / metric_name
+                            / f"sample_{batch_start + batch_index:08d}.png",
+                            f"{metric_name} sample {sample_index}",
+                            show_neighbors=False,
+                            view_range=60.0,
+                        )
+                        detail["visualization_png"] = str(
+                            visualization_root
+                            / metric_name
+                            / f"sample_{sample_index:08d}.png"
+                        )
+                    details.append(detail)
+
+            if details_root is not None:
+                details_path = details_root / metric_name / "details.jsonl"
+                details_path.parent.mkdir(parents=True, exist_ok=True)
+                details_path.write_text(
+                    "".join(json.dumps(detail, ensure_ascii=False) + "\n" for detail in details),
+                    encoding="utf-8",
+                )
 
             summaries[metric_name] = {"sample_count": float(count)}
             summaries[metric_name].update(

@@ -83,7 +83,7 @@ def draw_bounding_box(ax, x, y, cos, sin, len_x, len_y, color, alpha):
         )
 
 
-def draw_ego_vehicle(ax, inputs):
+def draw_ego_vehicle(ax, inputs, show_future=True):
     """Draw ego vehicle, its past and future trajectories."""
     ego_state = inputs["ego_current_state"][0]
     ego_x, ego_y = ego_state[0], ego_state[1]
@@ -140,7 +140,7 @@ def draw_ego_vehicle(ax, inputs):
         #     )
 
     # Draw future trajectory
-    if "ego_agent_future" in inputs:
+    if show_future and "ego_agent_future" in inputs:
         ego_future = inputs["ego_agent_future"][0]
         valid_indices = ~((ego_future[:, 0] == 0) & (ego_future[:, 1] == 0))
         if np.any(valid_indices):
@@ -330,7 +330,7 @@ def draw_lanes(ax, inputs):
         ax.add_collection(lc_lanes)
 
 
-def draw_route(ax, inputs):
+def draw_route(ax, inputs, color="olive", label=None):
     """Draw route lanes."""
     route_lanes = inputs["route_lanes"][0]
 
@@ -340,8 +340,9 @@ def draw_route(ax, inputs):
             route_lanes[i, :, 1],
             alpha=0.5,
             linewidth=2,
-            color="olive",
+            color=color,
             linestyle="--",
+            label=label if i == 0 else None,
         )
 
 
@@ -444,6 +445,10 @@ def visualize_inputs(
     view_ranges: list = None,
     annotation: str | None = None,
     annotation_color: str = "red",
+    show_neighbors: bool = True,
+    show_ego_future: bool = True,
+    route_color: str = "olive",
+    route_label: str | None = None,
 ):
     """
     Draw the input data of the diffusion_planner model on the xy plane.
@@ -477,11 +482,12 @@ def visualize_inputs(
     # Handle single axis case for backward compatibility
     if ax is not None and len(view_ranges) == 1:
         # Single plot mode
-        ego_x, ego_y, ego_state = draw_ego_vehicle(ax, inputs)
-        draw_neighbor_agents(ax, inputs)
+        ego_x, ego_y, ego_state = draw_ego_vehicle(ax, inputs, show_future=show_ego_future)
+        if show_neighbors:
+            draw_neighbor_agents(ax, inputs)
         draw_static_objects(ax, inputs)
         draw_lanes(ax, inputs)
-        draw_route(ax, inputs)
+        draw_route(ax, inputs, color=route_color, label=route_label)
         draw_goal_pose(ax, inputs)
         draw_polygons_and_lines(ax, inputs)
         setup_axis(ax, ego_x, ego_y, ego_state, view_ranges[0], inputs)
@@ -501,11 +507,14 @@ def visualize_inputs(
         current_ax = axes[i]
 
         # Draw all components
-        ego_x, ego_y, ego_state = draw_ego_vehicle(current_ax, inputs)
-        draw_neighbor_agents(current_ax, inputs)
+        ego_x, ego_y, ego_state = draw_ego_vehicle(
+            current_ax, inputs, show_future=show_ego_future
+        )
+        if show_neighbors:
+            draw_neighbor_agents(current_ax, inputs)
         draw_static_objects(current_ax, inputs)
         draw_lanes(current_ax, inputs)
-        draw_route(current_ax, inputs)
+        draw_route(current_ax, inputs, color=route_color, label=route_label)
         draw_goal_pose(current_ax, inputs)
         draw_polygons_and_lines(current_ax, inputs)
         setup_axis(current_ax, ego_x, ego_y, ego_state, view_range, inputs)
