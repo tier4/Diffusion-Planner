@@ -24,6 +24,7 @@ import torch
 
 from rlvr.autoresearch.tools.reproducer_danger_scorer import (
     build_realized_event_scorer,
+    build_realized_reward_scorer,
     load_credit_windows,
 )
 from scenario_generation.perf_timer import Timers
@@ -136,11 +137,8 @@ def iter_direct_chunks(
 ) -> Iterator[Chunk]:
     if chunk_len < 2:
         raise ValueError(f"chunk_len must be >= 2, got {chunk_len}")
-    if start_stride < chunk_len:
-        raise ValueError(
-            f"start_stride ({start_stride}) must be >= chunk_len ({chunk_len}); "
-            "overlapping chunks are intentionally unsupported in the streaming direct miner"
-        )
+    if start_stride < 1:
+        raise ValueError(f"start_stride must be >= 1, got {start_stride}")
     if expected_frame_step < 1:
         raise ValueError(f"expected_frame_step must be >= 1, got {expected_frame_step}")
     if min_chunk_len is None:
@@ -160,27 +158,37 @@ def iter_direct_chunks(
     candidate_idx = 0
     seen = 0
     yielded = 0
-    while max_scenes is None or seen < max_scenes:
-        block: list[Path] = []
-        for _ in range(start_stride):
+    # Sliding read-ahead buffer: each candidate window needs chunk_len paths, and the
+    # cursor advances by start_stride between candidates. With start_stride >= chunk_len
+    # this degenerates to the original block reader (window read, tail skipped); with
+    # start_stride < chunk_len the buffer retains the overlap so consecutive windows
+    # share paths — still a single pass over the scene list.
+    read_ahead = max(chunk_len, start_stride)
+    buf: list[Path] = []
+    exhausted = False
+    while True:
+        while len(buf) < read_ahead and not exhausted:
             if max_scenes is not None and seen >= max_scenes:
+                exhausted = True
                 break
             try:
-                block.append(next(paths))
+                buf.append(next(paths))
             except StopIteration:
+                exhausted = True
                 break
             seen += 1
-        if not block:
+        if not buf:
             break
 
         global_start = candidate_idx * start_stride
         candidate_idx += 1
+        window = buf[:chunk_len]
+        buf = buf[start_stride:]
         if (global_start // start_stride) % num_shards != shard_index:
             continue
         if sample_fraction < 1.0 and _sample_value(global_start, sample_seed) >= sample_fraction:
             continue
 
-        window = block[:chunk_len]
         kept = [window[0]]
         end_reason = "chunk_len"
         for next_path in window[1:]:
@@ -340,6 +348,8 @@ def _credit_row_from_saved_scene(scene_path: Path, manifest: dict, label: str) -
         "expert_disagreement_expert_end_progress",
         "expert_disagreement_model_end_speed",
         "expert_disagreement_expert_end_speed",
+        "expert_disagreement_realized_lag",
+        "expert_disagreement_realized_gap_m",
     ):
         if key in manifest:
             row[key] = manifest[key]
@@ -454,6 +464,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out_jsonl", type=Path, default=None)
     parser.add_argument("--segments_jsonl", type=Path, required=True)
     parser.add_argument("--summary_json", type=Path, default=None)
+    parser.add_argument(
+        "--realized_reward",
+        action="store_true",
+        help=(
+            "also compute the realized closed-loop reward (reward.py total on the driven "
+            "trajectory, per pose) during this same rollout and write it to the summary. "
+            "Uses --danger_reward_config. No extra simulation, no disk save/reload."
+        ),
+    )
+    parser.add_argument("--realized_reward_sample_step", type=int, default=10)
     parser.add_argument("--plan_only", action="store_true")
     parser.add_argument("--chunk_len", type=int, default=80)
     parser.add_argument("--start_stride", type=int, default=80)
@@ -626,6 +646,39 @@ def main() -> None:
             )
         danger_credit_windows = load_credit_windows(args.danger_credit_window_config)
 
+    realized_reward_finalize = None
+    if not args.plan_only and args.realized_reward:
+        # The realized reward scores each sampled pose's H-step DRIVEN future, so a chunk
+        # must contain at least H+1 steps or no pose ever has a full future and the metric
+        # would silently be NaN over 0 poses. Fail loudly instead (the default chunk_len ==
+        # future_len == 80 hits exactly this).
+        horizon = int(model_args.future_len)
+        if int(args.chunk_len) <= horizon:
+            raise ValueError(
+                f"--realized_reward requires chunk_len > model future_len ({horizon}); got "
+                f"chunk_len={args.chunk_len}. Use e.g. --chunk_len {horizon * 2} so each pose "
+                "has a full realized future to score."
+            )
+        # The realized reward reconstructs the shown neighbor future from the sim tracker;
+        # in `recorded` mode there is no shown-motion telemetry, so the reward would be
+        # scored with neighbors dropped (collision/TTC/static neutralized) and be
+        # misleadingly safety-blind. Require `sim` rather than silently mis-score.
+        if str(args.neighbor_history_mode) != "sim":
+            raise ValueError(
+                "--realized_reward requires --neighbor_history_mode sim (got "
+                f"{args.neighbor_history_mode!r}); the recorded path cannot supply the shown "
+                "neighbor future, so the reward would drop all neighbor-safety terms."
+            )
+        # Piggyback the otherwise-free per-step danger_scorer hook to capture the
+        # realized trajectory + contexts in memory during THIS rollout, then score
+        # reward once at the end. No second simulation, no disk save/reload.
+        danger_scorer, realized_reward_finalize = build_realized_reward_scorer(
+            reward_config=args.danger_reward_config,
+            device=device,
+            horizon=horizon,
+            sample_step=int(args.realized_reward_sample_step),
+        )
+
     args.segments_jsonl.parent.mkdir(parents=True, exist_ok=True)
     skipped_path = args.segments_jsonl.with_suffix(".skipped.jsonl")
     summary_path = args.summary_json or args.segments_jsonl.with_suffix(".summary.json")
@@ -727,6 +780,14 @@ def main() -> None:
             unstick_after=args.unstick_after,
             unstick_advance_m=args.unstick_advance_m,
         )
+        # Realized reward is scored + accumulated + buffers cleared PER BATCH: this
+        # run_segments_batched call owns a fresh set of _SegState objects, so finalizing
+        # here bounds context memory to one batch and avoids cross-batch id(s) aliasing.
+        # Invariant this relies on: len(work_units) <= args.batch_size (guaranteed above),
+        # and the same batch_size is passed to run_segments_batched, so its internal
+        # sub-batch loop runs exactly once per call -> no id(s) reuse within one finalize().
+        if realized_reward_finalize is not None:
+            realized_reward_finalize()
         for chunk, result in zip(kept_chunks, results):
             row = {**_chunk_row(chunk), **result.metrics}
             fout.write(json.dumps(row, sort_keys=True, default=float) + "\n")
@@ -779,6 +840,16 @@ def main() -> None:
         if credit_f is not None:
             credit_f.close()
 
+    realized_cl_reward = None
+    realized_cl_reward_poses = 0
+    if realized_reward_finalize is not None:
+        t_rew = time.perf_counter()
+        realized_cl_reward, realized_cl_reward_poses = realized_reward_finalize()
+        print(
+            f"[realized_reward] mean={realized_cl_reward:.4f} over "
+            f"{realized_cl_reward_poses} poses ({time.perf_counter() - t_rew:.1f}s)"
+        )
+
     elapsed = time.perf_counter() - t0
     summary = {
         "scene_list": None if args.scene_list is None else str(args.scene_list),
@@ -798,6 +869,8 @@ def main() -> None:
         "simulated_chunks": int(n_simulated),
         "skipped_chunks": int(n_skipped),
         "credit_rows": int(n_credit_rows),
+        "realized_cl_reward": realized_cl_reward,
+        "realized_cl_reward_poses": int(realized_cl_reward_poses),
         "elapsed_sec": round(elapsed, 3),
         "chunks_per_sec": n_simulated / elapsed if elapsed > 0 and n_simulated else 0.0,
         "timers": timers.report(max(1, n_simulated)) if n_simulated else "",

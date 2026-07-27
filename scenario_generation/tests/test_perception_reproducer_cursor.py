@@ -97,3 +97,22 @@ def test_nearest_only_cursor_does_not_rewind(tmp_path):
     assert cur.step(np.array([5 * SPACING_M, 0.0]), 5.0, 0.0) == 5
     assert cur.step(np.array([0.0, 0.0]), 0.0, 0.1) == 5
     assert cur.max_idx_reached == 5
+
+
+def test_zero_radius_repeat_when_ego_stationary(tmp_path):
+    """search_radius=0: first pick of an index is normal; republishing it is repeat."""
+    tl = _straight_route(tmp_path, n=12)
+    cur = PerceptionReproducer(tl, search_radius=0.0)
+    cur.reset(0)
+    xy = np.array([0.0, 0.0])
+
+    assert cur.step(xy, 0.0, 0.0) == 0
+    assert cur.last_was_repeat is False and cur.normal_steps == 1
+
+    assert cur.step(xy, 0.0, 0.1) == 0
+    assert cur.last_was_repeat is True and cur.repeat_steps == 1
+
+    # Moving to a new nearest frame advances again (normal).
+    assert cur.step(np.array([1.1, 0.0]), 5.0, 0.2) == 2
+    assert cur.last_was_repeat is False
+    assert cur.normal_steps == 2

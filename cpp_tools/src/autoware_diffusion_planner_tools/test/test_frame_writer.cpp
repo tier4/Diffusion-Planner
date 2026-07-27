@@ -21,7 +21,7 @@ namespace
 {
 BagMetadata make_test_metadata()
 {
-  return {"log-id-1", "vehicle-id-1", "x2_dev", "1847-ver", "2026-01-16", "10-03-35"};
+  return {"log-id-1", "vehicle-id-1", "x2_dev", "1847-ver", "2026-01-16", "10-03-35", "", ""};
 }
 }  // namespace
 

@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -41,6 +42,25 @@ def find_upward(start_file: str, target_name: str) -> Path:
     raise FileNotFoundError(f"{target_name} up {directory}")
 
 
+def _add_path_list_compressed(artifact: wandb.Artifact, path: Path, tmp_dir: Path) -> None:
+    """Attach a path-list json to the artifact as zstd-compressed ``<name>.zst``.
+
+    Raw path lists are multi-GB of near-identical absolute paths; zstd shrinks them
+    ~100x in a few seconds. openjson() reads ``*.zst`` transparently on download.
+    """
+    try:
+        import zstandard
+    except ImportError:
+        print(f"zstandard not installed; uploading {path.name} uncompressed.")
+        artifact.add_file(str(path), name=path.name)
+        return
+    dst = tmp_dir / f"{path.name}.zst"
+    cctx = zstandard.ZstdCompressor(level=3, threads=-1)
+    with open(path, "rb") as fin, open(dst, "wb") as fout:
+        cctx.copy_stream(fin, fout)
+    artifact.add_file(str(dst), name=dst.name)
+
+
 def log_dataset_artifact(
     run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str
 ) -> None:
@@ -49,21 +69,23 @@ def log_dataset_artifact(
         type="dataset",
         metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
     )
-    train_path = Path(train_set_list)
-    valid_path = Path(valid_set_list)
-    artifact.add_file(str(train_path), name=train_path.name)
-    artifact.add_file(str(valid_path), name=valid_path.name)
-    try:
-        summary_csv = find_upward(train_set_list, "summary.csv")
-        artifact.add_file(str(summary_csv), name="summary.csv")
-    except FileNotFoundError:
-        print("summary.csv not found, skipping.")
-    try:
-        rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
-        artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
-    except FileNotFoundError:
-        print("rosbag_summary.csv not found, skipping.")
-    run.use_artifact(artifact)
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        _add_path_list_compressed(artifact, Path(train_set_list), tmp_dir)
+        _add_path_list_compressed(artifact, Path(valid_set_list), tmp_dir)
+        try:
+            summary_csv = find_upward(train_set_list, "summary.csv")
+            artifact.add_file(str(summary_csv), name="summary.csv")
+        except FileNotFoundError:
+            print("summary.csv not found, skipping.")
+        try:
+            rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
+            artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
+        except FileNotFoundError:
+            print("rosbag_summary.csv not found, skipping.")
+        # add_file() copies into wandb's staging cache, so the temp dir can be
+        # removed as soon as use_artifact() returns.
+        run.use_artifact(artifact)
 
 
 def mean_ego_loss(loss_dict):

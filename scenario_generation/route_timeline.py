@@ -287,6 +287,31 @@ class RouteTimeline:
         _, i = self.kdtree.query(xy)
         return int(i)
 
+    def index_ahead_by_arc_length(self, start_idx: int, distance_m: float) -> int:
+        """First recorded-frame index at least ``distance_m`` of bag arc length ahead of
+        ``start_idx``.
+
+        Accumulates the 2D distance between consecutive recorded ego poses forward from
+        ``start_idx`` and returns the first index whose cumulative arc length reaches
+        ``distance_m`` (clamped to the last frame if the route ends first). Arc length along
+        the recorded path, not Euclidean distance from a query point. Used by the rollout's
+        unstick teleport to pick a target ahead; mirrors Autoware ``find_perturb_index_along_bag``.
+        """
+        n = len(self)
+        start_idx = int(max(0, min(start_idx, n - 1)))
+        if start_idx + 1 >= n:
+            return start_idx
+        # Always advance at least one frame so an unstick teleport cannot re-land on the
+        # same anchor (distance_m <= 0 would otherwise return start_idx unchanged).
+        if distance_m <= 0.0:
+            return start_idx + 1
+        accumulated = 0.0
+        for i in range(start_idx, n - 1):
+            accumulated += float(np.linalg.norm(self.poses[i + 1, :2] - self.poses[i, :2]))
+            if accumulated >= distance_m:
+                return i + 1
+        return n - 1
+
     def iter_segments(self, seg_len: int, stride: int | None = None):
         """Yield (start, end) frame-index windows of length ``seg_len`` (10 Hz).
 

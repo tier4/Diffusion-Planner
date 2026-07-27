@@ -27,6 +27,8 @@ struct BagMetadata
   std::string map_version_id;
   std::string date;
   std::string bag_time;
+  std::string t4_dataset_id;
+  std::string t4_dataset_version_id;
 };
 
 BagMetadata load_bag_metadata(const std::string & rosbag_path);

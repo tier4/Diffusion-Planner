@@ -23,6 +23,7 @@ dependencies = [
     "torch",
     "tqdm",
     "wandb",
+    "zstandard>=0.25.0",
 ]
 
 [build-system]

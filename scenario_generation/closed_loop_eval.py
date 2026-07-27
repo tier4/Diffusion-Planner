@@ -77,7 +77,10 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
     total_steps = sum(r["n_steps_run"] for r in rows)
     total_collision_steps = sum(r["n_collision_steps"] for r in rows)
     total_near_miss_steps = sum(r["n_near_miss_steps"] for r in rows)
-    total_snaps = sum(r["n_snaps"] for r in rows)
+    total_snaps = sum(r["snap_count"] for r in rows)
+    total_expand = sum(r["expand_count"] for r in rows)
+    total_normal = sum(r["normal_steps"] for r in rows)
+    total_repeat = sum(r["repeat_steps"] for r in rows)
 
     n_seg_collision = sum(1 for r in rows if r["n_collision_steps"] > 0)
     n_seg_near_miss = sum(1 for r in rows if r["n_near_miss_steps"] > 0)
@@ -110,6 +113,10 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
         if finite_mean_cl
         else float("inf"),
         "total_snaps": total_snaps,
+        "total_expand_count": total_expand,
+        "total_normal_steps": total_normal,
+        "total_repeat_steps": total_repeat,
+        "repeat_step_rate": total_repeat / total_steps if total_steps else 0.0,
         "terminated_counts": term_counts,
     }
 
@@ -168,6 +175,7 @@ def run_closed_loop_eval(
     tracker_mode: str = "mpc",
     verbose: bool = True,
     shard: tuple[int, int] | None = None,
+    yaw_gate: bool = True,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -246,6 +254,7 @@ def run_closed_loop_eval(
                 draw_every=draw_every,
                 neighbor_history_mode=neighbor_history_mode,
                 tracker_mode=tracker_mode,
+                yaw_gate=yaw_gate,
             )
             row = {"route": key, **metrics}
             fout.write(json.dumps(row, default=float) + "\n")

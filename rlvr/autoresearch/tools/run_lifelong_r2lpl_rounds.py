@@ -485,6 +485,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         ),
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
+        "realized_reward": bool(workflow.get("realized_reward", False)),
+        "final_round_mining": bool(
+            workflow.get("final_round_mining", workflow.get("realized_reward", False))
+        ),
         "perception_mining": perception_mining,
         "repair_refresh_every_epochs": int(
             _first_non_null(
@@ -901,6 +905,11 @@ def _perception_mining_cmd(
     if bool(cfg.get("count_rear_end_collisions", False)):
         # Keep realized-event mining rear-end-consistent with the repair side.
         cmd.append("--count_rear_end_collisions")
+    if bool(cfg.get("realized_reward", False)) or bool(mining.get("realized_reward", False)):
+        # Compute the realized closed-loop reward on the driven trajectory in the
+        # same rollout (no extra sim, no disk save/reload) and write it to the
+        # mining summary. The reward reflects the checkpoint THIS mine ran with.
+        cmd.append("--realized_reward")
     return cmd, danger_save_dir
 
 
@@ -1070,7 +1079,7 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
     through by original path.
     """
-    from scenario_generation.reproducer_rollout import _future_to_4col
+    from planner_metrics.scene_format import future_to_4col as _future_to_4col
 
     out: list[str] = []
     for path in paths:
@@ -2071,6 +2080,18 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         "elapsed_sec": max((float(s.get("elapsed_sec", 0.0)) for s in summaries), default=0.0),
         "shards": summaries,
     }
+    # Realized closed-loop reward: pose-count-weighted mean across shards (each shard
+    # scored a disjoint set of poses). Without this the sharded/multi-GPU summary would
+    # drop the field the single-GPU path emits.
+    rr_poses = sum(int(s.get("realized_cl_reward_poses", 0)) for s in summaries)
+    if rr_poses > 0:
+        rr_sum = sum(
+            float(s.get("realized_cl_reward", 0.0)) * int(s.get("realized_cl_reward_poses", 0))
+            for s in summaries
+            if s.get("realized_cl_reward") is not None
+        )
+        aggregate["realized_cl_reward"] = rr_sum / rr_poses
+        aggregate["realized_cl_reward_poses"] = rr_poses
     _write_json(output, aggregate)
     return aggregate
 
@@ -2593,6 +2614,12 @@ def _summarize_round(
         "phase_peak_memory_mb": {k: None for k in sorted(phase_times)},
         "next_model_path": str(next_model_path),
     }
+    # Propagate the realized closed-loop reward (from this round's mining, i.e. the
+    # incoming checkpoint) into the round summary so workflow_summary.json can compare
+    # per-round checkpoints. None when --realized_reward was not enabled.
+    if mining_summary.get("realized_cl_reward") is not None:
+        summary["realized_cl_reward"] = mining_summary["realized_cl_reward"]
+        summary["realized_cl_reward_poses"] = int(mining_summary.get("realized_cl_reward_poses", 0))
     if guard_metrics is not None:
         summary["guards"] = guard_metrics
     _write_json(rdir / "round_summary.json", summary)
@@ -2802,8 +2829,41 @@ def main() -> None:
         workflow_summary.append(_load_json(rdir / "round_summary.json"))
         print(f"[round {round_idx}] next model: {model_path}")
 
+    # Final-round mining: one closed-loop mine with the LAST round's checkpoint so
+    # its residual problem-scene count AND realized closed-loop reward are recorded
+    # (every earlier round's final model is already covered by the next round's mine;
+    # the last round has no successor, so it needs this pass). Enabled whenever
+    # realized-reward is on, or explicitly via final_round_mining.
+    want_final_mine = bool(cfg.get("final_round_mining", cfg.get("realized_reward", False)))
+    final_round = None
+    if not args.dry_run and want_final_mine and not str(cfg.get("training_backend")) == "none":
+        fdir = out / "final_round_mine"
+        fdir.mkdir(parents=True, exist_ok=True)
+        print(f"[final] mining residual problems + realized reward with {model_path}")
+        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        fsum = _load_json(fdir / "perception_direct_summary.json")
+        # Represent the final-round mine in the operator-facing summary contract, not
+        # just stdout: the last round's checkpoint has no successor mine, so this is the
+        # only place its residual counts + realized reward appear.
+        final_round = {
+            "checkpoint": str(model_path),
+            "residual_credit_rows": int(fsum.get("credit_rows", 0)),
+            "residual_event_count_by_label": _derive_event_counts_from_credit_rows(
+                _read_jsonl(fdir / "credit_windows.jsonl")
+            ),
+            "realized_cl_reward": fsum.get("realized_cl_reward"),
+            "realized_cl_reward_poses": int(fsum.get("realized_cl_reward_poses", 0)),
+        }
+        print(
+            f"[final] residual credit_rows={final_round['residual_credit_rows']} "
+            f"realized_cl_reward={final_round['realized_cl_reward']}"
+        )
+
     if not args.dry_run:
-        _write_json(out / "workflow_summary.json", {"rounds": workflow_summary})
+        workflow_out = {"rounds": workflow_summary}
+        if final_round is not None:
+            workflow_out["final_round_mine"] = final_round
+        _write_json(out / "workflow_summary.json", workflow_out)
         if reference_metrics is not None and guard_rows:
             report = _selection_report(reference_metrics, guard_rows)
             _write_json(out / "selection_report.json", report)

@@ -48,6 +48,8 @@ TEST_F(BagMetadataTest, ValidJsonAllFields)
     "vehicle_id": "cfa23601-97c4-4d47-a37e-edfc7e080d8c",
     "project_id": "x2_dev",
     "area_map_version_id": "1847-20250819054643702212",
+    "t4_dataset_id": "ds-001",
+    "t4_dataset_version_id": "7",
     "log_file_name": "cfa23601-97c4-4d47-a37e-edfc7e080d8c_2026-01-16-10-03-35_p0900_0.db3.zst"
   })");
 
@@ -59,6 +61,8 @@ TEST_F(BagMetadataTest, ValidJsonAllFields)
   EXPECT_EQ(meta.map_version_id, "1847-20250819054643702212");
   EXPECT_EQ(meta.date, "2026-01-16");
   EXPECT_EQ(meta.bag_time, "10-03-35");
+  EXPECT_EQ(meta.t4_dataset_id, "ds-001");
+  EXPECT_EQ(meta.t4_dataset_version_id, "7");
 }
 
 TEST_F(BagMetadataTest, MissingFileReturnsEmptyStrings)
@@ -71,6 +75,8 @@ TEST_F(BagMetadataTest, MissingFileReturnsEmptyStrings)
   EXPECT_EQ(meta.map_version_id, "");
   EXPECT_EQ(meta.date, "");
   EXPECT_EQ(meta.bag_time, "");
+  EXPECT_EQ(meta.t4_dataset_id, "");
+  EXPECT_EQ(meta.t4_dataset_version_id, "");
 }
 
 TEST_F(BagMetadataTest, MalformedJsonReturnsEmptyStrings)
@@ -98,6 +104,22 @@ TEST_F(BagMetadataTest, MissingIndividualFieldsPartiallyPopulated)
   EXPECT_EQ(meta.map_version_id, "");
   EXPECT_EQ(meta.date, "");
   EXPECT_EQ(meta.bag_time, "");
+  EXPECT_EQ(meta.t4_dataset_id, "");
+  EXPECT_EQ(meta.t4_dataset_version_id, "");
+}
+
+TEST_F(BagMetadataTest, T4DatasetFieldsAreLoaded)
+{
+  write_json(R"({
+    "id": "abc-123",
+    "t4_dataset_id": "ds-001",
+    "t4_dataset_version_id": "7"
+  })");
+
+  const BagMetadata meta = load_bag_metadata(tmp_dir_.string());
+
+  EXPECT_EQ(meta.t4_dataset_id, "ds-001");
+  EXPECT_EQ(meta.t4_dataset_version_id, "7");
 }
 
 TEST_F(BagMetadataTest, LogFileNameWithoutDateTimePattern)

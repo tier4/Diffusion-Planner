@@ -91,6 +91,14 @@ def parse_args() -> argparse.Namespace:
         help="if still stuck this many steps AFTER the radius was widened, fall back to the hard "
         "teleport onto the GT pose ahead (last resort)",
     )
+    p.add_argument(
+        "--yaw_gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="pose mode only: drop recorded frames whose heading differs from live ego by "
+        "more than pi/2 (threshold fixed at pi/2; --no-yaw-gate disables). No-op in clock "
+        "mode, which never calls cursor.step (closed-loop/R2LPL default)",
+    )
     p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
     p.add_argument(
         "--replan_interval",
@@ -136,6 +144,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
+        yaw_gate=args.yaw_gate,
     )
 
 
@@ -242,7 +251,11 @@ def main() -> None:
         f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
         f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
     )
-    print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
+    print(
+        f"total_snaps={summary['total_snaps']} expand={summary.get('total_expand_count', 0)} "
+        f"repeat_steps={summary.get('total_repeat_steps', 0)} "
+        f"terminated={summary['terminated_counts']}"
+    )
     print(f"videos: one <route>.mp4 per route in {out_dir}")
 
 

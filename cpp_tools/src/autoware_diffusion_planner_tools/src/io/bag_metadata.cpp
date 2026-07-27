@@ -68,6 +68,8 @@ BagMetadata load_bag_metadata(const std::string & rosbag_path)
     meta.vehicle_id = get_string_or_empty(j, "vehicle_id");
     meta.project_id = get_string_or_empty(j, "project_id");
     meta.map_version_id = get_string_or_empty(j, "area_map_version_id");
+    meta.t4_dataset_id = get_string_or_empty(j, "t4_dataset_id");
+    meta.t4_dataset_version_id = get_string_or_empty(j, "t4_dataset_version_id");
 
     const std::string log_file_name = get_string_or_empty(j, "log_file_name");
     if (!log_file_name.empty()) {
@@ -90,4 +92,6 @@ void write_bag_metadata(nlohmann::json & j, const BagMetadata & bag_metadata)
   j["map_version_id"] = bag_metadata.map_version_id;
   j["date"] = bag_metadata.date;
   j["bag_time"] = bag_metadata.bag_time;
+  j["t4_dataset_id"] = bag_metadata.t4_dataset_id;
+  j["t4_dataset_version_id"] = bag_metadata.t4_dataset_version_id;
 }

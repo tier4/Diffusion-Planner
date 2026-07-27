@@ -104,10 +104,12 @@ class SyntheticColliderInjector:
     def _rand(self, lo, hi, device):
         return torch.rand((), device=device) * (hi - lo) + lo
 
-    def _make_neighbor(self, ego_xy, device):
-        """Build one (past[31,11], future[80,3]) colliding neighbor for a single scene.
+    def _make_neighbor(self, ego_xy, device, future_cols):
+        """Build one (past[31,11], future[80,future_cols]) colliding neighbor for a scene.
 
         ego_xy: [80, 2] ego GT future positions (ego frame, metres).
+        future_cols: 3 -> [x, y, heading] (legacy) or 4 -> [x, y, cos, sin] (canonical);
+        must match the batch's ``neighbor_agents_future`` width.
 
         The collision is aimed at a GT waypoint that is **at least ``keep_clear_radius`` from
         the ego's t=0 position (the origin)**, and any candidate whose path passes within
@@ -205,9 +207,9 @@ class SyntheticColliderInjector:
         if best is None:
             return None  # no origin-clearing candidate found within max_tries
         _, p0, v0, a = best
-        return self._assemble(p0, v0, a, tau_p, tau_f, spec, width, length, device)
+        return self._assemble(p0, v0, a, tau_p, tau_f, spec, width, length, device, future_cols)
 
-    def _assemble(self, p0, v0, a, tau_p, tau_f, spec, width, length, device):
+    def _assemble(self, p0, v0, a, tau_p, tau_f, spec, width, length, device, future_cols):
         def motion(tau):  # tau [M] -> pos [M,2], vel [M,2]
             t = tau[:, None]
             pos = p0[None, :] + v0[None, :] * t + 0.5 * a[None, :] * (t * t)
@@ -240,8 +242,12 @@ class SyntheticColliderInjector:
         past[:, _WIDTH], past[:, _LENGTH] = width, length
         past[:, _TYPE_BASE + spec["idx"]] = 1.0
 
-        future = torch.zeros(OUTPUT_T, 3, device=device)
-        future[:, 0], future[:, 1], future[:, 2] = fut_pos[:, 0], fut_pos[:, 1], h_fut
+        future = torch.zeros(OUTPUT_T, future_cols, device=device)
+        future[:, 0], future[:, 1] = fut_pos[:, 0], fut_pos[:, 1]
+        if future_cols == 4:
+            future[:, 2], future[:, 3] = torch.cos(h_fut), torch.sin(h_fut)
+        else:
+            future[:, 2] = h_fut
         return past, future
 
     @torch.no_grad()
@@ -258,10 +264,13 @@ class SyntheticColliderInjector:
         of slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
         neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
-        neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]
+        neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3 or 4]
         ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device
         B, Pn = neighbor_past.shape[:2]
+        future_cols = neighbor_future.shape[-1]
+        if future_cols not in (3, 4):
+            raise ValueError(f"neighbor_agents_future must be 3- or 4-col, got {future_cols}")
 
         empty = (neighbor_past != 0.0).any(dim=(2, 3)).logical_not()  # [B, Pn]
         injected = torch.zeros(B, Pn, dtype=torch.bool, device=device)
@@ -285,7 +294,7 @@ class SyntheticColliderInjector:
             chosen = torch.randperm(n_positions, device=device)[:k]
 
             for slot in chosen:
-                out = self._make_neighbor(ego_xy, device)
+                out = self._make_neighbor(ego_xy, device, future_cols)
                 if out is None:
                     continue  # couldn't build an avoidable collider for this scene/slot
                 past, future = out

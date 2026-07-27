@@ -80,6 +80,7 @@ import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 
+from planner_metrics.scene_format import future_to_4col
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 from rlvr.reward import compute_lane_departure_penalty
@@ -94,19 +95,7 @@ def _wrap_angle(rad: float) -> float:
     return float((rad + math.pi) % (2 * math.pi) - math.pi)
 
 
-def _future_to_4col(arr: np.ndarray) -> np.ndarray:
-    """Futures are ALWAYS 4-col [x,y,cos,sin]; widen legacy 3-col [x,y,heading].
-    4-col passes through; invalid (zero) rows stay zero."""
-    arr = np.asarray(arr, dtype=np.float32)
-    if arr.shape[-1] == 4:
-        return arr
-    mask = np.abs(arr[..., :2]).sum(-1) == 0
-    h = arr[..., 2]
-    out = np.concatenate(
-        [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
-    ).astype(np.float32)
-    out[mask] = 0.0
-    return out
+_future_to_4col = future_to_4col
 
 
 def _rotate_past_about_pivot(
@@ -557,9 +546,14 @@ def _apply_inverse_rigid_to_spatial(
     # --- ego_agent_future (T, 4) [x, y, cos, sin] — zeros mark invalid steps.
     # Legacy 3-col [x,y,yaw] is widened first; we never keep/emit 3-col futures. ---
     if "ego_agent_future" in out:
-        fut = _future_to_4col(np.asarray(out["ego_agent_future"], dtype=np.float32))
+        raw = np.asarray(out["ego_agent_future"], dtype=np.float32)
+        # Validity from the RAW row: a stopped ego recorded at the origin keeps a
+        # nonzero heading channel (yaw for 3-col, cos/sin for 4-col) while padding
+        # rows are all-zero. (A 3-col origin row with yaw exactly 0 remains
+        # indistinguishable from padding and is treated as padding, as before.)
+        valid = np.any(raw != 0, axis=-1)
+        fut = _future_to_4col(raw, zero_rows_are_padding=False)
         out["ego_agent_future"] = fut
-        valid = (fut[:, 0] != 0) | (fut[:, 1] != 0)
         _xy_inv(fut, 0, 1)
         _dir_inv(fut, 2, 3)  # rotate the (cos,sin) heading vector, not wrap a yaw scalar
         fut[~valid] = 0
@@ -1066,7 +1060,9 @@ def main(argv: Iterable[str] | None = None) -> None:
                     pass
 
                 # Widen the legacy baseline prediction to 4-col; never save 3-col.
-                perturbed["ego_agent_future"] = _future_to_4col(fut.astype(np.float32))
+                perturbed["ego_agent_future"] = _future_to_4col(
+                    fut.astype(np.float32), zero_rows_are_padding=False
+                )
                 np.savez(out_path, **perturbed)
             else:
                 # Skip baseline inference. Source NPZ's ego_agent_future

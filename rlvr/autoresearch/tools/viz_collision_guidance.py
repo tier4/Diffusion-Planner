@@ -44,6 +44,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from planner_metrics.scene_format import future_to_4col
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.audit_static_collision import (
     _ZONE_COLORS,
@@ -81,10 +82,7 @@ def _score_traj(
     if nb_fut_raw.ndim == 4:
         nb_fut_raw = nb_fut_raw[0]
     nb_fut_raw = nb_fut_raw[:, :T, :]
-    yaw = nb_fut_raw[..., 2:3]
-    nb_fut_4 = np.concatenate([nb_fut_raw[..., :2], np.cos(yaw), np.sin(yaw)], axis=-1).astype(
-        np.float32
-    )
+    nb_fut_4 = future_to_4col(nb_fut_raw)
 
     neighbor_futures = torch.from_numpy(nb_fut_4).to(device)
     slot_valid = neighbor_futures[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
@@ -306,10 +304,7 @@ def _draw_scene_figure(
         _nb_fut_raw = _nb_fut_raw[0]
     _T = trajs_np.shape[1]
     _nb_fut_raw = _nb_fut_raw[:, :_T, :]
-    _yaw = _nb_fut_raw[..., 2:3]
-    _nb_fut_4 = np.concatenate([_nb_fut_raw[..., :2], np.cos(_yaw), np.sin(_yaw)], axis=-1).astype(
-        np.float32
-    )
+    _nb_fut_4 = future_to_4col(_nb_fut_raw)
     _neighbor_futures = _t.from_numpy(_nb_fut_4)
     _slot_valid = _neighbor_futures[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
     if _slot_valid.any():

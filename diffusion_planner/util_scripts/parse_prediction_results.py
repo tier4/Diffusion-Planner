@@ -12,29 +12,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _future_to_angle3(arr: np.ndarray) -> np.ndarray:
+    """(.., T, 3 or 4) -> fresh (.., T, 3) [x, y, heading_rad]."""
+    if arr.shape[-1] == 3:
+        return arr.copy()
+    if arr.shape[-1] == 4:
+        heading = np.arctan2(arr[..., 3], arr[..., 2])
+        return np.concatenate([arr[..., :2], heading[..., None]], axis=-1)
+    raise ValueError(f"future must be 3- or 4-col, got {arr.shape}")
+
+
+def _future_to_cossin4(arr: np.ndarray) -> np.ndarray:
+    """(.., T, 3 or 4) -> fresh (.., T, 4) [x, y, cos, sin]."""
+    if arr.shape[-1] == 4:
+        return arr.copy()
+    if arr.shape[-1] == 3:
+        return np.concatenate([arr[..., :2], np.cos(arr[..., 2:3]), np.sin(arr[..., 2:3])], axis=-1)
+    raise ValueError(f"future must be 3- or 4-col, got {arr.shape}")
+
+
 def calc_loss(inputs, prediction) -> tuple:
-    ego_future = inputs["ego_agent_future"]  # (T, 3)
-    ego_future_original = ego_future.copy()  # 元の角度情報を保持
-    ego_future = np.concatenate(
-        [
-            ego_future[..., :2],
-            np.cos(ego_future[..., 2:3]),
-            np.sin(ego_future[..., 2:3]),
-        ],
-        axis=-1,
-    )  # (T, 4)
-    neighbors_future = inputs["neighbor_agents_future"]  # (P32, T, 3)
-    neighbors_future_original = neighbors_future.copy()  # 元の角度情報を保持
-    neighbor_future_mask = np.sum((neighbors_future[..., :3] != 0), axis=-1) == 0  # (P32, T)
-    neighbors_future = np.concatenate(
-        [
-            neighbors_future[..., :2],
-            np.cos(neighbors_future[..., 2:3]),
-            np.sin(neighbors_future[..., 2:3]),
-        ],
-        axis=-1,
-    )  # (P32, T, 4)
+    # Both ego and neighbor futures may be legacy 3-col [x, y, heading] or canonical
+    # 4-col [x, y, cos, sin]; keep an angle-space copy plus a cos/sin copy of each.
+    ego_future_original = _future_to_angle3(inputs["ego_agent_future"])  # (T, 3)
+    ego_future = _future_to_cossin4(inputs["ego_agent_future"])  # (T, 4)
+    neighbors_future_original = _future_to_angle3(
+        inputs["neighbor_agents_future"]
+    )  # (Pn, T, 3) 元の角度情報を保持
+    neighbors_future = _future_to_cossin4(inputs["neighbor_agents_future"])  # (Pn, T, 4)
+    # Padding mask from the RAW array: widening turns an all-zero 3-col padding row
+    # into (0, 0, 1, 0), so the mask must be computed before conversion.
+    raw_future = inputs["neighbor_agents_future"]
+    neighbor_future_mask = np.sum((raw_future[..., :3] != 0), axis=-1) == 0  # (Pn, T)
     neighbors_future[neighbor_future_mask] = 0.0
+    neighbors_future_original[neighbor_future_mask] = 0.0
 
     P32, T, _ = neighbors_future.shape
     ego_current, neighbors_current = (

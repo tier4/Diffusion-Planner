@@ -48,31 +48,6 @@ std::vector<float> cos_sin_to_heading(const std::vector<float> & data, size_t nu
   return result;
 }
 
-std::vector<float> cos_sin_to_heading_3d(const std::vector<float> & data, size_t dim0, size_t dim1)
-{
-  const size_t input_cols = 4;
-  const size_t output_cols = 3;
-  std::vector<float> result(dim0 * dim1 * output_cols);
-
-  for (size_t i = 0; i < dim0; ++i) {
-    for (size_t j = 0; j < dim1; ++j) {
-      const size_t base_in = (i * dim1 + j) * input_cols;
-      const size_t base_out = (i * dim1 + j) * output_cols;
-
-      const float x = data[base_in + 0];
-      const float y = data[base_in + 1];
-      const float cos_val = data[base_in + 2];
-      const float sin_val = data[base_in + 3];
-      const float heading = std::atan2(sin_val, cos_val);
-
-      result[base_out + 0] = x;
-      result[base_out + 1] = y;
-      result[base_out + 2] = heading;
-    }
-  }
-  return result;
-}
-
 }  // namespace
 
 void save_frame_data_npz(
@@ -107,7 +82,7 @@ void save_frame_data_npz(
 
   const std::string npz_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".npz";
 
-  const uint32_t version = 2;
+  const uint32_t version = 3;
   cnpy::npz_save_compressed(npz_filename, "version", &version, {1}, "w");
 
   const std::vector<float> ego_past_heading = cos_sin_to_heading(ego_past, INPUT_T_WITH_CURRENT);
@@ -126,11 +101,11 @@ void save_frame_data_npz(
     npz_filename, "neighbor_agents_past", neighbor_past.data(),
     {MAX_NUM_NEIGHBORS, INPUT_T_WITH_CURRENT, static_cast<size_t>(NEIGHBOR_PAST_DIM)}, "a");
 
-  const std::vector<float> neighbor_future_heading =
-    cos_sin_to_heading_3d(neighbor_future, MAX_NUM_NEIGHBORS, OUTPUT_T);
+  // Since version 3, neighbor futures are stored as [x, y, cos, sin] — the layout
+  // training consumes — instead of down-converting to [x, y, heading].
   cnpy::npz_save_compressed(
-    npz_filename, "neighbor_agents_future", neighbor_future_heading.data(),
-    {MAX_NUM_NEIGHBORS, OUTPUT_T, 3}, "a");
+    npz_filename, "neighbor_agents_future", neighbor_future.data(),
+    {MAX_NUM_NEIGHBORS, OUTPUT_T, 4}, "a");
 
   cnpy::npz_save_compressed(
     npz_filename, "static_objects", static_objects.data(),
@@ -209,10 +184,9 @@ void add_frame_to_sequence_npz(
   using autoware::diffusion_planner::OUTPUT_T;
 
   // Same heading representation as the per-frame writer, computed before stacking.
+  // Neighbor futures stay [x, y, cos, sin] (version 3 layout).
   const std::vector<float> ego_past_heading = cos_sin_to_heading(ego_past, INPUT_T_WITH_CURRENT);
   const std::vector<float> ego_future_heading = cos_sin_to_heading(ego_future, OUTPUT_T);
-  const std::vector<float> neighbor_future_heading =
-    cos_sin_to_heading_3d(neighbor_future, MAX_NUM_NEIGHBORS, OUTPUT_T);
   const std::vector<float> goal_pose_heading = cos_sin_to_heading(goal_pose, 1);
 
   acc.frame_indices.push_back(frame_index);
@@ -221,7 +195,7 @@ void add_frame_to_sequence_npz(
   append_floats(acc.ego_current_state, ego_current);
   append_floats(acc.ego_agent_future, ego_future_heading);
   append_floats(acc.neighbor_agents_past, neighbor_past);
-  append_floats(acc.neighbor_agents_future, neighbor_future_heading);
+  append_floats(acc.neighbor_agents_future, neighbor_future);
   append_floats(acc.static_objects, static_objects);
   append_floats(acc.lanes, lanes);
   append_floats(acc.lanes_speed_limit, lanes_speed_limit);
@@ -270,7 +244,7 @@ void save_sequence_data_npz(
   const std::string npz_filename = output_path + "/" + rosbag_dir_name + "_" + sequence_id + ".npz";
   const size_t f = static_cast<size_t>(acc.num_frames);
 
-  const uint32_t version = 2;
+  const uint32_t version = 3;
   cnpy::npz_save_compressed(npz_filename, "version", &version, {1}, "w");
 
   cnpy::npz_save_compressed(npz_filename, "frame_indices", acc.frame_indices.data(), {f}, "a");
@@ -290,7 +264,7 @@ void save_sequence_data_npz(
 
   cnpy::npz_save_compressed(
     npz_filename, "neighbor_agents_future", acc.neighbor_agents_future.data(),
-    {f, MAX_NUM_NEIGHBORS, OUTPUT_T, 3}, "a");
+    {f, MAX_NUM_NEIGHBORS, OUTPUT_T, 4}, "a");
 
   cnpy::npz_save_compressed(
     npz_filename, "static_objects", acc.static_objects.data(),

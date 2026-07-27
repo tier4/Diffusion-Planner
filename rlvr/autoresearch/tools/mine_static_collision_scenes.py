@@ -55,6 +55,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from planner_metrics.scene_format import future_to_4col
 from rlvr.autoresearch.tools.audit_static_collision import (
     _ZONE_COLORS,
     _draw_audit_figure,
@@ -123,11 +124,8 @@ def _score_scene(
     if nb_fut_raw.shape[1] < T:
         return None
     nb_fut_raw = nb_fut_raw[:, :T, :]
-    # Convert to (N_nb, T, 4) [x, y, cos, sin] for the primitive.
-    yaw = nb_fut_raw[..., 2:3]
-    nb_fut_4 = np.concatenate([nb_fut_raw[..., :2], np.cos(yaw), np.sin(yaw)], axis=-1).astype(
-        np.float32
-    )
+    # Canonical (N_nb, T, 4) [x, y, cos, sin] for the primitive (idempotent on 4-col).
+    nb_fut_4 = future_to_4col(nb_fut_raw)
 
     neighbor_futures = torch.from_numpy(nb_fut_4).to(device)
     slot_valid = neighbor_futures[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6

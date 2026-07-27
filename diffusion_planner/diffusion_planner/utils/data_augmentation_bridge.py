@@ -1434,7 +1434,13 @@ class StatePerturbation:
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        if neighbors_future.shape[-1] == 4:
+            # Canonical [x, y, cos, sin]: rotate the heading unit vector.
+            neighbors_future[..., 2:4] = vector_transform(
+                neighbors_future[..., 2:4], transform_matrix
+            )
+        else:
+            neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
         neighbors_future[mask] = 0.0
 
         # lanes

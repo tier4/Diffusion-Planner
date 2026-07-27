@@ -28,6 +28,16 @@ _SUPPORTED_REALIZED_EVENT_LABELS = frozenset(
     {"moving_collision", "static_collision", "road_border_crossing", "expert_disagreement"}
 )
 
+# Realized-lag (closed-loop) fail-to-resume detection: the paper-faithful Conflict above
+# compares the model's OPEN-LOOP proposal against the expert future, which is blind to a
+# dithering model whose plans keep promising a departure the closed loop never executes,
+# and whose lag flags at chunk START fall before the rollout so their credit windows can
+# never be saved. The realized branch instead compares where the ego ACTUALLY is against
+# where the expert clock is, on the same route polyline. The gap must be sustained this
+# many consecutive sim steps (1 s at 10 Hz) before flagging, so a transient gap while the
+# recorded expert decelerates into a stop the model already reached does not fire.
+REALIZED_LAG_SUSTAIN_STEPS = 10
+
 
 def load_credit_windows(path: Path | None) -> dict[str, dict[str, int | float]] | None:
     if path is None:
@@ -206,6 +216,8 @@ def build_realized_event_scorer(
         expert_future_world: np.ndarray | None = None,
         expert_future_speed: np.ndarray | None = None,
         ref_polyline_world: np.ndarray | None = None,
+        realized_lag_streak: int = 0,
+        realized_lag_gap_m: float | None = None,
     ) -> dict[str, Any]:
         labels: list[str] = []
         row: dict[str, Any] = {
@@ -357,8 +369,182 @@ def build_realized_event_scorer(
                 row["expert_disagreement_step"] = step
                 labels.append("expert_disagreement")
 
+            # Realized-lag branch (see REALIZED_LAG_SUSTAIN_STEPS). The rollout loop
+            # tracks the streak per segment and passes it in; the thresholds live on
+            # this scorer (expert_lag_thresholds attribute) so both sides use one
+            # source. Reason string matches the frozen 3-branch port so the repair
+            # side's depart-morph gate fires without changes.
+            row["expert_disagreement_realized_lag"] = False
+            if realized_lag_gap_m is not None:
+                row["expert_disagreement_realized_gap_m"] = float(realized_lag_gap_m)
+            if not row["expert_disagreement"] and realized_lag_streak >= REALIZED_LAG_SUSTAIN_STEPS:
+                row["expert_disagreement"] = True
+                row["expert_disagreement_step"] = step
+                row["expert_disagreement_reason"] = "model_lagging_expert"
+                row["expert_disagreement_realized_lag"] = True
+                labels.append("expert_disagreement")
+
         row["labels"] = labels or ["clean"]
         row["label"] = labels[0] if labels else "clean"
         return row
 
+    # Single source for the realized-lag thresholds: the rollout loop reads these to
+    # maintain the per-segment streak it passes back into the scorer above. None when
+    # expert_disagreement is not an allowed label (the loop then skips the tracking).
+    _scorer.expert_lag_thresholds = (
+        {
+            "lag_progress_gap_m": float(thresholds["expert_disagreement_lag_progress_gap_m"]),
+            "moving_speed_mps": float(thresholds["expert_disagreement_moving_speed_mps"]),
+        }
+        if "expert_disagreement" in allowed
+        else None
+    )
     return _scorer
+
+
+def build_realized_reward_scorer(
+    *,
+    reward_config: Path,
+    device: str,
+    horizon: int,
+    sample_step: int = 10,
+):
+    """Realized closed-loop reward, computed natively during a mining rollout.
+
+    Returned as ``(hook, finalize)``:
+      - ``hook(built, preds, data, _device)`` is installed as the rollout's per-step
+        ``danger_scorer`` (free in the mining path). It only RECORDS — each segment's
+        realized world pose every step, and (every ``sample_step`` steps) the scene
+        scoring tensors. It returns all-clean rows so it never perturbs event mining.
+      - ``finalize()`` scores the REALIZED trajectory for the segments buffered SINCE
+        the last call: at each sampled pose ``t`` it expresses the realized future
+        ``poses[t+1 : t+1+H]`` in the ego frame at ``t`` and rewards it against the
+        context captured at ``t``; it then ACCUMULATES into a persistent running total
+        and CLEARS the buffers. Returns the running ``(mean_reward, n_poses)``.
+
+    ``run_segments_batched`` is invoked once per mining batch, so the caller must call
+    ``finalize()`` after each batch: this bounds memory to one batch of contexts and —
+    because ``_SegState`` objects (and their ``id``) are freed and reused between
+    batches — prevents cross-batch ``id(s)`` aliasing from merging poses of different
+    chunks. Windows that cross an unstick teleport (detected via ``s.snap_count``) are
+    skipped so the discontinuous jump is not baked into a "realized future".
+
+    Reward is per-pose (the reward function shapes an H-step trajectory), so the
+    realized DRIVE is rewarded — not the model's per-step plan. No disk save/reload,
+    no second simulation.
+    """
+    from rlvr.reward import compute_reward_batch  # local: avoid module-load cycle
+    from scenario_generation.transforms import _rotation_matrix
+
+    reward_cfg = load_reward_config(reward_config)
+    tdev = torch.device(device)
+    # Per-BATCH buffers (cleared by finalize); id(s) is unique within a single
+    # run_segments_batched call, so it is a safe within-batch key.
+    poses: dict[int, dict[int, np.ndarray]] = {}
+    contexts: dict[int, dict[int, dict]] = {}
+    # Shown neighbor world poses per step (uuid -> (wx, wy, wh)); captured EVERY step so a
+    # sampled pose t can assemble the realized neighbor FUTURE over t+1..t+H. Slot order at
+    # a sampled step mirrors sim_nb's nearest-first ordering, so the reconstructed future
+    # aligns slot-for-slot with the captured neighbor_agents_past.
+    nbr_world: dict[int, dict[int, dict]] = {}
+    slot_uuids_at: dict[int, dict[int, list]] = {}
+    teleport_ks: dict[int, set] = {}  # seg -> step indices where an unstick teleport fired
+    last_snaps: dict[int, int] = {}
+    acc = {"sum": 0.0, "n": 0}  # persistent running total across batches
+
+    def hook(built, preds, data, _device):
+        rows = []
+        for item in built:
+            s, np_dict = item[0], item[1]
+            rest = item[2:]
+            suuid = rest[2] if len(rest) > 2 else None  # slot -> uuid (sim mode)
+            wbu = rest[3] if len(rest) > 3 else None  # uuid -> current shown world pose
+            k = int(s.k)
+            sid = id(s)
+            poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
+            if wbu:
+                nbr_world.setdefault(sid, {})[k] = {
+                    u: np.asarray(p, dtype=np.float64) for u, p in wbu.items()
+                }
+            snaps = int(getattr(s, "snap_count", 0))
+            if snaps > last_snaps.get(sid, 0):
+                teleport_ks.setdefault(sid, set()).add(k)  # a teleport landed at this step
+            last_snaps[sid] = snaps
+            if k % sample_step == 0:
+                # keep scoring tensors on CPU; moved to GPU in one batch at finalize
+                contexts.setdefault(sid, {})[k] = _np_dict_to_scoring_tensors(np_dict, device="cpu")
+                if suuid is not None:
+                    slot_uuids_at.setdefault(sid, {})[k] = list(suuid)
+        return [{"labels": ["clean"], "label": "clean"} for _ in built]
+
+    def _ego_future(world: np.ndarray, t: int) -> np.ndarray:
+        x0, y0, yaw0 = world[t]
+        c, s = np.cos(-yaw0), np.sin(-yaw0)
+        fut = world[t + 1 : t + 1 + horizon]
+        dx = fut[:, 0] - x0
+        dy = fut[:, 1] - y0
+        xe = dx * c - dy * s
+        ye = dx * s + dy * c
+        dyaw = fut[:, 2] - yaw0
+        return np.column_stack([xe, ye, np.cos(dyaw), np.sin(dyaw)]).astype(np.float32)
+
+    def _neighbor_future(sid: int, k: int, ego_pose: np.ndarray, n_slots: int) -> np.ndarray | None:
+        """Realized neighbor future in the ego frame at step k: for each slot's uuid, its
+        SHOWN world pose at k+1..k+H (from nbr_world), transformed like sim_nb's past block
+        so slots align with neighbor_agents_past. Returns (n_slots, H, 4) or None if no
+        neighbor telemetry was captured (non-sim mode)."""
+        slots = slot_uuids_at.get(sid, {}).get(k)
+        wmap = nbr_world.get(sid)
+        if slots is None or wmap is None:
+            return None
+        x0, y0, yaw0 = float(ego_pose[0]), float(ego_pose[1]), float(ego_pose[2])
+        rot = _rotation_matrix(yaw0)  # world delta -> ego frame (matches SimNeighborTracker.build)
+        nf = np.zeros((n_slots, horizon, 4), dtype=np.float32)
+        for i, u in enumerate(slots[:n_slots]):
+            for j in range(1, horizon + 1):
+                wp = wmap.get(k + j, {}).get(u)
+                if wp is None:
+                    continue  # neighbor absent that step -> zero (slot/step-invalid downstream)
+                dxy = (wp[:2] - np.array([x0, y0])) @ rot.T
+                lh = wp[2] - yaw0
+                nf[i, j - 1] = (dxy[0], dxy[1], np.cos(lh), np.sin(lh))
+        return nf
+
+    def finalize() -> tuple[float, int]:
+        for sid, kmap in poses.items():
+            ks = sorted(kmap)
+            kpos = {k: i for i, k in enumerate(ks)}  # step index -> contiguous row
+            world = np.stack([kmap[k] for k in ks])
+            tps = teleport_ks.get(sid, set())
+            for k, sd in sorted(contexts.get(sid, {}).items()):
+                if k not in kpos:
+                    continue
+                # need the H future steps present AND no teleport within (k, k+H]
+                if any((k + j) not in kpos for j in range(1, horizon + 1)):
+                    continue
+                if any((k + j) in tps for j in range(1, horizon + 1)):
+                    continue
+                fut = _ego_future(world, kpos[k])
+                if fut.shape[0] < horizon:
+                    continue
+                sd_gpu = {kk: (vv.to(tdev) if torch.is_tensor(vv) else vv) for kk, vv in sd.items()}
+                # Realized neighbor future: score collision/TTC against where neighbors
+                # ACTUALLY were over k+1..k+H (the shown motion), not an empty set.
+                nap = sd_gpu.get("neighbor_agents_past")
+                n_slots = int(nap.shape[-3]) if nap is not None and nap.dim() >= 3 else 0
+                nf = _neighbor_future(sid, k, world[kpos[k]], n_slots) if n_slots else None
+                if nf is not None:
+                    sd_gpu["neighbor_agents_future"] = torch.from_numpy(nf[None]).to(tdev)
+                ego = torch.from_numpy(fut[None]).to(tdev)
+                rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
+                acc["sum"] += float(rb[0].total)
+                acc["n"] += 1
+        poses.clear()
+        contexts.clear()
+        nbr_world.clear()
+        slot_uuids_at.clear()
+        teleport_ks.clear()
+        last_snaps.clear()
+        return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]
+
+    return hook, finalize

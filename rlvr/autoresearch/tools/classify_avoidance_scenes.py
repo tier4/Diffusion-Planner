@@ -276,8 +276,8 @@ def main():
         datas = [load_npz_data(p, device, ego_shape_override=ego_override) for p in batch_paths]
         # Raw NPZs may carry fewer neighbor slots than the model's
         # agent_num (e.g. 32 vs 320) — zero-pad up (zero rows ARE empty
-        # slots, identical to pad_neighbors_320.py). More slots than the
-        # model expects would drop real agents — fail loudly.
+        # slots). More slots than the model expects would drop real
+        # agents — fail loudly.
         agent_num = int(model_args.agent_num)
         for d in datas:
             nb = d["neighbor_agents_past"]

@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from planner_metrics.scene_format import future_to_4col
 from planner_metrics.subscores import compute_road_border_penalty
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _ego_shape_from_data,
@@ -123,10 +124,8 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
         raise ValueError(f"expected future shaped (T,C) or (1,T,C), got {arr.shape}")
     if arr.shape[1] >= 4:
         return arr[:, :4].astype(np.float32)
-    if arr.shape[1] != 3:
-        raise ValueError(f"expected 3 or 4 future channels, got {arr.shape}")
-    yaw = arr[:, 2]
-    return np.column_stack([arr[:, 0], arr[:, 1], np.cos(yaw), np.sin(yaw)]).astype(np.float32)
+    # Single ego trajectory: a waypoint at the origin is real, not padding.
+    return future_to_4col(arr, zero_rows_are_padding=False)
 
 
 def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
@@ -488,6 +487,12 @@ def _repairs_source_labels(
     # soft, deviation-class-weighted term (c_E, dropped entirely for far-off states,
     # w_E=0). So expert_disagreement is handled by the soft r2lpl_score ranking in
     # _best_safe_candidate, not by rejecting conflict-flagged candidates here.
+    #
+    # NOTE: the road-border gate is ABSOLUTE (any crossing is rejected). An earlier
+    # expert-relative relaxation for shoulder-stop scenes was removed: rb_min_dist is an
+    # unsigned distance to the border, so it cannot distinguish a shoulder skim from a
+    # trajectory that crossed to the wrong side and ran far outside, making any distance
+    # floor unsafe. Re-enabling it needs a signed / side-aware containment metric.
     if not _passes_global_gates(label_row, reward_row):
         return False
     for label in source_labels:
