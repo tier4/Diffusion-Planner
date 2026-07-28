@@ -37,9 +37,6 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="optional JSON mapping Override Open-loop metric names to NPZ path lists. Empty = disabled.",
     )
-    p.add_argument("--override_centerline_horizon_seconds", type=float, default=8.0)
-    p.add_argument("--override_departure_horizon_seconds", type=float, default=3.0)
-    p.add_argument("--override_departure_minimum_displacement_m", type=float, default=2.0)
     return p.parse_args()
 
 
@@ -101,12 +98,6 @@ def main() -> None:
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
         "--override_open_loop_list",
         str(Path(args.override_open_loop_list).resolve()) if args.override_open_loop_list else "",
-        "--override_centerline_horizon_seconds",
-        str(args.override_centerline_horizon_seconds),
-        "--override_departure_horizon_seconds",
-        str(args.override_departure_horizon_seconds),
-        "--override_departure_minimum_displacement_m",
-        str(args.override_departure_minimum_displacement_m),
         *optional,
     ]
     rc = tee_run(
