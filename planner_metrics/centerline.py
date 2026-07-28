@@ -47,7 +47,9 @@ def compute_centerline_distance_batch(
         raise ValueError("centerline metric requires route_lanes or lanes in data")
     if lanes.ndim == 5:
         if lanes.shape[1] != 1:
-            raise ValueError(f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}")
+            raise ValueError(
+                f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}"
+            )
         lanes = lanes[:, 0]
     if lanes.ndim == 3:
         lanes = lanes.unsqueeze(0)

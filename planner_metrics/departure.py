@@ -81,9 +81,7 @@ def evaluate_departure(
     if steps < 1:
         raise ValueError("departure horizon selects zero prediction steps")
     return {
-        "failure_rate_percent": compute_departure_failure_batch(
-            ego_trajs, data, minimum, steps
-        )
+        "failure_rate_percent": compute_departure_failure_batch(ego_trajs, data, minimum, steps)
         * 100.0
     }
 
