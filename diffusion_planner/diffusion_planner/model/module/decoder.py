@@ -254,11 +254,12 @@ def compute_training_loss(
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
     turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, TURN_INDICATOR_OUTPUT_KEEP]
-    turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
+    turn_indicators_for_gt = inputs.get("turn_indicators_gt_source", inputs["turn_indicators"])
+    turn_indicator_gt = make_turn_indicator_gt(turn_indicators_for_gt)  # [B,]
     turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="none"
     )
-    turn_indicator_change = inputs["turn_indicators"][:, -2] != inputs["turn_indicators"][:, -1]
+    turn_indicator_change = turn_indicators_for_gt[:, -2] != turn_indicators_for_gt[:, -1]
     turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.05)
     turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
     loss["turn_indicator_loss"] = turn_indicator_loss

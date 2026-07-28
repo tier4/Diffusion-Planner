@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.forced_augmentation import ForcedAugmentationSelector
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
 
@@ -32,7 +32,15 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+def train_epoch(
+    data_loader,
+    model,
+    optimizer,
+    args,
+    ema,
+    aug_pipeline: list | None = None,
+    aug_selector: ForcedAugmentationSelector | None = None,
+):
     if len(data_loader) == 0:
         empty = {"loss": 0.0, "turn_indicator_accuracy": 0.0}
         return empty, 0.0
@@ -44,6 +52,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if args.ddp:
         torch.cuda.synchronize()
 
+    # Captured before the tqdm wrap: tqdm does not forward attribute access to the
+    # iterable it wraps, so reading .sampler off the wrapper would return None.
+    train_sampler = getattr(data_loader, "sampler", None)
+
     if ddp.get_rank() == 0:
         data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
@@ -54,9 +66,38 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]
-        # Normalize to ego-centric
-        if aug is not None:
-            inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
+        # Bind this epoch's repeat flags on the first batch, never before. repeat_flags
+        # is regenerated inside the sampler's __iter__, which the DataLoader only calls
+        # once iteration starts -- binding in train.py would read the previous epoch's.
+        if aug_selector is not None and not aug_selector.is_bound:
+            if train_sampler is None:
+                raise RuntimeError(
+                    "forced augmentation needs a sampler exposing repeat_flags, but the "
+                    "data_loader has no .sampler attribute"
+                )
+            aug_selector.start_epoch(
+                args.current_epoch,
+                getattr(train_sampler, "repeat_flags", None),
+                getattr(train_sampler, "repeat_flags_epoch", None),
+            )
+
+        # One force mask per pool member for this batch. batch_size comes off the batch
+        # itself rather than args.batch_size // world_size: that is a floor division and
+        # a computed offset would drift on any partial batch.
+        if aug_selector is not None:
+            force_masks = aug_selector.masks_for_batch(
+                inputs["ego_current_state"].shape[0], args.device
+            )
+        else:
+            force_masks = {}
+
+        # Normalize to ego-centric. Canonical order; state_perturbation runs last
+        # because it ends with centric_transform, which the others assume has not yet
+        # happened.
+        for aug_name, aug in aug_pipeline or []:
+            inputs, ego_future, neighbors_future = aug(
+                inputs, ego_future, neighbors_future, force=force_masks.get(aug_name)
+            )
 
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)

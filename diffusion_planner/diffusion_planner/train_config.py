@@ -26,6 +26,13 @@ class TrainConfig:
     train_set_list: str
     valid_set_list: str
     train_subsample_step: int
+    cluster_json: str = ""
+    cluster_weight_alpha: float = 1.0
+    force_aug_on_repeat: bool = False
+    # Must default to "" and never None: resolve_repeat_aug_pool calls .split(",") on it,
+    # so a None default turns a misconfiguration into an AttributeError traceback
+    # instead of the intended launch-time ValueError.
+    repeat_aug_pool: str = ""
 
     # ---------------------------------------------------------
     # Data Dimensions
@@ -58,6 +65,16 @@ class TrainConfig:
     use_data_augment: bool = True
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge"] = "quintic"
+    use_flip_augment: bool = False
+    flip_prob: float = 0.5
+    use_neighbor_dropout: bool = False
+    neighbor_dropout_prob: float = 0.1
+    use_neighbor_noise: bool = False
+    neighbor_noise_pos_std: float = 0.2
+    neighbor_noise_vel_std: float = 0.3
+    neighbor_noise_heading_std: float = 0.05
+    use_turn_indicator_dropout: bool = False
+    turn_indicator_dropout_prob: float = 0.1
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True

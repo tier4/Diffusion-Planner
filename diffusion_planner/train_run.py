@@ -17,7 +17,17 @@ from pathlib import Path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
 
-def parse_args() -> argparse.Namespace:
+def boolean(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    if value.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def parse_args(args_list: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--exp_name", required=True)
     p.add_argument("--train_set_list", required=True)
@@ -32,7 +42,74 @@ def parse_args() -> argparse.Namespace:
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
         "list of such dirs (like --train_set_list). Empty = disabled.",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--cluster_json",
+        default=None,
+        help="optional: path to cluster assignment JSON for weighted sampling",
+    )
+    p.add_argument(
+        "--cluster_weight_alpha",
+        type=float,
+        default=None,
+        help="optional: exponent on inverse-frequency cluster weights "
+        "(1.0 = full inverse, 0.0 = uniform)",
+    )
+    p.add_argument(
+        "--force_aug_on_repeat",
+        type=boolean,
+        default=None,
+        help="optional: force one augmentation on repeated weighted-sampler draws",
+    )
+    p.add_argument(
+        "--repeat_aug_pool",
+        default=None,
+        help="optional: comma-separated augmentations eligible for repeat-draw forcing",
+    )
+    p.add_argument("--use_flip_augment", type=boolean, default=None)
+    p.add_argument("--use_neighbor_dropout", type=boolean, default=None)
+    p.add_argument("--use_neighbor_noise", type=boolean, default=None)
+    p.add_argument("--use_turn_indicator_dropout", type=boolean, default=None)
+    return p.parse_args(args_list)
+
+
+def build_optional_args(args: argparse.Namespace) -> list[str]:
+    optional: list[str] = []
+    if args.resume_model_path:
+        optional += ["--resume_model_path", str(Path(args.resume_model_path).resolve())]
+    if args.wandb_run_id:
+        optional += ["--wandb_run_id", args.wandb_run_id]
+    if args.wandb_project_name:
+        optional += ["--wandb_project_name", args.wandb_project_name]
+    if args.cluster_json:
+        # ``Path.resolve()`` is non-strict, so a typo would sail through and only
+        # surface after every rank has loaded the (large) train/valid path lists
+        # and built the model. Fail before launching torchrun.
+        cluster_json = Path(args.cluster_json).resolve()
+        if not cluster_json.is_file():
+            sys.exit(f"--cluster_json not found: {cluster_json}")
+        optional += ["--cluster_json", str(cluster_json)]
+    if args.cluster_weight_alpha is not None:
+        if not args.cluster_json:
+            print(
+                f"WARNING: --cluster_weight_alpha {args.cluster_weight_alpha} has no effect "
+                "without --cluster_json; training will use the default DistributedSampler.",
+                file=sys.stderr,
+            )
+        optional += ["--cluster_weight_alpha", str(args.cluster_weight_alpha)]
+    if args.force_aug_on_repeat is not None:
+        optional += ["--force_aug_on_repeat", str(args.force_aug_on_repeat)]
+    if args.repeat_aug_pool is not None:
+        optional += ["--repeat_aug_pool", args.repeat_aug_pool]
+    for name in (
+        "use_flip_augment",
+        "use_neighbor_dropout",
+        "use_neighbor_noise",
+        "use_turn_indicator_dropout",
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            optional += [f"--{name}", str(value)]
+    return optional
 
 
 def main() -> None:
@@ -52,13 +129,7 @@ def main() -> None:
     )
     (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
 
-    optional: list[str] = []
-    if args.resume_model_path:
-        optional += ["--resume_model_path", str(Path(args.resume_model_path).resolve())]
-    if args.wandb_run_id:
-        optional += ["--wandb_run_id", args.wandb_run_id]
-    if args.wandb_project_name:
-        optional += ["--wandb_project_name", args.wandb_project_name]
+    optional = build_optional_args(args)
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 

@@ -30,6 +30,37 @@ def get_args(args_list=None):
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument("--train_subsample_step", type=int, default=1)
+    parser.add_argument(
+        "--cluster_json",
+        type=str,
+        default="",
+        help="Path to cluster assignment JSON from cluster.py. Enables weighted sampling.",
+    )
+    parser.add_argument(
+        "--cluster_weight_alpha",
+        type=float,
+        default=1.0,
+        help="Exponent on inverse-frequency cluster weights. 1.0 = full inverse "
+        "weighting (every cluster gets an equal share of draws), 0.0 = uniform. "
+        "Lower values soften oversampling. Ignored without --cluster_json.",
+    )
+    parser.add_argument(
+        "--force_aug_on_repeat",
+        default=_train_config_default("force_aug_on_repeat"),
+        type=boolean,
+        help="Force one augmentation on any sample the cluster-weighted sampler draws "
+        "more than once in an epoch, so repeats vary instead of duplicating. "
+        "Requires --cluster_json.",
+    )
+    parser.add_argument(
+        "--repeat_aug_pool",
+        type=str,
+        default=_train_config_default("repeat_aug_pool"),
+        help="Comma-separated augmentation names eligible to be forced on a repeat "
+        "draw (flip, neighbor_dropout, neighbor_noise, turn_indicator, traffic_light, "
+        "state_perturbation). Empty means every enabled augmentation. Ignored without "
+        "--force_aug_on_repeat.",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -58,6 +89,52 @@ def get_args(args_list=None):
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
     parser.add_argument(
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+    )
+    parser.add_argument(
+        "--use_flip_augment",
+        default=_train_config_default("use_flip_augment"),
+        type=boolean,
+    )
+    parser.add_argument("--flip_prob", type=float, default=_train_config_default("flip_prob"))
+    parser.add_argument(
+        "--use_neighbor_dropout",
+        default=_train_config_default("use_neighbor_dropout"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--neighbor_dropout_prob",
+        type=float,
+        default=_train_config_default("neighbor_dropout_prob"),
+    )
+    parser.add_argument(
+        "--use_neighbor_noise",
+        default=_train_config_default("use_neighbor_noise"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--neighbor_noise_pos_std",
+        type=float,
+        default=_train_config_default("neighbor_noise_pos_std"),
+    )
+    parser.add_argument(
+        "--neighbor_noise_vel_std",
+        type=float,
+        default=_train_config_default("neighbor_noise_vel_std"),
+    )
+    parser.add_argument(
+        "--neighbor_noise_heading_std",
+        type=float,
+        default=_train_config_default("neighbor_noise_heading_std"),
+    )
+    parser.add_argument(
+        "--use_turn_indicator_dropout",
+        default=_train_config_default("use_turn_indicator_dropout"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--turn_indicator_dropout_prob",
+        type=float,
+        default=_train_config_default("turn_indicator_dropout_prob"),
     )
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"

@@ -37,6 +37,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 SAMPLING_DIR = Path(__file__).resolve().parent.parent / "sampling"
 sys.path.insert(0, str(SAMPLING_DIR))
@@ -47,7 +48,9 @@ from utils.pipeline import (
     ClusteringStrategy,
     ElbowKMeansStrategy,
     cluster_trajectories,
+    cluster_trajectories_enriched,
     extract_features,
+    extract_features_enriched,
 )
 
 # ─────────────────────────────── helpers ────────────────────────────────────
@@ -58,6 +61,33 @@ def _make_npz(path: str, ego_future: np.ndarray | None = None) -> None:
     if ego_future is None:
         ego_future = np.random.randn(80, 3).astype(np.float32)
     np.savez(path, ego_agent_future=ego_future)
+
+
+def _make_enriched_npz(
+    path: str,
+    n_active_neighbors: int = 5,
+    seed: int = 0,
+) -> None:
+    """Write an NPZ file with all fields needed for enriched clustering."""
+    rng = np.random.default_rng(seed)
+    ego_past = rng.standard_normal((31, 4)).astype(np.float32)
+    ego_future = rng.standard_normal((80, 3)).astype(np.float32)
+    ego_state = rng.standard_normal(10).astype(np.float32)
+
+    nbr_past = np.zeros((320, 31, 11), dtype=np.float32)
+    nbr_future = np.zeros((320, 80, 3), dtype=np.float32)
+    for i in range(n_active_neighbors):
+        nbr_past[i] = rng.standard_normal((31, 11)).astype(np.float32)
+        nbr_future[i] = rng.standard_normal((80, 3)).astype(np.float32)
+
+    np.savez(
+        path,
+        ego_agent_past=ego_past,
+        ego_agent_future=ego_future,
+        ego_current_state=ego_state,
+        neighbor_agents_past=nbr_past,
+        neighbor_agents_future=nbr_future,
+    )
 
 
 def _synthetic_clusters(n_per_cluster: int = 10, n_clusters: int = 3, seed: int = 42) -> np.ndarray:
@@ -132,6 +162,126 @@ def test_extract_features_dtype_is_float():
         feat = extract_features(npz_path)
     assert np.issubdtype(feat.dtype, np.floating), f"Expected float dtype, got {feat.dtype}"
     print("  [PASS] extract_features dtype is float")
+
+
+# ─────────────────────── extract_features_enriched ─────────────────────────
+
+
+def test_extract_enriched_shapes_default():
+    """Default 2hz, top_k=20: ego_block=(109,), neighbor_block=(2560,)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path, n_active_neighbors=25)
+        ego, nbr = extract_features_enriched(npz_path, top_k=20, temporal_hz=2)
+    # ego: 7*4 + 17*3 + 10 + 20 = 109  (17 future indices: endpoint always included)
+    assert ego.shape == (109,), f"Expected (109,), got {ego.shape}"
+    # neighbor: 20*(7*11 + 17*3) = 20*(77+51) = 2560
+    assert nbr.shape == (2560,), f"Expected (2560,), got {nbr.shape}"
+
+
+def test_extract_enriched_shapes_10hz():
+    """At 10hz (no downsampling): ego_block=(394,), neighbor_block=(11620,)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path, n_active_neighbors=25)
+        ego, nbr = extract_features_enriched(npz_path, top_k=20, temporal_hz=10)
+    # ego: 31*4 + 80*3 + 10 + 20 = 394
+    assert ego.shape == (394,), f"Expected (394,), got {ego.shape}"
+    # neighbor: 20*(31*11 + 80*3) = 20*(341+240) = 11620
+    assert nbr.shape == (11620,), f"Expected (11620,), got {nbr.shape}"
+
+
+def test_extract_enriched_top_k_selection():
+    """Closest neighbors are selected; farthest are dropped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+
+        nbr_past = np.zeros((320, 31, 11), dtype=np.float32)
+        nbr_future = np.zeros((320, 80, 3), dtype=np.float32)
+        # Place 3 neighbors at known distances (position is in last past timestep, cols 0:2)
+        for i, dist in enumerate([1.0, 5.0, 3.0]):
+            nbr_past[i, :, :] = 0.01  # make all values nonzero (active)
+            nbr_past[i, -1, 0] = dist  # x at t=0
+            nbr_past[i, -1, 1] = 0.0  # y at t=0
+            nbr_future[i, :, :] = float(i + 1)  # distinguishable values
+
+        np.savez(
+            npz_path,
+            ego_agent_past=np.zeros((31, 4), dtype=np.float32),
+            ego_agent_future=np.zeros((80, 3), dtype=np.float32),
+            ego_current_state=np.zeros(10, dtype=np.float32),
+            neighbor_agents_past=nbr_past,
+            neighbor_agents_future=nbr_future,
+        )
+        ego, nbr = extract_features_enriched(npz_path, top_k=2, temporal_hz=10)
+
+    # Top-2 should be neighbor 0 (dist=1) and neighbor 2 (dist=3)
+    # Distances in ego block are the last 2 elements
+    distances = ego[-2:]
+    np.testing.assert_allclose(distances, [1.0, 3.0], atol=1e-6)
+
+
+def test_extract_enriched_fewer_than_k_neighbors():
+    """When fewer active neighbors than top_k, inactive get sentinel -1.0."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path, n_active_neighbors=3)
+        ego, nbr = extract_features_enriched(npz_path, top_k=10, temporal_hz=2)
+    # ego: 7*4 + 17*3 + 10 + 10 = 99
+    assert ego.shape == (99,), f"Expected (99,), got {ego.shape}"
+    # Last 10 elements are distances; 3 active (>0), 7 inactive (== -1)
+    distances = ego[-10:]
+    assert np.sum(distances > 0) == 3, f"Expected 3 positive distances, got {np.sum(distances > 0)}"
+    assert np.sum(distances == -1.0) == 7, (
+        f"Expected 7 sentinel distances, got {np.sum(distances == -1.0)}"
+    )
+
+
+def test_extract_enriched_invalid_temporal_hz():
+    """temporal_hz that doesn't divide 10 raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        try:
+            extract_features_enriched(npz_path, temporal_hz=3)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+
+def test_extract_enriched_zero_temporal_hz():
+    """temporal_hz=0 raises ValueError (not ZeroDivisionError)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        try:
+            extract_features_enriched(npz_path, temporal_hz=0)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+        except ZeroDivisionError:
+            assert False, "Got ZeroDivisionError instead of ValueError"
+
+
+def test_extract_enriched_negative_temporal_hz():
+    """temporal_hz=-2 raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        try:
+            extract_features_enriched(npz_path, temporal_hz=-2)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+
+def test_extract_enriched_dtype_is_float():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        ego, nbr = extract_features_enriched(npz_path)
+    assert np.issubdtype(ego.dtype, np.floating)
+    assert np.issubdtype(nbr.dtype, np.floating)
 
 
 # ──────────────────────────── compute_wcss ──────────────────────────────────
@@ -380,6 +530,43 @@ def _make_synthetic_dataset(tmp_dir: str, n: int = 30, seed: int = 0) -> list[st
     return paths
 
 
+def _make_enriched_dataset(tmp_dir: str, n: int = 30, seed: int = 0) -> list:
+    """Create n NPZ files with enriched fields and distinct trajectory patterns."""
+    rng = np.random.default_rng(seed)
+    patterns = [
+        np.column_stack([np.linspace(0, 20, 80), np.zeros(80), np.zeros(80)]),
+        np.column_stack(
+            [np.linspace(0, 10, 80), np.linspace(0, 10, 80), np.linspace(0, np.pi / 2, 80)]
+        ),
+        np.column_stack(
+            [np.linspace(0, 10, 80), np.linspace(0, -10, 80), np.linspace(0, -np.pi / 2, 80)]
+        ),
+    ]
+    paths = []
+    for i in range(n):
+        pattern = patterns[i % len(patterns)].copy().astype(np.float32)
+        pattern += rng.normal(0, 0.05, pattern.shape).astype(np.float32)
+
+        n_nbrs = rng.integers(2, 15)
+        nbr_past = np.zeros((320, 31, 11), dtype=np.float32)
+        nbr_future = np.zeros((320, 80, 3), dtype=np.float32)
+        for j in range(n_nbrs):
+            nbr_past[j] = rng.standard_normal((31, 11)).astype(np.float32)
+            nbr_future[j] = rng.standard_normal((80, 3)).astype(np.float32)
+
+        npz_path = str(Path(tmp_dir) / f"sample_{i:04d}.npz")
+        np.savez(
+            npz_path,
+            ego_agent_past=rng.standard_normal((31, 4)).astype(np.float32),
+            ego_agent_future=pattern,
+            ego_current_state=rng.standard_normal(10).astype(np.float32),
+            neighbor_agents_past=nbr_past,
+            neighbor_agents_future=nbr_future,
+        )
+        paths.append(npz_path)
+    return paths
+
+
 def test_main_end_to_end():
     with tempfile.TemporaryDirectory() as tmp:
         npz_paths = _make_synthetic_dataset(tmp, n=30)
@@ -496,6 +683,153 @@ def test_main_output_keys_sorted():
     print("  [PASS] main end-to-end: output keys are sorted")
 
 
+# ─────────────────────── cluster_trajectories_enriched ─────────────────────
+
+
+def test_enriched_pipeline_returns_dict():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=30)
+        strategy = ElbowKMeansStrategy(k_max=5, random_state=42)
+        result = cluster_trajectories_enriched(
+            npz_paths,
+            strategy,
+            pca_components=10,
+            neighbor_pca_components=10,
+            top_k=5,
+            temporal_hz=2,
+        )
+    assert isinstance(result, dict)
+    assert isinstance(strategy.n_clusters_, int)
+    for key in result:
+        assert key.startswith("cluster_id")
+
+
+def test_enriched_pipeline_all_paths_present():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=20)
+        result = cluster_trajectories_enriched(
+            npz_paths,
+            ElbowKMeansStrategy(k_max=5, random_state=42),
+            pca_components=10,
+            neighbor_pca_components=10,
+            top_k=5,
+            temporal_hz=2,
+        )
+    all_out = [p for paths in result.values() for p in paths]
+    assert sorted(all_out) == sorted(npz_paths)
+
+
+def test_enriched_pipeline_no_valid_files_raises():
+    strategy = ElbowKMeansStrategy(k_max=3)
+    try:
+        cluster_trajectories_enriched(
+            ["/nonexistent/a.npz"],
+            strategy,
+            pca_components=10,
+            neighbor_pca_components=10,
+        )
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError:
+        pass
+
+
+def test_enriched_pipeline_no_duplicates():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=25)
+        result = cluster_trajectories_enriched(
+            npz_paths,
+            ElbowKMeansStrategy(k_max=5, random_state=42),
+            pca_components=10,
+            neighbor_pca_components=10,
+            top_k=5,
+            temporal_hz=2,
+        )
+    all_paths = [p for paths in result.values() for p in paths]
+    assert len(all_paths) == len(set(all_paths))
+
+
+# ──────────────────────── integration: main enriched ──────────────────────
+
+
+def test_main_enriched_end_to_end():
+    """End-to-end test with --mode enriched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=30)
+        data_list_path = str(Path(tmp) / "data_list.json")
+        with open(data_list_path, "w") as f:
+            json.dump(npz_paths, f)
+
+        output_path = str(Path(tmp) / "result.json")
+        argv = [
+            "cluster.py",
+            "--data_list",
+            data_list_path,
+            "--output",
+            output_path,
+            "--mode",
+            "enriched",
+            "--k_max",
+            "5",
+            "--pca_components",
+            "10",
+            "--neighbor_pca_components",
+            "10",
+            "--top_k_neighbors",
+            "5",
+            "--temporal_hz",
+            "2",
+            "--seed",
+            "42",
+        ]
+        with patch("sys.argv", argv):
+            main()
+
+        assert Path(output_path).exists()
+        with open(output_path) as f:
+            result = json.load(f)
+
+        for key in result:
+            assert key.startswith("cluster_id")
+        all_out = [p for paths in result.values() for p in paths]
+        assert sorted(all_out) == sorted(npz_paths)
+
+
+def test_main_trajectory_mode_unchanged():
+    """--mode trajectory produces identical results to no --mode flag (regression)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_synthetic_dataset(tmp, n=20)
+        data_list_path = str(Path(tmp) / "data_list.json")
+        with open(data_list_path, "w") as f:
+            json.dump(npz_paths, f)
+
+        out_default = str(Path(tmp) / "default.json")
+        out_explicit = str(Path(tmp) / "explicit.json")
+
+        base_argv = [
+            "cluster.py",
+            "--data_list",
+            data_list_path,
+            "--k_max",
+            "5",
+            "--pca_components",
+            "10",
+            "--seed",
+            "42",
+        ]
+
+        with patch("sys.argv", base_argv + ["--output", out_default]):
+            main()
+        with patch("sys.argv", base_argv + ["--output", out_explicit, "--mode", "trajectory"]):
+            main()
+
+        with open(out_default) as f:
+            result_default = json.load(f)
+        with open(out_explicit) as f:
+            result_explicit = json.load(f)
+
+        assert result_default == result_explicit
+
+
 # ──────────────────────────────── runner ────────────────────────────────────
 
 
@@ -506,6 +840,14 @@ ALL_TESTS = [
     test_extract_features_values,
     test_extract_features_missing_key,
     test_extract_features_dtype_is_float,
+    test_extract_enriched_shapes_default,
+    test_extract_enriched_shapes_10hz,
+    test_extract_enriched_top_k_selection,
+    test_extract_enriched_fewer_than_k_neighbors,
+    test_extract_enriched_invalid_temporal_hz,
+    test_extract_enriched_zero_temporal_hz,
+    test_extract_enriched_negative_temporal_hz,
+    test_extract_enriched_dtype_is_float,
     test_compute_wcss_length,
     test_compute_wcss_monotone,
     test_compute_wcss_k1_max_inertia,
@@ -531,6 +873,12 @@ ALL_TESTS = [
     test_main_end_to_end,
     test_main_output_no_duplicates,
     test_main_output_keys_sorted,
+    test_enriched_pipeline_returns_dict,
+    test_enriched_pipeline_all_paths_present,
+    test_enriched_pipeline_no_valid_files_raises,
+    test_enriched_pipeline_no_duplicates,
+    test_main_enriched_end_to_end,
+    test_main_trajectory_mode_unchanged,
 ]
 
 
@@ -556,3 +904,123 @@ if __name__ == "__main__":
         sys.exit(1)
     else:
         print("All tests passed!")
+
+
+# ───────────────────── enriched schema fail-fast ─────────────────────────────
+
+
+def _make_enriched_npz_custom(
+    path: str,
+    n_slots: int = 320,
+    nbr_future_cols: int = 3,
+    nbr_future_t: int = 80,
+    seed: int = 0,
+) -> None:
+    """Enriched NPZ with a tunable neighbor layout, for schema-mismatch tests."""
+    rng = np.random.default_rng(seed)
+    np.savez(
+        path,
+        ego_agent_past=rng.standard_normal((31, 4)).astype(np.float32),
+        ego_agent_future=rng.standard_normal((80, 3)).astype(np.float32),
+        ego_current_state=rng.standard_normal(10).astype(np.float32),
+        neighbor_agents_past=rng.standard_normal((n_slots, 31, 11)).astype(np.float32),
+        neighbor_agents_future=rng.standard_normal((n_slots, nbr_future_t, nbr_future_cols)).astype(
+            np.float32
+        ),
+    )
+
+
+def test_extract_enriched_pads_when_fewer_slots_than_top_k():
+    """Truncating to the available slots would yield a narrower vector than peers,
+    which only blows up later when every vector is stacked into one matrix."""
+    with tempfile.TemporaryDirectory() as tmp:
+        few = str(Path(tmp) / "few.npz")
+        many = str(Path(tmp) / "many.npz")
+        _make_enriched_npz_custom(few, n_slots=5)
+        _make_enriched_npz_custom(many, n_slots=320)
+
+        ego_few, nbr_few = extract_features_enriched(few, top_k=20, temporal_hz=2)
+        ego_many, nbr_many = extract_features_enriched(many, top_k=20, temporal_hz=2)
+
+    assert ego_few.shape == ego_many.shape
+    assert nbr_few.shape == nbr_many.shape
+    # 15 padded slots carry the -1.0 "absent" sentinel.
+    assert np.sum(ego_few[-20:] == -1.0) == 15
+
+
+def test_extract_enriched_rejects_neighbor_ego_horizon_mismatch():
+    """Shorter neighbor horizon would IndexError; longer would silently drop the tail."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = str(Path(tmp) / "short.npz")
+        _make_enriched_npz_custom(p, nbr_future_t=40)
+        with pytest.raises(ValueError, match="horizon mismatch"):
+            extract_features_enriched(p, top_k=5, temporal_hz=2)
+
+
+def test_enriched_pipeline_fails_fast_on_mixed_npz_widths():
+    """A v2/v3 mixed corpus must abort on the second file, not after reading all of
+    them and dying inside np.array()."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for i in range(4):
+            p = str(Path(tmp) / f"v2_{i}.npz")
+            _make_enriched_npz_custom(p, nbr_future_cols=3, seed=i)
+            paths.append(p)
+        v3 = str(Path(tmp) / "v3.npz")
+        _make_enriched_npz_custom(v3, nbr_future_cols=4, seed=99)
+        paths.append(v3)
+
+        with pytest.raises(ValueError, match="feature width"):
+            cluster_trajectories_enriched(
+                paths,
+                ElbowKMeansStrategy(k_max=3, random_state=42),
+                pca_components=3,
+                neighbor_pca_components=3,
+                top_k=5,
+                temporal_hz=2,
+            )
+
+
+def test_enriched_pipeline_skips_unreadable_files_and_keeps_alignment():
+    """Skipped files must drop out of valid_paths in lockstep with the feature lists,
+    or every path after the first skip lands in the wrong cluster."""
+    with tempfile.TemporaryDirectory() as tmp:
+        good = _make_enriched_dataset(tmp, n=20)
+        bad = str(Path(tmp) / "truncated.npz")
+        Path(bad).write_bytes(b"not an npz")
+
+        result = cluster_trajectories_enriched(
+            good[:10] + [bad] + good[10:],
+            ElbowKMeansStrategy(k_max=4, random_state=42),
+            pca_components=5,
+            neighbor_pca_components=5,
+            top_k=5,
+            temporal_hz=2,
+        )
+
+    clustered = [p for paths in result.values() for p in paths]
+    assert sorted(clustered) == sorted(good)
+    assert len(clustered) == len(set(clustered))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"top_k": 0},
+        {"neighbor_pca_components": 0},
+        {"pca_components": 0},
+    ],
+)
+def test_enriched_pipeline_rejects_nonpositive_dims(kwargs):
+    """These would otherwise fail inside PCA, after the whole extraction pass."""
+    base = {
+        "pca_components": 5,
+        "neighbor_pca_components": 5,
+        "top_k": 5,
+        "temporal_hz": 2,
+    }
+    base.update(kwargs)
+    with pytest.raises(ValueError, match="must be >= 1"):
+        cluster_trajectories_enriched(
+            ["/nonexistent.npz"], ElbowKMeansStrategy(k_max=2, random_state=42), **base
+        )

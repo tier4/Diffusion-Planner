@@ -1035,8 +1035,14 @@ class StatePerturbation:
         self.time_interval = TIME_INTERVAL
         self.dense_sample_ds = dense_sample_ds
 
-    def __call__(self, inputs, ego_future, neighbors_future):
-        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(inputs, ego_future)
+        # Accumulated as a device tensor and read once per epoch. A per-batch .item()
+        # here would add a GPU->CPU sync inside the training loop.
+        self.forced_noop_count: torch.Tensor | None = None
+
+    def __call__(self, inputs, ego_future, neighbors_future, force=None):
+        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(
+            inputs, ego_future, force=force
+        )
 
         inputs["ego_current_state"][aug_flag] = aug_current_state[aug_flag]
         inputs["ego_agent_past"][aug_flag] = aug_ego_past[aug_flag]
@@ -1328,7 +1334,15 @@ class StatePerturbation:
             wheel_base=self._wheel_base,
         )
 
-    def augment(self, inputs, ego_future):
+    def pop_forced_noop_count(self) -> int:
+        """Read and reset the forced-but-unchanged counter. Syncs; call once per epoch."""
+        if self.forced_noop_count is None:
+            return 0
+        count = int(self.forced_noop_count.item())
+        self.forced_noop_count = None
+        return count
+
+    def augment(self, inputs, ego_future, force=None):
         ego_current_state = inputs["ego_current_state"].clone()
         ego_agent_past = inputs["ego_agent_past"].clone()
         aug_ego_future = ego_future.clone()
@@ -1343,6 +1357,14 @@ class StatePerturbation:
             & valid_speed
             & valid_offset
         )
+        if force is not None:
+            # Forced rows still have to clear valid_speed and valid_offset -- without a
+            # real offset the search has nothing to solve for.
+            aug_flag = aug_flag | (force.to(self._device) & valid_speed & valid_offset)
+            noop = (force.to(self._device) & ~aug_flag).sum()
+            self.forced_noop_count = (
+                noop if self.forced_noop_count is None else self.forced_noop_count + noop
+            )
 
         for batch_index in torch.nonzero(aug_flag, as_tuple=False).flatten():
             lateral_offset = lateral_offsets[batch_index]

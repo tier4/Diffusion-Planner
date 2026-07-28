@@ -162,6 +162,10 @@ class StatePerturbation:
         self.num_refine = num_refine
         self.time_interval = TIME_INTERVAL
 
+        # Accumulated as a device tensor and read once per epoch. A per-batch .item()
+        # here would add a GPU->CPU sync inside the training loop.
+        self.forced_noop_count: torch.Tensor | None = None
+
         REFINE_HORIZON = num_refine * TIME_INTERVAL
 
         T = REFINE_HORIZON + TIME_INTERVAL
@@ -184,8 +188,8 @@ class StatePerturbation:
             torch.arange(6).unsqueeze(0),
         ).to(device=device)  # shape (B, N+1)
 
-    def __call__(self, inputs, ego_future, neighbors_future):
-        aug_flag, aug_ego_current_state = self.augment(inputs)
+    def __call__(self, inputs, ego_future, neighbors_future, force=None):
+        aug_flag, aug_ego_current_state = self.augment(inputs, force=force)
 
         # Interpolate future trajectory
         interpolated_ego_future = self.interpolation_future_trajectory(
@@ -214,15 +218,20 @@ class StatePerturbation:
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
-    def augment(self, inputs):
+    def augment(self, inputs, force=None):
         # Only aug current state
         ego_current_state = inputs["ego_current_state"].clone()
         wheel_base = inputs["ego_shape"][:, 0]  # (B,)
 
         B = ego_current_state.shape[0]
-        aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
-            abs(ego_current_state[:, 4]) < 2.0
-        )
+        # The Bernoulli mask is built on CPU and then moved; force arrives already on
+        # the augmentation's device. OR-ing before the .to() would mix CPU and GPU
+        # tensors and throw, so the OR happens after.
+        bernoulli = (torch.rand(B) < self._augment_prob).bool().to(self._device)
+        if force is not None:
+            bernoulli = bernoulli | force.to(self._device)
+        speed_ok = ~(abs(ego_current_state[:, 4]) < 2.0)
+        aug_flag = bernoulli & speed_ok
 
         random_tensor = torch.rand(B, len(self._low)).to(self._device)
         scaled_random_tensor = self._low + (self._high - self._low) * random_tensor
@@ -265,7 +274,24 @@ class StatePerturbation:
         collision = self._check_aug_validity(ego_current_state, inputs)
         aug_flag = aug_flag & ~collision
 
+        if force is not None:
+            # "Forced but not applied": the low-speed gate or the collision check
+            # vetoed it. Counted, not retried -- a retry would be another whole-batch
+            # augmentation pass.
+            noop = (force.to(self._device) & ~aug_flag).sum()
+            self.forced_noop_count = (
+                noop if self.forced_noop_count is None else self.forced_noop_count + noop
+            )
+
         return aug_flag, ego_current_state
+
+    def pop_forced_noop_count(self) -> int:
+        """Read and reset the forced-but-unchanged counter. Syncs; call once per epoch."""
+        if self.forced_noop_count is None:
+            return 0
+        count = int(self.forced_noop_count.item())
+        self.forced_noop_count = None
+        return count
 
     def _check_aug_validity(self, aug_ego_state: torch.Tensor, inputs: dict) -> torch.Tensor:
         """

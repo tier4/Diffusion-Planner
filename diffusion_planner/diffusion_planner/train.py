@@ -22,10 +22,23 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
+from diffusion_planner.utils.forced_augmentation import (
+    ForcedAugmentationSelector,
+    build_aug_pipeline,
+    duplicate_path_warning,
+    validate_forced_aug_flags,
+)
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.online_augmentations import (
+    FlipAugmentation,
+    NeighborDropoutAugmentation,
+    NeighborNoiseAugmentation,
+    TurnIndicatorDropoutAugmentation,
+)
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
     aggregate_valid_metrics,
@@ -265,15 +278,89 @@ def model_training(args: TrainConfig):
     else:
         aug = None
 
+    flip_aug = FlipAugmentation(args.flip_prob, args.device) if args.use_flip_augment else None
+    neighbor_dropout = (
+        NeighborDropoutAugmentation(args.neighbor_dropout_prob, args.device)
+        if args.use_neighbor_dropout
+        else None
+    )
+    neighbor_noise = (
+        NeighborNoiseAugmentation(
+            args.neighbor_noise_pos_std,
+            args.neighbor_noise_vel_std,
+            args.neighbor_noise_heading_std,
+            args.device,
+        )
+        if args.use_neighbor_noise
+        else None
+    )
+    turn_indicator_dropout = (
+        TurnIndicatorDropoutAugmentation(args.turn_indicator_dropout_prob, args.device)
+        if args.use_turn_indicator_dropout
+        else None
+    )
+
+    # Ordered (name, aug) pairs. train_epoch applies them in this order and looks up
+    # each one's force mask by name.
+    aug_pipeline = build_aug_pipeline(
+        {
+            "flip": flip_aug,
+            "neighbor_dropout": neighbor_dropout,
+            "neighbor_noise": neighbor_noise,
+            "turn_indicator": turn_indicator_dropout,
+            "state_perturbation": aug,
+        }
+    )
+
+    # Validate before the dataset scan: a bad flag must not surface after model init.
+    try:
+        repeat_aug_pool, pool_warnings = validate_forced_aug_flags(args, aug_pipeline)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if global_rank == 0:
+        for message in pool_warnings:
+            print(f"WARNING: {message}")
+
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
-    train_sampler = DistributedSampler(
-        train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
-    )
+    if repeat_aug_pool and global_rank == 0:
+        duplicate_message = duplicate_path_warning(train_set.data_list)
+        if duplicate_message is not None:
+            print(f"WARNING: {duplicate_message}")
+
+    if args.cluster_json:
+        train_sampler = ClusterWeightedDistributedSampler(
+            train_set.data_list,
+            args.cluster_json,
+            num_replicas=ddp.get_world_size(),
+            rank=global_rank,
+            seed=args.seed,
+            alpha=args.cluster_weight_alpha,
+            track_repeats=bool(repeat_aug_pool),
+        )
+        if global_rank == 0:
+            print(f"Using cluster-weighted sampling from {args.cluster_json}")
+    else:
+        if global_rank == 0 and args.cluster_weight_alpha != 1.0:
+            print(
+                f"WARNING: --cluster_weight_alpha {args.cluster_weight_alpha} is ignored "
+                "without --cluster_json; using the default DistributedSampler."
+            )
+        train_sampler = DistributedSampler(
+            train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
+        )
+
+    if repeat_aug_pool:
+        aug_selector = ForcedAugmentationSelector(repeat_aug_pool, seed=args.seed)
+        if global_rank == 0:
+            print(f"Forcing one augmentation on repeat draws from pool: {repeat_aug_pool}")
+    else:
+        aug_selector = None
+
     train_loader = DataLoader(
         train_set,
         sampler=train_sampler,
@@ -325,6 +412,55 @@ def model_training(args: TrainConfig):
                     0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
                 )
             )
+
+    if global_rank == 0 and args.cluster_json:
+        print(
+            f"Cluster distribution "
+            f"(matched {train_sampler.matched_count}/{len(train_set.data_list)} data paths, "
+            f"alpha={args.cluster_weight_alpha:.2f}):"
+        )
+
+        def _cluster_sort_key(item):
+            """Sort cluster_id<N> numerically so id10 follows id2, not id1.
+
+            Falls back to lexicographic order for keys that do not match the
+            ``cluster_id<N>`` shape -- a logging line must never crash training.
+            """
+            key = item[0]
+            suffix = key.replace("cluster_id", "", 1) if key.startswith("cluster_id") else key
+            return (0, int(suffix), "") if suffix.isdigit() else (1, 0, key)
+
+        ordered_counts = dict(sorted(train_sampler.cluster_counts.items(), key=_cluster_sort_key))
+        for k, v in ordered_counts.items():
+            print(f"  {k}: {v} samples  {train_sampler.cluster_multipliers[k]:.2f}x")
+
+        # Persist what was actually applied. The multipliers are derived from the
+        # LIVE, post---train_subsample_step data_list, so they cannot be
+        # reconstructed from args.json (which records only cluster_json and
+        # cluster_weight_alpha). Without this file the run's sampling distribution
+        # is lost the moment stdout is.
+        cluster_sampling = {
+            "cluster_json": args.cluster_json,
+            "cluster_weight_alpha": args.cluster_weight_alpha,
+            "train_subsample_step": args.train_subsample_step,
+            "data_list_size": len(train_set.data_list),
+            "matched_count": train_sampler.matched_count,
+            "cluster_counts": ordered_counts,
+            "cluster_multipliers": {
+                k: train_sampler.cluster_multipliers[k] for k in ordered_counts
+            },
+            # Configuration only. This file is written once at startup, so any
+            # forced/noop row counters here would be structurally always zero.
+            "forced_augmentation": {
+                "enabled": bool(repeat_aug_pool),
+                "pool": list(repeat_aug_pool),
+            },
+        }
+        if save_path is not None:
+            with open(os.path.join(save_path, "cluster_sampling.json"), "w", encoding="utf-8") as f:
+                json.dump(cluster_sampling, f, indent=4)
+    else:
+        cluster_sampling = None
 
     if args.ddp:
         torch.distributed.barrier()
@@ -396,6 +532,10 @@ def model_training(args: TrainConfig):
         )
 
         wandb.config.update(args_dict)
+        if cluster_sampling is not None:
+            # args_dict carries only the requested alpha; this carries the applied
+            # per-cluster multipliers, so runs at different alphas are comparable.
+            wandb.config.update({"cluster_sampling": cluster_sampling})
 
         # this function creates dataset artifacts and associate them with wandb run
         # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed
@@ -458,6 +598,11 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
+        train_sampler.set_epoch(epoch)
+        # train_epoch binds the selector's repeat flags lazily on its first batch and
+        # needs to know which epoch it is stamping against.
+        args.current_epoch = epoch
+
         # Adjust learning rate for final 10 epochs
         final_epoch_count = 10
         if epoch >= train_epochs - final_epoch_count:
@@ -474,7 +619,7 @@ def model_training(args: TrainConfig):
         # training step
         train_start_time = time.perf_counter()
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader, diffusion_planner, optimizer, args, model_ema, aug_pipeline, aug_selector
         )
         train_sec = time.perf_counter() - train_start_time
 
@@ -645,7 +790,6 @@ def model_training(args: TrainConfig):
                 )
 
         scheduler.step()
-        train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
