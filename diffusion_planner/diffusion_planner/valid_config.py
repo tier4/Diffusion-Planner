@@ -12,7 +12,6 @@ class ValidConfig:
     valid_set_list: Optional[str] = None
     save_predictions_dir: Optional[str] = None
     override_open_loop_list: Optional[str] = None
-    override_open_loop_config: Optional[str] = None
     override_only: bool = False
 
     # --- 実行環境パラメータ ---

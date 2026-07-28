@@ -2,10 +2,7 @@
 
 import wandb
 
-from diffusion_planner.override_validation.open_loop import (
-    load_override_open_loop_settings,
-    run_override_open_loop_validation,
-)
+from diffusion_planner.override_validation.open_loop import run_override_open_loop_validation
 from diffusion_planner.utils import ddp
 
 
@@ -16,13 +13,6 @@ def override_open_loop_validate(model, args, epoch: int) -> None:
     companion config determines the validation cadence and metric parameters.
     """
     if not args.override_open_loop_list:
-        return
-
-    _, config = load_override_open_loop_settings(
-        args.override_open_loop_list, args.override_open_loop_config
-    )
-    interval = config.get("interval_epochs", 1)
-    if (epoch + 1) % interval:
         return
 
     summary = run_override_open_loop_validation(ddp.get_model(model, args.ddp), args)

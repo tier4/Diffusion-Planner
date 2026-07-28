@@ -9,7 +9,6 @@ train_predictor.py under torch.distributed.run. train_predictor.py itself is unc
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -36,13 +35,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--override_open_loop_list",
         default="",
-        help="optional JSON mapping override Open-loop metric names to NPZ path lists. Empty = disabled.",
+        help="optional JSON mapping Override Open-loop metric names to NPZ path lists. Empty = disabled.",
     )
-    p.add_argument(
-        "--override_open_loop_config",
-        default="",
-        help="optional JSON containing Override Open-loop validation interval and metric parameters.",
-    )
+    p.add_argument("--override_centerline_horizon_seconds", type=float, default=8.0)
+    p.add_argument("--override_departure_horizon_seconds", type=float, default=3.0)
+    p.add_argument("--override_departure_minimum_displacement_m", type=float, default=2.0)
     return p.parse_args()
 
 
@@ -53,20 +50,10 @@ def main() -> None:
     save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
 
-    if bool(args.override_open_loop_list) != bool(args.override_open_loop_config):
-        raise ValueError(
-            "--override_open_loop_list and --override_open_loop_config must be supplied together"
-        )
-    if args.override_open_loop_config:
+    if args.override_open_loop_list:
         override_list = Path(args.override_open_loop_list).resolve()
         if not override_list.is_file():
             raise FileNotFoundError(f"Override Open-loop list not found: {override_list}")
-        override_config = Path(args.override_open_loop_config).resolve()
-        if not override_config.is_file():
-            raise FileNotFoundError(f"Override Open-loop config not found: {override_config}")
-        # Preserve the evaluation settings with the run, but deliberately do not copy the
-        # (potentially large and externally managed) NPZ-list JSON.
-        shutil.copy2(override_config, save_path / override_config.name)
 
     # Save git info next to the run.
     for name, cmd in (("git_show.txt", ["git", "show", "-s"]), ("git_diff.txt", ["git", "diff"])):
@@ -114,10 +101,12 @@ def main() -> None:
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
         "--override_open_loop_list",
         str(Path(args.override_open_loop_list).resolve()) if args.override_open_loop_list else "",
-        "--override_open_loop_config",
-        str(Path(args.override_open_loop_config).resolve())
-        if args.override_open_loop_config
-        else "",
+        "--override_centerline_horizon_seconds",
+        str(args.override_centerline_horizon_seconds),
+        "--override_departure_horizon_seconds",
+        str(args.override_departure_horizon_seconds),
+        "--override_departure_minimum_displacement_m",
+        str(args.override_departure_minimum_displacement_m),
         *optional,
     ]
     rc = tee_run(

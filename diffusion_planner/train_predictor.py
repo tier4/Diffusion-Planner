@@ -261,8 +261,8 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
 
-    # Override Open-loop validation. The list selects samples per metric; the config supplies
-    # the validation cadence and metric-specific parameters.
+    # Override Open-loop validation. The list selects samples per metric; metric parameters
+    # are regular TrainConfig fields.
     parser.add_argument(
         "--override_open_loop_list",
         type=str,
@@ -270,10 +270,19 @@ def get_args(args_list=None):
         help="JSON mapping Override Open-loop metric names to NPZ path lists. Empty = disabled.",
     )
     parser.add_argument(
-        "--override_open_loop_config",
-        type=str,
-        default="",
-        help="JSON containing Override Open-loop validation interval and metric parameters.",
+        "--override_centerline_horizon_seconds",
+        type=float,
+        default=_train_config_default("override_centerline_horizon_seconds"),
+    )
+    parser.add_argument(
+        "--override_departure_horizon_seconds",
+        type=float,
+        default=_train_config_default("override_departure_horizon_seconds"),
+    )
+    parser.add_argument(
+        "--override_departure_minimum_displacement_m",
+        type=float,
+        default=_train_config_default("override_departure_minimum_displacement_m"),
     )
 
     # Deterministic

@@ -29,7 +29,6 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--valid_set_list", default="")
     p.add_argument("--override_open_loop_list", default="")
-    p.add_argument("--override_open_loop_config", default="")
     p.add_argument("--override_only", action="store_true")
     p.add_argument("--batch_size", type=int, default=32)
     return p.parse_args()
@@ -39,12 +38,8 @@ def main() -> None:
     args = parse_args()
     if not args.valid_set_list and not args.override_only:
         raise ValueError("--valid_set_list is required unless --override_only is set")
-    if bool(args.override_open_loop_list) != bool(args.override_open_loop_config):
-        raise ValueError(
-            "--override_open_loop_list and --override_open_loop_config must be supplied together"
-        )
     if args.override_only and not args.override_open_loop_list:
-        raise ValueError("--override_only requires Override Open-loop list and config")
+        raise ValueError("--override_only requires Override Open-loop list")
     if args.batch_size < 1:
         raise ValueError("--batch_size must be at least 1")
     model_dir = Path(args.model_dir)
@@ -94,8 +89,6 @@ def main() -> None:
             [
                 "--override_open_loop_list",
                 args.override_open_loop_list,
-                "--override_open_loop_config",
-                args.override_open_loop_config,
             ]
         )
     if args.override_only:

@@ -60,7 +60,6 @@ def get_args(args_list=None):
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
     parser.add_argument("--override_open_loop_list", type=str, default=None)
-    parser.add_argument("--override_open_loop_config", type=str, default=None)
     parser.add_argument("--override_only", action="store_true")
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
@@ -107,12 +106,8 @@ def get_args(args_list=None):
 def run_validation(valid_cfg: ValidConfig):
     """Core logic for validation."""
 
-    if bool(valid_cfg.override_open_loop_list) != bool(valid_cfg.override_open_loop_config):
-        raise ValueError(
-            "--override_open_loop_list and --override_open_loop_config must be supplied together"
-        )
     if valid_cfg.override_only and not valid_cfg.override_open_loop_list:
-        raise ValueError("--override_only requires Override Open-loop list and config")
+        raise ValueError("--override_only requires Override Open-loop list")
 
     # 1. Restore model configuration from training settings (args.json)
     config_obj = Config(valid_cfg.args_json_path)
@@ -187,7 +182,15 @@ def run_validation(valid_cfg: ValidConfig):
             summary_path = output_root / "override_open_loop" / "summary.json"
             override_args = SimpleNamespace(
                 override_open_loop_list=valid_cfg.override_open_loop_list,
-                override_open_loop_config=valid_cfg.override_open_loop_config,
+                override_centerline_horizon_seconds=getattr(
+                    config_obj, "override_centerline_horizon_seconds", 8.0
+                ),
+                override_departure_horizon_seconds=getattr(
+                    config_obj, "override_departure_horizon_seconds", 3.0
+                ),
+                override_departure_minimum_displacement_m=getattr(
+                    config_obj, "override_departure_minimum_displacement_m", 2.0
+                ),
                 batch_size=valid_cfg.batch_size,
                 num_workers=valid_cfg.num_workers,
                 pin_mem=valid_cfg.pin_mem,

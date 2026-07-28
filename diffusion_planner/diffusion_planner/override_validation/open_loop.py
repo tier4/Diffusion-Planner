@@ -19,6 +19,24 @@ METRICS = {
 }
 
 
+def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
+    """Build metric parameters from ``override_<metric>_<parameter>`` fields.
+
+    Keeping the naming convention in ``TrainConfig`` avoids maintaining a
+    second metric-to-parameter mapping in the validation runner.
+    """
+    values = vars(args)
+    parameters: dict[str, dict[str, object]] = {}
+    for metric_name in METRICS:
+        prefix = f"override_{metric_name}_"
+        parameters[metric_name] = {
+            field_name[len(prefix) :]: value
+            for field_name, value in values.items()
+            if field_name.startswith(prefix)
+        }
+    return parameters
+
+
 class _NpzPathDataset(Dataset):
     """Small dataset adapter for path lists embedded in an Override list JSON."""
 
@@ -45,27 +63,12 @@ def _load_json_object(path: str, label: str) -> dict:
     return payload
 
 
-def load_override_open_loop_settings(
-    list_path: str, config_path: str
-) -> tuple[dict[str, list[str]], dict]:
-    """Load and validate the metric-to-NPZ list plus its shared configuration."""
-    if bool(list_path) != bool(config_path):
-        raise ValueError(
-            "override_open_loop_list and override_open_loop_config must be supplied together"
-        )
+def load_override_open_loop_settings(list_path: str) -> dict[str, list[str]]:
+    """Load and validate the metric-to-NPZ list."""
     if not list_path:
-        return {}, {}
+        return {}
 
     raw_lists = _load_json_object(list_path, "list")
-    raw_config = _load_json_object(config_path, "config")
-    metric_parameters = raw_config.get("metrics", {})
-    if not isinstance(metric_parameters, dict):
-        raise ValueError("Override Open-loop config field 'metrics' must be an object")
-    interval = raw_config.get("interval_epochs", 1)
-    if not isinstance(interval, int) or interval < 1:
-        raise ValueError(
-            "Override Open-loop config field 'interval_epochs' must be an integer >= 1"
-        )
 
     lists: dict[str, list[str]] = {}
     for metric_name, paths in raw_lists.items():
@@ -78,11 +81,9 @@ def load_override_open_loop_settings(
             raise ValueError(
                 f"Override Open-loop list for {metric_name!r} must be a list of strings"
             )
-        if not isinstance(metric_parameters.get(metric_name, {}), dict):
-            raise ValueError(f"Override Open-loop parameters for {metric_name!r} must be an object")
         lists[metric_name] = paths
 
-    return lists, raw_config
+    return lists
 
 
 @torch.no_grad()
@@ -97,9 +98,7 @@ def run_override_open_loop_validation(
     This intentionally runs on one process only.  Callers own rank selection and
     W&B logging; the scorer registry owns metric-specific computation.
     """
-    metric_lists, config = load_override_open_loop_settings(
-        args.override_open_loop_list, args.override_open_loop_config
-    )
+    metric_lists = load_override_open_loop_settings(args.override_open_loop_list)
     if not metric_lists:
         return {}
 
@@ -111,7 +110,7 @@ def run_override_open_loop_validation(
     model.eval()
     try:
         summaries: dict[str, dict[str, float]] = {}
-        metric_parameters = config.get("metrics", {})
+        metric_parameters = _metric_parameters_from_args(args)
         visualization_root = Path(visualization_dir) if visualization_dir is not None else None
         details_root = Path(details_dir) if details_dir is not None else None
         if visualization_root is not None:
