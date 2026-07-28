@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from diffusion_planner.override_validation.metrics import METRICS
+from diffusion_planner.override_validation.open_loop import METRICS
 from diffusion_planner.override_validation.open_loop import load_override_open_loop_settings
 
 

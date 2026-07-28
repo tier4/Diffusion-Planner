@@ -1,5 +1,5 @@
 import torch
-from diffusion_planner.override_validation.metrics.departure import evaluate_departure
+from planner_metrics.departure import evaluate_departure
 
 
 def test_departure_failure_rate_is_one_hundred_only_for_non_departing_predictions():

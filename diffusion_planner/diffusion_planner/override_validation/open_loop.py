@@ -10,8 +10,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from diffusion_planner.override_validation.metrics import METRICS
-from diffusion_planner.override_validation.metrics.departure import departure_max_displacement
+from planner_metrics.centerline import evaluate_centerline
+from planner_metrics.departure import departure_max_displacement, evaluate_departure
+
+METRICS = {
+    "centerline": evaluate_centerline,
+    "departure": evaluate_departure,
+}
 
 
 class _NpzPathDataset(Dataset):
