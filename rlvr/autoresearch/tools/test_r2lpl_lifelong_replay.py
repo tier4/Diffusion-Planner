@@ -657,7 +657,11 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
     def _fake_run_segments_batched(*args, **kwargs):
         captured["realized_event_scorer"] = kwargs.get("realized_event_scorer")
         captured["danger_scorer"] = kwargs.get("danger_scorer")
-        return [SimpleNamespace(metrics={"n_collision_steps": 1, "min_clearance": -0.1})]
+        return [
+            {
+                "object": {"collision_steps": 1, "clearance_min_m": -0.1},
+            }
+        ]
 
     chunk = Chunk(
         key="chunkA",
@@ -1743,6 +1747,12 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             ego_shape=np.ones(3, dtype=np.float32),
             clearances=np.full(8, np.inf, dtype=np.float32),
             collisions=np.zeros(8, dtype=bool),
+            rb_dists=np.full(8, np.inf, dtype=np.float32),
+            red_light=np.zeros(8, dtype=bool),
+            accels=np.zeros(8, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             k=0,
             done=False,
             terminated="max_steps",
@@ -1750,9 +1760,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            expand_count=0,
             snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
+            last_turn_indicator=0,
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -1778,7 +1788,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         return [(1.0, False, 0, -1) for _ in neighbors_list]
 
     def _fake_realized_event_scorer(
@@ -1797,8 +1807,8 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
@@ -1815,7 +1825,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -1897,14 +1909,20 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            red_light=np.zeros(max_steps + 1, dtype=bool),
+            accels=np.zeros(max_steps + 1, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             ego_shape=np.ones(3, dtype=np.float32),
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            expand_count=0,
             snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
+            last_turn_indicator=0,
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -1932,7 +1950,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
 
     score_calls = {"n": 0}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         score_calls["n"] += 1
         collided = score_calls["n"] >= 2
         return [(0.0, collided, 1, 0) for _ in neighbors_list]
@@ -1956,8 +1974,8 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
@@ -1972,7 +1990,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -2041,14 +2061,20 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            red_light=np.zeros(max_steps + 1, dtype=bool),
+            accels=np.zeros(max_steps + 1, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             ego_shape=np.ones(3, dtype=np.float32),
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            expand_count=0,
             snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
+            last_turn_indicator=0,
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -2074,7 +2100,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         return [(0.0, True, 1, 0) for _ in neighbors_list]
 
     def _fake_clean_scorer(*_args, **_kwargs):
@@ -2086,8 +2112,8 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append({"out_dir": args[0], "label": args[10]})
@@ -2096,7 +2122,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)

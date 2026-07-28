@@ -53,10 +53,14 @@ def main() -> None:
             raise FileNotFoundError(f"Override Open-loop list not found: {override_list}")
 
     # Save git info next to the run.
-    for name, cmd in (("git_show.txt", ["git", "show", "-s"]), ("git_diff.txt", ["git", "diff"])):
-        (save_path / name).write_text(
-            subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
-        )
+    def git_output(cmd: list[str]) -> str:
+        return subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
+
+    branch = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    (save_path / "git_show.txt").write_text(
+        f"branch: {branch}\n\n" + git_output(["git", "show", "-s", "--decorate"])
+    )
+    (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
 
     optional: list[str] = []
     if args.resume_model_path:

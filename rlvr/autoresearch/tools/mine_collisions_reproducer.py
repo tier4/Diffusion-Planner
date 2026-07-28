@@ -2,7 +2,7 @@
 
 Runs a checkpoint closed-loop over recorded routes (ego driven by the planner +
 PerfectTracker; neighbors replayed from the log via the autoware-style cursor),
-scores every step with a raw all-neighbor OBB overlap check (``score_step`` —
+scores every step with a raw all-neighbor OBB overlap check (``score_object_step`` —
 collision = the ego box overlaps ANY neighbor box, moving or static, including
 rear-end hits; no stopped-only / ego-speed / direction gates), and writes a ranked
 index of the segments where the model collides or nearly collides.
@@ -35,6 +35,7 @@ from rlvr.autoresearch.tools.reproducer_danger_scorer import (
     build_reproducer_danger_scorer,
     load_credit_windows,
 )
+from scenario_generation.closed_loop_eval import segment_row_for_json
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline, group_routes
@@ -325,7 +326,12 @@ def main() -> None:
 
     def _keep(row: dict) -> None:
         nonlocal seq
-        key = (row["n_collision_steps"], -row["min_clearance"], seq)
+        obj = row.get("object") or {}
+        key = (
+            int(obj.get("collision_steps", 0)),
+            -float(obj.get("clearance_min_m", float("inf"))),
+            seq,
+        )
         seq += 1
         heapq.heappush(heap, (key, row))
         if len(heap) > top_k:
@@ -368,7 +374,7 @@ def main() -> None:
             danger_decluster_steps=args.danger_decluster_steps,
         )
         for key, res in zip(buf_keys, res_list):
-            row = {"route": key, **res.metrics}
+            row = segment_row_for_json(res, route=key)
             fout.write(json.dumps(row, default=float) + "\n")
             _keep(row)
             n_seg += 1
@@ -411,9 +417,12 @@ def main() -> None:
     )
     print("top hits (collisions desc, clearance asc):")
     for r in hits[:10]:
+        obj = r.get("object") or {}
         print(
-            f"  {r['route']} {r['segment']}  collisions={r['n_collision_steps']:3d}  "
-            f"min_clr={r['min_clearance']:.2f}  near_miss={r['n_near_miss_steps']:3d}  "
+            f"  {r['route']} {r['segment']}  "
+            f"collisions={int(obj.get('collision_steps', 0)):3d}  "
+            f"min_clr={float(obj.get('clearance_min_m', float('inf'))):.2f}  "
+            f"miss={int(obj.get('miss_steps', 0)):3d}  "
             f"term={r['terminated']}"
         )
     print("\n" + timers.report(n_seg))
@@ -432,7 +441,10 @@ def main() -> None:
         )
         run_tag = render_tag(args.model_path, args.lora_path)
         for r in hits[: args.dump_hits]:
-            if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
+            obj = r.get("object") or {}
+            coll = int(obj.get("collision_steps", 0))
+            miss = int(obj.get("miss_steps", 0))
+            if coll == 0 and miss == 0:
                 continue  # nothing interesting to render
             s0, e0 = r["segment"]
             tl = RouteTimeline(routes[r["route"]], sidecar_dir=args.sidecar_root)

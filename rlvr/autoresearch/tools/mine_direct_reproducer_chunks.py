@@ -27,6 +27,7 @@ from rlvr.autoresearch.tools.reproducer_danger_scorer import (
     build_realized_reward_scorer,
     load_credit_windows,
 )
+from scenario_generation.closed_loop_eval import segment_row_for_json
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline
@@ -789,7 +790,7 @@ def main() -> None:
         if realized_reward_finalize is not None:
             realized_reward_finalize()
         for chunk, result in zip(kept_chunks, results):
-            row = {**_chunk_row(chunk), **result.metrics}
+            row = segment_row_for_json(result, **_chunk_row(chunk))
             fout.write(json.dumps(row, sort_keys=True, default=float) + "\n")
             n_simulated += 1
         fout.flush()

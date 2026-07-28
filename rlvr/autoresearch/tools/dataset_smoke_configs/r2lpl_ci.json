@@ -1,0 +1,25 @@
+{
+  "_doc": "Quick PR-shipping check variant of r2lpl.json: 1 round x 1 epoch (~4 min) to confirm the R2LPL lifelong pipeline still mines/repairs/trains. The default r2lpl.json is the real multi-round config.",
+  "rounds": 1,
+  "epochs_per_round": 1,
+  "replay_capacity": 200,
+  "enabled_labels": [
+    "moving_collision",
+    "road_border_crossing",
+    "expert_disagreement"
+  ],
+  "expert_stop_anchor": "recorded",
+  "min_margin": 0.3,
+  "chunk_len": 80,
+  "start_stride": 80,
+  "expected_frame_step": 1,
+  "tracker_mode": "mpc",
+  "timeline_progress_mode": "clock",
+  "neighbor_history_mode": "sim",
+  "batch_size": 8,
+  "max_chunks": 15,
+  "n_val_cap": 40,
+  "reward_config": "rlvr/autoresearch/tools/dataset_smoke_configs/r2lpl_danger_reward.json",
+  "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
+  "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
+}

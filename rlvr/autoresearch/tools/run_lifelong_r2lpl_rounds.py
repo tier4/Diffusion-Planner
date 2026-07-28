@@ -1079,7 +1079,7 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
     through by original path.
     """
-    from scenario_generation.reproducer_rollout import _future_to_4col
+    from planner_metrics.scene_format import future_to_4col as _future_to_4col
 
     out: list[str] = []
     for path in paths:
@@ -1647,12 +1647,11 @@ def _run_closed_loop_probe(
     shutil.copy2(summary_path, gdir / "closed_loop_summary.json")
     keep = (
         "n_segments",
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "total_snaps",
+        "object",
+        "road_border",
+        "red_light_violation",
+        "strong_brake",
+        "reproducer",
     )
     picked = {k: summary[k] for k in keep if k in summary}
     picked["run_dir"] = str(new_dirs[-1])
@@ -1908,17 +1907,30 @@ def _base_train_invocation(
     if train_scene_count < 1:
         raise ValueError(f"{train_list} is empty; refusing to launch base training")
 
+    # Device-aware launch: on CPU (device=cpu, e.g. a CPU-only host or --device cpu) a
+    # torch.distributed.run / DDP launch drives NCCL + torch.cuda.set_device and dies
+    # with "No CUDA GPUs are available". Launch train_predictor directly with ddp=false
+    # there; keep the DDP launcher on CUDA.
+    device = str(overrides.get("device", base_args.get("device", "cuda"))).lower()
+    cpu = device == "cpu"
+    launcher = (
+        [sys.executable, "-m", "train_predictor"]
+        if cpu
+        else [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node",
+            str(nproc),
+            "--standalone",
+            "--master_port",
+            master_port,
+            "-m",
+            "train_predictor",
+        ]
+    )
     cmd = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--nproc_per_node",
-        str(nproc),
-        "--standalone",
-        "--master_port",
-        master_port,
-        "-m",
-        "train_predictor",
+        *launcher,
         "--exp_name",
         f"r2lpl_round_{round_idx:03d}",
         "--save_dir",
@@ -2003,7 +2015,7 @@ def _base_train_invocation(
     )
     merged = {k: base_args[k] for k in passthrough if k in base_args}
     merged.update(overrides)
-    merged["ddp"] = True
+    merged["ddp"] = not cpu  # single-process on CPU; DDP on CUDA
     merged["port"] = master_port
     if "batch_size" in merged:
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))

@@ -1,4 +1,4 @@
-"""score_step must count collisions with MOVING neighbors AND rear-end hits.
+"""score_object_step must count collisions with MOVING neighbors AND rear-end hits.
 
 The avoidance reward's ``compute_static_collision_penalty`` deliberately scores
 only *stopped* neighbors and filters out rear-end contacts (the ego being struck
@@ -9,7 +9,7 @@ that a model that drifts into a moving car or gets rear-ended is flagged.
 
 import numpy as np
 
-from scenario_generation.reproducer_rollout import score_step, score_step_batched
+from scenario_generation.metrics import score_object_step, score_object_step_batched
 
 EGO_SHAPE = np.array([4.76, 7.24, 2.29], dtype=np.float32)  # wheelbase, length, width
 
@@ -26,7 +26,7 @@ def _neighbors(rows: list[list[float]]) -> np.ndarray:
 def test_rear_end_moving_neighbor_is_a_collision():
     """Ego moving forward, a moving neighbor overlaps it from BEHIND (x < 0)."""
     rear = _neighbors([[-3.0, 0.0, 1.0, 0.0, 5.0, 0.0, 2.0, 5.0]])  # vx=5 => moving
-    clr, collision, m = score_step(rear, EGO_SHAPE, ego_speed=8.0, device="cpu")
+    clr, collision, m = score_object_step(rear, EGO_SHAPE, device="cpu")
     assert m == 1
     assert collision is True, f"rear-end moving overlap not flagged (clr={clr:.3f})"
     assert clr < 0.5
@@ -34,13 +34,13 @@ def test_rear_end_moving_neighbor_is_a_collision():
 
 def test_moving_neighbor_ahead_overlap_is_a_collision():
     ahead = _neighbors([[4.0, 0.0, 1.0, 0.0, 6.0, 0.0, 2.0, 4.0]])  # moving, overlaps
-    clr, collision, _ = score_step(ahead, EGO_SHAPE, ego_speed=8.0, device="cpu")
+    clr, collision, _ = score_object_step(ahead, EGO_SHAPE, device="cpu")
     assert collision is True, f"moving overlap not flagged (clr={clr:.3f})"
 
 
 def test_far_apart_is_not_a_collision():
     far = _neighbors([[30.0, 12.0, 1.0, 0.0, 8.0, 0.0, 2.0, 4.0]])
-    clr, collision, _ = score_step(far, EGO_SHAPE, ego_speed=8.0, device="cpu")
+    clr, collision, _ = score_object_step(far, EGO_SHAPE, device="cpu")
     assert collision is False
     assert clr > 1.0
 
@@ -48,12 +48,12 @@ def test_far_apart_is_not_a_collision():
 def test_collision_counted_even_when_ego_stopped():
     """No ego-speed gate: an overlap counts regardless of ego speed."""
     overlap = _neighbors([[4.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 4.0]])
-    _, collision, _ = score_step(overlap, EGO_SHAPE, ego_speed=0.0, device="cpu")
+    _, collision, _ = score_object_step(overlap, EGO_SHAPE, device="cpu")
     assert collision is True
 
 
 def test_no_valid_neighbors_returns_inf():
-    clr, collision, m = score_step(np.zeros((3, 11), np.float32), EGO_SHAPE, 5.0, "cpu")
+    clr, collision, m = score_object_step(np.zeros((3, 11), np.float32), EGO_SHAPE, "cpu")
     assert m == 0 and collision is False and clr == float("inf")
 
 
@@ -73,7 +73,7 @@ def _rand_segment(rng, k):
 
 
 def test_batched_scorer_matches_per_segment():
-    """score_step_batched must be bit-identical to per-segment score_step."""
+    """score_object_step_batched must be bit-identical to per-segment score_object_step."""
     rng = np.random.default_rng(1)
     segs = [_rand_segment(rng, int(rng.integers(0, 40))) for _ in range(8)]
     segs[2] = _rand_segment(rng, 0)  # include a segment with no valid neighbors
@@ -83,12 +83,13 @@ def test_batched_scorer_matches_per_segment():
         [EGO_SHAPE] * 8,
         [np.array([4.76 + 0.1 * i, 7.24, 2.29], np.float32) for i in range(8)],
     ):
-        single = [score_step(nb, sh, 5.0, "cpu") for nb, sh in zip(segs, shapes)]
-        batched = score_step_batched(segs, shapes, "cpu")
+        single = [score_object_step(nb, sh, "cpu") for nb, sh in zip(segs, shapes)]
+        batched = score_object_step_batched(segs, shapes, "cpu")
         for a, b in zip(single, batched):
-            # score_step returns a 3-tuple (min_clearance, collision, n_valid); score_step_batched
-            # intentionally returns a 4-tuple that appends collider_slot — its first three elements
-            # are bit-identical to score_step (same ops, same order), the 4th is extra.
+            # score_object_step returns a 3-tuple (min_clearance, collision, n_valid);
+            # score_object_step_batched intentionally returns a 4-tuple that appends
+            # collider_slot — its first three elements are bit-identical to score_object_step
+            # (same ops, same order), the 4th is extra.
             assert len(a) == 3 and len(b) == 4
             assert a[0] == b[0] or (a[0] != a[0] and b[0] != b[0])  # equal, or both NaN/inf
             assert a[1] == b[1] and a[2] == b[2]

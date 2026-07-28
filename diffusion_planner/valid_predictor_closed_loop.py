@@ -6,13 +6,15 @@ CLOSED LOOP through ``scenario_generation``: each tick the model predicts the eg
 trajectory, ``PerfectTracker`` advances the ego one step along it, the recorded
 neighbors are replayed from the log via the Perception-Reproducer cursor, and the
 realized ego footprint is scored against those neighbors with the canonical OBB
-(``score_step`` -> collision / near-miss / min clearance).
+(``score_object_step`` -> collision / near-miss / min clearance).
 
 A *route* = one bag-prefix group of consecutive 10 Hz NPZ frames (``RouteTimeline``);
 each route is rolled out whole with ``render_segment`` (one GPU forward per tick), which BOTH
 returns the route metrics AND writes a per-step PNG of the live-ego scene. Every run therefore
 always produces video: one MP4 per route (``<route>.mp4``). Per-route metrics are streamed to
 ``segments.jsonl`` and aggregated into ``summary.json`` (both next to the checkpoint).
+Clearance t-digest sketches used for multi-GPU p5 merge are written beside them as
+``tdigests.jsonl`` / ``tdigests_{rank}.jsonl`` so ``segments.jsonl`` stays human-readable.
 
 Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
 the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
@@ -37,6 +39,16 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _negative_mps2(value: str) -> float:
+    """argparse type: strong-brake threshold must be negative (accel <= thresh)."""
+    v = float(value)
+    if v > 0.0:
+        raise argparse.ArgumentTypeError(
+            f"strong_brake_mps2 must be <= 0 (got {v}); a positive threshold matches nearly every step"
+        )
+    return v
+
+
 def parse_args() -> argparse.Namespace:
     # Only the checkpoint and the NPZ dir are required; everything else is a tunable
     # knob with the closed-loop mining default. Outputs land next to the checkpoint.
@@ -59,7 +71,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
     p.add_argument("--near_miss_thresh", type=float, default=0.5, help="near-miss clearance (m)")
     p.add_argument(
+        "--strong_brake_mps2",
+        type=_negative_mps2,
+        default=-2.5,
+        help="strong-brake threshold (m/s^2, negative); a step counts when this and the previous frame both have tangential accel <= this",
+    )
+    p.add_argument(
         "--search_radius", type=float, default=1.5, help="PerceptionReproducer cursor search (m)"
+    )
+    p.add_argument(
+        "--yaw_gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="pose mode only: drop recorded frames whose heading differs from live ego by "
+        "more than pi/2 (threshold fixed at pi/2; --no-yaw-gate disables). No-op in clock "
+        "mode, which never calls cursor.step (closed-loop/R2LPL default)",
     )
     p.add_argument(
         "--warmup_steps",
@@ -90,14 +116,6 @@ def parse_args() -> argparse.Namespace:
         default=300,
         help="if still stuck this many steps AFTER the radius was widened, fall back to the hard "
         "teleport onto the GT pose ahead (last resort)",
-    )
-    p.add_argument(
-        "--yaw_gate",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="pose mode only: drop recorded frames whose heading differs from live ego by "
-        "more than pi/2 (threshold fixed at pi/2; --no-yaw-gate disables). No-op in clock "
-        "mode, which never calls cursor.step (closed-loop/R2LPL default)",
     )
     p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
     p.add_argument(
@@ -134,6 +152,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
     return dict(
         near_miss_thresh=args.near_miss_thresh,
         search_radius=args.search_radius,
+        yaw_gate=args.yaw_gate,
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
@@ -144,7 +163,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
-        yaw_gate=args.yaw_gate,
+        strong_brake_mps2=args.strong_brake_mps2,
     )
 
 
@@ -167,25 +186,23 @@ def _run_shard(rank, num_workers, gpu_ids, model_path, npz_root, out_dir, knobs)
     )
 
 
-def _merge_shards(out_dir: Path, npz_root, near_miss_thresh: float) -> dict:
-    """Aggregate every worker's segments_{rank}.jsonl into one summary and write summary.json
-    (the videos already live in the shared out_dir, route keys being globally unique)."""
-    from scenario_generation.closed_loop_eval import aggregate
+def _merge_shards(
+    out_dir: Path, npz_root, near_miss_thresh: float, *, strong_brake_mps2: float
+) -> dict:
+    """Aggregate every worker's segments_{rank}.jsonl (+ tdigests sidecars) into one summary."""
+    from scenario_generation.closed_loop_eval import aggregate, load_segment_rows_with_tdigests
 
-    rows: list[dict] = []
-    for f in sorted(out_dir.glob("segments_*.jsonl")):
-        rows += [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
-
-    summary = aggregate(rows, near_miss_thresh)
+    rows = load_segment_rows_with_tdigests(out_dir)
+    summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len({r["route"] for r in rows})
     summary["video_mp4s"] = sorted(str(p) for p in out_dir.glob("*.mp4"))
-    summary["segments"] = rows
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump(
-            {k: v for k, v in summary.items() if k not in ("video_mp4s", "segments")}, f, indent=4
-        )
     return summary
+
+
+def _write_summary(out_dir: Path, summary: dict) -> None:
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump({k: v for k, v in summary.items() if k != "video_mp4s"}, f, indent=4)
 
 
 def main() -> None:
@@ -229,33 +246,24 @@ def main() -> None:
             nprocs=nproc,
             join=True,
         )
-        summary = _merge_shards(out_dir, args.npz_root, args.near_miss_thresh)
+        summary = _merge_shards(
+            out_dir,
+            args.npz_root,
+            args.near_miss_thresh,
+            strong_brake_mps2=args.strong_brake_mps2,
+        )
         summary["elapsed_sec"] = time.perf_counter() - t0
 
     summary["model_path"] = str(args.model_path)
+    if nproc > 1:
+        _write_summary(out_dir, summary)
+
+    from scenario_generation.closed_loop_eval import format_summary_lines
 
     n_seg = summary["n_segments"]
     print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
-    print(
-        f"collision: {summary['n_segments_with_collision']}/{n_seg} segments "
-        f"(rate {summary['collision_segment_rate']:.4f}), "
-        f"{summary['total_collision_steps']} steps (rate {summary['collision_step_rate']:.6f})"
-    )
-    print(
-        f"near-miss (<= {args.near_miss_thresh} m): "
-        f"{summary['n_segments_with_near_miss']}/{n_seg} segments "
-        f"(rate {summary['near_miss_segment_rate']:.4f}), {summary['total_near_miss_steps']} steps"
-    )
-    print(
-        f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
-        f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
-        f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
-    )
-    print(
-        f"total_snaps={summary['total_snaps']} expand={summary.get('total_expand_count', 0)} "
-        f"repeat_steps={summary.get('total_repeat_steps', 0)} "
-        f"terminated={summary['terminated_counts']}"
-    )
+    for line in format_summary_lines(summary):
+        print(line)
     print(f"videos: one <route>.mp4 per route in {out_dir}")
 
 

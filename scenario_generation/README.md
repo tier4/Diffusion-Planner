@@ -14,6 +14,7 @@ This module provides `SceneContext`, an intermediate format that stores all scen
 - **GT route extractor** (`gt_route_extractor.py`) -- Assigns goal poses and route lanelets to agents from their ground truth future trajectories. Trims zero-padded GT data and removes short-lived agents (misdetections).
 - **Visualization** (`visualize.py`) -- Renders scenes with lanes, road borders, stop lines, agent bounding boxes, trajectories, goals, and routes.
 - **Simulation** (`simulate.py`) -- Closed-loop simulation: at each timestep, every vehicle agent gets its own model forward pass as ego, then all agents advance by one step.
+- **Closed-loop metrics** — Nested per-segment scores (object / road_border / red light / strong brake / reproducer) and aggregate `summary.json`; see [Closed-loop evaluation metrics](#closed-loop-evaluation-metrics).
 
 ## Usage
 
@@ -432,6 +433,173 @@ Output structure: `<output_dir>/<snippet_name>/scene_NNN/{initial.png, scene.pkl
 ```bash
 python -m pytest scenario_generation/tests/ -v
 ```
+
+## Closed-loop evaluation metrics
+
+How we score a Diffusion-Planner checkpoint (or mining run) when the ego is
+driven by the model, while the rest of the scene is replayed from logged route
+NPZs.
+
+Typical eval entry:
+
+```bash
+python -m diffusion_planner.valid_predictor_closed_loop \
+    --model_path /path/to/best_model.pth \
+    --npz_root /path/to/closed_loop_npz_dir   # or a path-list JSON
+```
+
+Outputs land under `<model_dir>/closed_loop/<timestamp>/`: `segments.jsonl`,
+optional `tdigests.jsonl`, `summary.json`, per-route videos. R2LPL mining reuses
+the same metric fields in its own segment jsonl.
+
+### How closed-loop is measured
+
+What a route is. Consecutive 10 Hz NPZ frames that share one bag prefix form a
+route. Eval rolls the ego through the whole route (or a segment of it).
+
+What the perception reproducer does. At each sim tick (0.1 s):
+
+1. A cursor picks which recorded frame to replay (neighbors, map, route,
+   traffic lights, goal as baked into that NPZ).
+2. Those tensors are rigidly re-centered from the logged ego onto the live
+   (model-driven) ego — no live Lanelet map is required.
+3. The model predicts an ego trajectory; a perfect tracker advances the live
+   ego one step along it.
+4. The realized ego footprint is scored against the replayed scene (neighbors,
+   curbs, lights, accel).
+
+So: ego = closed-loop model, everything else = log replay. That is different
+from open-loop validation, which scores one frozen prediction against GT future
+without moving the ego.
+
+Unstick (when the ego gets stuck). If the live ego stays near-stopped for too
+long (and, in pose mode, the cursor is also stuck repeating the same bag frame),
+recovery is two-stage:
+
+1. Expand — temporarily widen the cursor search radius so it can latch onto
+   recorded frames further ahead (often enough for a phantom blocker to clear
+   without teleporting).
+2. Snap — if still stuck after a grace window, teleport the live ego onto a bag
+   pose a fixed arc-length ahead, reset the cursor there, and continue.
+
+Moving again clears the stuck counter and restores the nominal search radius.
+`expand_count` / `snap_count` record how often each stage fired.
+
+### Metric catalog (overview)
+
+| Category | What it answers |
+|---|---|
+| `object` | Hit / near-hit other agents? |
+| `road_border` | Hit / near-hit the curb? |
+| `red_light_violation` | Drive through a red? |
+| `strong_brake` | Hard braking? |
+| `reproducer` | How often stuck / cursor's repeat fired? |
+
+Shared reading notes:
+
+- `*_steps` = frames true; `*_count` = distinct events (False gaps shorter than 3
+  frames do not end an event).
+- Clearance `inf` = no finite samples that segment (not “infinitely far”).
+- Clearance mean in `summary.json` is weighted by `clearance_finite_steps`.
+
+Each segment row also has `route`, `segment` `[start, end]`, `n_steps_run`, and
+`terminated`. Summary adds `n_segments`, `total_steps`, `terminated_counts`.
+
+### object — neighbor collision / near-miss / clearance
+
+Ego box vs every valid neighbor box (moving and static; no rear-end filter):
+collision = overlap; clearance = closest-point distance; near-miss = clearance ≤
+threshold.
+
+Inputs:
+
+| | |
+|---|---|
+| `--near_miss_thresh` (default `0.5` m) | Tunable near-miss cutoff; echoed as `miss_thresh_m` |
+
+Outputs (`object`):
+
+| Field | Meaning |
+|---|---|
+| `collision_steps` / `collision_count` | Overlap frames / events |
+| `miss_steps` / `miss_count` | Near-miss frames / events |
+| `clearance_min_m` / `clearance_mean_m` / `clearance_p5_m` | Finite samples only |
+| `clearance_finite_steps` | Sample count behind those stats |
+
+### road_border — curb collision / near-miss / clearance
+
+Unsigned distance from the ego footprint to road-border geometry. Near-miss uses
+the same `--near_miss_thresh` as object.
+
+Inputs:
+
+| | |
+|---|---|
+| `--near_miss_thresh` (default `0.5` m) | Tunable near-miss cutoff; echoed as `miss_thresh_m` |
+| Collision cutoff `0.1` m (fixed) | Below this counts as collision; not written to JSON |
+
+Outputs (`road_border`): same shape as `object`.
+
+### red_light_violation — running a red
+
+Uses traffic-light state baked into the route NPZ. Only scored when the ego is
+moving.
+
+Inputs:
+
+| | |
+|---|---|
+| Speed gate `0.5` m/s (fixed) | At or below this, violations are ignored |
+
+Outputs (`red_light_violation`):
+
+| Field | Meaning |
+|---|---|
+| `steps` / `count` | Violating frames / events |
+
+### strong_brake — hard braking
+
+Realized longitudinal accel after each tracker step. A frame counts only when
+this and the previous frame are both at or below the threshold.
+
+Inputs:
+
+| | |
+|---|---|
+| Strong-brake threshold (default `-2.5` m/s²) | Tunable; echoed as `thresh_mps2` |
+| Consecutive-pair rule (fixed) | Need two frames in a row over threshold — the current simulator’s realized speed often spikes for a single frame at replan, which would otherwise look like a hard brake |
+
+Outputs (`strong_brake`):
+
+| Field | Meaning |
+|---|---|
+| `steps` / `count` | Counted frames / events |
+| `strongest_mps2` | Most negative counted accel (`inf` if none) |
+
+### reproducer — unstick and cursor health
+
+How often log replay recovered (expand / snap) and whether the cursor advanced
+or repeated. High `snap_count` / `repeat_step_rate` usually means the model
+often stalled or left the bag corridor.
+
+Inputs:
+
+| | |
+|---|---|
+| `--unstick_after` (default `300`) | Stuck steps before stage-1 expand (`0` disables unstick) |
+| `--unstick_radius_mult` (default `3.0`) | Stage-1: widen cursor `search_radius` by this factor (`≤1` skips expand, teleport at `--unstick_after`) |
+| `--unstick_teleport_after` (default `300`) | Extra stuck steps after expand before stage-2 snap |
+| `--unstick_advance_m` (default `2.5`) | Bag arc-length (m) ahead to teleport onto when snapping |
+| `--search_radius` (default `1.5`) | Nominal cursor search radius (m); expand multiplies this |
+
+Outputs (`reproducer`):
+
+| Field | Meaning |
+|---|---|
+| `expand_count` | Stage-1 search-radius widenings |
+| `snap_count` | Stage-2 teleports onto bag pose |
+| `normal_steps` / `repeat_steps` | Cursor advanced vs repeated |
+| `repeat_step_rate` | Summary only: `repeat_steps / total_steps` |
 
 ## Design notes
 

@@ -348,6 +348,82 @@ def test_step_sets_repeat_state_and_counters(tmp_path):
     assert cur.state_run_steps >= 1
 
 
+def test_event_count_rising_edges():
+    """``_event_count`` counts rising edges with a 3-frame falling-edge debounce."""
+    from scenario_generation.reproducer_rollout import _event_count
+
+    assert _event_count(np.array([], dtype=bool)) == 0
+    assert _event_count(np.zeros(5, dtype=bool)) == 0
+    assert _event_count(np.array([1, 1, 1], dtype=bool)) == 1  # one run, leading True
+    # Gaps of 1–2 False stay latched (same event); gap of 3 releases for a new count.
+    assert _event_count(np.array([1, 0, 1], dtype=bool)) == 1  # gap 1
+    assert _event_count(np.array([1, 0, 0, 1], dtype=bool)) == 1  # gap 2
+    assert _event_count(np.array([1, 0, 0, 0, 1], dtype=bool)) == 2  # gap 3
+    assert _event_count(np.array([1, 0, 1, 1, 0, 1], dtype=bool)) == 1  # two short gaps
+
+
+def test_finalize_strong_brake_steps_and_count(tmp_path):
+    """``strong_brake.steps`` needs two consecutive over-threshold frames;
+    ``strong_brake.count`` is the number of discrete braking events (debounced rising edges)."""
+    from scenario_generation.reproducer_rollout import _finalize
+
+    tl = _make_route(tmp_path)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        N_FRAMES,
+        search_radius=1.5,
+        warmup_steps=0,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        strong_brake_mps2=-2.5,
+    )
+    # Raw over-thresh: F T T F F F T  — consecutive mask: F F T F F F F
+    # One sustained pair -> steps=1, count=1. Trailing single-frame spike ignored.
+    s.k = 7
+    s.accels[:7] = np.array([0.0, -5.0, -4.5, 0.0, 0.0, 0.0, -6.0], dtype=np.float32)
+    metrics = _finalize(s)
+    assert metrics["strong_brake"]["steps"] == 1
+    assert metrics["strong_brake"]["count"] == 1
+    # Mask keeps only the 2nd frame of the consecutive pair (-4.5); lone -6.0 spike excluded.
+    assert abs(metrics["strong_brake"]["strongest_mps2"] - (-4.5)) < 1e-6
+
+
+def test_finalize_road_border_collision_thresh(tmp_path):
+    """Unsigned curb distance < 0.1 m is a collision; (0.1, miss_thresh] is miss-only."""
+    from scenario_generation.reproducer_rollout import _finalize
+
+    tl = _make_route(tmp_path)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        N_FRAMES,
+        search_radius=1.5,
+        warmup_steps=0,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        strong_brake_mps2=-2.5,
+    )
+    s.k = 4
+    # 0.05 -> collision+miss; 0.2 -> miss only; 0.6 -> neither; inf -> neither
+    s.rb_dists[:4] = np.array([0.05, 0.2, 0.6, np.inf], dtype=np.float32)
+    metrics = _finalize(s)
+    rb = metrics["road_border"]
+    assert rb["collision_steps"] == 1
+    assert rb["collision_count"] == 1
+    assert rb["miss_steps"] == 2
+    assert rb["miss_count"] == 1
+    assert "collision_thresh_m" not in rb
+
+
 def test_index_ahead_by_arc_length(tmp_path):
     """Teleport target index is chosen by cumulative BAG arc length, not Euclidean
     distance from the live ego (Autoware ``find_perturb_index_along_bag`` parity)."""

@@ -21,23 +21,15 @@ import pickle
 
 import numpy as np
 
+from planner_metrics.scene_format import future_to_4col as _f2to4
 from scenario_generation.tools._heatmap_common import build_route_polyline, project_to_polyline
-
-
-def _f2to4(arr):  # (...,3)[x,y,h] -> (...,4)[x,y,cos,sin]
-    x, y, h = arr[..., 0], arr[..., 1], arr[..., 2]
-    # padding rows are (0,0,0); the 0.1 m floor (vs the 1e-6 used for map
-    # arrays) matches convert_3col_to_4col so near-origin trajectory points
-    # get a zero heading instead of a spurious cos/sin.
-    v = (np.abs(x) + np.abs(y)) > 0.1
-    cos = np.where(v, np.cos(h), 0.0)
-    sin = np.where(v, np.sin(h), 0.0)
-    return np.stack([x, y, cos, sin], axis=-1).astype(np.float32)
 
 
 def convert(d):
     out = {k: d[k] for k in d.files}
-    out["ego_agent_future"] = _f2to4(d["ego_agent_future"].astype(np.float32))
+    out["ego_agent_future"] = _f2to4(
+        d["ego_agent_future"].astype(np.float32), zero_rows_are_padding=False
+    )
     out["ego_agent_past"] = d["ego_agent_past"].astype(np.float32)
     # neighbors: pad slots to 320
     npf = d["neighbor_agents_future"].astype(np.float32)  # (32,80,3)

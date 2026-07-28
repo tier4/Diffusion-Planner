@@ -1,0 +1,21 @@
+{
+  "_doc": "DEFAULT R2LPL lifelong config (rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds). Multi-round / multi-epoch campaign (2 rounds x 3 epochs per round). Warmstarts from --base_model, then each round mines the model's mistakes on the v1 contiguous corpus, builds repair targets, updates replay memory, and TRAINS. IMPORTANT: R2LPL learns from MISTAKES, so v1's contiguous corpus must contain scenes the base model FAILS on (moving_collision / road_border_crossing / expert_disagreement). A clean normal-driving corpus mines zero credit rows and R2LPL fails loud. reward_config, threshold_config, and credit_window_config all SHIP in-repo (generic, no dataset specifics) so this runs out of the box; override reward_config with your own closed-loop reward. n_val_cap subsamples v1 frame/val for the base-vs-trained L2 regression check. For a quick PR check use r2lpl_ci.json instead.",
+  "rounds": 2,
+  "epochs_per_round": 3,
+  "replay_capacity": 200,
+  "enabled_labels": ["moving_collision", "road_border_crossing", "expert_disagreement"],
+  "expert_stop_anchor": "recorded",
+  "min_margin": 0.3,
+  "chunk_len": 80,
+  "start_stride": 80,
+  "expected_frame_step": 1,
+  "tracker_mode": "mpc",
+  "timeline_progress_mode": "clock",
+  "neighbor_history_mode": "sim",
+  "batch_size": 8,
+  "max_chunks": 15,
+  "n_val_cap": 40,
+  "reward_config": "rlvr/autoresearch/tools/dataset_smoke_configs/r2lpl_danger_reward.json",
+  "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
+  "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
+}

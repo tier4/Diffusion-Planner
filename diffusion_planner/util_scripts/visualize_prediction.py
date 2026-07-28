@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from collections import defaultdict
 from functools import partial
-from multiprocessing import Pool
+from multiprocessing import get_context
 from pathlib import Path
 from shutil import rmtree
 
@@ -315,7 +315,11 @@ def visualize_predictions(
     )
     n = len(valid_data_path_list)
     chunksize = max(1, n // (os.cpu_count() * 2))
-    with Pool(os.cpu_count()) as pool:
+    # "spawn", not the default fork: valid_predictor.py calls this in-process on rank 0, where
+    # CUDA and the NCCL process group are already initialized. Forking there copies the memory of
+    # a process whose helper threads hold locks those threads no longer exist to release, and the
+    # workers deadlock before writing a single PNG. spawn gives each worker a clean interpreter.
+    with get_context("spawn").Pool(os.cpu_count()) as pool:
         with tqdm(total=n) as pbar:
             for _ in pool.imap_unordered(
                 render, zip(valid_data_path_list, prediction_path_list), chunksize=chunksize

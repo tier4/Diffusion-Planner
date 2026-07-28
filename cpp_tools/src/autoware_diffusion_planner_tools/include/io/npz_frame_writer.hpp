@@ -38,7 +38,8 @@ void save_frame_data_npz(
 
 // Holds the concatenated per-frame buffers for one sequence. Each buffer is the row-major
 // concatenation of every frame's data (in frame order), so reshaping to {num_frames, ...}
-// yields the stacked array. The cos/sin->heading conversion matches save_frame_data_npz.
+// yields the stacked array. Heading layouts match save_frame_data_npz: ego arrays are
+// [x, y, heading]; neighbor futures stay [x, y, cos, sin] (npz version 3).
 struct SequenceNpzData
 {
   int64_t num_frames;

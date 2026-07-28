@@ -1,0 +1,10 @@
+{
+  "_doc": "Quick PR-shipping check variant of sft.json: 1 epoch on a small subsample (~2 min) to confirm a code change did not break the SFT pipeline. The default sft.json is the real multi-epoch training config.",
+  "train_epochs": 1,
+  "warm_up_epoch": 0,
+  "batch_size": 8,
+  "use_data_augment": true,
+  "augment_prob": 0.5,
+  "n_train_cap": 400,
+  "n_val_cap": 100
+}

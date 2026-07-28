@@ -50,6 +50,12 @@ wheels = [
 ]
 
 [[package]]
+name = "accumulation-tree"
+version = "0.6.4"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/ac/dc/4ffda8a22b6af3f41bcec07ddfebe723218976eaa016cefbc904634a4e85/accumulation_tree-0.6.4.tar.gz", hash = "sha256:5f907667e4106b5ba140b6b871e1902eb2a93d429b92f8a9f7ddb2bee7704334", size = 12635, upload-time = "2024-09-26T21:50:40.627Z" }
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -1654,6 +1660,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pyudorandom"
+version = "1.0.0"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/13/14/6fc20ea903eda547d6a255e995f8d4a09fdc3cf8bfacb6f85e6d669bc259/pyudorandom-1.0.0.tar.gz", hash = "sha256:f30a093a0170c15f9c7f87eb29f71f0f5fde995528b7c6dc4606d389e8c37755", size = 1599, upload-time = "2016-07-18T16:18:56.037Z" }
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -1835,6 +1847,7 @@ dependencies = [
     { name = "rlvr" },
     { name = "scene-search" },
     { name = "scipy" },
+    { name = "tdigest" },
     { name = "torch" },
 ]
 
@@ -1847,6 +1860,7 @@ requires-dist = [
     { name = "rlvr", editable = "rlvr" },
     { name = "scene-search", editable = "scene_search" },
     { name = "scipy" },
+    { name = "tdigest", specifier = "==0.5.2.2" },
     { name = "torch" },
 ]
 
@@ -1993,6 +2007,20 @@ dependencies = [
 sdist = { url = "https://pypi.flatt.tech/files/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://pypi.flatt.tech/files/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "tdigest"
+version = "0.5.2.2"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "accumulation-tree" },
+    { name = "pyudorandom" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/dd/34/7e2f78d1ed0af7d0039ab2cff45b6bf8512234b9f178bb21713084a1f2f0/tdigest-0.5.2.2.tar.gz", hash = "sha256:8deffc8bac024761786f43d9444e3b6c91008cd690323e051f068820a7364d0e", size = 6549, upload-time = "2019-05-07T18:57:40.771Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/32/72/f420480118cbdd18eb761b9936f0a927957130659a638449575b4a4f0aa7/tdigest-0.5.2.2-py2.py3-none-any.whl", hash = "sha256:e32ff6ab62e4defdb93b816c831080d94dfa1efb68a9fa1e7976c237fa9375cb", size = 9445, upload-time = "2019-05-07T18:57:37.493Z" },
+    { url = "https://pypi.flatt.tech/files/packages/b4/94/fd3853b98f39d10206b08f2737d2ec2dc6f46a42dc7b7e05f4f0162d13ee/tdigest-0.5.2.2-py3-none-any.whl", hash = "sha256:dd25f8d6e6be002192bba9e4b8c16491d36c10b389f50637818603d1f67c6fb2", size = 9440, upload-time = "2019-05-07T18:57:38.942Z" },
 ]
 
 [[package]]

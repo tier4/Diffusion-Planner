@@ -648,6 +648,19 @@ def decode_turn_indicator(ti_logit, keep_bias: float = 0.25):
     return biased.argmax(dim=-1).cpu().numpy()
 
 
+def resolve_keep_turn_indicator(ti_cls: int, prev: int) -> int:
+    """Resolve the KEEP pseudo-class (4) to the previous indicator state.
+
+    KEEP is an instruction ("hold the previous signal"), not a real indicator
+    state: the ``turn_indicators`` input history only holds classes 0-3, and the
+    model's history encoder one-hots it with num_classes=4, so writing a raw 4
+    into the history crashes the next forward pass. Mirrors the C++
+    ``TurnIndicatorManager``, which latches the previously published state on
+    KEEP. Every closed-loop path that feeds a decoded class back into the
+    history must go through this."""
+    return prev if ti_cls == 4 else ti_cls
+
+
 def _predict_batch(
     model,
     model_args,

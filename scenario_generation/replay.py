@@ -101,6 +101,7 @@ from scenario_generation.simulate import (
     advance_scene,
     advance_scene_mpc,
     load_model,
+    resolve_keep_turn_indicator,
 )
 from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 from scenario_generation.traffic_light import TrafficLightController
@@ -2897,7 +2898,12 @@ def run_route_replay(
                         # DISABLE=1, LEFT=2, RIGHT=3 trigger a new hold.
                         # -1 because this step already consumes one slot.
                         turn_hold_state[a.id] = (ti_cls, hold_steps - 1)
-                a.turn_indicators[-1] = ti_cls
+                # After the roll in _advance, the previous step's state sits
+                # at [-2]; KEEP (4) must resolve to it — the history only
+                # holds classes 0-3.
+                a.turn_indicators[-1] = resolve_keep_turn_indicator(
+                    ti_cls, int(a.turn_indicators[-2])
+                )
             # Drop hold state for despawned agents so the dict doesn't grow.
             if hold_steps > 0 and turn_hold_state:
                 alive = {a.id for a in scene.agents}

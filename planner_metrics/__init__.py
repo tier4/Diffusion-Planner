@@ -16,4 +16,5 @@ from planner_metrics.pdms_proxy import (  # noqa: F401
     pdms_proxy_masked,
     synthetic_epdms,
 )
+from planner_metrics.scene_format import future_to_4col  # noqa: F401
 from planner_metrics.subscores import *  # noqa: F401,F403

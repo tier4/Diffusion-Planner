@@ -165,33 +165,42 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     finally:
         net.train(was_training)
 
-    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-    ]
+    # Scalar metrics from nested summary (skip non-finite clearances).
+    def _flat_scalars(node: dict, prefix: str = "") -> dict[str, float | int]:
+        out: dict[str, float | int] = {}
+        for k, v in node.items():
+            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
+            if isinstance(v, dict):
+                out.update(_flat_scalars(v, key))
+            elif isinstance(v, (int,)) or (isinstance(v, float) and math.isfinite(v)):
+                out[key] = v
+        return out
+
     log = {
-        f"closed_loop/{k}": summary[k]
-        for k in scalar_keys
-        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+        f"closed_loop/{k}": v
+        for k, v in _flat_scalars(
+            {
+                "n_segments": summary["n_segments"],
+                "total_steps": summary["total_steps"],
+                "object": summary["object"],
+                "road_border": summary["road_border"],
+                "red_light_violation": summary["red_light_violation"],
+                "strong_brake": summary["strong_brake"],
+                "reproducer": summary["reproducer"],
+            }
+        ).items()
     }
     for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
     wandb.log(log, step=epoch + 1)
+    from scenario_generation.closed_loop_eval import format_summary_lines
+
     print(
         f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
     )
+    for line in format_summary_lines(summary):
+        print(f"  {line}")
 
 
 def model_training(args: TrainConfig):

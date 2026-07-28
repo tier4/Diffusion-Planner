@@ -254,7 +254,8 @@ def transform_positions_to_ego_frame(
     Used by RolloutManager to transform GT neighbor futures into current ego frame.
 
     Args:
-        positions: [N, 3] (x, y, heading_rad) in original frame.
+        positions: [N, 3] (x, y, heading_rad) or [N, 4] (x, y, cos_h, sin_h)
+            in original frame.
         ego_x, ego_y, ego_heading: Ego's absolute pose in original frame.
         device: Torch device.
 
@@ -272,8 +273,13 @@ def transform_positions_to_ego_frame(
     x_ego = cos_h * rel_x + sin_h * rel_y
     y_ego = -sin_h * rel_x + cos_h * rel_y
 
-    # Transform heading
-    rel_heading = positions[:, 2] - ego_heading
+    # Transform heading. Rows may be 3-col (x, y, heading) or canonical 4-col
+    # (x, y, cos, sin) — col 2 of a 4-col row is a cos VALUE, not radians.
+    if positions.shape[-1] >= 4:
+        heading = torch.atan2(positions[:, 3], positions[:, 2])
+    else:
+        heading = positions[:, 2]
+    rel_heading = heading - ego_heading
     cos_rel = torch.cos(rel_heading)
     sin_rel = torch.sin(rel_heading)
 

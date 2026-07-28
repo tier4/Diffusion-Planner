@@ -19,10 +19,12 @@ the two GT paths happen to coincide in space-time -- which a large enough DB mak
 
 On-disk DB layout (single ``.npz``):
     past:   [M, INPUT_T + 1, 11] float32  - neighbor past/current states (raw npz format)
-    future: [M, OUTPUT_T,    3] float32  - neighbor future (x, y, heading), raw npz format
+    future: [M, OUTPUT_T,    4] float32  - neighbor future (x, y, cos, sin); legacy 3-col
+            source scenes are widened at scan time, and injection reconciles the DB width
+            with the batch width either way (``_match_future_width``).
 
-The columns match ``neighbor_agents_past`` / ``neighbor_agents_future`` exactly, so injected
-patterns flow through the normal preprocessing (heading_to_cos_sin, normalization, masking).
+Injected patterns flow through the normal preprocessing (heading_to_cos_sin is idempotent,
+normalization, masking).
 """
 
 import argparse
@@ -101,6 +103,28 @@ def parse_args():
     return parser.parse_args()
 
 
+def _match_future_width(future: torch.Tensor, target_cols: int) -> torch.Tensor:
+    """Reconcile a DB future ([k, T, 3 or 4]) with the batch's column count.
+
+    3 -> 4 widens heading to (cos, sin); 4 -> 3 recovers heading via atan2.
+    Padding rows (x and y exactly zero) stay fully zero either way.
+    """
+    cols = future.shape[-1]
+    if cols == target_cols:
+        return future
+    pad = future[..., :2].abs().sum(-1) == 0
+    if cols == 3 and target_cols == 4:
+        h = future[..., 2]
+        out = torch.cat([future[..., :2], h.cos()[..., None], h.sin()[..., None]], dim=-1)
+    elif cols == 4 and target_cols == 3:
+        h = torch.atan2(future[..., 3], future[..., 2])
+        out = torch.cat([future[..., :2], h[..., None]], dim=-1)
+    else:
+        raise ValueError(f"cannot reconcile future widths {cols} -> {target_cols}")
+    out[pad] = 0.0
+    return out
+
+
 def _valid_slot_mask(neighbor_past: np.ndarray) -> np.ndarray:
     """[Pn] bool mask: a slot is valid if its past track is not all zeros (padding)."""
     return np.any(neighbor_past != 0.0, axis=(1, 2))
@@ -121,12 +145,23 @@ def _current_distance(neighbor_past: np.ndarray) -> np.ndarray:
 def _scan_scene(path: str, max_per_scene: int, min_future_steps: int):
     """Return the closest valid+full-future neighbor patterns of one scene.
 
-    Returns ``(past, future)`` with shapes ``[k, 31, 11]`` / ``[k, 80, 3]`` (``k`` up to
-    ``max_per_scene``), or ``None`` if the scene has no usable neighbor.
+    Returns ``(past, future)`` with shapes ``[k, 31, 11]`` / ``[k, 80, 4]`` (``k`` up to
+    ``max_per_scene``), or ``None`` if the scene has no usable neighbor. Futures are
+    stored 4-col ``[x, y, cos, sin]``; legacy 3-col source scenes are widened here so
+    one DB never mixes widths regardless of the source corpus.
     """
     scene = np.load(path, allow_pickle=True)
     neighbor_past = np.asarray(scene["neighbor_agents_past"], dtype=np.float32)  # [Pn, 31, 11]
-    neighbor_future = np.asarray(scene["neighbor_agents_future"], dtype=np.float32)  # [Pn, 80, 3]
+    neighbor_future = np.asarray(scene["neighbor_agents_future"], dtype=np.float32)
+    if neighbor_future.shape[-1] == 3:
+        pad = np.abs(neighbor_future[..., :2]).sum(-1) == 0
+        h = neighbor_future[..., 2]
+        neighbor_future = np.concatenate(
+            [neighbor_future[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
+        ).astype(np.float32)
+        neighbor_future[pad] = 0.0
+    elif neighbor_future.shape[-1] != 4:
+        raise ValueError(f"{path}: neighbor_agents_future must be 3- or 4-col")
 
     usable = _valid_slot_mask(neighbor_past) & _full_future_mask(neighbor_future, min_future_steps)
     usable_indices = np.nonzero(usable)[0]
@@ -192,7 +227,7 @@ def build_neighbor_db(
         raise RuntimeError("No usable neighbor patterns found while building the DB.")
 
     past_arr = np.concatenate(past_patterns, axis=0)  # [M, 31, 11]
-    future_arr = np.concatenate(future_patterns, axis=0)  # [M, 80, 3]
+    future_arr = np.concatenate(future_patterns, axis=0)  # [M, 80, 4]
 
     if past_arr.shape[0] > max_patterns:
         rng = np.random.default_rng(seed)
@@ -217,7 +252,9 @@ class NeighborPatternDB:
     ):
         data = np.load(db_path, allow_pickle=True)
         self.past = torch.from_numpy(np.asarray(data["past"], dtype=np.float32))  # [M, 31, 11]
-        self.future = torch.from_numpy(np.asarray(data["future"], dtype=np.float32))  # [M, 80, 3]
+        self.future = torch.from_numpy(
+            np.asarray(data["future"], dtype=np.float32)
+        )  # [M, 80, 4] (legacy DBs: [M, 80, 3]; reconciled at inject)
         self.num_patterns = self.past.shape[0]
 
         # Precompute future xy + validity for fast collision search.
@@ -276,7 +313,7 @@ class NeighborPatternDB:
         slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
         neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
-        neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]
+        neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3 or 4]
         ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device
         self._to(device)
@@ -357,7 +394,9 @@ class NeighborPatternDB:
             chosen = cand[torch.randperm(cand.numel(), device=device)[:k]]
 
             neighbor_past[b, slots] = self.past[chosen]
-            neighbor_future[b, slots] = self.future[chosen]
+            neighbor_future[b, slots] = _match_future_width(
+                self.future[chosen], neighbor_future.shape[-1]
+            )
             injected[b, slots] = True
 
         self.last_injected_mask = injected

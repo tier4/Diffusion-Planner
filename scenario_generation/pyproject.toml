@@ -11,6 +11,7 @@ dependencies = [
     "rlvr",
     "scene-search",
     "scipy",
+    "tdigest==0.5.2.2",
     "torch",
 ]
 
@@ -22,6 +23,7 @@ build-backend = "setuptools.build_meta"
 packages = [
     "scenario_generation",
     "scenario_generation.gui",
+    "scenario_generation.metrics",
     "scenario_generation.tools",
 ]
 package-dir = { "scenario_generation" = "." }
