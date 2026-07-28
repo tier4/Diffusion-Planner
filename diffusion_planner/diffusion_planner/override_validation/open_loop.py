@@ -201,9 +201,7 @@ def run_override_open_loop_validation(
                             view_range=60.0,
                         )
                         detail["visualization_png"] = str(
-                            visualization_root
-                            / metric_name
-                            / f"sample_{sample_index:08d}.png"
+                            visualization_root / metric_name / f"sample_{sample_index:08d}.png"
                         )
                     details.append(detail)
 

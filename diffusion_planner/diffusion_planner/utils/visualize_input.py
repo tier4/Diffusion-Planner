@@ -507,9 +507,7 @@ def visualize_inputs(
         current_ax = axes[i]
 
         # Draw all components
-        ego_x, ego_y, ego_state = draw_ego_vehicle(
-            current_ax, inputs, show_future=show_ego_future
-        )
+        ego_x, ego_y, ego_state = draw_ego_vehicle(current_ax, inputs, show_future=show_ego_future)
         if show_neighbors:
             draw_neighbor_agents(current_ax, inputs)
         draw_static_objects(current_ax, inputs)
