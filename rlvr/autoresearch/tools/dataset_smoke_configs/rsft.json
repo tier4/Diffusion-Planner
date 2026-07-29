@@ -31,7 +31,5 @@
   "train_epochs": 8,
   "sg_filter_window": 11,
   "sg_filter_order": 3,
-  "n_train_cap": 300,
-  "n_val_cap": 100,
   "sft_batch_size": 8
 }

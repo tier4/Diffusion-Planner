@@ -14,7 +14,6 @@
   "neighbor_history_mode": "sim",
   "batch_size": 8,
   "max_chunks": 15,
-  "n_val_cap": 40,
   "reward_config": "rlvr/autoresearch/tools/dataset_smoke_configs/r2lpl_danger_reward.json",
   "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
   "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
