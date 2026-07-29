@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from run_utils import NCCL_ENV, gpu_count, tee_run
+from diffusion_planner.override_validation.open_loop import load_override_open_loop_settings
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,13 +45,11 @@ def main() -> None:
     args = parse_args()
 
     here = Path(__file__).resolve().parent
+    if args.override_open_loop_list:
+        load_override_open_loop_settings(args.override_open_loop_list)
+
     save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
-
-    if args.override_open_loop_list:
-        override_list = Path(args.override_open_loop_list).resolve()
-        if not override_list.is_file():
-            raise FileNotFoundError(f"Override Open-loop list not found: {override_list}")
 
     # Save git info next to the run.
     def git_output(cmd: list[str]) -> str:

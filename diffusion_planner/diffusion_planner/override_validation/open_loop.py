@@ -81,6 +81,19 @@ def load_override_open_loop_settings(list_path: str) -> dict[str, list[str]]:
             raise ValueError(
                 f"Override Open-loop list for {metric_name!r} must be a list of strings"
             )
+        for path in paths:
+            resolved = Path(path)
+            if not resolved.is_file():
+                raise FileNotFoundError(
+                    f"Override Open-loop NPZ for {metric_name!r} not found: {resolved}"
+                )
+            try:
+                with np.load(resolved, allow_pickle=True):
+                    pass
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"Override Open-loop NPZ for {metric_name!r} cannot be read: {resolved}"
+                ) from exc
         lists[metric_name] = paths
 
     return lists

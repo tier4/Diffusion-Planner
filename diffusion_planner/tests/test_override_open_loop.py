@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pytest
 from diffusion_planner.override_validation.open_loop import (
     METRICS,
@@ -13,18 +14,30 @@ def _write_json(path, value) -> None:
 
 
 def test_load_override_open_loop_settings(tmp_path):
+    centerline_path = tmp_path / "centerline.npz"
+    departure_path = tmp_path / "departure.npz"
+    np.savez(centerline_path)
+    np.savez(departure_path)
     list_path = tmp_path / "list.json"
     _write_json(
         list_path,
         {
-            "centerline": ["/data/centerline.npz"],
-            "departure": ["/data/departure.npz"],
+            "centerline": [str(centerline_path)],
+            "departure": [str(departure_path)],
         },
     )
     metric_lists = load_override_open_loop_settings(str(list_path))
 
-    assert metric_lists["centerline"] == ["/data/centerline.npz"]
-    assert metric_lists["departure"] == ["/data/departure.npz"]
+    assert metric_lists["centerline"] == [str(centerline_path)]
+    assert metric_lists["departure"] == [str(departure_path)]
+
+
+def test_load_override_open_loop_settings_rejects_missing_npz(tmp_path):
+    list_path = tmp_path / "list.json"
+    _write_json(list_path, {"centerline": [str(tmp_path / "missing.npz")]})
+
+    with pytest.raises(FileNotFoundError, match="not found"):
+        load_override_open_loop_settings(str(list_path))
 
 
 def test_override_open_loop_rejects_unknown_metric(tmp_path):
