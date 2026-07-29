@@ -1,0 +1,11 @@
+{
+  "_doc": "DEFAULT real training config for IL / base supervised training (diffusion_planner/train_predictor.py, the README predictor training) on a v1 dataset. Multi-epoch: from --base_model (warm-start) or from scratch when omitted, ~11 epochs over the full 20k-frame train set at batch_size 8 (~10.6 GB peak, fits a 12 GB GPU) -> about 1.5-2 h on an RTX 4090. For a quick 'did I break it' PR check, use il_ci.json instead.",
+  "train_epochs": 11,
+  "warm_up_epoch": 0,
+  "batch_size": 8,
+  "learning_rate": 0.0001,
+  "use_data_augment": true,
+  "augment_prob": 0.5,
+  "n_train_cap": 20000,
+  "n_val_cap": 2000
+}

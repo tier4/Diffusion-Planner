@@ -1414,6 +1414,16 @@ class StatePerturbation:
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
         inputs["ego_agent_future"] = ego_future
 
+        # goal pose (x, y, cos, sin)
+        mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+        inputs["goal_pose"][..., :2] = vector_transform(
+            inputs["goal_pose"][..., :2], transform_matrix, center_xy
+        )
+        inputs["goal_pose"][..., 2:4] = vector_transform(
+            inputs["goal_pose"][..., 2:4], transform_matrix
+        )
+        inputs["goal_pose"][mask] = 0.0
+
         # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
         inputs["neighbor_agents_past"][..., :2] = vector_transform(
