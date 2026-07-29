@@ -14,8 +14,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from diffusion_planner.scenario_based_open_loop.open_loop import (
+    load_scenario_based_open_loop_settings,
+)
 from run_utils import NCCL_ENV, gpu_count, tee_run
-from diffusion_planner.scenario_based_open_loop.open_loop import load_scenario_based_open_loop_settings
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,7 +102,9 @@ def main() -> None:
         "--closed_loop_npz_root",
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
         "--scenario_based_open_loop_list",
-        str(Path(args.scenario_based_open_loop_list).resolve()) if args.scenario_based_open_loop_list else "",
+        str(Path(args.scenario_based_open_loop_list).resolve())
+        if args.scenario_based_open_loop_list
+        else "",
         *optional,
     ]
     rc = tee_run(

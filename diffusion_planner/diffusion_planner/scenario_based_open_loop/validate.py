@@ -2,7 +2,9 @@
 
 import wandb
 
-from diffusion_planner.scenario_based_open_loop.open_loop import run_scenario_based_open_loop_validation
+from diffusion_planner.scenario_based_open_loop.open_loop import (
+    run_scenario_based_open_loop_validation,
+)
 from diffusion_planner.utils import ddp
 
 

@@ -99,9 +99,7 @@ def evaluate_departure_with_details(
         raise ValueError("departure horizon selects zero prediction steps")
     maximum = compute_max_displacement_batch(ego_trajs, data, steps)
     return MetricEvaluation(
-        scores={
-            "failure_rate_percent": (maximum < minimum).to(ego_trajs.dtype) * 100.0
-        },
+        scores={"failure_rate_percent": (maximum < minimum).to(ego_trajs.dtype) * 100.0},
         details={
             "departure": {
                 "horizon_seconds": torch.full_like(maximum, horizon_seconds),

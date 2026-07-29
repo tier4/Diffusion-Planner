@@ -37,7 +37,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if not args.valid_set_list and not args.scenario_based_open_loop_only:
-        raise ValueError("--valid_set_list is required unless --scenario_based_open_loop_only is set")
+        raise ValueError(
+            "--valid_set_list is required unless --scenario_based_open_loop_only is set"
+        )
     if args.scenario_based_open_loop_only and not args.scenario_based_open_loop_list:
         raise ValueError("--scenario_based_open_loop_only requires Scenario-based Open-loop list")
     if args.batch_size < 1:

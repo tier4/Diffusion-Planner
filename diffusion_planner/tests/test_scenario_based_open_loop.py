@@ -60,6 +60,7 @@ def test_scenario_metric_registry_has_initial_metrics():
 
 def test_metric_parameters_are_derived_from_train_config_field_names():
     """Strip metric prefixes when collecting parameters from training args."""
+
     class Args:
         def __init__(self):
             self.scenario_centerline_horizon_seconds = 8.0

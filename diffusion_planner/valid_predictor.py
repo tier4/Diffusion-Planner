@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.scenario_based_open_loop.open_loop import run_scenario_based_open_loop_validation
+from diffusion_planner.scenario_based_open_loop.open_loop import (
+    run_scenario_based_open_loop_validation,
+)
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
