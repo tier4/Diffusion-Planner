@@ -1,9 +1,12 @@
+"""Tests for trajectory departure failure metrics."""
+
 import torch
 
 from planner_metrics.departure import evaluate_departure
 
 
 def test_departure_failure_rate_is_one_hundred_only_for_non_departing_predictions():
+    """Mark only predictions below the displacement threshold as failures."""
     prediction = torch.tensor(
         [
             [[0.2, 0.0], [0.5, 0.0], [0.8, 0.0], [3.0, 0.0]],

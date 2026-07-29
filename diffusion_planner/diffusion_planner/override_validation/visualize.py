@@ -1,4 +1,4 @@
-"""Visualization helpers for Override Open-loop validation predictions."""
+"""Visualization helpers for scenario-specific open-loop predictions."""
 
 from pathlib import Path
 
@@ -11,7 +11,12 @@ def visualize_override_prediction(
     show_neighbors: bool = False,
     view_range: float = 60.0,
 ) -> None:
-    """Render one input scene with the predicted ego trajectory overlaid."""
+    """Render one input scene with the predicted ego trajectory overlaid.
+
+    The input NPZ convention stores heading as ``(x, y, heading)`` for the ego
+    history and goal pose. It is converted to the cosine/sine representation
+    expected by the shared input visualizer before rendering.
+    """
     import matplotlib.pyplot as plt
     import torch
 
@@ -25,7 +30,7 @@ def visualize_override_prediction(
         else:
             sample_inputs[key] = value
 
-    # The raw Override NPZs store headings as (x, y, heading), while the shared
+    # The scenario NPZs store headings as (x, y, heading), while the shared
     # visualization helpers expect (x, y, cos(heading), sin(heading)).
     for key in ("ego_agent_past", "goal_pose"):
         if key in sample_inputs:

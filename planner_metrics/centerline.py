@@ -112,7 +112,11 @@ def evaluate_centerline_with_details(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> MetricEvaluation:
-    """Evaluate centerline metrics using the common Open-loop result format."""
+    """Evaluate centerline metrics using the common open-loop result format.
+
+    Centerline currently has no additional per-sample detail fields, so the
+    result contains only the ADE/FDE score tensors.
+    """
     return MetricEvaluation(scores=evaluate_centerline(ego_trajs, data, parameters))
 
 
@@ -121,4 +125,5 @@ __all__ = [
     "compute_centerline_distance_batch",
     "compute_centerline_fde_batch",
     "evaluate_centerline",
+    "evaluate_centerline_with_details",
 ]

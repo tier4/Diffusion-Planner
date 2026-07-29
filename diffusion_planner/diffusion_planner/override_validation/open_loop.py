@@ -1,4 +1,4 @@
-"""Open-loop Override Validation runner used from the training loop."""
+"""Run configured scenario-specific open-loop metrics on NPZ samples."""
 
 from __future__ import annotations
 
@@ -21,10 +21,12 @@ METRICS = {
 
 
 def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
-    """Build metric parameters from ``override_<metric>_<parameter>`` fields.
+    """Build metric parameters from prefixed argument fields.
 
-    Keeping the naming convention in ``TrainConfig`` avoids maintaining a
-    second metric-to-parameter mapping in the validation runner.
+    For each registered metric, fields named
+    ``override_<metric>_<parameter>`` are collected under the shorter
+    ``<parameter>`` key. This keeps metric configuration in ``TrainConfig``
+    without requiring a second metric-to-parameter mapping here.
     """
     values = vars(args)
     parameters: dict[str, dict[str, object]] = {}
@@ -39,6 +41,7 @@ def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
 
 
 def _load_json_object(path: str, label: str) -> dict:
+    """Read a required UTF-8 JSON object and report path-specific errors."""
     resolved = Path(path)
     if not resolved.is_file():
         raise FileNotFoundError(f"Override Open-loop {label} not found: {resolved}")
@@ -49,7 +52,11 @@ def _load_json_object(path: str, label: str) -> dict:
 
 
 def load_override_open_loop_settings(list_path: str) -> dict[str, list[str]]:
-    """Load and validate the metric-to-NPZ list."""
+    """Load and validate the metric-to-NPZ mapping.
+
+    The mapping must contain registered metric names whose values are lists of
+    readable NPZ file paths. An empty path disables this validation set.
+    """
     if not list_path:
         return {}
 
@@ -91,10 +98,12 @@ def run_override_open_loop_validation(
     visualization_dir: str | Path | None = None,
     details_dir: str | Path | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Run configured Override Open-loop metrics once and return scalar summaries.
+    """Run configured open-loop metrics once and return scalar summaries.
 
-    This intentionally runs on one process only.  Callers own rank selection and
-    W&B logging; the scorer registry owns metric-specific computation.
+    This function intentionally runs on one process only. Callers own rank
+    selection and W&B logging, while registered scorers own metric-specific
+    score and detail computation. Optional per-sample JSONL details and scene
+    visualizations are written under the supplied output directories.
     """
     metric_lists = load_override_open_loop_settings(args.override_open_loop_list)
     if not metric_lists:
@@ -140,8 +149,8 @@ def run_override_open_loop_validation(
                 }
                 prepared = _prepare_validation_inputs(inputs, args, args.device)
                 _, outputs = model(prepared.inputs)
-                # Match validate_model's metric convention: model predictions are
-                # physical coordinates and metrics receive denormalized inputs.
+                # Match validate_model's convention: predictions are physical
+                # coordinates and metric inputs are denormalized.
                 metric_inputs = args.observation_normalizer.inverse(prepared.inputs)
                 batch_size = int(outputs["prediction"].shape[0])
                 ego_prediction = outputs["prediction"][:, 0]

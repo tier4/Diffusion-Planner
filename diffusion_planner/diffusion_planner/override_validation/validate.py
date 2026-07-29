@@ -1,4 +1,4 @@
-"""Training-loop integration for Override Open-loop validation."""
+"""Training-loop integration for scenario-specific open-loop validation."""
 
 import wandb
 
@@ -9,8 +9,9 @@ from diffusion_planner.utils import ddp
 def override_open_loop_validate(model, args, epoch: int) -> None:
     """Run configured open-loop metrics and publish summaries to W&B.
 
-    This is called by rank 0 only. The list JSON selects NPZ files per metric,
-    while the training configuration provides the metric parameters.
+    This is called by rank 0 only. The list JSON selects NPZ files per metric;
+    the training configuration provides metric parameters, and the resulting
+    scalar summaries are logged under the open-loop W&B namespace.
     """
     if not args.override_open_loop_list:
         return

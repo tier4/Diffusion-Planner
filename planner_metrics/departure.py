@@ -83,7 +83,13 @@ def evaluate_departure_with_details(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> MetricEvaluation:
-    """Evaluate departure metrics and return their per-sample details."""
+    """Evaluate departure metrics and return per-sample diagnostic details.
+
+    The aggregate score is the departure failure rate in percent. The detail
+    section additionally records the configured threshold and horizon, the
+    maximum displacement observed for each sample, and the resulting departure
+    decision.
+    """
     horizon_seconds = float(parameters["horizon_seconds"])
     minimum = float(parameters["minimum_displacement_m"])
     if horizon_seconds <= 0:
