@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from diffusion_planner.utils.dist_init import dist_init_file_path
 
 _CONFIG_REQUIRED = {
     "rounds",
@@ -53,7 +54,7 @@ _RSFT_TRAINING_KEYS = {
     "replay_der_coef",
 }
 _MINING_TOOL = "direct_reproducer_chunks"
-_TORCH_DDP_FILE_STORE = Path("/tmp/tmp_dist_init")
+_TORCH_DDP_FILE_STORE = dist_init_file_path()
 _REPAIR_REFRESH_SCOPES = {"unrepaired", "all"}
 
 

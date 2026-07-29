@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from diffusion_planner.utils.dist_init import dist_init_file_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
 
@@ -57,7 +58,7 @@ def main() -> None:
     )
     (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    dist_init_file_path().unlink(missing_ok=True)
 
     cmd = [
         sys.executable,
