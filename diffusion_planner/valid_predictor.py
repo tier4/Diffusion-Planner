@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.override_validation.open_loop import run_override_open_loop_validation
+from diffusion_planner.scenario_based_open_loop.open_loop import run_scenario_based_open_loop_validation
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
@@ -59,8 +59,8 @@ def get_args(args_list=None):
     parser.add_argument("--resume_model_path", type=str, required=True)
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
-    parser.add_argument("--override_open_loop_list", type=str, default=None)
-    parser.add_argument("--override_only", action="store_true")
+    parser.add_argument("--scenario_based_open_loop_list", type=str, default=None)
+    parser.add_argument("--scenario_based_open_loop_only", action="store_true")
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
@@ -106,8 +106,8 @@ def get_args(args_list=None):
 def run_validation(valid_cfg: ValidConfig):
     """Core logic for validation."""
 
-    if valid_cfg.override_only and not valid_cfg.override_open_loop_list:
-        raise ValueError("--override_only requires Override Open-loop list")
+    if valid_cfg.scenario_based_open_loop_only and not valid_cfg.scenario_based_open_loop_list:
+        raise ValueError("--scenario_based_open_loop_only requires Scenario-based Open-loop list")
 
     # 1. Restore model configuration from training settings (args.json)
     config_obj = Config(valid_cfg.args_json_path)
@@ -172,24 +172,24 @@ def run_validation(valid_cfg: ValidConfig):
     if valid_cfg.ddp:
         torch.distributed.barrier()
 
-    if valid_cfg.override_open_loop_list:
+    if valid_cfg.scenario_based_open_loop_list:
         if global_rank == 0:
             output_root = (
                 Path(valid_cfg.save_predictions_dir).parent
                 if valid_cfg.save_predictions_dir
                 else Path(valid_cfg.args_json_path).parent
             )
-            summary_path = output_root / "override_open_loop" / "summary.json"
-            override_args = SimpleNamespace(
-                override_open_loop_list=valid_cfg.override_open_loop_list,
-                override_centerline_horizon_seconds=getattr(
-                    config_obj, "override_centerline_horizon_seconds", 8.0
+            summary_path = output_root / "scenario_based_open_loop" / "summary.json"
+            scenario_open_loop_args = SimpleNamespace(
+                scenario_based_open_loop_list=valid_cfg.scenario_based_open_loop_list,
+                scenario_centerline_horizon_seconds=getattr(
+                    config_obj, "scenario_centerline_horizon_seconds", 8.0
                 ),
-                override_departure_horizon_seconds=getattr(
-                    config_obj, "override_departure_horizon_seconds", 3.0
+                scenario_departure_horizon_seconds=getattr(
+                    config_obj, "scenario_departure_horizon_seconds", 3.0
                 ),
-                override_departure_minimum_displacement_m=getattr(
-                    config_obj, "override_departure_minimum_displacement_m", 2.0
+                scenario_departure_minimum_displacement_m=getattr(
+                    config_obj, "scenario_departure_minimum_displacement_m", 2.0
                 ),
                 batch_size=valid_cfg.batch_size,
                 num_workers=valid_cfg.num_workers,
@@ -198,19 +198,19 @@ def run_validation(valid_cfg: ValidConfig):
                 observation_normalizer=config_obj.observation_normalizer,
                 ddp=False,
             )
-            summary = run_override_open_loop_validation(
+            summary = run_scenario_based_open_loop_validation(
                 ddp.get_model(diffusion_planner, valid_cfg.ddp),
-                override_args,
-                visualization_dir=output_root / "override_open_loop" / "visualization",
-                details_dir=output_root / "override_open_loop" / "details",
+                scenario_open_loop_args,
+                visualization_dir=output_root / "scenario_based_open_loop" / "visualization",
+                details_dir=output_root / "scenario_based_open_loop" / "details",
             )
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.write_text(json.dumps(summary, indent=2) + "\n")
-            print(f"override-open-loop summary: {summary_path}")
+            print(f"scenario-based-open-loop summary: {summary_path}")
 
         if valid_cfg.ddp:
             torch.distributed.barrier()
-        if valid_cfg.override_only:
+        if valid_cfg.scenario_based_open_loop_only:
             return
 
     if valid_cfg.valid_set_list is None:

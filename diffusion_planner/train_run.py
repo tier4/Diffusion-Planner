@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from run_utils import NCCL_ENV, gpu_count, tee_run
-from diffusion_planner.override_validation.open_loop import load_override_open_loop_settings
+from diffusion_planner.scenario_based_open_loop.open_loop import load_scenario_based_open_loop_settings
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,9 +34,9 @@ def parse_args() -> argparse.Namespace:
         "list of such dirs (like --train_set_list). Empty = disabled.",
     )
     p.add_argument(
-        "--override_open_loop_list",
+        "--scenario_based_open_loop_list",
         default="",
-        help="optional JSON mapping Override Open-loop metric names to NPZ path lists. Empty = disabled.",
+        help="optional JSON mapping Scenario-based Open-loop metric names to NPZ path lists. Empty = disabled.",
     )
     return p.parse_args()
 
@@ -45,8 +45,8 @@ def main() -> None:
     args = parse_args()
 
     here = Path(__file__).resolve().parent
-    if args.override_open_loop_list:
-        load_override_open_loop_settings(args.override_open_loop_list)
+    if args.scenario_based_open_loop_list:
+        load_scenario_based_open_loop_settings(args.scenario_based_open_loop_list)
 
     save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
@@ -99,8 +99,8 @@ def main() -> None:
         "10",
         "--closed_loop_npz_root",
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
-        "--override_open_loop_list",
-        str(Path(args.override_open_loop_list).resolve()) if args.override_open_loop_list else "",
+        "--scenario_based_open_loop_list",
+        str(Path(args.scenario_based_open_loop_list).resolve()) if args.scenario_based_open_loop_list else "",
         *optional,
     ]
     rc = tee_run(

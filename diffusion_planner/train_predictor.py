@@ -261,28 +261,28 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
 
-    # Override Open-loop validation. The list selects samples per metric; metric parameters
+    # Scenario-based Open-loop validation. The list selects samples per metric; metric parameters
     # are regular TrainConfig fields.
     parser.add_argument(
-        "--override_open_loop_list",
+        "--scenario_based_open_loop_list",
         type=str,
         default="",
-        help="JSON mapping Override Open-loop metric names to NPZ path lists. Empty = disabled.",
+        help="JSON mapping Scenario-based Open-loop metric names to NPZ path lists. Empty = disabled.",
     )
     parser.add_argument(
-        "--override_centerline_horizon_seconds",
+        "--scenario_centerline_horizon_seconds",
         type=float,
-        default=_train_config_default("override_centerline_horizon_seconds"),
+        default=_train_config_default("scenario_centerline_horizon_seconds"),
     )
     parser.add_argument(
-        "--override_departure_horizon_seconds",
+        "--scenario_departure_horizon_seconds",
         type=float,
-        default=_train_config_default("override_departure_horizon_seconds"),
+        default=_train_config_default("scenario_departure_horizon_seconds"),
     )
     parser.add_argument(
-        "--override_departure_minimum_displacement_m",
+        "--scenario_departure_minimum_displacement_m",
         type=float,
-        default=_train_config_default("override_departure_minimum_displacement_m"),
+        default=_train_config_default("scenario_departure_minimum_displacement_m"),
     )
 
     # Deterministic

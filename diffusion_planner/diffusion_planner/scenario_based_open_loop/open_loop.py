@@ -24,14 +24,14 @@ def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
     """Build metric parameters from prefixed argument fields.
 
     For each registered metric, fields named
-    ``override_<metric>_<parameter>`` are collected under the shorter
+    ``scenario_<metric>_<parameter>`` are collected under the shorter
     ``<parameter>`` key. This keeps metric configuration in ``TrainConfig``
     without requiring a second metric-to-parameter mapping here.
     """
     values = vars(args)
     parameters: dict[str, dict[str, object]] = {}
     for metric_name in METRICS:
-        prefix = f"override_{metric_name}_"
+        prefix = f"scenario_{metric_name}_"
         parameters[metric_name] = {
             field_name[len(prefix) :]: value
             for field_name, value in values.items()
@@ -44,14 +44,14 @@ def _load_json_object(path: str, label: str) -> dict:
     """Read a required UTF-8 JSON object and report path-specific errors."""
     resolved = Path(path)
     if not resolved.is_file():
-        raise FileNotFoundError(f"Override Open-loop {label} not found: {resolved}")
+        raise FileNotFoundError(f"Scenario-based Open-loop {label} not found: {resolved}")
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError(f"Override Open-loop {label} must contain a JSON object: {resolved}")
+        raise ValueError(f"Scenario-based Open-loop {label} must contain a JSON object: {resolved}")
     return payload
 
 
-def load_override_open_loop_settings(list_path: str) -> dict[str, list[str]]:
+def load_scenario_based_open_loop_settings(list_path: str) -> dict[str, list[str]]:
     """Load and validate the metric-to-NPZ mapping.
 
     The mapping must contain registered metric names whose values are lists of
@@ -66,25 +66,25 @@ def load_override_open_loop_settings(list_path: str) -> dict[str, list[str]]:
     for metric_name, paths in raw_lists.items():
         if metric_name not in METRICS:
             raise ValueError(
-                f"Unsupported Override Open-loop metric {metric_name!r}; "
+                f"Unsupported Scenario-based Open-loop metric {metric_name!r}; "
                 f"supported: {sorted(METRICS)}"
             )
         if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
             raise ValueError(
-                f"Override Open-loop list for {metric_name!r} must be a list of strings"
+                f"Scenario-based Open-loop list for {metric_name!r} must be a list of strings"
             )
         for path in paths:
             resolved = Path(path)
             if not resolved.is_file():
                 raise FileNotFoundError(
-                    f"Override Open-loop NPZ for {metric_name!r} not found: {resolved}"
+                    f"Scenario-based Open-loop NPZ for {metric_name!r} not found: {resolved}"
                 )
             try:
                 with np.load(resolved, allow_pickle=True):
                     pass
             except (OSError, ValueError) as exc:
                 raise ValueError(
-                    f"Override Open-loop NPZ for {metric_name!r} cannot be read: {resolved}"
+                    f"Scenario-based Open-loop NPZ for {metric_name!r} cannot be read: {resolved}"
                 ) from exc
         lists[metric_name] = paths
 
@@ -92,7 +92,7 @@ def load_override_open_loop_settings(list_path: str) -> dict[str, list[str]]:
 
 
 @torch.no_grad()
-def run_override_open_loop_validation(
+def run_scenario_based_open_loop_validation(
     model,
     args,
     visualization_dir: str | Path | None = None,
@@ -105,7 +105,7 @@ def run_override_open_loop_validation(
     score and detail computation. Optional per-sample JSONL details and scene
     visualizations are written under the supplied output directories.
     """
-    metric_lists = load_override_open_loop_settings(args.override_open_loop_list)
+    metric_lists = load_scenario_based_open_loop_settings(args.scenario_based_open_loop_list)
     if not metric_lists:
         return {}
 
@@ -122,8 +122,8 @@ def run_override_open_loop_validation(
         details_root = Path(details_dir) if details_dir is not None else None
         if visualization_root is not None:
             visualization_root.mkdir(parents=True, exist_ok=True)
-            from diffusion_planner.override_validation.visualize import (
-                visualize_override_prediction,
+            from diffusion_planner.scenario_based_open_loop.visualize import (
+                visualize_scenario_prediction,
             )
         for root in (details_root,):
             if root is not None:
@@ -165,7 +165,7 @@ def run_override_open_loop_validation(
                         or value.shape[0] != batch_size
                     ):
                         raise ValueError(
-                            f"Override metric {metric_name!r} output {key!r} must be a "
+                            f"Scenario-based metric {metric_name!r} output {key!r} must be a "
                             f"per-sample 1-D tensor of length {batch_size}"
                         )
                     totals[key] += float(value.detach().float().sum().item())
@@ -191,7 +191,7 @@ def run_override_open_loop_validation(
                             else value
                             for key, value in raw_inputs.items()
                         }
-                        visualize_override_prediction(
+                        visualize_scenario_prediction(
                             sample_inputs,
                             ego_prediction[batch_index],
                             visualization_root

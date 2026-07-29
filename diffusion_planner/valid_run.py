@@ -28,18 +28,18 @@ def parse_args() -> argparse.Namespace:
         help="validation output root; defaults to a timestamped directory under --model_dir",
     )
     p.add_argument("--valid_set_list", default="")
-    p.add_argument("--override_open_loop_list", default="")
-    p.add_argument("--override_only", action="store_true")
+    p.add_argument("--scenario_based_open_loop_list", default="")
+    p.add_argument("--scenario_based_open_loop_only", action="store_true")
     p.add_argument("--batch_size", type=int, default=32)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not args.valid_set_list and not args.override_only:
-        raise ValueError("--valid_set_list is required unless --override_only is set")
-    if args.override_only and not args.override_open_loop_list:
-        raise ValueError("--override_only requires Override Open-loop list")
+    if not args.valid_set_list and not args.scenario_based_open_loop_only:
+        raise ValueError("--valid_set_list is required unless --scenario_based_open_loop_only is set")
+    if args.scenario_based_open_loop_only and not args.scenario_based_open_loop_list:
+        raise ValueError("--scenario_based_open_loop_only requires Scenario-based Open-loop list")
     if args.batch_size < 1:
         raise ValueError("--batch_size must be at least 1")
     model_dir = Path(args.model_dir)
@@ -84,15 +84,15 @@ def main() -> None:
     ]
     if args.valid_set_list:
         cmd.extend(["--valid_set_list", args.valid_set_list])
-    if args.override_open_loop_list:
+    if args.scenario_based_open_loop_list:
         cmd.extend(
             [
-                "--override_open_loop_list",
-                args.override_open_loop_list,
+                "--scenario_based_open_loop_list",
+                args.scenario_based_open_loop_list,
             ]
         )
-    if args.override_only:
-        cmd.append("--override_only")
+    if args.scenario_based_open_loop_only:
+        cmd.append("--scenario_based_open_loop_only")
     rc = tee_run(cmd, cwd=here, log_path=output_root / "valid_log.txt")
     sys.exit(rc)
 

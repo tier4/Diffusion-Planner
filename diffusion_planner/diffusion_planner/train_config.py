@@ -167,11 +167,11 @@ class TrainConfig:
     closed_loop_unstick_after: int = 300
     closed_loop_unstick_advance_m: float = 2.5
 
-    # Override Open-loop validation. The list JSON maps metric names to NPZ paths.
-    override_open_loop_list: str = ""
-    override_centerline_horizon_seconds: float = 8.0
-    override_departure_horizon_seconds: float = 3.0
-    override_departure_minimum_displacement_m: float = 2.0
+    # Scenario-based Open-loop validation. The list JSON maps metric names to NPZ paths.
+    scenario_based_open_loop_list: str = ""
+    scenario_centerline_horizon_seconds: float = 8.0
+    scenario_departure_horizon_seconds: float = 3.0
+    scenario_departure_minimum_displacement_m: float = 2.0
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

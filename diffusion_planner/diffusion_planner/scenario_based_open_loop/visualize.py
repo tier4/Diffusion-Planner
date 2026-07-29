@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def visualize_override_prediction(
+def visualize_scenario_prediction(
     inputs: dict,
     prediction,
     save_path: str | Path,
@@ -53,7 +53,7 @@ def visualize_override_prediction(
         prediction_xy[:, 1],
         color="orange",
         linewidth=2,
-        label="override prediction",
+        label="scenario-based prediction",
     )
     ax.scatter(
         prediction_xy[-1, 0],
