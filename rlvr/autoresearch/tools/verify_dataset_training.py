@@ -1,14 +1,16 @@
 """Smoke-test that a v1-style dataset can still train every pipeline.
 
 Point this at a dataset built by ``build_small_dataset.py`` and it runs a tiny,
-fast pass of each training pipeline — each **warmstarted from ``--base_model``** —
-reporting PASS/FAIL per pipeline, EMITTING each pipeline's trained model, and
-showing a base-vs-trained regression check:
+fast pass of each training pipeline — warmstarted from ``--base_model`` (SFT may also
+run **from scratch** when no base is given) — reporting PASS/FAIL per pipeline, EMITTING
+each pipeline's trained model, and showing a base-vs-trained regression check:
 
-* **SFT**   - ``diffusion_planner/train_predictor.py`` on the frame set, warmstarted
-  (``train_epochs = base_epoch + N``, computed from the checkpoint). PASS = finite
-  train+val loss + a saved checkpoint. Reports **base->trained L2** (ego/neighbor via
-  ``valid_predictor``) as the regression signal.
+* **SFT**   - ``diffusion_planner/train_predictor.py`` on the frame set. Warmstarted
+  from ``--base_model`` when given (``train_epochs = base_epoch + N``, computed from the
+  checkpoint), or **from scratch** when ``--base_model`` is omitted (the README cold-start
+  recipe; ``train_epochs = N``). PASS = finite train+val loss + a saved checkpoint. With a
+  base it reports **base->trained L2** (ego/neighbor via ``valid_predictor``) as the
+  regression signal; from scratch there is no base to regress against.
 * **RSFT**  - ``rlvr.autoresearch.run_experiment`` (K-sample ranked SFT), warmstarted.
   PASS = finite per-epoch loss + reward + a LoRA save. Reports **base->trained reward**
   and merges the LoRA into a full model.
@@ -35,14 +37,20 @@ the dataset layout produced by ``build_small_dataset.py``::
       contiguous/reproducer_chunks.jsonl  # R2LPL chunk manifest (failure corpus)
       normalization.json        # (or pass --normalization)
 
-The base model (``--base_model``) is required (warmstart) and must have an
-``args.json`` beside it (the standard deploy-dir layout).
+The base model (``--base_model``) must have an ``args.json`` beside it (the standard
+deploy-dir layout). It is required whenever RSFT or R2LPL runs (they warmstart from it);
+an SFT-only run may omit it to train from scratch (README cold-start).
 
 Usage:
+    # warmstart smoke of all three pipelines
     python -m rlvr.autoresearch.tools.verify_dataset_training \
         --dataset_root <v1_dir> --base_model <best_model.pth> \
         [--skip_sft] [--skip_rsft] [--skip_r2lpl] [--no-emit-models] [--no_l2] \
         [--device auto]
+
+    # from-scratch SFT (no base model): omit --base_model and skip the warmstart-only pipelines
+    python -m rlvr.autoresearch.tools.verify_dataset_training \
+        --dataset_root <v1_dir> --skip_rsft --skip_r2lpl [--device auto]
 """
 
 from __future__ import annotations
@@ -354,8 +362,17 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
     ok = rc == 0 and _finite(tr_loss) and _finite(va_loss) and best.exists()
     l2_note = ""
     if ok and not args.no_l2:
-        l2_note, l2_ok = _regression_l2(args.base_model, best, work / "val.json", work, args, env)
-        ok = ok and l2_ok
+        if args.base_model:
+            l2_note, l2_ok = _regression_l2(
+                args.base_model, best, work / "val.json", work, args, env
+            )
+            ok = ok and l2_ok
+        else:
+            # From-scratch SFT: no base checkpoint exists, so a base-vs-trained L2
+            # regression is undefined. The PASS contract is finite train/val loss + a
+            # written checkpoint (reported below). Flag the gate as N/A loudly rather
+            # than silently skipping it.
+            l2_note = " [from-scratch: no base for L2 regression]"
     saved = _emit_model(best, "sft", args) if (ok and best.exists() and args.emit_models) else None
     detail = (
         f"rc={rc} train_loss={tr_loss[-1] if tr_loss else 'NONE'} "
@@ -733,10 +750,16 @@ def main() -> None:
     if not pipelines:
         print("Nothing to do: all pipelines skipped.")
         return
-    # Every pipeline warmstarts from the base model and reports base-vs-trained metrics,
-    # so it is required for all three (not just RSFT/R2LPL) — no silent from-scratch SFT.
-    if not args.base_model:
-        raise SystemExit("--base_model is required (every pipeline warmstarts from it)")
+    # RSFT and R2LPL always warmstart from the base model (and report base-vs-trained
+    # metrics against it), so a base is required whenever either is enabled. SFT can also
+    # train from scratch (no --base_model) — the README's cold-start recipe — so an
+    # SFT-only run may omit it. Fail loud if a warmstart-only pipeline has no base.
+    needs_base = any(name in ("RSFT", "R2LPL") for name, _, _ in pipelines)
+    if needs_base and not args.base_model:
+        raise SystemExit(
+            "--base_model is required for RSFT/R2LPL (they warmstart from it). "
+            "For from-scratch SFT, run with --skip_rsft --skip_r2lpl and omit --base_model."
+        )
 
     print(f"dataset_root: {root}")
     print(f"out_dir:      {args.out_dir}")
