@@ -723,20 +723,6 @@ def _point_to_segments_min_dist(
     return torch.cat(results)
 
 
-def _point_to_polylines_min_dist(
-    points: torch.Tensor,
-    polylines: torch.Tensor,
-    valid_points: torch.Tensor,
-) -> torch.Tensor:
-    """Return each point's nearest distance to any valid polyline segment."""
-    valid_segments = valid_points[:, :-1] & valid_points[:, 1:]
-    if not valid_segments.any():
-        raise ValueError("centerline metric found no valid route-centerline segments")
-    seg_p1 = polylines[:, :-1, :][valid_segments]
-    seg_p2 = polylines[:, 1:, :][valid_segments]
-    return _point_to_segments_min_dist(points, seg_p1, seg_p2)
-
-
 def _points_inside_intersection_areas(
     points: torch.Tensor,
     polygons_tensor: torch.Tensor,

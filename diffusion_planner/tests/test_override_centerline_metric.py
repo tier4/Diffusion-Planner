@@ -1,16 +1,20 @@
 import torch
 
-from planner_metrics.centerline import evaluate_centerline
-from planner_metrics.geometry import _point_to_polylines_min_dist
+from planner_metrics.centerline import compute_centerline_distance_batch, evaluate_centerline
 
 
 def test_centerline_metric_projects_to_segments():
-    points = torch.tensor([[0.5, 1.0], [2.0, -2.0]])
-    polylines = torch.tensor([[[0.0, 0.0], [3.0, 0.0]]])
+    ego_trajs = torch.tensor([[[0.5, 1.0], [2.0, -2.0]]])
+    route_lanes = torch.zeros((1, 2, 8))
+    route_lanes[0, :, 0] = torch.tensor([0.0, 3.0])
+    route_lanes[0, :, 2] = 1.0
 
-    distances = _point_to_polylines_min_dist(points, polylines, torch.tensor([[True, True]]))
+    distances = compute_centerline_distance_batch(
+        ego_trajs,
+        {"route_lanes": route_lanes},
+    )
 
-    torch.testing.assert_allclose(distances, torch.tensor([1.0, 2.0]))
+    torch.testing.assert_allclose(distances, torch.tensor([[1.0, 2.0]]))
 
 
 def test_centerline_metric_returns_ade_and_fde_at_requested_horizon():
