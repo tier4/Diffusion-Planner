@@ -8,8 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
+from diffusion_planner.utils.dataset import DiffusionPlannerData
 from planner_metrics.centerline import evaluate_centerline
 from planner_metrics.departure import departure_max_displacement, evaluate_departure
 
@@ -35,22 +36,6 @@ def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
             if field_name.startswith(prefix)
         }
     return parameters
-
-
-class _NpzPathDataset(Dataset):
-    """Small dataset adapter for path lists embedded in an Override list JSON."""
-
-    def __init__(self, paths: list[str]) -> None:
-        self.paths = paths
-
-    def __len__(self) -> int:
-        return len(self.paths)
-
-    def __getitem__(self, index: int) -> dict:
-        with np.load(self.paths[index], allow_pickle=True) as loaded:
-            data = dict(loaded)
-        data.pop("version", None)
-        return data
 
 
 def _load_json_object(path: str, label: str) -> dict:
@@ -136,7 +121,7 @@ def run_override_open_loop_validation(
                 root.mkdir(parents=True, exist_ok=True)
         for metric_name, paths in metric_lists.items():
             loader = DataLoader(
-                _NpzPathDataset(paths),
+                DiffusionPlannerData(paths),
                 batch_size=args.batch_size,
                 shuffle=False,
                 num_workers=args.num_workers,
