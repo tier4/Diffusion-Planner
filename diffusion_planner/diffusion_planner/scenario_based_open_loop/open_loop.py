@@ -198,7 +198,7 @@ def run_scenario_based_open_loop_validation(
                             / metric_name
                             / f"sample_{batch_start + batch_index:08d}.png",
                             f"{metric_name} sample {sample_index}",
-                            show_neighbors=False,
+                            show_neighbors=True,
                             view_range=60.0,
                         )
                         detail["visualization_png"] = str(
