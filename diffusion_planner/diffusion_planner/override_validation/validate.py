@@ -7,10 +7,10 @@ from diffusion_planner.utils import ddp
 
 
 def override_open_loop_validate(model, args, epoch: int) -> None:
-    """Run configured Override Open-loop metrics and publish summaries to W&B.
+    """Run configured open-loop metrics and publish summaries to W&B.
 
-    Called by rank 0 only.  The list JSON selects NPZs per metric, while the
-    companion config determines the validation cadence and metric parameters.
+    This is called by rank 0 only. The list JSON selects NPZ files per metric,
+    while the training configuration provides the metric parameters.
     """
     if not args.override_open_loop_list:
         return
