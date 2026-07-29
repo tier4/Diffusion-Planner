@@ -45,7 +45,6 @@ def main() -> None:
     if args.batch_size < 1:
         raise ValueError("--batch_size must be at least 1")
     model_dir = Path(args.model_dir)
-    valid_set_list = args.valid_set_list
     model_path = Path(args.checkpoint) if args.checkpoint else model_dir / "best_model.pth"
     args_json_path = model_dir / "args.json"
     if not model_path.is_file():
@@ -73,8 +72,6 @@ def main() -> None:
         str(gpu_count()),
         "--standalone",
         "valid_predictor.py",
-        "--valid_set_list",
-        valid_set_list,
         "--resume_model_path",
         str(model_path),
         "--args_json_path",
@@ -85,12 +82,12 @@ def main() -> None:
         str(save_dir),
     ]
     if args.valid_set_list:
-        cmd.extend(["--valid_set_list", args.valid_set_list])
+        cmd.extend(["--valid_set_list", str(Path(args.valid_set_list).resolve())])
     if args.scenario_based_open_loop_list:
         cmd.extend(
             [
                 "--scenario_based_open_loop_list",
-                args.scenario_based_open_loop_list,
+                str(Path(args.scenario_based_open_loop_list).resolve()),
             ]
         )
     if args.scenario_based_open_loop_only:

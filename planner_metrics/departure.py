@@ -54,21 +54,6 @@ def compute_departure_failure_batch(
     return (maximum < minimum_displacement_m).to(ego_trajs.dtype)
 
 
-def departure_max_displacement(
-    ego_trajs: torch.Tensor,
-    data: dict[str, torch.Tensor],
-    parameters: dict,
-) -> torch.Tensor:
-    """Return maximum displacement through the configured horizon."""
-    horizon_seconds = float(parameters["horizon_seconds"])
-    if horizon_seconds <= 0:
-        raise ValueError("departure horizon_seconds must be positive")
-    steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), ego_trajs.shape[1])
-    if steps < 1:
-        raise ValueError("departure horizon selects zero prediction steps")
-    return compute_max_displacement_batch(ego_trajs, data, steps)
-
-
 def evaluate_departure(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
@@ -114,7 +99,6 @@ def evaluate_departure_with_details(
 __all__ = [
     "compute_departure_failure_batch",
     "compute_max_displacement_batch",
-    "departure_max_displacement",
     "evaluate_departure",
     "evaluate_departure_with_details",
 ]
