@@ -11,12 +11,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from diffusion_planner.utils.dataset import DiffusionPlannerData
-from planner_metrics.centerline import evaluate_centerline
-from planner_metrics.departure import departure_max_displacement, evaluate_departure
+from planner_metrics.centerline import evaluate_centerline_with_details
+from planner_metrics.departure import evaluate_departure_with_details
 
 METRICS = {
-    "centerline": evaluate_centerline,
-    "departure": evaluate_departure,
+    "centerline": evaluate_centerline_with_details,
+    "departure": evaluate_departure_with_details,
 }
 
 
@@ -147,12 +147,8 @@ def run_override_open_loop_validation(
                 ego_prediction = outputs["prediction"][:, 0]
                 batch_start = count
                 count += batch_size
-                per_sample_scores = scorer(ego_prediction, metric_inputs, parameters)
-                departure_displacements = (
-                    departure_max_displacement(ego_prediction, metric_inputs, parameters)
-                    if metric_name == "departure"
-                    else None
-                )
+                evaluation = scorer(ego_prediction, metric_inputs, parameters)
+                per_sample_scores = evaluation.scores
                 for key, value in per_sample_scores.items():
                     if (
                         not torch.is_tensor(value)
@@ -175,15 +171,9 @@ def run_override_open_loop_validation(
                             for key, value in per_sample_scores.items()
                         },
                     }
-                    if metric_name == "departure":
-                        horizon_seconds = float(parameters["horizon_seconds"])
-                        minimum_displacement_m = float(parameters["minimum_displacement_m"])
-                        max_displacement_m = departure_displacements[batch_index].item()
-                        detail["departure"] = {
-                            "horizon_seconds": horizon_seconds,
-                            "minimum_displacement_m": minimum_displacement_m,
-                            "max_displacement_m": max_displacement_m,
-                            "departed": max_displacement_m >= minimum_displacement_m,
+                    for section, fields in evaluation.details.items():
+                        detail[section] = {
+                            key: value[batch_index].item() for key, value in fields.items()
                         }
                     if visualization_root is not None:
                         sample_inputs = {

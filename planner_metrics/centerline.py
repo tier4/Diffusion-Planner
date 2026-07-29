@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from planner_metrics.evaluation import MetricEvaluation
 from planner_metrics.geometry import _point_to_segments_min_dist
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
@@ -104,6 +105,15 @@ def evaluate_centerline(
         "ade_m": compute_centerline_ade_batch(ego_trajs, data, steps),
         "fde_m": compute_centerline_fde_batch(ego_trajs, data, steps),
     }
+
+
+def evaluate_centerline_with_details(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    parameters: dict,
+) -> MetricEvaluation:
+    """Evaluate centerline metrics using the common Open-loop result format."""
+    return MetricEvaluation(scores=evaluate_centerline(ego_trajs, data, parameters))
 
 
 __all__ = [

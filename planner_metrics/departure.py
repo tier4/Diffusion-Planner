@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from planner_metrics.evaluation import MetricEvaluation
+
 _PREDICTION_TIMESTEP_SECONDS = 0.1
 
 
@@ -73,6 +75,15 @@ def evaluate_departure(
     parameters: dict,
 ) -> dict[str, torch.Tensor]:
     """Return departure failure as 0 or 100 percent per trajectory."""
+    return evaluate_departure_with_details(ego_trajs, data, parameters).scores
+
+
+def evaluate_departure_with_details(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    parameters: dict,
+) -> MetricEvaluation:
+    """Evaluate departure metrics and return their per-sample details."""
     horizon_seconds = float(parameters["horizon_seconds"])
     minimum = float(parameters["minimum_displacement_m"])
     if horizon_seconds <= 0:
@@ -80,10 +91,20 @@ def evaluate_departure(
     steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), ego_trajs.shape[1])
     if steps < 1:
         raise ValueError("departure horizon selects zero prediction steps")
-    return {
-        "failure_rate_percent": compute_departure_failure_batch(ego_trajs, data, minimum, steps)
-        * 100.0
-    }
+    maximum = compute_max_displacement_batch(ego_trajs, data, steps)
+    return MetricEvaluation(
+        scores={
+            "failure_rate_percent": (maximum < minimum).to(ego_trajs.dtype) * 100.0
+        },
+        details={
+            "departure": {
+                "horizon_seconds": torch.full_like(maximum, horizon_seconds),
+                "minimum_displacement_m": torch.full_like(maximum, minimum),
+                "max_displacement_m": maximum,
+                "departed": maximum >= minimum,
+            }
+        },
+    )
 
 
 __all__ = [
@@ -91,4 +112,5 @@ __all__ = [
     "compute_max_displacement_batch",
     "departure_max_displacement",
     "evaluate_departure",
+    "evaluate_departure_with_details",
 ]
