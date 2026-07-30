@@ -517,7 +517,7 @@ def _seed_state(
     neighbor_history_mode="recorded",
     goal_mode="segment",
     replay_mode="pose",
-    tracker_mode="mpc",
+    tracker_mode="mpc_batched",
     strong_brake_mps2=-2.5,
     yaw_gate: bool = True,
 ) -> _SegState:
@@ -1359,7 +1359,7 @@ def render_segment(
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
     timeline_progress_mode: str = "pose",
-    tracker_mode: str = "mpc",
+    tracker_mode: str = "mpc_batched",
     goal_mode: str = "segment",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
@@ -1404,7 +1404,9 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
-    ``tracker_mode="mpc"`` (default) uses the bicycle-model MPC tracker for ego advance while
+    ``tracker_mode="mpc_batched"`` (default) uses the bicycle-model MPC tracker for ego advance
+    (one vectorized solve for all segments per tick; ``"mpc"`` keeps the serial per-segment
+    scipy solve) while
     keeping the same reproduced perception inputs. ``tracker_mode="perfect"`` is *complete* perfect
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
@@ -1708,7 +1710,7 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
-    tracker_mode: str = "mpc",
+    tracker_mode: str = "mpc_batched",
     timeline_progress_mode: str = "pose",
     strong_brake_mps2: float = -2.5,
     yaw_gate: bool = True,

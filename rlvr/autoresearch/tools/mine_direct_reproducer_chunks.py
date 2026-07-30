@@ -541,7 +541,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal_reach_m", type=float, default=0.0)
     parser.add_argument("--unstick_after", type=int, default=300)
     parser.add_argument("--unstick_advance_m", type=float, default=5.0)
-    parser.add_argument("--tracker_mode", choices=["mpc", "mpc_batched", "perfect"], default="mpc")
+    parser.add_argument(
+        "--tracker_mode", choices=["mpc", "mpc_batched", "perfect"], default="mpc_batched"
+    )
     parser.add_argument("--timeline_progress_mode", choices=["clock", "pose"], default="clock")
     parser.add_argument("--neighbor_history_mode", choices=["sim", "recorded"], default="sim")
     parser.add_argument("--gpu_transform", action="store_true")

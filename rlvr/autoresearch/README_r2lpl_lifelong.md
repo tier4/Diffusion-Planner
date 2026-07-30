@@ -327,7 +327,9 @@ building each chunk.
 
 For this workflow, the intended reproducer settings are:
 
-- `tracker_mode="mpc"`
+- `tracker_mode="mpc_batched"` (bicycle-model MPC, one vectorized solve for all
+  segments per tick; `"mpc"` selects the legacy serial per-segment solve — same
+  events within a frame or two of onset shift, ~2.3x slower advance stage)
 - `timeline_progress_mode="clock"`
 - `neighbor_history_mode="sim"`
 - `gpu_transform=true`
@@ -534,7 +536,7 @@ Common production settings:
 - `repair_generation.repair_labels=["road_border_crossing","static_collision","moving_collision","expert_disagreement"]`
 - `validate_on_repaired_targets=true` when training validation should measure
   imitation on the repaired scene-target pairs produced by the same round
-- `perception_reproducer.tracker_mode=mpc`
+- `perception_reproducer.tracker_mode=mpc_batched`
 - `perception_reproducer.timeline_progress_mode=clock`
 - `perception_reproducer.neighbor_history_mode=sim`
 

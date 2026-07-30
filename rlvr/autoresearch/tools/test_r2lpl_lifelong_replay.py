@@ -1844,6 +1844,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         verify_credit_windows=[
             {
                 "route_key": "bagA",
@@ -2009,6 +2012,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         route_keys=["bagA"],
         danger_save_dir=tmp_path,
         danger_scorer=_fake_danger_scorer,
@@ -2141,6 +2147,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         route_keys=["bagA"],
         danger_save_dir=tmp_path,
         danger_scorer=_fake_clean_scorer,

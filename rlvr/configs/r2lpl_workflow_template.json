@@ -32,7 +32,7 @@
     "anchor_horizon_steps": 40,
     "max_rollout_steps": 80,
     "timeline_progress_mode": "clock",
-    "tracker_mode": "mpc"
+    "tracker_mode": "mpc_batched"
   },
   "repair_generation": {
     "ego_shape": "WB,L,W",
