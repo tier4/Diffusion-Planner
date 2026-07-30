@@ -317,21 +317,18 @@ class MPCTracker:
     # Public API
     # ------------------------------------------------------------------
 
-    def track(
+    def _build_ref_and_init(
         self,
         x0: np.ndarray,
         ref_world: np.ndarray,
-    ) -> tuple[np.ndarray, float]:
-        """Run one MPC step: optimise controls, apply first step.
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Build the MPC-horizon reference + warm-start knots for one solve.
 
-        Args:
-            x0: (4,) [x, y, yaw, v] current state in world frame.
-            ref_world: (N, 3) reference [x, y, yaw] in world frame.
-                At least *horizon* rows; extras are ignored.
+        Shared verbatim by ``track()`` and the batched solver
+        (``mpc_tracker_batched.track_many``), so the idle-recovery /
+        warm-start semantics can never drift between the two paths.
 
-        Returns:
-            new_pos: (3,) [x, y, yaw] after one dt step.
-            new_speed: scalar speed after one dt step.
+        Returns (ref (horizon, 3), init (n_knots, 2)).
         """
         # Idle-recovery check uses the model's FULL prediction horizon,
         # not the MPC's truncated window. Post-stop the model typically
@@ -407,6 +404,25 @@ class MPCTracker:
             init[:, 0] = a_guess
         else:
             init = np.zeros((self.n_knots, 2), dtype=np.float64)
+        return ref, init
+
+    def track(
+        self,
+        x0: np.ndarray,
+        ref_world: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        """Run one MPC step: optimise controls, apply first step.
+
+        Args:
+            x0: (4,) [x, y, yaw, v] current state in world frame.
+            ref_world: (N, 3) reference [x, y, yaw] in world frame.
+                At least *horizon* rows; extras are ignored.
+
+        Returns:
+            new_pos: (3,) [x, y, yaw] after one dt step.
+            new_speed: scalar speed after one dt step.
+        """
+        ref, init = self._build_ref_and_init(x0, ref_world)
 
         # Tightened tolerance / iter caps. The smooth quadratic-ish cost
         # converges long before maxiter=50 in the typical case; profiles

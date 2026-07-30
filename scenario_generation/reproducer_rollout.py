@@ -551,10 +551,15 @@ def _seed_state(
     turn_hist = np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
     if tracker_mode == "perfect":
         tracker = PerfectTracker(dt=DT)
-    elif tracker_mode == "mpc":
+    elif tracker_mode in ("mpc", "mpc_batched"):
+        # mpc_batched keeps the identical per-segment MPCTracker (warm start +
+        # telemetry live on it); only the per-tick SOLVE is batched across
+        # segments in run_segments_batched (see mpc_tracker_batched.track_many).
         tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
     else:
-        raise ValueError(f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect' or 'mpc'")
+        raise ValueError(
+            f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect', 'mpc', or 'mpc_batched'"
+        )
     return _SegState(
         tl=tl,
         start=start,
@@ -701,7 +706,7 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
-def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
+def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
     ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
@@ -709,6 +714,12 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
     PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
     multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
     applied directly, which is the faithful "perfect tracking" of the cached plan.
+
+    ``tracked`` = ``(new_pose(3,), new_speed)`` from a BATCHED tracker solve
+    (``mpc_tracker_batched.track_many``): the caller already ran the tracker for
+    this segment, so the tracker branch is skipped and its result applied with
+    the same telemetry reads (``track_many`` set ``last_yaw_rate``/``last_steering``
+    on ``s.tracker`` exactly like ``track()`` does).
     """
     from scenario_generation.mpc_tracker import postprocess_reference
 
@@ -725,6 +736,11 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             dh = (float(new_pose[2]) - float(s.live_pose[2]) + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = float(dh / DT)
             steering = 0.0
+        elif tracked is not None:
+            new_pose = np.asarray(tracked[0], dtype=np.float64)
+            new_speed = float(tracked[1])
+            yaw_rate = float(getattr(s.tracker, "last_yaw_rate", 0.0))
+            steering = float(getattr(s.tracker, "last_steering", 0.0))
         else:
             wxy, wh = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
@@ -2263,9 +2279,44 @@ def run_segments_batched(
                                         s.episode_saved = True
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
+                    tracked_by_row: dict[int, tuple] = {}
+                    if tracker_mode == "mpc_batched":
+                        # ONE vectorized L-BFGS-B solve for every tracker-branch
+                        # segment this tick, instead of B serial scipy solves
+                        # inside _advance_step (its `tracked` fast path applies
+                        # the results; warmup segments keep their own branch).
+                        from scenario_generation.mpc_tracker import postprocess_reference
+                        from scenario_generation.mpc_tracker_batched import track_many
+
+                        with timers("advance_solve"):
+                            rows_b: list[int] = []
+                            trks_b, x0s_b, refs_b = [], [], []
+                            for i, (s, *_rest) in enumerate(built):
+                                if s.k < s.warmup_steps:
+                                    continue
+                                wxy, wh = _ego_pred_to_world(
+                                    preds[i][:, :2],
+                                    preds[i][:, 2:4],
+                                    s.live_pose[0],
+                                    s.live_pose[1],
+                                    s.live_pose[2],
+                                )
+                                refs_b.append(postprocess_reference(wxy, wh, dt=DT))
+                                x0s_b.append(
+                                    [s.live_pose[0], s.live_pose[1], s.live_pose[2], s.dyn.speed]
+                                )
+                                rows_b.append(i)
+                                trks_b.append(s.tracker)
+                            if rows_b:
+                                solved = track_many(
+                                    trks_b, np.asarray(x0s_b, dtype=np.float64), refs_b
+                                )
+                                tracked_by_row = dict(zip(rows_b, solved))
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.snap_count
-                        _advance_step(s, preds[i], idx, device, timers)
+                        _advance_step(
+                            s, preds[i], idx, device, timers, tracked=tracked_by_row.get(i)
+                        )
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
