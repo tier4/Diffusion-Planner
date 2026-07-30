@@ -933,9 +933,12 @@ def _materialize_chunk_manifest_for_shards(
     # which must not change mid-campaign anyway (guard comparability rule) — so
     # plan once at the CAMPAIGN level and reuse across rounds. A knob mismatch
     # against an existing campaign plan fails loudly instead of silently
-    # re-planning with different chunking.
+    # re-planning with different chunking. The scene list is keyed by CONTENT
+    # digest, not pathname: a list regenerated in place before a resumed round
+    # must not silently reuse a plan built over the old pool.
     plan_key = {
         "scene_list": str(scene_list),
+        "scene_list_sha256": hashlib.sha256(Path(scene_list).read_bytes()).hexdigest(),
         "chunk_len": mining.get("chunk_len", 80),
         "start_stride": mining.get("start_stride", mining.get("chunk_len", 80)),
         **{

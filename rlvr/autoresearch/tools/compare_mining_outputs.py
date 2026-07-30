@@ -12,6 +12,7 @@ Usage: compare_mining_outputs.py <dir_A> <dir_B> [--atol 0] [--float_fields_rtol
 import argparse
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -54,22 +55,41 @@ def cmp_value(a, b, rtol: float) -> bool:
 
 def compare_jsonl(name: str, a_rows: list[dict], b_rows: list[dict], rtol: float) -> list[str]:
     diffs = []
-    a_by, b_by = {row_key(r): r for r in a_rows}, {row_key(r): r for r in b_rows}
+    if len(a_rows) != len(b_rows):
+        diffs.append(f"{name}: row counts differ ({len(a_rows)} vs {len(b_rows)})")
+    # Group per key and preserve multiplicity: a dict keyed on row_key would
+    # silently collapse duplicate rows, letting an A-with-duplicates vs
+    # B-without regression read as IDENTICAL (a correctness gate must not).
+    a_by: dict[tuple, list[dict]] = defaultdict(list)
+    b_by: dict[tuple, list[dict]] = defaultdict(list)
+    for r in a_rows:
+        a_by[row_key(r)].append(r)
+    for r in b_rows:
+        b_by[row_key(r)].append(r)
     only_a, only_b = set(a_by) - set(b_by), set(b_by) - set(a_by)
     if only_a:
         diffs.append(f"{name}: {len(only_a)} rows only in A, e.g. {sorted(only_a)[:3]}")
     if only_b:
         diffs.append(f"{name}: {len(only_b)} rows only in B, e.g. {sorted(only_b)[:3]}")
+
+    def _canon(row: dict) -> str:
+        return json.dumps(row, sort_keys=True, default=str)
+
     for k in sorted(set(a_by) & set(b_by)):
-        ra, rb = a_by[k], b_by[k]
-        bad = [
-            f
-            for f in sorted(set(ra) | set(rb))
-            # scene_path/window_dir embed the output dir name — not semantics.
-            if f not in ("scene_path", "window_dir") and not cmp_value(ra.get(f), rb.get(f), rtol)
-        ]
-        if bad:
-            diffs.append(f"{name} {k}: fields differ: {bad[:8]}")
+        group_a, group_b = a_by[k], b_by[k]
+        if len(group_a) != len(group_b):
+            diffs.append(f"{name} {k}: multiplicity differs ({len(group_a)} vs {len(group_b)})")
+            continue
+        for ra, rb in zip(sorted(group_a, key=_canon), sorted(group_b, key=_canon)):
+            bad = [
+                f
+                for f in sorted(set(ra) | set(rb))
+                # scene_path/window_dir embed the output dir name — not semantics.
+                if f not in ("scene_path", "window_dir")
+                and not cmp_value(ra.get(f), rb.get(f), rtol)
+            ]
+            if bad:
+                diffs.append(f"{name} {k}: fields differ: {bad[:8]}")
     return diffs
 
 

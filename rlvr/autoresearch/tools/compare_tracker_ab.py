@@ -114,10 +114,28 @@ def main() -> int:
         f"{'OK' if match else 'FAIL'}"
     )
 
-    for tag, path in (("A", a_dir), ("B", b_dir)):
-        segs = load_jsonl(path / "segments.jsonl")
-        term = Counter(str(r.get("terminated")) for r in segs)
-        print(f"terminations[{tag}]: {dict(sorted(term.items()))}")
+    # Termination reasons and rollout lengths are GATED, not informational: a
+    # tracker can match chunk/event counts while materially changing how or
+    # how long segments run, and that must not read as PASS.
+    a_segs = load_jsonl(a_dir / "segments.jsonl")
+    b_segs = load_jsonl(b_dir / "segments.jsonl")
+    term_a = Counter(str(r.get("terminated")) for r in a_segs)
+    term_b = Counter(str(r.get("terminated")) for r in b_segs)
+    for reason in sorted(set(term_a) | set(term_b)):
+        na, nb = term_a.get(reason, 0), term_b.get(reason, 0)
+        tol = max(1, round(0.02 * max(na, nb)))
+        match = abs(na - nb) <= tol
+        ok &= match
+        print(f"terminations[{reason}]: A={na} B={nb} (tol ±{tol}) {'OK' if match else 'FAIL'}")
+    steps_a = sum(int(r.get("n_steps_run", 0)) for r in a_segs)
+    steps_b = sum(int(r.get("n_steps_run", 0)) for r in b_segs)
+    steps_tol = max(1, round(0.02 * max(steps_a, steps_b)))
+    match = abs(steps_a - steps_b) <= steps_tol
+    ok &= match
+    print(
+        f"total simulated steps: A={steps_a} B={steps_b} (tol ±{steps_tol}) "
+        f"{'OK' if match else 'FAIL'}"
+    )
 
     print("VERDICT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

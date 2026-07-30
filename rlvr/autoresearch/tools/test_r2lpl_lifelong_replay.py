@@ -4749,6 +4749,12 @@ def test_materialize_chunk_manifest_campaign_cache(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="different knobs"):
         round_runner._materialize_chunk_manifest_for_shards(bad_cfg, r2)
 
+    # A scene list regenerated IN PLACE (same path, new content) must fail
+    # loudly too — the plan is keyed by content digest, not pathname.
+    scene_list.write_text('["/data/new_scene.npz"]')
+    with pytest.raises(ValueError, match="different knobs"):
+        round_runner._materialize_chunk_manifest_for_shards(cfg, r2)
+
 
 def test_replay_capacity_is_required():
     with pytest.raises(ValueError, match="capacity is required"):

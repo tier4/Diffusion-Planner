@@ -11,6 +11,7 @@ Usage: compare_repair_outputs.py <dir_A> <dir_B> [--atol 0]
 import argparse
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 from rlvr.autoresearch.tools.compare_mining_outputs import cmp_value, compare_npzs, load_jsonl
@@ -20,22 +21,38 @@ _PATH_FIELDS = {"scene_path", "source_scene_path", "window_dir"}
 
 def compare_rows(name: str, a_rows, b_rows, rtol: float) -> list[str]:
     diffs = []
-    a_by = {Path(r["scene_path"]).name: r for r in a_rows}
-    b_by = {Path(r["scene_path"]).name: r for r in b_rows}
+    if len(a_rows) != len(b_rows):
+        diffs.append(f"{name}: row counts differ ({len(a_rows)} vs {len(b_rows)})")
+    # Preserve multiplicity — see compare_mining_outputs.compare_jsonl: a plain
+    # dict would collapse duplicate rows and hide a duplication regression.
+    a_by: dict[str, list] = defaultdict(list)
+    b_by: dict[str, list] = defaultdict(list)
+    for r in a_rows:
+        a_by[Path(r["scene_path"]).name].append(r)
+    for r in b_rows:
+        b_by[Path(r["scene_path"]).name].append(r)
     only_a, only_b = set(a_by) - set(b_by), set(b_by) - set(a_by)
     if only_a:
         diffs.append(f"{name}: {len(only_a)} rows only in A, e.g. {sorted(only_a)[:3]}")
     if only_b:
         diffs.append(f"{name}: {len(only_b)} rows only in B, e.g. {sorted(only_b)[:3]}")
+
+    def _canon(row) -> str:
+        return json.dumps(row, sort_keys=True, default=str)
+
     for k in sorted(set(a_by) & set(b_by)):
-        ra, rb = a_by[k], b_by[k]
-        bad = [
-            f
-            for f in sorted(set(ra) | set(rb))
-            if f not in _PATH_FIELDS and not cmp_value(ra.get(f), rb.get(f), rtol)
-        ]
-        if bad:
-            diffs.append(f"{name} {k}: fields differ: {bad[:10]}")
+        group_a, group_b = a_by[k], b_by[k]
+        if len(group_a) != len(group_b):
+            diffs.append(f"{name} {k}: multiplicity differs ({len(group_a)} vs {len(group_b)})")
+            continue
+        for ra, rb in zip(sorted(group_a, key=_canon), sorted(group_b, key=_canon)):
+            bad = [
+                f
+                for f in sorted(set(ra) | set(rb))
+                if f not in _PATH_FIELDS and not cmp_value(ra.get(f), rb.get(f), rtol)
+            ]
+            if bad:
+                diffs.append(f"{name} {k}: fields differ: {bad[:10]}")
     return diffs
 
 
