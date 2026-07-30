@@ -16,9 +16,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Sequence
 
-Source = str | Path | Sequence[str | Path]
+Source = str | Path | list[str | Path]
 
 
 def load_json(path: str | Path):
@@ -36,11 +36,13 @@ def load_json(path: str | Path):
         return json.load(handle)
 
 
-def _looks_like_npz(entry: str | Path) -> bool:
+def _is_npz_path(entry: str | Path) -> bool:
+    """Check if entry looks like an NPZ path (ends with .npz)."""
     return str(entry).endswith(".npz")
 
 
-def _looks_like_path_list_file(path: Path) -> bool:
+def _is_path_list_file(path: Path) -> bool:
+    """Check if path is a path-list file (.json, .json.zst, .zst)."""
     name = path.name
     return name.endswith(".json") or name.endswith(".json.zst") or name.endswith(".zst")
 
@@ -70,22 +72,19 @@ def expand_source(source: Source, *, sort: bool = False) -> list[Path]:
     return paths
 
 
-def iter_source(source: Source) -> Iterator[Path]:
-    """Same as :func:`expand_source` but yields paths (still materializes path lists)."""
-    yield from expand_source(source, sort=False)
-
-
 def _expand_sequence(items: Sequence[str | Path]) -> list[Path]:
-    seq = list(items)
-    if not seq:
+    """Expand a sequence of sources, deduplicating paths."""
+    if not items:
         return []
-    # Fast path: already a list of npz path strings (the training path_list shape).
-    if all(_looks_like_npz(x) for x in seq):
-        return _dedupe_npz_strings(str(os.path.expanduser(str(x))) for x in seq)
 
+    # Fast path: already a list of npz path strings (the training path_list shape).
+    if all(_is_npz_path(x) for x in items):
+        return _dedupe_npz_strings(os.path.expanduser(str(x)) for x in items)
+
+    # Mixed: recurse into each item
     out: list[Path] = []
     seen: set[str] = set()
-    for item in seq:
+    for item in items:
         for path in _expand_spec(os.path.expanduser(str(item))):
             key = str(path)
             if key not in seen:
@@ -94,7 +93,8 @@ def _expand_sequence(items: Sequence[str | Path]) -> list[Path]:
     return out
 
 
-def _dedupe_npz_strings(strings: Iterable[str]) -> list[Path]:
+def _dedupe_npz_strings(strings: list[str] | tuple[str, ...]) -> list[Path]:
+    """Dedupe NPZ path strings, preserving order."""
     seen: set[str] = set()
     out: list[Path] = []
     for s in strings:
@@ -105,16 +105,25 @@ def _dedupe_npz_strings(strings: Iterable[str]) -> list[Path]:
 
 
 def _expand_spec(path_s: str) -> list[Path]:
+    """Expand a single source specification."""
+    # NPZ file: return as-is (light exists check — 1 stat() call, no rglob)
     if path_s.endswith(".npz"):
-        return [Path(path_s)]
+        p = Path(path_s)
+        if not p.exists():
+            raise FileNotFoundError(f"source not found: {path_s}")
+        return [p]
 
     path = Path(path_s)
-    if _looks_like_path_list_file(path) and path.is_file():
+
+    # Path-list JSON file
+    if _is_path_list_file(path) and path.is_file():
         return _expand_path_list_file(path)
 
+    # Directory
     if path.is_dir():
         return _expand_directory(path)
 
+    # File exists but unrecognized type
     if path.exists():
         raise ValueError(
             f"source is neither .npz, directory, nor path-list JSON: {path_s}"
@@ -123,6 +132,7 @@ def _expand_spec(path_s: str) -> list[Path]:
 
 
 def _expand_path_list_file(path: Path) -> list[Path]:
+    """Expand a path-list JSON file."""
     data = load_json(path)
     if not isinstance(data, list):
         raise ValueError(f"path list must be a JSON array: {path}")
@@ -133,14 +143,14 @@ def _expand_path_list_file(path: Path) -> list[Path]:
             raise ValueError(f"path list entries must be strings: {path}")
 
     # Training lists: every entry is an npz path — no stat, no rglob.
-    if all(_looks_like_npz(entry) for entry in data):
-        return _dedupe_npz_strings(os.path.expanduser(entry) for entry in data)
+    if all(_is_npz_path(entry) for entry in data):
+        return _dedupe_npz_strings([os.path.expanduser(entry) for entry in data])
 
     # Mixed / closed-loop lists may contain route directories — expand those only.
     out: list[Path] = []
     seen: set[str] = set()
-    for entry in data:
-        for npz in _expand_spec(os.path.expanduser(entry)):
+    for item in data:
+        for npz in _expand_spec(os.path.expanduser(item)):
             key = str(npz)
             if key not in seen:
                 seen.add(key)

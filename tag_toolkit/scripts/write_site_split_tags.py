@@ -29,7 +29,6 @@ sys.path.insert(0, str(_repo_root() / "Diffusion-Planner"))
 from tag_toolkit.sidecar import drop_dimension, format_tag, normalize_tags, read_tags, write_tags
 from tag_toolkit.source import Source, expand_source
 
-
 MODE_TOKENS = frozenset({"manual", "auto", "train", "valid"})
 SITE_RE = re.compile(r"^\d+_.+")
 
@@ -128,7 +127,7 @@ def apply_path_tags(
         desired = [format_tag("site", site), format_tag("split", split)]
         current = drop_dimension(drop_dimension(read_tags(npz), "site"), "split")
         merged = normalize_tags(list(current) + desired)
-        if merged != normalize_tags(read_tags(npz)):
+        if merged != normalize_tags(current):
             write_tags(npz, merged)
             n += 1
     return n

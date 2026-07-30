@@ -1,2 +1,13 @@
 sample_data/
 *.egg-info/
+
+# Un-ignore sample_dataset/ (its parent .gitignore has a broad `sample*`
+# rule in Diffusion-Planner/.gitignore that we'd otherwise inherit).
+# Only the three regenerated artifacts are ignored; the dataset tree and
+# _build.py are checked in.
+!sample_dataset/
+!sample_dataset/**
+sample_dataset/__pycache__/
+sample_dataset/index.tag
+sample_dataset/npz_list.json
+sample_dataset/route_list.json

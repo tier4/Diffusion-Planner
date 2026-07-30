@@ -1,0 +1,28 @@
+{
+ "bag_time": "",
+ "date": "",
+ "is_skipped": false,
+ "log_file_id": "",
+ "map_version_id": "",
+ "neighbor_ids": [],
+ "project_id": "",
+ "qw": 0.9986325108298485,
+ "qx": 3.497563179713956e-05,
+ "qy": 0.0006681568370738095,
+ "qz": -0.05227485683212336,
+ "skipping_info": {
+  "details": "Accepted",
+  "incomplete_data_types": [],
+  "label": 0
+ },
+ "timestamp": 1755512847531711442,
+ "vehicle_id": "",
+ "x": 61495.5404559746,
+ "y": 56222.50612976825,
+ "z": 78.2734534977897,
+ "tags": [
+  "override_metric:centerline",
+  "site:879_hiratsuka",
+  "split:manual"
+ ]
+}

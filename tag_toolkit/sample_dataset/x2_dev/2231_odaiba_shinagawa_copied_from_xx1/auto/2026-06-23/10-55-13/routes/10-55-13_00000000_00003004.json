@@ -1,0 +1,53 @@
+{
+ "bag_time": "10-55-13",
+ "date": "2026-06-23",
+ "is_skipped": false,
+ "log_file_id": "eac95045-a725-4062-9926-93db7cef1f2d",
+ "map_version_id": "2231-20260514082401670986",
+ "neighbor_ids": [
+  "7fc3ed8d2ae7ea79955b1891b92d56b5",
+  "a937778714f72a14b476bbad8be175ca",
+  "ef29c40dd34052e0f781e30516d94002",
+  "cead662810237f75437a88add795f4a1",
+  "d08d67fc281fcc44895ce5d0a611bcf1",
+  "350a73f0b995f4041d368b3ac4c54ca6",
+  "a2f4bed07087c4f57ec9c5cd769c37b9",
+  "38b9c7190bf270e883cf52ae955e2172",
+  "bc52fd19f3fa1d432d082d4a9a45b97f",
+  "666fc07b8f6310b0f59509c3f20d5f79",
+  "462c1664a2d3771ed40364965fc6e658",
+  "35e5be145b9c386ec3c1e628da78e224",
+  "712b49633766fe01eb71ec25ad749c0a",
+  "1aa2ceb48e1706c3807ddcf711a8366f",
+  "ec5d22bb6c1c9353ac8c4e1daeff9602",
+  "bc83dd2692199d45a94ca95f7bb72d3d",
+  "b97c60ff0cd4ecc3cd46aebac5f77e70",
+  "39594861924043ec0a19a8e83b83593e",
+  "dafabe48c45cda25afee8273e0f9eeb6",
+  "1591b2d51c77b1acb694554f69fd9749",
+  "e6ebe33da1fbc306258df42165d33468",
+  "ff59bdc00023aaf709557db62c5a6fd6",
+  "9286a1a46b8997864e5c4de89b886c72"
+ ],
+ "project_id": "x2_dev",
+ "qw": 0.9562053660933815,
+ "qx": -0.021303358267874405,
+ "qy": 0.004073499195796041,
+ "qz": 0.29189188304068114,
+ "skipping_info": {
+  "details": "Accepted",
+  "incomplete_data_types": [],
+  "label": 0
+ },
+ "timestamp": 1782180018657734074,
+ "vehicle_id": "e14508f0-5cc8-410c-886b-23aea4a8d5d8",
+ "x": 89524.7284391903,
+ "y": 42270.75963274306,
+ "z": 7.439551228050141,
+ "tags": [
+  "longitudinal:yield",
+  "override_metric:centerline",
+  "site:2231_odaiba_shinagawa_copied_from_xx1",
+  "split:auto"
+ ]
+}

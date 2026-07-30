@@ -22,6 +22,41 @@ Instead of keeping a separate tag database, each frame's `<stem>.json` holds a
 Tags travel with the data. If a dataset is moved or partially copied, the labels
 stay attached to the same frames.
 
+> **Try it against `tag_toolkit/sample_dataset/`** — every example in this
+> README and in `docs/usage.md` runs as-is against the checked-in fixture.
+
+## Three usage modes
+
+### 1. Scan mode (no index file needed)
+
+For small datasets or one-off queries, pass a directory directly:
+
+```python
+from tag_toolkit import TagStore
+
+# Scan and build in-memory index
+store = TagStore("/path/to/dataset")
+routes = store.query("split:auto")  # instant
+```
+
+### 2. Index mode (fast for large datasets)
+
+For large datasets, build a pickled index once and load it for repeated queries:
+
+```python
+from tag_toolkit import TagStore
+
+# Build index (do once after updating tags). The output path must end in
+# `.tag` — TagStore only reloads files whose suffix is `.tag`, so a `.pkl`
+# or unsuffixed file would be re-scanned as a dataset and silently fail
+# to load.
+TagStore.build_index("/path/to/dataset", "/path/to/tags.tag")
+
+# Load from index (fast)
+store = TagStore("/path/to/tags.tag")
+routes = store.query("split:auto")
+```
+
 ## Route vs frame
 
 Tags are stored per frame, but most workflows care about whole routes. So
@@ -30,142 +65,126 @@ Tags are stored per frame, but most workflows care about whole routes. So
 At route granularity, a route has a tag if **any** frame under it has that tag.
 Use `granularity="frame"` when you need per-frame results instead.
 
-
-## What a `source` means
-
-Most APIs operate on a **source**:
-
-- one `.npz` file
-- one directory (recursive `*.npz`)
-- one `path_list.json` / `.json.zst`
-- a Python list mixing the above
-
-For large datasets, prefer a pre-built `path_list.json` (same shape as training).
-
 ## Tag format
 
-- Stored in `tags: list[str]`
-- Each entry is `dimension:value` (prefer `[a-z0-9_]+` on both sides)
-- A frame may carry several tags; missing `tags` ≡ `[]`
-- Do not duplicate native sidecar fields (`timestamp`, `project_id`, …) as tags
+Tags are stored in the NPZ sidecar JSON file, alongside native fields:
 
-Examples: `site:1423_shinagawa_odaiba`, `split:train`, `lateral:lane_change`,
+```json
+{
+  "timestamp": 1738632874843986836,
+  "project_id": "prd_jt",
+  "vehicle_id": "532d0885-...",
+  "tags": [
+    "site:1423_shinagawa_odaiba",
+    "split:manual",
+    "lateral:turn"
+  ]
+}
+```
+
+Each tag is `dimension:value` (lowercase `[a-z0-9_]+` on both sides). A frame may have
+zero or more tags. Do not duplicate native sidecar fields (`timestamp`, `project_id`, …)
+as tags.
+
+**Examples:** `site:1423_shinagawa_odaiba`, `split:train`, `lateral:lane_change`,
 `override_metric:centerline`.
 
 ## Typical workflows
 
-### 1. Tag every frame under a route directory
+### 1. Quick query on small dataset
 
 ```python
 from tag_toolkit import TagStore
 
-store = TagStore()  # you can also pass a dataset root / path list to cache all npz data
-
-route_dir = (
-    "your_dataset/"
-    "rAwaNfK1/2479_Nishishinjuku_Ward_DP/manual/2026-06-12/09-36-32"
-)
-frame_path = route_dir + "/routes/000123.npz"
-
-updated_route = store.add_tags(route_dir, ["override_metric:centerline"])
-updated_frame = store.add_tags(frame_path, ["scene:merge"])
-print(updated_route, updated_frame)
+store = TagStore("/path/to/small_dataset")
+routes = store.query("split:auto")
+print(f"Found {len(routes)} routes")
 ```
 
-```text
-187 1
-```
-
-This tags either a whole route or one specific frame, depending on the `source`
-you pass.
-
-### 2. Query routes from a path list
+### 2. Build and cache index for large dataset
 
 ```python
 from tag_toolkit import TagStore
 
-store = TagStore("your_path_list.json")
-routes = store.query("split:auto")          # default: route level
-frames = store.query("split:auto", granularity="frame")
-print(len(routes), len(frames))
-print(routes[0])
+# Build once (slow)
+TagStore.build_index("/path/to/large_dataset", "/path/to/tags.tag")
+
+# Load from index (fast, repeated use)
+store = TagStore("/path/to/tags.tag")
+routes = store.query("split:auto")
 ```
 
-```text
-15 31
-your_dataset/x2_dev/2231_odaiba_shinagawa/auto/2026-06-09/11-31-31
+### 3. Add tags to frames
+
+```python
+from pathlib import Path
+from tag_toolkit import TagStore
+
+store = TagStore("/path/to/tags.tag")
+
+# Tag every frame in the index — the typical "label the whole dataset" case.
+n = store.add_tags(["override_metric:centerline"])
+print(f"updated {n} sidecars")
+
+# Or tag just one NPZ by passing it as scope. Use ``npz_paths()`` (or a
+# known route) so the scope hits something already in the index — paths
+# outside the index are silently dropped, but unknown paths that look like
+# directories raise FileNotFoundError during scope expansion.
+target_npz = store.npz_paths()[0]
+n = store.add_tags(["override_metric:centerline"], scope=target_npz)
+print(f"updated {n} sidecar for {target_npz}")
 ```
 
-Fifteen routes in that eval list carry `split:auto` (31 frames total). Members
-are bag directories, ready to feed closed-loop tooling.
-
-### 3. Group by multiple labels
+### 4. Group by multiple labels
 
 ```python
 from tag_toolkit import TagStore, format_buckets
 
-store = TagStore("your_path_list.json")
-buckets = store.group_by(
-    ["site", "lateral"],
-    clause={"any": ["lateral:turn", "lateral:lane_change"]},
-)
-print(format_buckets(buckets, ["site", "lateral"]))
+store = TagStore("/path/to/tags.tag")
+buckets = store.group_by(["site", "split"])
+print(format_buckets(buckets, ["site", "split"]))
 print(buckets[0].members[:2])  # route list in this bucket
 ```
 
 ```text
-site                    lateral      count
-----------------------  -----------  -----
-1423_shinagawa_odaiba   turn         12
-1423_shinagawa_odaiba   lane_change  4
-2416_odaiba             turn         7
-----------------------  -----------  -----
-TOTAL                                23
+site                                   split   count
+-------------------------------------  ------  -----
+2231_odaiba_shinagawa_copied_from_xx1  auto    1
+2231_odaiba_shinagawa_copied_from_xx1  train   1
+879_hiratsuka                          manual  1
+879_hiratsuka                          valid   1
+-------------------------------------  ------  -----
+TOTAL                                          3
 [
-  PosixPath('your_dataset/prd_jt/1423_shinagawa_odaiba/manual/2025-02-04/10-34-24'),
-  PosixPath('your_dataset/prd_jt/1423_shinagawa_odaiba/manual/2025-02-04/10-41-08'),
+  PosixPath('/path/to/dataset/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/auto/2026-06-23/10-55-13'),
 ]
 ```
-At default route granularity they are route directories; with `granularity="frame"`
-they are NPZ paths. Route unions / counts are relative to the current `source`.
 
-## CLI
+### 5. Replace and remove
 
-```bash
-# Routes matching a tag (default)
-python -m tag_toolkit \
-  --source try_train_assets/open_loop_matrix_flat.json \
-  query 'split:auto'
+```python
+from tag_toolkit import TagStore
 
-# Frames instead
-python -m tag_toolkit \
-  --source try_train_assets/open_loop_matrix_flat.json \
-  query 'split:auto' --granularity frame
+store = TagStore("/path/to/tags.tag")
 
-# Tag one route directory
-python -m tag_toolkit \
-  --source /path/to/one/route_dir \
-  add override_metric:centerline
+# Add
+store.add_tags(["lateral:turn"])
 
-# Group routes
-python -m tag_toolkit \
-  --source try_train_assets/open_loop_matrix_flat.json \
-  group-by site split
+# Remove exact tag strings
+store.remove_tags(["lateral:turn"])
 
+# Remove every tag under a dimension (e.g. all `lateral:*` tags)
+store.remove_dimension("lateral")
+
+# Replace one specific tag with another, atomically per sidecar.
+# Like add_tags, scopes resolve against the in-memory index; paths not in
+# the index are silently skipped.
+store.replace_tags(tag_pairs={"split:eval": "split:train"})
 ```
-
-## Notes on scale
-
-- Prefer `path_list.json` over walking a multi-TB dataset root.
-- Pure NPZ path lists load without per-entry `resolve()` / `exists()` / `rglob()`.
-- First query builds an in-memory index: per-frame tags, per-route unions, and
-  inverted maps `tag → routes` / `tag → frames`. Mutate invalidates the index.
-- The dataset-wide `site` / `split` auto-tagging flow lives in an external
-  script (`tag_toolkit/scripts/write_site_split_tags.py`), not in the public
-  `tag_toolkit` API.
 
 ## More detail
 
-- **Design and API contract**: [`docs/design.md`](docs/design.md)
+- **Usage (format, route, API examples)**: [`docs/usage.md`](docs/usage.md)
+- **Design (source contract, scope resolution, atomic writes)**: [`docs/design.md`](docs/design.md)
 - **Reference taxonomy** (draft only; not used by query/mutate):
   [`docs/tag_taxonomy.yaml`](docs/tag_taxonomy.yaml)

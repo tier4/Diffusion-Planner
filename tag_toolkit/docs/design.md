@@ -1,199 +1,123 @@
-# tag_toolkit design
+# TagStore: design notes
 
-Tags for Diffusion Planner data live on each NPZ’s sidecar JSON (`<stem>.json`
-next to `<stem>.npz`). `tag_toolkit` reads and writes that `tags` field, and
-queries it at **route** or **frame** granularity.
-
-The unit of work is a **`source`**: one `.npz`, a directory of `*.npz` (small
-trees only), a path-list JSON / `.json.zst`, or a list of those. Prefer a
-pre-built path list for large datasets.
+What `TagStore` actually does under the hood, and the contracts that aren't
+obvious from the API. For method signatures and examples, see
+[`usage.md`](usage.md).
 
 ---
 
-## Why tags live on the sidecar
+## Source (the authoritative frame set)
 
-Dataset directory layouts change across builds. A separate tag DB keyed by path
-quickly goes stale when data is re-converted or partially copied.
+A TagStore is built from a `source` at construction time and that set is
+**fixed for the lifetime of the instance**: the constructor scans, the index
+is built, and subsequent calls only ever operate on frames that were present
+in that scan. There is no way to add frames later; if the data on disk
+changes, rebuild the index.
 
-Putting labels on the same sidecar as the frame keeps them together: move or
-subset the data, and the tags move with it.
+`clause`, `scope`, and `frame_filter` are **only filters** — they narrow the
+set, they never extend it. A path that isn't in the index never becomes
+"visible" through `scope`.
 
----
+`source` accepts any shape that [`expand_source`](../source.py) understands
+(directory, path-list JSON, single NPZ, list of those, or an existing
+`.tag` index file):
 
-## Tag format
+|  Form  |  Example  |
+| --- | --- |
+|  Index file  |  `TagStore("/path/to/tags.tag")`  |
+|  Directory  |  `TagStore("/path/to/dataset")`  |
+|  Path-list JSON  |  `TagStore("/path/to/list.json")`  |
+|  List of paths  |  `TagStore([path1, path2])`  |
+|  Single NPZ  |  `TagStore("/path/to/frame.npz")`  |
+|  None (empty)  |  `TagStore()`  |
 
-```json
-{
-  "timestamp": 1738632874843986836,
-  "project_id": "prd_jt",
-  "vehicle_id": "532d0885-…",
-  "tags": [
-    "site:1423_shinagawa_odaiba",
-    "split:manual",
-    "lateral:turn",
-    "longitudinal:yield"
-  ]
-}
-```
-
-| Rule | Detail |
-|---|---|
-| Type | JSON array of strings. Missing `tags` ≡ `[]`. |
-| Entry | `dimension:value` (exactly one colon). |
-| Names | Prefer `[a-z0-9_]+` on both sides. |
-| Multi | A frame may carry several tags. |
-| Order | Writers sort for stable diffs; readers should not depend on order. |
-
-Do **not** duplicate native sidecar fields as tags (`timestamp`, `project_id`,
-`vehicle_id`, pose, `date`, `bag_time`, …). Use `tags` for scene / eval labels
-such as `site`, `split`, `lateral`, `longitudinal`, `override_metric`.
-
-Unless you ask for a dimension replace or a full replace, writes **merge** into
-the existing list and leave other dimensions alone.
+For large or repeated use, prefer a pre-built `.tag` index file. The on-init
+directory scan reads every sidecar on disk; the loaded index skips that.
 
 ---
 
-## Route
+## Atomic writes
 
-[`dataset/generate_from_labeled.sh`](../../../dataset/generate_from_labeled.sh)
-defines the converted layout:
+A mutation (`add_tags`, `remove_tags`, `remove_dimension`, `replace_tags`,
+`add_tags_to_route`) writes to one sidecar at a time via a `.json.tmp` sibling that
+gets `os.replace`d over the target on success. If anything fails, the
+original `.json` is left untouched and the temp file is removed. A partial
+mutation can therefore leave the dataset in a half-tagged state across
+frames — but never corrupts a single sidecar.
 
-```text
-…/<project>/<map_id>/{manual|auto}/<date>/<bag_time>/routes/*.npz
-```
-
-A **route** is that bag directory (`…/<bag_time>/` — parent of `routes/` when
-present). Closed-loop path lists use the same directories.
-`route_of(path)` maps an NPZ (or a route dir) to this route root.
+The atomic-rename pattern does not protect against power loss between
+`write(2)` and the parent-directory entry being durable on disk; if a
+crash lands inside that gap, the sidecar may be missing despite the
+caller seeing success. For dataset publishing pipelines that demand
+stronger durability, run `fsync(f.fileno())` plus an `fsync` on the
+parent directory in the same critical section — out of scope here, but
+worth knowing before relying on writes through a network filesystem.
 
 ---
 
-## Route vs frame
+## Scope resolution
 
-Tags are stored per frame. Most workflows care about whole routes, so
-`query` / `group_by` default to `granularity="route"`.
+`scope` looks informal from the outside but the resolution has a deliberate
+order: fast paths first, disk fallback last, and a strict never-extends
+guarantee. The contract is the same for query and mutate.
 
-At route granularity, a route has a tag if **any indexed frame under it** has
-that tag. “Indexed” means frames present in the current `source` (e.g. a path
-list may cover only a subset of a bag). Matching uses that union, so
-`{"all": ["lateral:turn", "longitudinal:yield"]}` can succeed even when no
-single frame has both. With `granularity="frame"`, tags must co-occur on the
-same NPZ.
+`_resolve_scope(scope, granularity)` returns a `set[Path]` of either route
+directories (`granularity="route"`) or NPZ paths (`granularity="frame"`).
+Three cases, evaluated in order:
 
-`tags_for(route_dir)` uses the cached source-relative union when that route is
-indexed; otherwise it scans the directory on disk.
+1. **`scope is None`** — return every path in the index at the requested
+   granularity. No filesystem work.
+2. **`scope` is a `TagStore`** — return every path from that store's index
+   at the requested granularity, then **intersect** with this store's index.
+   Routes from the scope store that don't exist here drop out silently.
+   The intersection is what makes nested queries behave identically to
+   passing in a list of paths: a route only contributes if it also has
+   frames in this store.
+3. **`scope` is a Path or list of Paths** — for each item, try in order:
+   - **route path already in the index** — O(1) lookup in
+     `frames_of_route`. Return `{route}` for route granularity, or the
+     route's frame list for frame granularity.
+   - **NPZ path already in the index** — O(1) lookup in `route_of_frame`.
+     Return `{route}` for route granularity, or `{npz}` for frame.
+   - **fallback** — for anything else (a directory, a path-list JSON, a
+     typo'd path, anything not in the index), use
+     [`expand_source`](../source.py) to enumerate NPZ files on disk, then
+     keep only the ones that are also in the index.
 
-| Granularity | Matching | Result paths |
+Anything that ends up with no match in the index is silently dropped. The
+fallback is the only place that touches disk during a `scope` resolution, so
+passing already-known routes or NPZs (cases 3a/3b) avoids it entirely on
+repeated operations.
+
+`add_tags_to_route` is a deliberate exception: it rejects with `ValueError` when
+the route isn't in the index instead of falling back, because silently
+tagging frames that aren't indexed would make those tags invisible to
+every subsequent query — a footgun rather than a feature.
+
+---
+
+## Source vs Scope
+
+`source` and `scope` look similar but are deliberately distinct roles:
+
+| | `source` (constructor) | `scope` (per-call) |
 |---|---|---|
-| `route` (default) | Union of frame tags | route directories |
-| `frame` | Tags on one NPZ | `.npz` files |
+| When set | Once, at `TagStore(source)` | Every query / mutate call |
+| Effect | Defines the **authoritative frame set** — what the store ever knows about | Narrows the **operation** to a subset of the store's frames |
+| Can extend the frame set? | Yes — scanning discovers frames on disk | **No** — unknown paths are silently dropped (or raise `FileNotFoundError` if they look like a directory) |
+| Disk cost | One-time scan or `.tag` load | None for indexed paths; one `expand_source` fallback per non-indexed path |
+| Mutability | Frozen for the lifetime of the store | Re-evaluated per call |
 
----
+`source` answers "what does this store see?". `scope` answers "of what
+this store sees, which subset does this call care about?". Confusing them
+is the most common source of bugs:
 
-## `site` and `split`
+- Passing a `Path` that doesn't exist to `TagStore(source)` raises
+  `FileNotFoundError` — that's the store refusing to fabricate an
+  authoritative set.
+- Passing the same `Path` to `query(..., scope=path)` silently drops it —
+  the store already has its authoritative set; the path just didn't match
+  any of it.
 
-Once written, `site` and `split` are ordinary tags. Query and mutate only look
-at sidecar `tags`.
-
-| Dimension | Examples |
-|---|---|
-| `site` | `site:1423_shinagawa_odaiba`, `site:unknown` |
-| `split` | `split:auto`, `split:train`, `split:valid`, `split:manual`, `split:unknown` |
-
-In the layout above, the path usually shows only `manual` / `auto`. Train vs
-valid is often collapsed under `manual/`; optional
-[`split_labels.json`](../../../dataset/create_split_labels.py) can refine that
-when writing tags.
-
-To fill `site` / `split` for a whole dataset from paths (and optional split
-labels), use:
-
-[`scripts/write_site_split_tags.py`](../scripts/write_site_split_tags.py)
-
-That script is a dataset helper that calls into `tag_toolkit`; it is not a
-library entry point.
-
----
-
-## Taxonomy
-
-[`tag_taxonomy.yaml`](tag_taxonomy.yaml) is a human reference for known
-dimensions and values. It is not an allow-list: any `dimension:value` on a
-sidecar is valid. Query and mutate ignore this file. Helpers such as
-`list_known_tags()` may load it and warn that it can differ from tags on a
-given `source`.
-
----
-
-## API
-
-### Mutate
-
-Always writes frame sidecars. Pass the `source` you want to update (one frame,
-one route directory, a path list, …).
-
-```python
-from tag_toolkit import TagStore
-
-store = TagStore()  # optional: TagStore(dataset_or_path_list) to set a default source
-
-store.add_tags(route_dir, ["lateral:turn", "split:manual"])
-store.add_tags(frame_path, ["scene:merge"])
-store.remove_tags(route_dir, ["lateral:turn"])
-store.replace_tags(route_dir, dimension="lateral", values=["turn"])
-store.set_tags(route_dir, tags=[...], mode="merge")   # or mode="replace"
-```
-
-A route directory as `source` updates every NPZ under it. Unknown dimensions
-and values are allowed.
-
-### Query / group
-
-```python
-store = TagStore(source=...)
-
-store.query("lateral:turn")                       # route dirs
-store.query("lateral:turn", granularity="frame")  # npz paths
-store.query({"all": ["split:manual", "lateral:turn"]})
-
-buckets = store.group_by(["site", "lateral"])
-print(format_buckets(buckets, ["site", "lateral"]))  # dimensions + count
-print(buckets[0].members)  # matching routes (or frames if granularity="frame")
-
-store.tags_for(route_dir)   # union of frame tags
-store.tags_for(npz_path)  # one frame
-```
-
-`format_buckets(...)` prints `dimensions` + per-cell `count`. Detailed paths live
-in `bucket.members`. Multi-value dimensions can put one member in several cells;
-`TOTAL` then counts unique members when those lists are present.
-
-Clause forms: `"dim:value"`, `{"all": [...]}`, `{"any": [...]}`, `{"not": ...}`.
-
----
-
-## Sidecar examples
-
-```json
-{ "timestamp": 1, "tags": [] }
-```
-
-```json
-{
-  "timestamp": 1,
-  "project_id": "xx1_psim",
-  "tags": ["site:unknown", "split:auto"]
-}
-```
-
-```json
-{
-  "timestamp": 1,
-  "tags": [
-    "site:879_hiratsuka",
-    "split:train",
-    "lateral:lane_change",
-    "longitudinal:gap_search"
-  ]
-}
-```
+Treat them as different categories. `source` is a build-time contract;
+`scope` is a runtime filter.
