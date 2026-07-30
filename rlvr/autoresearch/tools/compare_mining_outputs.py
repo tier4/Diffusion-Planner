@@ -105,6 +105,11 @@ def compare_npzs(a_root: Path, b_root: Path, atol: float) -> list[str]:
                     continue
                 if np.array_equal(va, vb, equal_nan=True):
                     continue
+                if va.dtype.kind == "f" and bool((np.isnan(va) != np.isnan(vb)).any()):
+                    # NaN-vs-value would vanish in the nanmax below — a NaN
+                    # regression must never read as "equal".
+                    diffs.append(f"{rel}[{k}]: NaN placement mismatch")
+                    continue
                 d = np.nanmax(np.abs(va.astype(np.float64) - vb.astype(np.float64)))
                 if d > atol:
                     diffs.append(f"{rel}[{k}]: max|diff|={d:.3e} > atol={atol}")

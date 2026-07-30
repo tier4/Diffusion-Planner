@@ -130,6 +130,10 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
     return future_to_4col(arr, zero_rows_are_padding=False)
 
 
+def _future_is_4col(data: dict[str, Any], key: str) -> bool:
+    return key not in data or int(data[key].shape[-1]) == 4
+
+
 def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
     return "expert_disagreement" in set(row.get("repair_labels") or [])
 
@@ -878,9 +882,6 @@ def build_repaired_targets(
             # expert-reference scoring (mutated data) and not when futures are
             # 3-col (the classifier scores a 4-col-converted copy, the legacy
             # reward path scored the raw arrays).
-            def _future_is_4col(d, key):
-                return key not in d or int(d[key].shape[-1]) == 4
-
             reuse_subs = (
                 not (repair_expert_reference and is_expert)
                 and _future_is_4col(data, "ego_agent_future")

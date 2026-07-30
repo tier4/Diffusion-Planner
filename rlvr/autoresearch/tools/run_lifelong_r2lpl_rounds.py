@@ -946,7 +946,11 @@ def _materialize_chunk_manifest_for_shards(
     }
     manifest = rdir.parent / "planned_chunks.jsonl"
     plan_key_path = rdir.parent / "planned_chunks.key.json"
-    if manifest.exists() and plan_key_path.exists():
+    # The knob guard hangs off the KEY file alone: a surviving key with a
+    # missing/deleted manifest must still fail loudly on a knob change (the
+    # re-plan branch would otherwise silently overwrite the key), and a
+    # matching key with a lost manifest just re-plans with the same knobs.
+    if plan_key_path.exists():
         prior_key = json.loads(plan_key_path.read_text())
         if prior_key != plan_key:
             raise ValueError(
@@ -954,7 +958,7 @@ def _materialize_chunk_manifest_for_shards(
                 f"({prior_key}) than this round requests ({plan_key}); chunking "
                 "must stay constant within a campaign"
             )
-    else:
+    if not (manifest.exists() and plan_key_path.exists()):
         cmd = [
             sys.executable,
             "-m",
@@ -1147,17 +1151,26 @@ def _ensure_4col_neighbor_futures(
     still exists; conversions run on a thread pool (zlib releases the GIL).
     """
     manifest_path = out_dir / "conversion_manifest.json"
-    manifest: dict[str, str] = {}
+    manifest: dict[str, dict] = {}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
 
+    def _src_stamp(src: str) -> dict:
+        st = Path(src).stat()
+        return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
     def _cached(src: str) -> str | None:
-        marker = manifest.get(src)
-        if marker is None:
+        entry = manifest.get(src)
+        if not isinstance(entry, dict):
             return None
+        # The cache is path-keyed; a scene regenerated IN PLACE with different
+        # content must not serve a stale conversion — validate the source stamp.
+        if {k: entry.get(k) for k in ("size", "mtime_ns")} != _src_stamp(src):
+            return None
+        marker = entry.get("marker")
         if marker == _4COL_PASSTHROUGH:
             return src
-        dst = out_dir / marker
+        dst = out_dir / str(marker)
         return str(dst) if dst.exists() else None
 
     todo = sorted({p for p in paths if _cached(p) is None})
@@ -1166,7 +1179,7 @@ def _ensure_4col_neighbor_futures(
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             markers = list(pool.map(lambda p: _convert_scene_to_4col(Path(p), out_dir), todo))
         for src, marker in zip(todo, markers):
-            manifest[src] = marker
+            manifest[src] = {"marker": marker, **_src_stamp(src)}
         tmp_manifest = out_dir / f".tmp_manifest_{os.getpid()}.json"
         tmp_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True))
         os.replace(tmp_manifest, manifest_path)

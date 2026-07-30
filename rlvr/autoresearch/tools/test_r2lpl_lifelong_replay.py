@@ -4694,7 +4694,7 @@ def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
 
     first = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
     manifest = json.loads((out_dir / "conversion_manifest.json").read_text())
-    assert manifest[str(p3)] == Path(first[0]).name
+    assert manifest[str(p3)]["marker"] == Path(first[0]).name
     mtime = Path(first[0]).stat().st_mtime_ns
 
     second = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
@@ -4705,6 +4705,15 @@ def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
     third = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
     assert third == first
     assert Path(first[0]).exists()  # rebuilt, not blindly trusted
+
+    # A source regenerated IN PLACE (same path, new content/mtime) must be
+    # reconverted — the cache is path-keyed but stamped with size+mtime.
+    three["neighbor_agents_future"][0, :, 1] = 5.0
+    np.savez(p3, **three)
+    fourth = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert fourth == first
+    with np.load(fourth[0]) as d:
+        np.testing.assert_allclose(d["neighbor_agents_future"][0, :, 1], 5.0)
 
 
 def test_materialize_chunk_manifest_campaign_cache(tmp_path, monkeypatch):
