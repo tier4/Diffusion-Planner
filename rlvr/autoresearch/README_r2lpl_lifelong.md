@@ -144,7 +144,8 @@ call to the prob/normal split (repaired scenes = prob, the listed real normal
 scenes = normal), with the mix controlled by the training config's explicit
 `n_prob_scenes` / `n_normal_scenes`. The list must be a non-empty JSON list of
 paths (validated at startup), the normal scenes are homogenized to 4-col
-neighbor futures into `r2lpl_round_NNN/normal_scenes_4col/` with a per-round
+neighbor futures into the campaign-level `normal_scenes_4col/` (converted once
+per campaign, manifest-cached across rounds) with a per-round
 resolved list (same collate incompatibility as the anchor slice below), and
 each round fails before training if `n_prob_scenes` is below that round's
 repaired-scene count — `run_experiment`'s `min(n_prob, len(prob))` sampling
@@ -152,8 +153,9 @@ would otherwise silently drop repairs.
 Raw logged anchor scenes carry
 3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
 `[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the
-3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
-(zero padding rows preserved) before the union.
+3-col anchors as 4-col copies under the campaign-level `anchor_scenes_4col/`
+(zero padding rows preserved, conversions manifest-cached so each anchor scene
+is converted once per campaign) before the union.
 
 For the base_sft backend, `training.train_args.ema_decay` is forwarded to
 `train_predictor --ema_decay`. The default 0.999 (time constant ~1000 steps)

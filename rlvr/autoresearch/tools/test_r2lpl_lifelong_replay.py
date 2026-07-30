@@ -4658,6 +4658,70 @@ def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
     assert stacked.shape == (2, 4, 80, 4)
 
 
+def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
+    """The 4-col rewrite is called with a CAMPAIGN-level out_dir every round; a
+    second call over the same pool must reuse the manifest + converted files
+    instead of re-decompressing/re-compressing every scene, and a converted
+    file deleted out from under the manifest must be rebuilt (a stale manifest
+    entry is never trusted blindly)."""
+    three = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((4, 80, 3), dtype=np.float32),
+    }
+    three["neighbor_agents_future"][0, :, 0] = 1.0
+    p3 = tmp_path / "logged_scene.npz"
+    np.savez(p3, **three)
+    out_dir = tmp_path / "converted"
+
+    first = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    manifest = json.loads((out_dir / "conversion_manifest.json").read_text())
+    assert manifest[str(p3)] == Path(first[0]).name
+    mtime = Path(first[0]).stat().st_mtime_ns
+
+    second = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert second == first
+    assert Path(first[0]).stat().st_mtime_ns == mtime  # cached: not rewritten
+
+    Path(first[0]).unlink()  # simulate a lost/partial conversion
+    third = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert third == first
+    assert Path(first[0]).exists()  # rebuilt, not blindly trusted
+
+
+def test_materialize_chunk_manifest_campaign_cache(tmp_path, monkeypatch):
+    """The plan_only chunk pass is planned once per CAMPAIGN and reused across
+    rounds; a knob change against the cached plan fails loudly (chunking must
+    stay constant within a campaign for guard comparability)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    out_dir = tmp_path / "campaign"
+    r1 = out_dir / "r2lpl_round_001"
+    r2 = out_dir / "r2lpl_round_002"
+    r1.mkdir(parents=True)
+    r2.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, log_path, env=None):
+        calls.append([str(c) for c in cmd])
+        Path(out_dir / "planned_chunks.jsonl").write_text("")
+        return 0.0
+
+    monkeypatch.setattr(round_runner, "_run", fake_run)
+    cfg = {"perception_mining": {"scene_list": str(scene_list), "chunk_len": 160}}
+
+    got1 = round_runner._materialize_chunk_manifest_for_shards(cfg, r1)
+    assert len(calls) == 1
+    assert got1["perception_mining"]["chunk_manifest"] == str(out_dir / "planned_chunks.jsonl")
+
+    got2 = round_runner._materialize_chunk_manifest_for_shards(cfg, r2)
+    assert len(calls) == 1  # reused, no second plan pass
+    assert got2["perception_mining"]["chunk_manifest"] == str(out_dir / "planned_chunks.jsonl")
+
+    bad_cfg = {"perception_mining": {"scene_list": str(scene_list), "chunk_len": 80}}
+    with pytest.raises(ValueError, match="different knobs"):
+        round_runner._materialize_chunk_manifest_for_shards(bad_cfg, r2)
+
+
 def test_replay_capacity_is_required():
     with pytest.raises(ValueError, match="capacity is required"):
         round_runner._required_replay_capacity({})
