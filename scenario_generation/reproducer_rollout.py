@@ -342,9 +342,11 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
         # then numpy slicing per segment — replaces the previous N x n_keys
         # per-segment `.cpu()` calls (B x 16 transfers + syncs per step).
         # The per-segment arrays are VIEWS into the batch-sized host arrays;
-        # every consumer (scorers, credit-window dump) is read-only on them,
-        # and the save buffer held one full batch of host arrays per tick
-        # before this change too (N standalone copies == one shared batch).
+        # every consumer (scorers, credit-window dump) is read-only on them.
+        # Memory caveat: while ALL N segments are alive this equals the old
+        # N standalone copies, but a single long-lived segment's save buffer
+        # now pins the whole tick's batch arrays (up to Bx its own slice) —
+        # bounded by the save-buffer deque cap, and irrelevant at B<=64.
         host = {k: batch[k].detach().cpu().numpy() for k in batch}
         np_dicts = [{k: host[k][i : i + 1] for k in host} for i in range(N)]
         nb_all = host["neighbor_agents_past"][:, :, -1, :]  # (N,320,11)

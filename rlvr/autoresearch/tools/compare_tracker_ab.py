@@ -15,6 +15,7 @@ frame-keyed comparison is the wrong ruler. The gates:
 Usage: compare_tracker_ab.py <dir_A> <dir_B>
 """
 
+import argparse
 import json
 import re
 import sys
@@ -41,7 +42,14 @@ def label_counts(rows: list[dict]) -> Counter:
 
 
 def main() -> int:
-    a_dir, b_dir = Path(sys.argv[1]), Path(sys.argv[2])
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("dir_a", type=Path, help="mining output dir of run A (reference)")
+    ap.add_argument("dir_b", type=Path, help="mining output dir of run B (candidate)")
+    args = ap.parse_args()
+    a_dir, b_dir = args.dir_a, args.dir_b
+    for d in (a_dir, b_dir):
+        if not (d / "summary.json").exists():
+            ap.error(f"{d} is not a mining output dir (missing summary.json)")
     a_rows = load_jsonl(a_dir / "credit_windows.jsonl")
     b_rows = load_jsonl(b_dir / "credit_windows.jsonl")
     a_sum = json.loads((a_dir / "summary.json").read_text())

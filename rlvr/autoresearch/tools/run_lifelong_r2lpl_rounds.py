@@ -1176,6 +1176,11 @@ def _ensure_4col_neighbor_futures(
     todo = sorted({p for p in paths if _cached(p) is None})
     if todo:
         out_dir.mkdir(parents=True, exist_ok=True)
+        # A crash mid-conversion leaves .tmp_* orphans behind (their conversions
+        # were never recorded in the manifest, so they are pure garbage) — sweep
+        # them before converting rather than letting them accumulate forever.
+        for stale in out_dir.glob(".tmp_*"):
+            stale.unlink()
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             markers = list(pool.map(lambda p: _convert_scene_to_4col(Path(p), out_dir), todo))
         for src, marker in zip(todo, markers):

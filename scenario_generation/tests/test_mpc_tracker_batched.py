@@ -101,3 +101,43 @@ def test_track_many_rejects_mismatched_knobs():
 
 def test_track_many_empty():
     assert track_many([], np.zeros((0, 4)), []) == []
+
+
+def test_advance_step_tracked_fast_path():
+    """_advance_step with a precomputed ``tracked`` result must apply it verbatim
+    (no tracker.track call) and read telemetry off the tracker like the serial
+    branch does — this is the mpc_batched integration seam in the rollout."""
+    from types import SimpleNamespace
+
+    from scenario_generation.perf_timer import Timers
+    from scenario_generation.reproducer_rollout import DT, _advance_step
+
+    class _MustNotTrack:
+        last_yaw_rate = 0.123
+        last_steering = -0.05
+
+        def track(self, x0, ref):
+            raise AssertionError("tracked= fast path must not invoke tracker.track")
+
+    s = SimpleNamespace(
+        k=3,
+        warmup_steps=0,
+        tracker=_MustNotTrack(),
+        live_pose=np.array([1.0, 2.0, 0.1], dtype=np.float64),
+        dyn=SimpleNamespace(speed=4.0),
+        ego_hist=np.zeros((31, 3), dtype=np.float64),
+        sim_time=0.3,
+        accels=np.zeros(100, dtype=np.float32),
+        unstick_after=0,
+    )
+    new_pose = np.array([1.4, 2.05, 0.12], dtype=np.float64)
+    _advance_step(s, np.zeros((80, 4)), 3, "cpu", Timers(), tracked=(new_pose, 4.5))
+
+    np.testing.assert_array_equal(s.live_pose, new_pose)
+    assert s.k == 4
+    assert s.dyn.speed == 4.5
+    np.testing.assert_allclose(s.dyn.accel, (4.5 - 4.0) / DT)
+    assert s.dyn.yaw_rate == 0.123  # read from tracker telemetry, like the serial branch
+    assert s.dyn.steering == -0.05
+    np.testing.assert_array_equal(s.ego_hist[-1], new_pose)
+    np.testing.assert_allclose(s.accels[3], (4.5 - 4.0) / DT)
