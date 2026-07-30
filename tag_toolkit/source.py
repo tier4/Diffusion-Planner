@@ -125,9 +125,7 @@ def _expand_spec(path_s: str) -> list[Path]:
 
     # File exists but unrecognized type
     if path.exists():
-        raise ValueError(
-            f"source is neither .npz, directory, nor path-list JSON: {path_s}"
-        )
+        raise ValueError(f"source is neither .npz, directory, nor path-list JSON: {path_s}")
     raise FileNotFoundError(f"source not found: {path_s}")
 
 

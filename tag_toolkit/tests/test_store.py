@@ -39,8 +39,8 @@ sys.path.insert(
     0,
     str(Path(__file__).resolve().parents[1] / "scripts"),
 )
-from write_site_split_tags import apply_path_tags, parse_site_split
 from incremental_index import build_incremental_index
+from write_site_split_tags import apply_path_tags, parse_site_split
 
 # ``sample_dataset/_build.py`` is the single source of truth for the test
 # fixture. The session fixture below calls it once into tmp_path; per-test
@@ -222,9 +222,7 @@ def test_add_remove_query_group_by(sample: Path) -> None:
 
     # Pre-existing: split:manual is on every route. Find the zeikan route
     # in the writable copy so we don't touch the checked-in fixture.
-    zeikan_route = next(
-        r for r in store.route_paths() if r.name == "psim_training_bag_0_0"
-    )
+    zeikan_route = next(r for r in store.route_paths() if r.name == "psim_training_bag_0_0")
     assert "split:manual" in store.tags_of(scope=zeikan_route)
 
     # Add a tag scoped to a single route — confirm scope narrows results
@@ -311,7 +309,9 @@ def test_remove_dimension(sample_route: Path) -> None:
     # unchanged and are not counted.
     assert n == 5
     for path in store.npz_paths():
-        assert all(not t.startswith("lateral:") for t in store.tags_of(scope=path, granularity="frame"))
+        assert all(
+            not t.startswith("lateral:") for t in store.tags_of(scope=path, granularity="frame")
+        )
     # After removing lateral, route-granularity query for it is empty.
     assert store.query("lateral:turn") == []
 
@@ -405,9 +405,13 @@ def test_clause_all_any_not(sample_route: Path) -> None:
     assert len(store.query({"all": ["lateral:turn", "longitudinal:yield"]})) == 1
     assert len(store.query({"not": "lateral:turn"})) == 0
     # frame granularity: no single frame carries both
-    assert len(store.query({"all": ["lateral:turn", "longitudinal:yield"]}, granularity="frame")) == 0
+    assert (
+        len(store.query({"all": ["lateral:turn", "longitudinal:yield"]}, granularity="frame")) == 0
+    )
     # any of turn or yield: 5 (turn) + 2 (yield) = 7 frames
-    assert len(store.query({"any": ["lateral:turn", "longitudinal:yield"]}, granularity="frame")) == 7
+    assert (
+        len(store.query({"any": ["lateral:turn", "longitudinal:yield"]}, granularity="frame")) == 7
+    )
     # not turn: 10 - 5 = 5 frames
     assert len(store.query({"not": "lateral:turn"}, granularity="frame")) == 5
 
@@ -499,9 +503,7 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
     # the map_id (which requires the directory above {manual,auto} to start
     # with a digit). The psim route uses a non-numeric map_id and yields
     # site="unknown" by design — skip those.
-    paths0 = next(
-        p for p in sorted_paths if parse_site_split(p)[0] != "unknown"
-    )
+    paths0 = next(p for p in sorted_paths if parse_site_split(p)[0] != "unknown")
     site, split = parse_site_split(paths0)
     # sorted_paths lands in the 2231_odaiba_shinagawa_copied_from_xx1 (aomi
     # or ariake) route, which has a numeric-prefixed map_id.
@@ -528,9 +530,7 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
     # Pick a frame that we know has lateral:turn after the parity-based
     # seeding: frame number 2997 in the aomi route (10-55-13_00000000_00002997).
     # apply_path_tags only touches site/split so lateral:turn survives.
-    aomi_turn_path = next(
-        p for p in paths if "10-55-13_00000000_00002997" in str(p)
-    )
+    aomi_turn_path = next(p for p in paths if "10-55-13_00000000_00002997" in str(p))
     assert "lateral:turn" in read_tags(aomi_turn_path)
 
 
@@ -606,14 +606,14 @@ def test_taxonomy_skips_malformed_entries(tmp_path: Path) -> None:
         "dimensions:\n"
         "  site:\n"
         "    values:\n"
-        "      - name: 1423\n"          # valid
-        "      - bogus_entry: 42\n"     # no 'name' key
-        "      - 7\n"                   # not a string or mapping
-        "  NOT-VALID-DIM:\n"           # dimension name with hyphens
+        "      - name: 1423\n"  # valid
+        "      - bogus_entry: 42\n"  # no 'name' key
+        "      - 7\n"  # not a string or mapping
+        "  NOT-VALID-DIM:\n"  # dimension name with hyphens
         "    values:\n"
         "      - name: x\n"
         "  good:\n"
-        "    values: not_a_list\n"     # values not a list
+        "    values: not_a_list\n"  # values not a list
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -682,9 +682,7 @@ def test_tags_for_route_via_tags_of(sample_route: Path) -> None:
     assert "longitudinal:yield" in tags
 
 
-def test_tags_of_route_uses_index_not_disk(
-    sample_route: Path, tmp_path: Path
-) -> None:
+def test_tags_of_route_uses_index_not_disk(sample_route: Path, tmp_path: Path) -> None:
     """tags_of returns indexed frames' tags only."""
     store = TagStore(sample_route)
     assert len(store.npz_paths()) == 10
@@ -704,7 +702,9 @@ def test_tags_of_route_uses_index_not_disk(
 def test_group_by_multi_value_total_is_unique(tmp_path: Path) -> None:
     """Multi-value dimensions count each route only once in TOTAL."""
     root = tmp_path / "data"
-    bag = root / "prd_jt" / "1423_shinagawa_odaiba" / "manual" / "2025-02-04" / "10-34-24" / "routes"
+    bag = (
+        root / "prd_jt" / "1423_shinagawa_odaiba" / "manual" / "2025-02-04" / "10-34-24" / "routes"
+    )
     _frame(bag, "a", ["site:alpha", "site:beta", "lateral:turn"])
 
     store = TagStore(root)
@@ -750,12 +750,14 @@ def test_group_by_none_sorts_last_in_its_slot(sample: Path) -> None:
     # The aomi/ariake routes all have lateral:turn on some frames.
     # Add a fourth route to the same source tree with no lateral tags.
     import shutil
+
     extra_root = store.npz_paths()[0].parent.parent.parent.parent
     extra_route = extra_root / "extra_no_lateral" / "manual" / "2026-04-15" / "10-00-00" / "routes"
     extra_route.mkdir(parents=True, exist_ok=True)
     npz_path = extra_route / "x_00000000_00000001.npz"
     npz_path.write_bytes(b"")
     import json
+
     (extra_route / "x_00000000_00000001.json").write_text(
         json.dumps({"tags": ["site:no_lateral_here", "split:manual"]})
     )
@@ -775,9 +777,7 @@ def test_group_by_none_sorts_last_in_its_slot(sample: Path) -> None:
             )
 
 
-def test_invalid_sidecar_tag_skipped_with_warning(
-    tmp_path: Path, sample: Path
-) -> None:
+def test_invalid_sidecar_tag_skipped_with_warning(tmp_path: Path, sample: Path) -> None:
     """Invalid tags are skipped with a warning during scan."""
     bag = tmp_path / "bag" / "routes"
     npz = _frame(bag, "x", ["lateral:turn", "BAD TAG"])
@@ -833,6 +833,7 @@ def test_build_index_creates_pickle_file(sample: Path, tmp_path: Path) -> None:
     assert head[: len(_PICKLE_MAGIC)] == _PICKLE_MAGIC
     assert head[len(_PICKLE_MAGIC) :] == _PICKLE_VERSION
     from tag_toolkit.store import _Index
+
     assert isinstance(idx, _Index)
     assert len(idx.frames) == 30
 
@@ -997,9 +998,7 @@ def test_scope_npz_path_uses_fast_path(
 
     store = TagStore(sample)
     zeikan_route = next(p for p in store.route_paths() if p.name == "psim_training_bag_0_0")
-    zeikan_npzs = [
-        p for p in store.npz_paths() if route_of(p) == zeikan_route
-    ]
+    zeikan_npzs = [p for p in store.npz_paths() if route_of(p) == zeikan_route]
     assert zeikan_npzs
     npz_a = zeikan_npzs[0]
     expected_route = route_of(npz_a)
@@ -1030,9 +1029,7 @@ def test_scope_mixed_list_fast_path(sample: Path) -> None:
     assert set(result) == {target_route}
 
 
-def test_scope_unindexed_npz_path_silently_dropped(
-    sample: Path, tmp_path: Path
-) -> None:
+def test_scope_unindexed_npz_path_silently_dropped(sample: Path, tmp_path: Path) -> None:
     """scope with a real path not in the index silently returns empty."""
     store = TagStore(sample)
     bogus_route = tmp_path / "outside_index"
@@ -1129,9 +1126,7 @@ def _build_old_index_with_routes(
 
 def test_incremental_index_adds_new_route(sample: Path, tmp_path: Path) -> None:
     """Adding a brand-new route grows the index without touching the old route."""
-    old_index, old_store = _build_old_index_with_routes(
-        sample, tmp_path, route_names=["aomi"]
-    )
+    old_index, old_store = _build_old_index_with_routes(sample, tmp_path, route_names=["aomi"])
     assert len(old_store.npz_paths()) == 10
 
     # Add the ariake route (10 new frames in a route the old index never saw).
@@ -1153,13 +1148,9 @@ def test_incremental_index_adds_new_route(sample: Path, tmp_path: Path) -> None:
     assert len(merged.query("lateral:turn", granularity="frame")) == 10
 
 
-def test_incremental_index_overwrites_in_place_by_default(
-    sample: Path, tmp_path: Path
-) -> None:
+def test_incremental_index_overwrites_in_place_by_default(sample: Path, tmp_path: Path) -> None:
     """Without --output the script writes back over the old index file."""
-    old_index, _ = _build_old_index_with_routes(
-        sample, tmp_path, route_names=["aomi"]
-    )
+    old_index, _ = _build_old_index_with_routes(sample, tmp_path, route_names=["aomi"])
     before_bytes = old_index.read_bytes()
     new_route = _route_dirs(sample)["ariake"]
 
@@ -1172,13 +1163,9 @@ def test_incremental_index_overwrites_in_place_by_default(
     assert len(merged.npz_paths()) == 20
 
 
-def test_incremental_index_output_keeps_old_intact(
-    sample: Path, tmp_path: Path
-) -> None:
+def test_incremental_index_output_keeps_old_intact(sample: Path, tmp_path: Path) -> None:
     """With output_path the old index is preserved; a new file is written."""
-    old_index, old_store = _build_old_index_with_routes(
-        sample, tmp_path, route_names=["aomi"]
-    )
+    old_index, old_store = _build_old_index_with_routes(sample, tmp_path, route_names=["aomi"])
     before_bytes = old_index.read_bytes()
     new_route = _route_dirs(sample)["ariake"]
     out = tmp_path / "merged.tag"
@@ -1194,13 +1181,9 @@ def test_incremental_index_output_keeps_old_intact(
     assert len(TagStore(out).npz_paths()) == 20
 
 
-def test_incremental_index_skips_frames_already_in_old(
-    sample: Path, tmp_path: Path
-) -> None:
+def test_incremental_index_skips_frames_already_in_old(sample: Path, tmp_path: Path) -> None:
     """Re-listing an old route yields zero new frames (warned, not crashed)."""
-    old_index, old_store = _build_old_index_with_routes(
-        sample, tmp_path, route_names=["aomi"]
-    )
+    old_index, old_store = _build_old_index_with_routes(sample, tmp_path, route_names=["aomi"])
     aomi = _route_dirs(sample)["aomi"]
 
     with warnings.catch_warnings(record=True) as caught:
@@ -1215,13 +1198,9 @@ def test_incremental_index_skips_frames_already_in_old(
     assert any("already in old index" in str(w.message) for w in caught)
 
 
-def test_incremental_index_missing_sidecar_aborts(
-    sample: Path, tmp_path: Path
-) -> None:
+def test_incremental_index_missing_sidecar_aborts(sample: Path, tmp_path: Path) -> None:
     """A new frame without a sidecar raises; old index stays intact."""
-    old_index, _ = _build_old_index_with_routes(
-        sample, tmp_path, route_names=["aomi"]
-    )
+    old_index, _ = _build_old_index_with_routes(sample, tmp_path, route_names=["aomi"])
     before_bytes = old_index.read_bytes()
 
     # Half-constructed new frame: NPZ present, sidecar missing.
@@ -1239,13 +1218,9 @@ def test_incremental_index_missing_sidecar_aborts(
     assert len(TagStore(old_index).npz_paths()) == 10
 
 
-def test_incremental_index_preserves_tag_counts(
-    sample: Path, tmp_path: Path
-) -> None:
+def test_incremental_index_preserves_tag_counts(sample: Path, tmp_path: Path) -> None:
     """route_tag_counts stays consistent after merging a new route."""
-    old_index, _ = _build_old_index_with_routes(
-        sample, tmp_path, route_names=["aomi"]
-    )
+    old_index, _ = _build_old_index_with_routes(sample, tmp_path, route_names=["aomi"])
     new_route = _route_dirs(sample)["ariake"]
 
     build_incremental_index(old_index, new_route)
@@ -1349,9 +1324,7 @@ def test_replace_tags_deduplicates_old_pair_with_duplicate_frame(
     # lateral:lane_keeping already (this frame does not get rewritten).
     npz = next(iter(store.npz_paths()))
     sidecar = json.loads(npz.with_suffix(".json").read_text())
-    sidecar["tags"] = sorted(
-        {"lateral:turn", "lateral:lane_keeping", "site:2231_x", "split:auto"}
-    )
+    sidecar["tags"] = sorted({"lateral:turn", "lateral:lane_keeping", "site:2231_x", "split:auto"})
     npz.with_suffix(".json").write_text(json.dumps(sidecar) + "\n")
     # Refresh index by re-opening.
     store = TagStore(sample_route)
@@ -1427,11 +1400,7 @@ def test_resolve_scope_with_list_of_tagstore(sample: Path) -> None:
     # Build a second store that scans only the ariake route. We give it the
     # parent auto/ directory and rely on TagStore to discover one route.
     ariake_route = (
-        sample
-        / "x2_dev"
-        / "2231_odaiba_shinagawa_copied_from_xx1"
-        / "auto"
-        / "2026-07-07"
+        sample / "x2_dev" / "2231_odaiba_shinagawa_copied_from_xx1" / "auto" / "2026-07-07"
     )
     other_store = TagStore(ariake_route)
     assert len(other_store.route_paths()) == 1
@@ -1517,7 +1486,15 @@ def test_helper_exports_basic(sample: Path) -> None:
     # produce from a write.
     from tag_toolkit import write_tags
 
-    npz = sample / "x2_dev" / "2231_odaiba_shinagawa_copied_from_xx1" / "auto" / "2026-06-23" / "10-55-13" / "routes"
+    npz = (
+        sample
+        / "x2_dev"
+        / "2231_odaiba_shinagawa_copied_from_xx1"
+        / "auto"
+        / "2026-06-23"
+        / "10-55-13"
+        / "routes"
+    )
     sample_npz = next(npz.glob("*.npz"))
     expected = normalize_tags(["split:auto", "lateral:turn"])
     write_tags(sample_npz, expected)
@@ -1620,7 +1597,7 @@ def test_bucket_members_is_always_populated(sample: Path) -> None:
 
 def test_load_legacy_pickle_without_magic(tmp_path: Path) -> None:
     """Legacy pickles (no magic header) still load — backwards compat."""
-    from tag_toolkit.store import _Index, _build_index_from_frames
+    from tag_toolkit.store import _build_index_from_frames, _Index
 
     legacy = tmp_path / "legacy.tag"
     idx = _Index()
@@ -1641,9 +1618,7 @@ def test_concurrent_add_tags_does_not_corrupt(tmp_path: Path) -> None:
     root = tmp_path / "data"
     bag = root / "p" / "1423_x" / "manual" / "2025-01-01" / "10-00-00" / "routes"
     bag.mkdir(parents=True)
-    frame_paths = [
-        _frame(bag, f"frame{i:08d}") for i in range(8)
-    ]
+    frame_paths = [_frame(bag, f"frame{i:08d}") for i in range(8)]
 
     store = TagStore(root)
 

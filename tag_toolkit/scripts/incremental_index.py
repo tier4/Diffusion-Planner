@@ -128,9 +128,7 @@ def _check_sidecars_present(frames: list[Path]) -> None:
     if missing:
         preview = ", ".join(str(p) for p in missing[:5])
         more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
-        raise FileNotFoundError(
-            f"missing sidecar(s) for new frames: {preview}{more}"
-        )
+        raise FileNotFoundError(f"missing sidecar(s) for new frames: {preview}{more}")
 
 
 def _merge_indices(old, new) -> None:
@@ -218,9 +216,7 @@ def build_incremental_index(
     # comparison is the same identity test the rest of the toolkit uses.
     known_keys = set(old.frame_tags.keys())
 
-    new_frames, skipped = _partition_new_and_skipped(
-        new_source, known_frame_keys=known_keys
-    )
+    new_frames, skipped = _partition_new_and_skipped(new_source, known_frame_keys=known_keys)
     _check_sidecars_present(new_frames)
 
     if not new_frames:
@@ -289,8 +285,7 @@ def main() -> int:
         output_path=args.output,
     )
     print(
-        f"new frames added: {summary['new_frames']}, "
-        f"already-in-index skipped: {summary['skipped']}"
+        f"new frames added: {summary['new_frames']}, already-in-index skipped: {summary['skipped']}"
     )
     print(f"wrote {summary['output']}")
     return 0

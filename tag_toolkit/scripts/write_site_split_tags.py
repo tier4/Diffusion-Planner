@@ -152,7 +152,9 @@ def main() -> int:
     if not data_root.is_dir():
         raise FileNotFoundError(f"dataset root not found: {data_root}")
 
-    split_labels = args.split_labels.resolve() if args.split_labels else _default_split_labels(data_root)
+    split_labels = (
+        args.split_labels.resolve() if args.split_labels else _default_split_labels(data_root)
+    )
     updated = apply_path_tags(data_root, split_labels=split_labels)
 
     if split_labels is None:

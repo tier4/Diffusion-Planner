@@ -54,9 +54,7 @@ Scope = Union[None, ScopeItem, Sequence[ScopeItem]]
 # detects "no magic" and falls back to unpickling the whole file.
 _PICKLE_MAGIC = b"TGID"
 _PICKLE_VERSION = b"\x01"
-_NO_INDEX_HINT = (
-    "no index loaded (hint: use TagStore(source) or TagStore.build_index)"
-)
+_NO_INDEX_HINT = "no index loaded (hint: use TagStore(source) or TagStore.build_index)"
 
 
 @dataclass
@@ -410,8 +408,7 @@ class TagStore:
         out = Path(output)
         if not out.name.endswith(".tag"):
             raise ValueError(
-                f"output must end with '.tag' so TagStore can reload it; "
-                f"got {out.name!r}"
+                f"output must end with '.tag' so TagStore can reload it; got {out.name!r}"
             )
         store = TagStore(source)
         if store._index is None:
@@ -742,9 +739,7 @@ class TagStore:
         """
         self._require_index()
         if not is_valid_dimension(dimension):
-            raise ValueError(
-                f"bad dimension {dimension!r}: expected [a-z0-9_]+"
-            )
+            raise ValueError(f"bad dimension {dimension!r}: expected [a-z0-9_]+")
         n = 0
         with self._lock:
             for npz in self._mutate_frames(frame_filter=frame_filter, scope=scope):
@@ -947,21 +942,23 @@ class TagStore:
             if isinstance(clause, str):
                 parse_tag(clause)
                 return [
-                    p for p in idx.frames
-                    if clause in idx.frame_tags.get(p, frozenset())
-                    and p in scope_set
+                    p
+                    for p in idx.frames
+                    if clause in idx.frame_tags.get(p, frozenset()) and p in scope_set
                 ]
             return [
-                p for p in idx.frames
-                if self._match(clause, set(idx.frame_tags.get(p, frozenset())))
-                and p in scope_set
+                p
+                for p in idx.frames
+                if self._match(clause, set(idx.frame_tags.get(p, frozenset()))) and p in scope_set
             ]
 
         if isinstance(clause, str):
             parse_tag(clause)
             hit = idx.tag_to_routes.get(clause, set())
             return [r for r in idx.routes if r in hit and r in scope_set]
-        return [r for r in idx.routes if self._match(clause, set(idx.route_tags[r])) and r in scope_set]
+        return [
+            r for r in idx.routes if self._match(clause, set(idx.route_tags[r])) and r in scope_set
+        ]
 
     def group_by(
         self,
@@ -1075,9 +1072,7 @@ class TagStore:
             parse_tag(clause)
             return clause in tags
         if not isinstance(clause, dict) or len(clause) != 1:
-            raise ValueError(
-                f"bad clause: {clause!r} (operators: {sorted(_CLAUSE_OPS)})"
-            )
+            raise ValueError(f"bad clause: {clause!r} (operators: {sorted(_CLAUSE_OPS)})")
         ((op, body),) = clause.items()
         if op == "all":
             if not body:
@@ -1090,6 +1085,4 @@ class TagStore:
         if op == "not":
             return not self._match(body, tags)
         # Fall through to explicit error so a typo like {"And": [...]} raises.
-        raise ValueError(
-            f"bad clause op {op!r}; expected one of {sorted(_CLAUSE_OPS)}"
-        )
+        raise ValueError(f"bad clause op {op!r}; expected one of {sorted(_CLAUSE_OPS)}")

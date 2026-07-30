@@ -53,9 +53,7 @@ from tag_toolkit import TagStore
 # sidecar JSON to copy into the destination tree. When this path is
 # unreachable (typical outside the original cluster), the script falls back
 # to a minimal synthetic sidecar per route.
-SOURCE_ROOT = Path(
-    "/mnt/storage_rdma/diffusion_planner/dataset/20260715_basic_dataset"
-)
+SOURCE_ROOT = Path("/mnt/storage_rdma/diffusion_planner/dataset/20260715_basic_dataset")
 
 
 @dataclass(frozen=True)
@@ -73,14 +71,7 @@ class RouteSpec:
     longitudinal_yield_frames: frozenset[str]  # frames that also get this tag
 
     def dest_route_dir(self, dest_root: Path) -> Path:
-        return (
-            dest_root
-            / self.project_id
-            / self.map_id
-            / self.split
-            / self.date
-            / self.bag_time
-        )
+        return dest_root / self.project_id / self.map_id / self.split / self.date / self.bag_time
 
 
 # 10 contiguous frames per route, picked from each closed-loop valid list.
@@ -277,11 +268,7 @@ def build(dest_root: Path | None = None) -> dict:
 
 if __name__ == "__main__":
     summary = build()
-    print(
-        f"Built sample_dataset: "
-        f"{summary['route_count']} routes, "
-        f"{summary['frame_count']} frames"
-    )
+    print(f"Built sample_dataset: {summary['route_count']} routes, {summary['frame_count']} frames")
     print(f"  npz_list:   {summary['npz_list']}")
     print(f"  route_list: {summary['route_list']}")
     print(f"  index:      {summary['index']}")

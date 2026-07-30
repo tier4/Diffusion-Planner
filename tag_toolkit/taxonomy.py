@@ -101,7 +101,9 @@ def list_known_tags(path: str | Path | None = None) -> list[str]:
         try:
             parse_tag(f"{dim_name}:placeholder")
         except ValueError:
-            warnings.warn(f"taxonomy: skipping dimension with invalid name {dim_name!r}", stacklevel=2)
+            warnings.warn(
+                f"taxonomy: skipping dimension with invalid name {dim_name!r}", stacklevel=2
+            )
             continue
         values = dim_body.get("values")
         if values is None:
@@ -109,7 +111,9 @@ def list_known_tags(path: str | Path | None = None) -> list[str]:
             out.append(f"{dim_name}:<open>")
             continue
         if not isinstance(values, list):
-            warnings.warn(f"taxonomy: 'values' for {dim_name!r} is not a list; skipping", stacklevel=2)
+            warnings.warn(
+                f"taxonomy: 'values' for {dim_name!r} is not a list; skipping", stacklevel=2
+            )
             continue
         for item in values:
             if isinstance(item, dict):
@@ -133,7 +137,9 @@ def list_known_tags(path: str | Path | None = None) -> list[str]:
             try:
                 parse_tag(tag)
             except ValueError:
-                warnings.warn(f"taxonomy: skipping value that fails parse_tag: {tag!r}", stacklevel=2)
+                warnings.warn(
+                    f"taxonomy: skipping value that fails parse_tag: {tag!r}", stacklevel=2
+                )
                 continue
             out.append(tag)
     return sorted(set(out))
