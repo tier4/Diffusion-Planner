@@ -32,10 +32,16 @@ def score_red_light_step(
     if "route_lanes" not in np_dict:
         return {"red_light_violation": False}
 
-    rl = np.asarray(np_dict["route_lanes"], dtype=np.float32)
-    if rl.ndim not in (3, 4):
-        return {"red_light_violation": False}
-    rl_t = torch.tensor(rl, dtype=torch.float32, device=device)
+    rl = np_dict["route_lanes"]
+    if torch.is_tensor(rl):  # GPU-resident batch slice from the rollout: no re-upload
+        if rl.dim() not in (3, 4):
+            return {"red_light_violation": False}
+        rl_t = rl.to(device=device, dtype=torch.float32)
+    else:
+        rl_np = np.asarray(rl, dtype=np.float32)
+        if rl_np.ndim not in (3, 4):
+            return {"red_light_violation": False}
+        rl_t = torch.tensor(rl_np, dtype=torch.float32, device=device)
 
     scores = compute_red_light_score_batch(
         ego_traj_ego_frame(live_pose, ego_hist, n_steps=2, device=device),

@@ -336,16 +336,31 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
 
     # Extract scoring inputs (+ optional save dicts) BEFORE normalization, so they match
     # the un-normalized arrays build_input_np returns.
-    nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()  # (N,320,11)
-    neighbors_live = [nb_all[i].copy() for i in range(N)]
     np_dicts = None
     if want_np_dicts:
-        np_dicts = [
-            {k: batch[k][i : i + 1].detach().cpu().numpy() for k in batch} for i in range(N)
-        ]
+        # ONE D2H transfer per key for the whole batch (16 transfers/step),
+        # then numpy slicing per segment — replaces the previous N x n_keys
+        # per-segment `.cpu()` calls (B x 16 transfers + syncs per step).
+        # The per-segment arrays are VIEWS into the batch-sized host arrays;
+        # every consumer (scorers, credit-window dump) is read-only on them,
+        # and the save buffer held one full batch of host arrays per tick
+        # before this change too (N standalone copies == one shared batch).
+        host = {k: batch[k].detach().cpu().numpy() for k in batch}
+        np_dicts = [{k: host[k][i : i + 1] for k in host} for i in range(N)]
+        nb_all = host["neighbor_agents_past"][:, :, -1, :]  # (N,320,11)
+    else:
+        nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()
+    neighbors_live = [nb_all[i].copy() for i in range(N)]
 
+    # Un-normalized GPU tensors with the same key set as np_dicts (snapshot
+    # BEFORE the static inputs land): per-segment slices of these feed the
+    # per-step scorers directly, replacing the old GPU->CPU->GPU round trip
+    # (np_dict D2H above, then a per-segment H2D re-upload in every scorer).
+    # The normalizer below shallow-copies and REPLACES keys, so these tensors
+    # stay un-normalized.
+    raw_gpu = dict(batch)
     _add_static_inputs(batch, model_args, N, device)
-    return model_args.observation_normalizer(batch), neighbors_live, np_dicts
+    return model_args.observation_normalizer(batch), neighbors_live, np_dicts, raw_gpu
 
 
 # --------------------------------------------------------------------------- #
@@ -1841,7 +1856,7 @@ def run_segments_batched(
                         # ONE batched on-device world_to_ego_frame; downstream identical.
                         raw_payloads = [pre for _s, pre in live]
                         with timers("to_torch"):
-                            data, nb_list, npd_list = _to_torch_batch_gpu(
+                            data, nb_list, npd_list, raw_gpu = _to_torch_batch_gpu(
                                 raw_payloads,
                                 model_args,
                                 device,
@@ -1851,6 +1866,11 @@ def run_segments_batched(
                                     or danger_save_dir is not None
                                 ),
                             )
+                        # Per-segment GPU-resident scene slices for the per-step
+                        # scorers (same keys/values as np_dict, no host round trip).
+                        gpu_scenes = [
+                            {k: raw_gpu[k][i : i + 1] for k in raw_gpu} for i in range(len(live))
+                        ]
                         built = [
                             (
                                 s,
@@ -1864,6 +1884,7 @@ def run_segments_batched(
                         ]
                     else:
                         built = [(s, *pre) for s, pre in live]
+                        gpu_scenes = None  # CPU build: scorers consume the numpy np_dicts
                         with timers("to_torch"):
                             data = _to_torch_batch([b[1] for b in built], model_args, device)
                     with timers("model_forward"):
@@ -1958,7 +1979,7 @@ def run_segments_batched(
                                     _s.realized_lag_streak = 0
                         realized_rows.append(
                             realized_event_scorer(
-                                np_dict,
+                                gpu_scenes[_row_i] if gpu_scenes is not None else np_dict,
                                 collided=bool(col),
                                 step=_s.k,
                                 model_pred_world=model_pred_world,
@@ -1981,7 +2002,9 @@ def run_segments_batched(
                             nb,
                             device,
                             timers,
-                            np_dict=_np,
+                            # GPU-resident slice when available: the rb / red-light
+                            # scorers then skip their per-step H2D re-upload.
+                            np_dict=gpu_scenes[row_idx] if gpu_scenes is not None else _np,
                             object_cl=float(cl),
                             object_col=bool(col),
                         )
