@@ -786,7 +786,11 @@ def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, t
             assert cmd[cmd.index("--num_shards") + 1] == "2"
             assert cmd[cmd.index("--shard_index") + 1] == str(expected_idx)
             assert "--chunk_manifest" in cmd
-            assert cmd[cmd.index("--chunk_manifest") + 1] == str(rdir / "planned_chunks.jsonl")
+            # The plan pass is cached at the CAMPAIGN level (rdir.parent) so
+            # later rounds reuse it instead of re-planning the full pool.
+            assert cmd[cmd.index("--chunk_manifest") + 1] == str(
+                rdir.parent / "planned_chunks.jsonl"
+            )
             assert "--scene_list" not in cmd
             _arg(cmd, "--out_jsonl").parent.mkdir(parents=True, exist_ok=True)
             _arg(cmd, "--out_jsonl").write_text(
@@ -1804,7 +1808,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             else {"labels": ["clean"], "label": "clean"}
         )
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -1971,7 +1975,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             else {"labels": ["clean"], "label": "clean"}
         )
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -2109,7 +2113,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_clean_realized(*_args, **_kwargs):
         return {"labels": ["clean"], "label": "clean"}
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -3179,11 +3183,17 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "classify_loaded_scene_candidates_batch",
-        lambda *_args, **_kwargs: [[{"labels": ["clean"]}]],
+        # return_subscores=True contract: (rows_per_scene, B-major subscores)
+        lambda *_args, **_kwargs: ([[{"labels": ["clean"]}]], {}),
     )
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "compute_reward_batch",
+        lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
+    )
+    monkeypatch.setattr(
+        build_repaired_targets_tool,
+        "_shape_reward",
         lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
     )
     monkeypatch.setattr(
