@@ -45,6 +45,7 @@ from rlvr.grpo_trainer_batched import (
     generate_all_scenes_batched,
 )
 from rlvr.reward import compute_reward_batch
+from scenario_generation.perf_timer import Timers
 
 _GENERATION_MODE_GUIDED_VARIANT = "guided_variant"
 _GENERATION_MODE_GRPO_TEMPERATURE = "grpo_temperature"
@@ -744,14 +745,16 @@ def build_repaired_targets(
     thresholds = _load_scene_thresholds(threshold_config_path)
     model, model_args = load_model(model_path, device)
     out_dir.mkdir(parents=True, exist_ok=True)
+    timers = Timers()
     repaired_rows: list[dict[str, Any]] = []
     unrepaired_rows: list[dict[str, Any]] = []
-    rows, dirty_rows = _drop_t0_dirty_event_windows(
-        rows,
-        rcfg=rcfg,
-        thresholds=thresholds,
-        device=device,
-    )
+    with timers("t0_prefilter"):
+        rows, dirty_rows = _drop_t0_dirty_event_windows(
+            rows,
+            rcfg=rcfg,
+            thresholds=thresholds,
+            device=device,
+        )
     unrepaired_rows.extend(dirty_rows)
 
     class _Args:
@@ -777,7 +780,8 @@ def build_repaired_targets(
         kept_rows = []
         for row in batch_rows:
             p = row["scene_path"]
-            data = load_npz_data(p, device)
+            with timers("scene_load"):
+                data = load_npz_data(p, device)
             npz_es = data["ego_shape"].detach().cpu().numpy().reshape(-1)[:3]
             if ego_shape is not None and not np.allclose(npz_es, ego_shape, atol=1e-2):
                 raise ValueError(
@@ -790,47 +794,49 @@ def build_repaired_targets(
         if not datas:
             continue
 
-        norm_batch = _normalize_batch(_stack_scene_data(datas, device), model_args)
-        if generation_mode == _GENERATION_MODE_GRPO_TEMPERATURE:
-            trajs = _generate_grpo_temperature_scenes(
-                model,
-                norm_batch,
-                K=K,
-                grpo_noise_scale=grpo_noise_scale,
-                device=device,
-            )
-        elif generation_mode == _GENERATION_MODE_GUIDED_VARIANT:
-            trajs = generate_all_scenes_batched(
-                model,
-                model_args,
-                norm_batch,
-                K=K,
-                noise_range=(noise_low, noise_high),
-                device=device,
-                gen_chunk_size=K,
-                gt_max_speed=gt_max_speed,
-                generation_variant=variant,
-                prototypes_path=repair_prototypes_path,
-                use_route_cl_guidance=use_route_cl_guidance,
-            )
-        else:
-            raise ValueError(
-                f"unknown generation_mode {generation_mode!r}; expected "
-                f"{_GENERATION_MODE_GRPO_TEMPERATURE!r} or {_GENERATION_MODE_GUIDED_VARIANT!r}"
-            )
+        with timers("generate"):
+            norm_batch = _normalize_batch(_stack_scene_data(datas, device), model_args)
+            if generation_mode == _GENERATION_MODE_GRPO_TEMPERATURE:
+                trajs = _generate_grpo_temperature_scenes(
+                    model,
+                    norm_batch,
+                    K=K,
+                    grpo_noise_scale=grpo_noise_scale,
+                    device=device,
+                )
+            elif generation_mode == _GENERATION_MODE_GUIDED_VARIANT:
+                trajs = generate_all_scenes_batched(
+                    model,
+                    model_args,
+                    norm_batch,
+                    K=K,
+                    noise_range=(noise_low, noise_high),
+                    device=device,
+                    gen_chunk_size=K,
+                    gt_max_speed=gt_max_speed,
+                    generation_variant=variant,
+                    prototypes_path=repair_prototypes_path,
+                    use_route_cl_guidance=use_route_cl_guidance,
+                )
+            else:
+                raise ValueError(
+                    f"unknown generation_mode {generation_mode!r}; expected "
+                    f"{_GENERATION_MODE_GRPO_TEMPERATURE!r} or {_GENERATION_MODE_GUIDED_VARIANT!r}"
+                )
         scene_paths = [str(row["scene_path"]) for row in kept_rows]
-        candidate_rows_per_scene = classify_loaded_scene_candidates_batch(
-            scene_paths,
-            trajs,
-            datas,
-            rcfg,
-            moving_collision_thresh=thresholds["moving_collision_thresh"],
-            moving_near_thresh=thresholds["moving_near_thresh"],
-            static_near_thresh=thresholds["static_near_thresh"],
-            rb_near_thresh=thresholds["rb_near_thresh"],
-            device=device,
-            args=cls_args,
-        )
+        with timers("classify"):
+            candidate_rows_per_scene = classify_loaded_scene_candidates_batch(
+                scene_paths,
+                trajs,
+                datas,
+                rcfg,
+                moving_collision_thresh=thresholds["moving_collision_thresh"],
+                moving_near_thresh=thresholds["moving_near_thresh"],
+                static_near_thresh=thresholds["static_near_thresh"],
+                rb_near_thresh=thresholds["rb_near_thresh"],
+                device=device,
+                args=cls_args,
+            )
 
         # Deterministic plan per scene — needed to seed the det-path re-timing morph
         # AND the depart morph (initial speed) for expert_disagreement scenes.
@@ -839,9 +845,10 @@ def build_repaired_targets(
         )
         det_trajs = None
         if want_morph:
-            det_trajs = det_inference_batched(
-                model, model_args, datas, device, norm_batch=norm_batch
-            )
+            with timers("det_inference"):
+                det_trajs = det_inference_batched(
+                    model, model_args, datas, device, norm_batch=norm_batch
+                )
 
         for scene_idx, (row, data, scene_trajs, candidate_rows) in enumerate(
             zip(kept_rows, datas, trajs, candidate_rows_per_scene, strict=True)
@@ -861,7 +868,8 @@ def build_repaired_targets(
                 scoring_data = data
                 reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
 
-            reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
+            with timers("reward"):
+                reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
             candidate_rows = list(candidate_rows)
 
             name = _output_name_for_scene(row["scene_path"])
@@ -901,24 +909,25 @@ def build_repaired_targets(
                         f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
                         "expected 'pseudo' or 'recorded'"
                     )
-                morph, morph_diag = build_expert_morph_candidate(
-                    det_traj,
-                    expert_traj,
-                    w_max=expert_morph_w_max,
-                    max_accel=expert_morph_max_accel,
-                    max_jerk=expert_morph_max_jerk,
-                    stop_anchor_xy=stop_anchor_xy,
-                    return_diag=True,
-                )
-                if morph is not None:
-                    morph_index, scene_trajs = _append_scripted_candidate(
-                        morph,
-                        candidate_rows=candidate_rows,
-                        reward_rows=reward_rows,
-                        scene_trajs=scene_trajs,
-                        **scripted_kwargs,
+                with timers("morph"):
+                    morph, morph_diag = build_expert_morph_candidate(
+                        det_traj,
+                        expert_traj,
+                        w_max=expert_morph_w_max,
+                        max_accel=expert_morph_max_accel,
+                        max_jerk=expert_morph_max_jerk,
+                        stop_anchor_xy=stop_anchor_xy,
+                        return_diag=True,
                     )
-                    morph_added = True
+                    if morph is not None:
+                        morph_index, scene_trajs = _append_scripted_candidate(
+                            morph,
+                            candidate_rows=candidate_rows,
+                            reward_rows=reward_rows,
+                            scene_trajs=scene_trajs,
+                            **scripted_kwargs,
+                        )
+                        morph_added = True
 
             # Depart morph for the fail-to-take-off direction: the stop morph
             # re-times the det plan's own geometry, which cannot synthesize a
@@ -933,34 +942,36 @@ def build_repaired_targets(
                 and is_expert
                 and row.get("expert_disagreement_reason") == "model_lagging_expert"
             ):
-                depart, depart_diag = build_depart_morph_candidate(
-                    det_traj,
-                    expert_traj,
-                    max_accel=expert_morph_max_accel,
-                    max_jerk=expert_morph_max_jerk,
-                    return_diag=True,
-                )
-                if depart is not None:
-                    depart_index, scene_trajs = _append_scripted_candidate(
-                        depart,
-                        candidate_rows=candidate_rows,
-                        reward_rows=reward_rows,
-                        scene_trajs=scene_trajs,
-                        **scripted_kwargs,
+                with timers("morph"):
+                    depart, depart_diag = build_depart_morph_candidate(
+                        det_traj,
+                        expert_traj,
+                        max_accel=expert_morph_max_accel,
+                        max_jerk=expert_morph_max_jerk,
+                        return_diag=True,
                     )
-                    depart_added = True
+                    if depart is not None:
+                        depart_index, scene_trajs = _append_scripted_candidate(
+                            depart,
+                            candidate_rows=candidate_rows,
+                            reward_rows=reward_rows,
+                            scene_trajs=scene_trajs,
+                            **scripted_kwargs,
+                        )
+                        depart_added = True
 
-            best_idx, meta = _best_safe_candidate(
-                row,
-                candidate_rows,
-                reward_rows,
-                min_static_margin=min_static_margin,
-                target_gt_disagreement_thresh=target_gt_disagreement_thresh,
-                candidate_trajs=scene_trajs,
-                reference_traj=reference_traj,
-                morph_index=morph_index if morph_added else None,
-                depart_index=depart_index if depart_added else None,
-            )
+            with timers("select"):
+                best_idx, meta = _best_safe_candidate(
+                    row,
+                    candidate_rows,
+                    reward_rows,
+                    min_static_margin=min_static_margin,
+                    target_gt_disagreement_thresh=target_gt_disagreement_thresh,
+                    candidate_trajs=scene_trajs,
+                    reference_traj=reference_traj,
+                    morph_index=morph_index if morph_added else None,
+                    depart_index=depart_index if depart_added else None,
+                )
             morph_selected = bool(morph_added and best_idx == morph_index)
             depart_selected = bool(depart_added and best_idx == depart_index)
             if is_expert:
@@ -993,13 +1004,14 @@ def build_repaired_targets(
                 )
                 continue
 
-            with np.load(row["scene_path"], allow_pickle=True) as loaded:
-                raw = _filtered_npz_payload(loaded)
-            raw["ego_agent_future"] = _future4_to_3col(
-                scene_trajs[best_idx].detach().cpu().numpy().astype(np.float32)
-            )
-            out_path = out_dir / name
-            np.savez(out_path, **raw)
+            with timers("npz_write"):
+                with np.load(row["scene_path"], allow_pickle=True) as loaded:
+                    raw = _filtered_npz_payload(loaded)
+                raw["ego_agent_future"] = _future4_to_3col(
+                    scene_trajs[best_idx].detach().cpu().numpy().astype(np.float32)
+                )
+                out_path = out_dir / name
+                np.savez(out_path, **raw)
 
             repaired = dict(row)
             repaired["source_scene_path"] = str(row["scene_path"])
@@ -1034,6 +1046,7 @@ def build_repaired_targets(
         unrepaired_path.write_text(json.dumps(unrepaired_rows, indent=2))
         print(f"  unrepaired list -> {unrepaired_path}")
 
+    print(timers.report(max(1, len(rows))))
     print(f"repaired {len(repaired_rows)}/{len(rows)} -> {out_dir}")
     return repaired_paths, unrepaired_rows
 

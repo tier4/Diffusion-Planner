@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1889,11 +1890,13 @@ def run_segments_batched(
                         score_list = score_object_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    danger_rows = (
-                        danger_scorer(built, preds, data, device)
-                        if danger_scorer is not None
-                        else [None] * len(built)
-                    )
+                    with timers("danger_scorer"):
+                        danger_rows = (
+                            danger_scorer(built, preds, data, device)
+                            if danger_scorer is not None
+                            else [None] * len(built)
+                        )
+                    realized_t0 = time.perf_counter()
                     realized_rows = []
                     for _row_i, (
                         (_s, np_dict, _nb, _idx, _suuid, _wbu),
@@ -1966,6 +1969,7 @@ def run_segments_batched(
                                 realized_lag_gap_m=realized_lag_gap_m,
                             )
                         )
+                    timers.add("realized_events", time.perf_counter() - realized_t0)
                     for row_idx, (
                         (s, _np, nb, idx, suuid, wbu),
                         (cl, col, _M, collider_slot),
@@ -2016,6 +2020,7 @@ def run_segments_batched(
                                 extra_manifest={
                                     "offense_frame_id": int(s.credit_window["offense_frame"])
                                 },
+                                timers=timers,
                             )
                             s.credit_saved = True
                             s.terminated = "credit_window_saved"
@@ -2096,6 +2101,7 @@ def run_segments_batched(
                                                 )
                                             ),
                                         },
+                                        timers=timers,
                                     )
                                     if manifest is not None:
                                         if danger_manifest_callback is not None:
@@ -2153,6 +2159,7 @@ def run_segments_batched(
                                             extra_manifest=_credit_event_metadata(
                                                 event_row_by_label.get(label)
                                             ),
+                                            timers=timers,
                                         )
                                         if (
                                             manifest is not None
@@ -2227,6 +2234,7 @@ def run_segments_batched(
                                         min_post_snap_frames=save_min_post_snap_frames,
                                         min_pre_frames=save_min_pre_frames,
                                         min_ego_speed=save_min_ego_speed,
+                                        timers=timers,
                                     )
                                     if mani is not None:
                                         s.episode_saved = True
@@ -2271,6 +2279,7 @@ def _dump_credit_window(
     seg_end: int,
     label: str,
     extra_manifest: dict | None = None,
+    timers: Timers | None = None,
 ) -> dict | None:
     """Write an inclusive R2LPL credit window ending before the offense step.
 
@@ -2314,6 +2323,7 @@ def _dump_credit_window(
         min_post_snap_frames=0,
         min_pre_frames=0,
         min_ego_speed=0.0,
+        timers=timers,
     )
     if manifest is None:
         return None
@@ -2553,6 +2563,7 @@ def _dump_precollision_window(
     min_post_snap_frames: int = 0,
     min_pre_frames: int = 30,
     min_ego_speed: float = 0.5,
+    timers: Timers | None = None,
 ) -> dict | None:
     """Write the scenes before collision step ``t_c`` from a live buffer.
 
@@ -2575,6 +2586,9 @@ def _dump_precollision_window(
     import json
     from pathlib import Path
 
+    if timers is None:
+        timers = Timers()  # throwaway sink: standalone callers without a report
+    t_window = time.perf_counter()
     out_dir = Path(out_dir)
     # Clear any prior batch in this dir FIRST — before the skip early-return — so that a
     # re-mine which now SKIPS this segment (or writes a shorter window) never leaves stale
@@ -2670,6 +2684,7 @@ def _dump_precollision_window(
                 f"[{start_k}, {t_c}] but it is absent (window-clamp / buffer regression)"
             )
         _, idx, live_pose, np_dict, slot_uuids, _wbu = live_by_step[step_k]
+        _t = time.perf_counter()
         scene = _scene_npz_from_np_dict(np_dict)
         ep = scene["ego_agent_past"]
         scene["ego_agent_past"] = np.column_stack(
@@ -2760,6 +2775,8 @@ def _dump_precollision_window(
             if naf is not None:
                 dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
                 scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
+        timers.add("dump_naf", time.perf_counter() - _t)
+        _t = time.perf_counter()
         eaf = np.zeros((fut_len, 4), dtype=np.float32)
         for j in range(1, fut_len + 1):
             fk = step_k + j
@@ -2808,9 +2825,12 @@ def _dump_precollision_window(
         if 0 < n_recorded < fut_len:
             recorded_eaf[n_recorded:] = recorded_eaf[n_recorded - 1]
         scene["ego_recorded_future"] = recorded_eaf
+        timers.add("dump_futures", time.perf_counter() - _t)
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
+        _t = time.perf_counter()
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
+        timers.add("dump_savez", time.perf_counter() - _t)
         saved.append(int(step_k))
         saved_frame_ids.append(_frame_id(tl, idx))
 
@@ -2832,4 +2852,5 @@ def _dump_precollision_window(
         "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    timers.add("dump_window", time.perf_counter() - t_window)
     return manifest
