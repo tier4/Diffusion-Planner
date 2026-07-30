@@ -27,6 +27,7 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
     _load_scene_thresholds,
     classify_loaded_scene_candidates_batch,
     current_ego_neighbor_clearance,
+    slice_subscore_outputs,
 )
 from rlvr.autoresearch.tools.eval_det_avoidance import (
     det_inference_batched,
@@ -44,7 +45,7 @@ from rlvr.grpo_trainer_batched import (
     _stack_scene_data,
     generate_all_scenes_batched,
 )
-from rlvr.reward import compute_reward_batch
+from rlvr.reward import _shape_reward, compute_reward_batch
 from scenario_generation.perf_timer import Timers
 
 _GENERATION_MODE_GUIDED_VARIANT = "guided_variant"
@@ -825,7 +826,7 @@ def build_repaired_targets(
                 )
         scene_paths = [str(row["scene_path"]) for row in kept_rows]
         with timers("classify"):
-            candidate_rows_per_scene = classify_loaded_scene_candidates_batch(
+            candidate_rows_per_scene, batch_subs = classify_loaded_scene_candidates_batch(
                 scene_paths,
                 trajs,
                 datas,
@@ -836,6 +837,7 @@ def build_repaired_targets(
                 rb_near_thresh=thresholds["rb_near_thresh"],
                 device=device,
                 args=cls_args,
+                return_subscores=True,
             )
 
         # Deterministic plan per scene — needed to seed the det-path re-timing morph
@@ -868,8 +870,34 @@ def build_repaired_targets(
                 scoring_data = data
                 reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
 
+            # The classifier above already ran the full subscore geometry
+            # (OBB clearance / road border / lane / centerline) on this exact
+            # (scene, candidates) pair — reuse it and apply only the reward
+            # shaping, instead of recomputing everything. Valid only when the
+            # reward would score the SAME data the classifier saw: not for
+            # expert-reference scoring (mutated data) and not when futures are
+            # 3-col (the classifier scores a 4-col-converted copy, the legacy
+            # reward path scored the raw arrays).
+            def _future_is_4col(d, key):
+                return key not in d or int(d[key].shape[-1]) == 4
+
+            reuse_subs = (
+                not (repair_expert_reference and is_expert)
+                and _future_is_4col(data, "ego_agent_future")
+                and _future_is_4col(data, "neighbor_agents_future")
+            )
             with timers("reward"):
-                reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
+                if reuse_subs:
+                    reward_rows = list(
+                        _shape_reward(
+                            slice_subscore_outputs(batch_subs, scene_idx),
+                            scene_trajs,
+                            scoring_data,
+                            rcfg,
+                        )
+                    )
+                else:
+                    reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
             candidate_rows = list(candidate_rows)
 
             name = _output_name_for_scene(row["scene_path"])

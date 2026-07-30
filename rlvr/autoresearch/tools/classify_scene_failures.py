@@ -856,6 +856,107 @@ def _moving_diagnostics(
     }
 
 
+def _moving_collision_steps_gated_batch(
+    collision_mask: torch.Tensor,
+) -> list[int | None]:
+    """Per-candidate first collision step from an (N, N_nb, T) gated mask.
+
+    Same semantics as ``_moving_collision_step_gated``'s final reduction, but
+    per candidate instead of collapsed across the N dimension.
+    """
+    by_t = collision_mask.any(dim=1)  # (N, T)
+    any_n = by_t.any(dim=1)
+    first = by_t.float().argmax(dim=1)
+    return [int(first[n].item()) if bool(any_n[n].item()) else None for n in range(by_t.shape[0])]
+
+
+def _moving_diagnostics_batch(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+    moving_collision_thresh: float,
+    moving_near_thresh: float,
+    device: torch.device,
+) -> list[dict[str, Any]]:
+    """``_moving_diagnostics`` for all N candidates of ONE scene in one pass.
+
+    The scene's neighbor inputs and the (N, N_nb, T) clearance tensor are
+    computed once instead of once per candidate; every per-candidate value is
+    then a row-wise reduction, so results match the per-candidate calls
+    exactly (verified by the repair-output equivalence check).
+    """
+    N, T = ego_trajs.shape[0], ego_trajs.shape[1]
+    ego_shape = _ego_shape_from_data(data, device)
+    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, T, device)
+    stopped_mask = _stopped_neighbor_mask(neighbor_futures, neighbor_valid, config)
+    moving_mask = ~stopped_mask
+    moving_count = int(moving_mask.sum().item())
+    stopped_count = int(stopped_mask.sum().item())
+
+    if moving_count == 0:
+        return [
+            {
+                "moving_neighbor_count": moving_count,
+                "stopped_neighbor_count": stopped_count,
+                "moving_min_dist": _NO_MOVING_NEIGHBOR_DISTANCE_M,
+                "moving_argmin_neighbor": None,
+                "moving_argmin_t": None,
+                "moving_collision_step": None,
+                "moving_near_miss": False,
+            }
+            for _ in range(N)
+        ]
+
+    mf = neighbor_futures[moving_mask]
+    ms = neighbor_shapes[moving_mask]
+    mv = neighbor_valid[moving_mask]
+    moving_global_idx = moving_mask.nonzero(as_tuple=True)[0]
+
+    distances = compute_ego_neighbor_signed_clearance(ego_trajs, ego_shape, mf, ms, mv)
+    _, M, Td = distances.shape
+    flat = distances.reshape(N, -1)
+    flat_idx = flat.argmin(dim=1)  # (N,)
+    min_dists = flat.gather(1, flat_idx[:, None]).squeeze(1)
+    argmin_m = (flat_idx // Td) % M
+    argmin_t = flat_idx % Td
+
+    # Gated collision mask — same construction as _moving_collision_step_gated,
+    # kept N-major so the first-step reduction stays per candidate.
+    ego_xy = ego_trajs[:, :, :2]
+    collision_mask = distances <= moving_collision_thresh
+    if config.ignore_rear_end_collisions:
+        ego_heading = ego_trajs[:, :, 2:4]
+        npc_xy = mf[:, :, :2]
+        ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
+        dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)
+        npc_is_behind = dot < 0
+        rear_contact = collision_mask & npc_is_behind
+        ever_rear = rear_contact.cummax(dim=2).values
+        collision_mask = collision_mask & ~npc_is_behind & ~ever_rear
+    if T >= 2:
+        ego_speed = (torch.diff(ego_xy, dim=1) / config.dt).norm(dim=-1)
+        ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)
+        collision_mask = collision_mask & (ego_speed > 1.0).unsqueeze(1)
+    collision_steps = _moving_collision_steps_gated_batch(collision_mask)
+
+    rows: list[dict[str, Any]] = []
+    for n in range(N):
+        min_dist = float(min_dists[n].item())
+        step = collision_steps[n]
+        rows.append(
+            {
+                "moving_neighbor_count": moving_count,
+                "stopped_neighbor_count": stopped_count,
+                "moving_min_dist": min_dist,
+                "moving_argmin_neighbor": int(moving_global_idx[int(argmin_m[n].item())].item()),
+                "moving_argmin_t": int(argmin_t[n].item()),
+                "moving_collision_step": step,
+                "moving_near_miss": step is None and min_dist < moving_near_thresh,
+            }
+        )
+    return rows
+
+
 def classify_loaded_scene(
     scene_path: str,
     ego_traj: torch.Tensor,
@@ -1010,6 +1111,15 @@ def classify_loaded_scenes_batch(
     return [rows[0] for rows in rows_per_scene]
 
 
+def slice_subscore_outputs(
+    subs: dict[str, torch.Tensor | list[list[int | None]]], bidx: int
+) -> dict[str, torch.Tensor | list[int | None]]:
+    """Per-scene view of ``compute_subscores_scene_batch`` output — the exact
+    dict ``compute_subscores_batch`` would have returned for that scene (the
+    scene-batch wrapper computes per scene and stacks, so slicing round-trips)."""
+    return {k: (v[bidx] if torch.is_tensor(v) else list(v[bidx])) for k, v in subs.items()}
+
+
 def classify_loaded_scene_candidates_batch(
     scene_paths: list[str],
     ego_trajs: torch.Tensor,
@@ -1022,8 +1132,15 @@ def classify_loaded_scene_candidates_batch(
     rb_near_thresh: float,
     device: torch.device,
     args=None,
-) -> list[list[dict[str, Any]]]:
-    """Classify a B-scene batch with N scored trajectories per scene."""
+    return_subscores: bool = False,
+):
+    """Classify a B-scene batch with N scored trajectories per scene.
+
+    With ``return_subscores=True`` returns ``(rows_per_scene, subs)`` where
+    ``subs`` is the B-major ``compute_subscores_scene_batch`` output — callers
+    that also need the reward (``rlvr.reward._shape_reward``) can reuse it via
+    ``slice_subscore_outputs`` instead of recomputing the identical geometry.
+    """
     if ego_trajs.dim() != 4:
         raise ValueError(
             "classify_loaded_scene_candidates_batch expects ego_trajs shaped (B,N,T,4); "
@@ -1044,16 +1161,19 @@ def classify_loaded_scene_candidates_batch(
     for bidx, scene_path in enumerate(scene_paths):
         scene_data = _slice_scene_data(batched_data, bidx, B)
         scene_rows: list[dict[str, Any]] = []
+        # One clearance pass for all N candidates of this scene instead of N
+        # batch-1 passes (same values; see _moving_diagnostics_batch).
+        moving_rows = _moving_diagnostics_batch(
+            ego_trajs[bidx],
+            scene_data,
+            config,
+            moving_collision_thresh,
+            moving_near_thresh,
+            device,
+        )
         for candidate_idx in range(N):
             traj_1 = ego_trajs[bidx, candidate_idx : candidate_idx + 1]
-            moving = _moving_diagnostics(
-                traj_1,
-                scene_data,
-                config,
-                moving_collision_thresh,
-                moving_near_thresh,
-                device,
-            )
+            moving = moving_rows[candidate_idx]
             conflict = _conflict_diagnostics(traj_1, scene_data, args) if args else {}
             row = _build_candidate_row(
                 scene_path,
@@ -1068,6 +1188,8 @@ def classify_loaded_scene_candidates_batch(
             row["trajectory_source"] = "generated" if N > 1 else row["trajectory_source"]
             scene_rows.append(row)
         rows_per_scene.append(scene_rows)
+    if return_subscores:
+        return rows_per_scene, subs
     return rows_per_scene
 
 
