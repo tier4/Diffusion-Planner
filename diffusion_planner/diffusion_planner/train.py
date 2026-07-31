@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
@@ -125,82 +126,180 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
-    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+_OBJECT_MODE_DROP_FLAGS = {"objects": False, "noobj": True}
 
-    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
-    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
-    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
-    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
-    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
-    and restored afterwards.
+
+def _object_mode_pairs(modes: list[str]) -> tuple[tuple[str, bool], ...]:
+    """Canonical (tag, drop_objects) pairs for the requested object modes.
+
+    Order is always "objects" before "noobj" regardless of the CLI list order, so labels/output
+    dirs are deterministic.
     """
-    if not args.closed_loop_npz_root:
-        return
-    import math
+    return tuple((m, _OBJECT_MODE_DROP_FLAGS[m]) for m in ("objects", "noobj") if m in modes)
 
-    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+
+def closed_loop_validate(
+    model, args, epoch: int, out_dir: str, *, is_final_save: bool = False
+) -> None:
+    """Closed-loop rendered rollout; logs metrics + videos to wandb.
+
+    Runs one :class:`~scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`
+    per (site, object-mode) pair: ``closed_loop_npz_root`` (single arbitrary path) and
+    ``closed_loop_sites_npz_root`` (a curated ``.json`` path-list manifest grouped into
+    per-site route pools by
+    :func:`~scenario_generation.site_discovery.discover_sites_from_json`) are independent — both
+    fire in the same call when both are set, each contributing its own rows to the combined
+    episode table / cross-site aggregate. Called on the checkpoint-save cadence, rank-0 only:
+    pass the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler
+    runs and produces ``prediction``) and restored afterwards.
+
+    Per-step matplotlib rendering (PNGs/video/colormap images) is the dominant per-call cost, so
+    it's deferred to the last call only (``is_final_save=True``, computed by the caller as "is
+    this the last time the checkpoint-save cadence fires in this run" -- NOT simply
+    ``epoch == train_epochs - 1``, since train_epochs may not land on a save_utd-multiple)
+    -- every other call still runs the full rollout and logs metrics/wandb scalars, just without
+    that cost.
+    """
+    if not args.closed_loop_npz_root and not args.closed_loop_sites_npz_root:
+        return
+
+    from scenario_generation.closed_loop_evaluation import (
+        ClosedLoopEvalConfig,
+        FullRouteClosedLoopEvaluation,
+        RolloutParams,
+    )
+    from scenario_generation.closed_loop_html_report import build_html_report
+    from scenario_generation.site_discovery import discover_sites_from_json
+    from scenario_generation.wandb_closed_loop import (
+        build_combined_episode_table,
+        build_full_closed_loop_wandb_log,
+        build_sites_aggregate_log,
+    )
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
-    try:
-        summary = run_closed_loop_eval(
+
+    def run_one(npz_root, site_out_dir: str, site_name: str | None, drop_objects: bool = False):
+        site_label = f" [{site_name}]" if site_name else ""
+        evaluator = FullRouteClosedLoopEvaluation(
             net,
             args,
-            args.closed_loop_npz_root,
-            out_dir,
-            device=args.device,
-            near_miss_thresh=args.closed_loop_near_miss_thresh,
-            search_radius=args.closed_loop_search_radius,
-            warmup_steps=args.closed_loop_warmup_steps,
-            unstick_after=args.closed_loop_unstick_after,
-            unstick_advance_m=args.closed_loop_unstick_advance_m,
-            fps=args.closed_loop_fps,
-            replan_interval=args.closed_loop_replan_interval,
-            draw_every=args.closed_loop_draw_every,
-            neighbor_history_mode="recorded",
-            verbose=False,
+            ClosedLoopEvalConfig(
+                out_dir=Path(site_out_dir),
+                params=RolloutParams(
+                    device=args.device,
+                    near_miss_thresh=args.closed_loop_near_miss_thresh,
+                    search_radius=args.closed_loop_search_radius,
+                    warmup_steps=args.closed_loop_warmup_steps,
+                    unstick_after=args.closed_loop_unstick_after,
+                    unstick_advance_m=args.closed_loop_unstick_advance_m,
+                    unstick_radius_mult=args.closed_loop_unstick_radius_mult,
+                    unstick_teleport_after=args.closed_loop_unstick_teleport_after,
+                    draw_every=args.closed_loop_draw_every if is_final_save else None,
+                    replan_interval=args.closed_loop_replan_interval,
+                    abort_deviation_m=args.closed_loop_abort_deviation_m,
+                    abort_after=args.closed_loop_abort_after,
+                    abort_max_snaps=args.closed_loop_abort_max_snaps,
+                    drop_objects=drop_objects,
+                ),
+                fps=float(args.closed_loop_fps),
+                verbose=False,
+            ),
+            npz_root,
+            seg_len=args.closed_loop_seg_len,
         )
+        summary = evaluator.run()
+        if not summary:
+            return {}, {}
+        site_log = build_full_closed_loop_wandb_log(
+            summary,
+            out_dir=site_out_dir,
+            site=site_name,
+            video_pick=args.closed_loop_wandb_video_pick,
+            colormap_metrics=args.closed_loop_colormap_metrics,
+            near_miss_thresh=args.closed_loop_near_miss_thresh,
+            report_base_url=args.closed_loop_report_base_url or None,
+            render_media=is_final_save,
+        )
+        print(
+            f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
+            f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+            f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+            f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+            f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+            f"{len(summary['video_mp4s'])} video(s)"
+        )
+        return site_log, summary
+
+    log: dict = {}
+    site_summaries: dict[str, dict] = {}
+    episode_data: list = []  # (label, rows, out_dir) for the ONE combined table, across BOTH sources
+    site_report_labels: list[str] = []
+
+    def run_labeled(
+        base_name: str | None,
+        npz_root,
+        mode_pairs: tuple[tuple[str, bool], ...],
+        *,
+        track_for_report: bool = False,
+    ) -> None:
+        """Run ``npz_root`` once per requested object-mode, merging into log/site_summaries/episode_data.
+
+        "noobj" gets a distinct label (suffix) rather than a separate axis, so it rides the
+        existing per-site machinery (wandb keys, metric_regex overlay, combined episode table)
+        unchanged. When only "objects" is requested (the common single-mode case), the
+        label/out_dir stay exactly as a bare single call would use (``base_name`` verbatim, no
+        subdir).
+        """
+        multi = len(mode_pairs) > 1
+        for tag, drop_objects in mode_pairs:
+            if multi:
+                base = base_name or "main"
+                label = f"{base}__noobj" if tag == "noobj" else base
+            else:
+                label = base_name
+            site_out_dir = os.path.join(out_dir, label) if label else out_dir
+            site_log, summary = run_one(npz_root, site_out_dir, label, drop_objects=drop_objects)
+            if not summary:
+                continue
+            episode_label = label or "main"
+            log.update(site_log)
+            site_summaries[episode_label] = summary
+            episode_data.append((episode_label, summary.get("segments") or [], site_out_dir))
+            if track_for_report:
+                site_report_labels.append(episode_label)
+
+    try:
+        if args.closed_loop_npz_root:
+            npz_modes = _object_mode_pairs(args.closed_loop_npz_object_modes)
+            run_labeled(None, args.closed_loop_npz_root, npz_modes)
+
+        if args.closed_loop_sites_npz_root:
+            sites = discover_sites_from_json(args.closed_loop_sites_npz_root)
+            if not sites:
+                print(f"closed-loop: no sites found under {args.closed_loop_sites_npz_root}")
+            sites_modes = _object_mode_pairs(args.closed_loop_sites_object_modes)
+            for site_name, npz_root in sites.items():
+                run_labeled(site_name, npz_root, sites_modes, track_for_report=True)
+
+        # One combined, filterable/groupable episode table across every source/site/mode.
+        if episode_data:
+            log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
+        # Cross-source/site pooled rollup under closed_loop_overview/*.
+        if len(site_summaries) > 1:
+            log.update(build_sites_aggregate_log(site_summaries))
+        # Local HTML gallery, sites only (see site_report_labels above) -- only built on
+        # is_final_save, same as the media (videos/colormap images) it links to.
+        if is_final_save and site_report_labels:
+            report_path = build_html_report(out_dir, site_report_labels)
+            if report_path:
+                print(f"closed-loop: wrote {report_path}")
     finally:
         net.train(was_training)
 
-    # Scalar metrics from nested summary (skip non-finite clearances).
-    def _flat_scalars(node: dict, prefix: str = "") -> dict[str, float | int]:
-        out: dict[str, float | int] = {}
-        for k, v in node.items():
-            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
-            if isinstance(v, dict):
-                out.update(_flat_scalars(v, key))
-            elif isinstance(v, (int,)) or (isinstance(v, float) and math.isfinite(v)):
-                out[key] = v
-        return out
-
-    log = {
-        f"closed_loop/{k}": v
-        for k, v in _flat_scalars(
-            {
-                "n_segments": summary["n_segments"],
-                "total_steps": summary["total_steps"],
-                "object": summary["object"],
-                "road_border": summary["road_border"],
-                "red_light_violation": summary["red_light_violation"],
-                "strong_brake": summary["strong_brake"],
-                "reproducer": summary["reproducer"],
-            }
-        ).items()
-    }
-    for mp4 in summary["video_mp4s"]:
-        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
-    wandb.log(log, step=epoch + 1)
-    from scenario_generation.closed_loop_eval import format_summary_lines
-
-    print(
-        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
-    )
-    for line in format_summary_lines(summary):
-        print(f"  {line}")
+    if log:
+        wandb.log(log, step=epoch + 1)
 
 
 def model_training(args: TrainConfig):
@@ -568,6 +667,8 @@ def model_training(args: TrainConfig):
                 step=epoch + 1,
             )
 
+            scenario_based_open_loop_validate(diffusion_planner, args, epoch)
+
             curr_data = {
                 "epoch": epoch + 1,
                 "train_loss": train_total_loss,
@@ -618,8 +719,15 @@ def model_training(args: TrainConfig):
                 )
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
+                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
+                    train_epochs - init_epoch
+                ) // save_utd
                 closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                    diffusion_planner,
+                    args,
+                    epoch,
+                    os.path.join(curr_dir, "closed_loop"),
+                    is_final_save=is_final_save,
                 )
 
             if valid_loss_ego_position_lat_loss < best_loss:

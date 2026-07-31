@@ -16,9 +16,9 @@ always produces video: one MP4 per route (``<route>.mp4``). Per-route metrics ar
 Clearance t-digest sketches used for multi-GPU p5 merge are written beside them as
 ``tdigests.jsonl`` / ``tdigests_{rank}.jsonl`` so ``segments.jsonl`` stays human-readable.
 
-Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
-the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
-closed-loop mining config. ``--npz_root`` is either one NPZ dir tree or a .json path list of
+Only ``--model_path`` and ``--npz_root`` are required; outputs default to next to the checkpoint
+(``<model_path dir>/closed_loop/``, override with ``--out_dir``) and the rollout knobs default to
+the closed-loop mining config. ``--npz_root`` is either one NPZ dir tree or a .json path list of
 route dirs; given a path list of multiple routes, the rollout automatically fans out one worker
 process per visible GPU (each its own model copy), which also parallelizes the matplotlib render.
 Example (1st epoch of a GRPO run)::
@@ -66,6 +66,13 @@ def parse_args() -> argparse.Namespace:
         help="dir tree of route NPZ frames (recursively globbed, grouped into routes), OR a .json "
         "path list of such dirs (one route dir per entry, like --train_set_list). Pose JSON "
         "sidecars are read from next to each .npz, falling back to its own source tree.",
+    )
+    p.add_argument(
+        "--out_dir",
+        type=Path,
+        default=None,
+        help="output dir for segments.jsonl/summary.json/videos. Default: "
+        "<model_path dir>/closed_loop/<timestamp>/",
     )
     # --- tunable knobs (default to the closed-loop mining config) ---
     p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
@@ -133,6 +140,25 @@ def parse_args() -> argparse.Namespace:
         "dominant cost; this throttles it without touching the rollout. Frames are encoded at --fps "
         "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
     )
+    p.add_argument(
+        "--abort_deviation_m",
+        type=float,
+        default=0.0,
+        help="early-abort a segment (terminated='diverged') once GT deviation exceeds this "
+        "(m) for --abort_after steps (0=disabled)",
+    )
+    p.add_argument("--abort_after", type=int, default=30)
+    p.add_argument(
+        "--abort_max_snaps",
+        type=int,
+        default=0,
+        help="early-abort a segment after this many unstick teleports (0=disabled)",
+    )
+    p.add_argument(
+        "--drop_objects",
+        action="store_true",
+        help="empty-world ablation: zero out dynamic/static objects each step (map kept)",
+    )
     return p.parse_args()
 
 
@@ -164,6 +190,10 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
         strong_brake_mps2=args.strong_brake_mps2,
+        abort_deviation_m=args.abort_deviation_m,
+        abort_after=args.abort_after,
+        abort_max_snaps=args.abort_max_snaps,
+        drop_objects=args.drop_objects,
     )
 
 
@@ -189,10 +219,22 @@ def _run_shard(rank, num_workers, gpu_ids, model_path, npz_root, out_dir, knobs)
 def _merge_shards(
     out_dir: Path, npz_root, near_miss_thresh: float, *, strong_brake_mps2: float
 ) -> dict:
-    """Aggregate every worker's segments_{rank}.jsonl (+ tdigests sidecars) into one summary."""
-    from scenario_generation.closed_loop_eval import aggregate, load_segment_rows_with_tdigests
+    """Aggregate every worker's segments_{rank}.jsonl (+ tdigests sidecars) into one summary.
+
+    Also writes a merged, human-readable ``segments.jsonl`` (same tdigest-stripped shape the
+    sequential path writes) -- downstream consumers like closed_loop_html_report only look for
+    the unsharded filename, so without this a parallel-run site's videos never show up there.
+    """
+    from scenario_generation.closed_loop_eval import (
+        aggregate,
+        load_segment_rows_with_tdigests,
+        segment_row_for_json,
+    )
 
     rows = load_segment_rows_with_tdigests(out_dir)
+    with open(out_dir / "segments.jsonl", "w") as f:
+        for r in sorted(rows, key=lambda r: r["route"]):
+            f.write(json.dumps(segment_row_for_json(r, route=r["route"]), default=float) + "\n")
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len({r["route"] for r in rows})
@@ -208,7 +250,9 @@ def _write_summary(out_dir: Path, summary: dict) -> None:
 def main() -> None:
     args = parse_args()
 
-    out_dir = args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = args.out_dir or (
+        args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     knobs = _eval_knobs(args)
 

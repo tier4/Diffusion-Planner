@@ -541,7 +541,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal_reach_m", type=float, default=0.0)
     parser.add_argument("--unstick_after", type=int, default=300)
     parser.add_argument("--unstick_advance_m", type=float, default=5.0)
-    parser.add_argument("--tracker_mode", choices=["mpc", "perfect"], default="mpc")
+    parser.add_argument(
+        "--tracker_mode", choices=["mpc", "mpc_batched", "perfect"], default="mpc_batched"
+    )
     parser.add_argument("--timeline_progress_mode", choices=["clock", "pose"], default="clock")
     parser.add_argument("--neighbor_history_mode", choices=["sim", "recorded"], default="sim")
     parser.add_argument("--gpu_transform", action="store_true")
@@ -698,11 +700,12 @@ def main() -> None:
         nonlocal n_credit_rows
         if credit_f is None:
             return
-        for scene_path in sorted(Path(window_dir).glob("credit*.npz")):
-            row = _credit_row_from_saved_scene(scene_path, manifest, label)
-            credit_f.write(json.dumps(row, sort_keys=True) + "\n")
-            n_credit_rows += 1
-        credit_f.flush()
+        with timers("credit_row_reload"):
+            for scene_path in sorted(Path(window_dir).glob("credit*.npz")):
+                row = _credit_row_from_saved_scene(scene_path, manifest, label)
+                credit_f.write(json.dumps(row, sort_keys=True) + "\n")
+                n_credit_rows += 1
+            credit_f.flush()
 
     def flush(chunks: list[Chunk], fout, fskip) -> None:
         nonlocal n_simulated, n_skipped
@@ -712,15 +715,18 @@ def main() -> None:
         kept_chunks = []
 
         def build(chunk: Chunk):
-            return _build_work_unit(
-                chunk,
-                args.sidecar_root,
-                args.prebuild_neighbor_tracks,
-                expected_frame_step=args.expected_frame_step,
-                max_pose_step_m=args.max_pose_step_m,
-                max_pose_speed_mps=args.max_pose_speed_mps,
-                max_yaw_step_rad=args.max_yaw_step_rad,
-            )
+            # NOTE: totals are summed across the build thread pool, so this timer
+            # reports CPU-seconds of timeline build, not wall-clock.
+            with timers("timeline_build"):
+                return _build_work_unit(
+                    chunk,
+                    args.sidecar_root,
+                    args.prebuild_neighbor_tracks,
+                    expected_frame_step=args.expected_frame_step,
+                    max_pose_step_m=args.max_pose_step_m,
+                    max_pose_speed_mps=args.max_pose_speed_mps,
+                    max_yaw_step_rad=args.max_yaw_step_rad,
+                )
 
         workers = max(1, int(args.timeline_build_workers))
         built = []
@@ -875,6 +881,7 @@ def main() -> None:
         "elapsed_sec": round(elapsed, 3),
         "chunks_per_sec": n_simulated / elapsed if elapsed > 0 and n_simulated else 0.0,
         "timers": timers.report(max(1, n_simulated)) if n_simulated else "",
+        "timers_detail": timers.as_dict() if n_simulated else {},
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2))

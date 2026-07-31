@@ -234,13 +234,47 @@ def get_args(args_list=None):
     )
 
     # per-epoch closed-loop validation (rendered rollout + wandb video).
-    # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
+    # Disabled unless --closed_loop_npz_root or --closed_loop_sites_npz_root is given.
     parser.add_argument(
         "--closed_loop_npz_root",
         type=str,
         default="",
         help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
         "cadence (save_utd). Empty = disabled. One route per trial.",
+    )
+    parser.add_argument(
+        "--closed_loop_sites_npz_root",
+        type=str,
+        default="",
+        help="alternative/addition to --closed_loop_npz_root: a curated .json path-list manifest, "
+        "grouped into per-site route pools by site_discovery.discover_sites_from_json and evaluated "
+        "as independent sites (own npz_root each). Both may be set at once (each fires "
+        "independently).",
+    )
+    parser.add_argument(
+        "--closed_loop_npz_object_modes",
+        nargs="+",
+        choices=("objects", "noobj"),
+        default=["objects"],
+        help="object-mode(s) to run --closed_loop_npz_root under: 'objects'=normal, "
+        "'noobj'=empty-world ablation (no dynamic/static objects, map kept; label gets a "
+        "'__noobj' suffix). Default is objects-only (single arbitrary path, usually a curated "
+        "scene set).",
+    )
+    parser.add_argument(
+        "--closed_loop_sites_object_modes",
+        nargs="+",
+        choices=("objects", "noobj"),
+        default=["objects", "noobj"],
+        help="object-mode(s) to run each --closed_loop_sites_npz_root site under (see "
+        "--closed_loop_npz_object_modes). Default runs both, for the objects-vs-noobj "
+        "comparison in wandb.",
+    )
+    parser.add_argument(
+        "--closed_loop_seg_len",
+        type=int,
+        default=100000,
+        help="frames per segment; large => one route = one segment = one trial",
     )
     parser.add_argument(
         "--closed_loop_replan_interval",
@@ -260,6 +294,85 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument("--closed_loop_unstick_radius_mult", type=float, default=10.0)
+    parser.add_argument("--closed_loop_unstick_teleport_after", type=int, default=300)
+    parser.add_argument(
+        "--closed_loop_abort_deviation_m",
+        type=float,
+        default=50.0,
+        help="early-abort a segment (terminated='diverged') once GT deviation exceeds this "
+        "(m) for --closed_loop_abort_after steps (0=disabled)",
+    )
+    parser.add_argument("--closed_loop_abort_after", type=int, default=30)
+    parser.add_argument(
+        "--closed_loop_abort_max_snaps",
+        type=int,
+        default=0,
+        help="early-abort a segment after this many unstick teleports (0=disabled)",
+    )
+    parser.add_argument(
+        "--closed_loop_wandb_video_pick",
+        choices=("worst", "first", "longest"),
+        default="worst",
+        help="which single episode per site gets its video + trajectory colormap uploaded "
+        "to wandb (all episodes still get rendered to out_dir either way)",
+    )
+    parser.add_argument(
+        "--closed_loop_colormap_metrics",
+        nargs="*",
+        choices=(
+            "clearance",
+            "collision",
+            "near_miss",
+            "speed",
+            "road_border",
+            "red_light",
+            "strong_brake",
+        ),
+        default=[
+            "clearance",
+            "collision",
+            "near_miss",
+            "speed",
+            "road_border",
+            "red_light",
+            "strong_brake",
+        ],
+        help="per-step metrics rendered as trajectory-colormap images for the wandb "
+        "representative episode (one image each — cheap, unlike video/episode picking, so "
+        "all of them render by default)",
+    )
+    parser.add_argument(
+        "--closed_loop_report_base_url",
+        type=str,
+        default="",
+        help="if the out_dir tree is served over HTTP from this base, wandb records a "
+        "clickable report URL instead of just the local path",
+    )
+
+    # Scenario-based Open-loop validation. The list selects samples per metric; metric parameters
+    # are regular TrainConfig fields.
+    parser.add_argument(
+        "--scenario_based_open_loop_list",
+        type=str,
+        default="",
+        help="JSON mapping Scenario-based Open-loop metric names to NPZ path lists. Empty = disabled.",
+    )
+    parser.add_argument(
+        "--scenario_centerline_horizon_seconds",
+        type=float,
+        default=_train_config_default("scenario_centerline_horizon_seconds"),
+    )
+    parser.add_argument(
+        "--scenario_departure_horizon_seconds",
+        type=float,
+        default=_train_config_default("scenario_departure_horizon_seconds"),
+    )
+    parser.add_argument(
+        "--scenario_departure_minimum_displacement_m",
+        type=float,
+        default=_train_config_default("scenario_departure_minimum_displacement_m"),
+    )
 
     # Deterministic
     parser.add_argument(

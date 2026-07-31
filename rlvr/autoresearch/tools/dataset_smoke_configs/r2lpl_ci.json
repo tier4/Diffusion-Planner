@@ -13,7 +13,7 @@
   "chunk_len": 80,
   "start_stride": 80,
   "expected_frame_step": 1,
-  "tracker_mode": "mpc",
+  "tracker_mode": "mpc_batched",
   "timeline_progress_mode": "clock",
   "neighbor_history_mode": "sim",
   "batch_size": 8,

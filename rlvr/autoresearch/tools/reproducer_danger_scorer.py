@@ -96,15 +96,25 @@ def _np_dict_to_scoring_tensors(
     *,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
+    """Normalize a scene dict (numpy arrays OR torch tensors) to scoring tensors.
+
+    Values that are already tensors on the right device/dtype pass through
+    without a copy (``Tensor.to`` is a no-op then) — the rollout hands the
+    scorer GPU-resident slices of the batched model input, so the per-segment
+    host->device re-upload this function used to force is gone.
+    """
     out: dict[str, torch.Tensor] = {}
     for key, value in np_dict.items():
-        array = np.asarray(value)
         if key in {"lanes_has_speed_limit", "route_lanes_has_speed_limit"}:
-            out[key] = torch.as_tensor(array, dtype=torch.bool, device=device)
+            dtype = torch.bool
         elif key in {"turn_indicators", "delay"}:
-            out[key] = torch.as_tensor(array, dtype=torch.long, device=device)
+            dtype = torch.long
         else:
-            out[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
+            dtype = torch.float32
+        if torch.is_tensor(value):
+            out[key] = value.to(device=device, dtype=dtype)
+        else:
+            out[key] = torch.as_tensor(np.asarray(value), dtype=dtype, device=device)
     if "delay" not in out:
         out["delay"] = torch.zeros((1,), dtype=torch.long, device=device)
     return out

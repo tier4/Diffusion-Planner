@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>__TITLE__</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --card:#f5f5f7; --border:#ddd; --danger:#d33; --muted:#888; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1a1a1a; --fg:#eee; --card:#2a2a2c; --border:#444; --danger:#ff6b6b; --muted:#999; }
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; margin:0; padding:16px 20px 60px; }
+  h1 { font-size:1.3rem; margin:0 0 4px; }
+  h2 { font-size:1.05rem; margin:28px 0 8px; }
+  .sub { color:var(--muted); font-size:0.85rem; margin-bottom:14px; }
+  .sub code { background:var(--card); padding:1px 5px; border-radius:4px; }
+  table { border-collapse:collapse; width:100%; margin:8px 0 20px; font-size:0.85rem; }
+  th,td { border:1px solid var(--border); padding:6px 10px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  th { background: var(--card); }
+  .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px; position:sticky; top:0; background:var(--bg); padding:8px 0; z-index:5; }
+  input[type=text] { flex:1; min-width:200px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); font-size:0.9rem; }
+  select { padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); font-size:0.9rem; }
+  .count { font-size:0.85rem; color:var(--muted); white-space:nowrap; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
+  .card { background: var(--card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .card video { width:100%; display:block; background:#000; }
+  .card .colormap { width:100%; height:320px; object-fit:contain; display:block; background:#fff; cursor:zoom-in; }
+  .card .colormap-controls { display:flex; justify-content:flex-end; align-items:center; gap:6px; padding:4px 10px 0; }
+  .card .colormap-controls select { font-size:0.68rem; padding:1px 4px; border-radius:4px; border:1px solid var(--border); background:var(--card); color:var(--fg); }
+  .meta { padding:8px 10px; font-size:0.78rem; line-height:1.5; }
+  .title { font-weight:600; font-size:0.82rem; margin-bottom:2px; word-break:break-word; }
+  .tag { display:inline-block; border-radius:4px; padding:1px 6px; font-size:0.7rem; margin-right:4px; color:#fff; }
+  .metrics { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; color:var(--muted); }
+  .metrics b { color: var(--fg); }
+  .flag { color: var(--danger); font-weight:700; }
+</style>
+</head>
+<body>
+
+<h1>__TITLE__</h1>
+<div class="sub">__SUBTITLE__</div>
+
+<h2>Per-Site Summary</h2>
+<table id="summaryTable">
+<tr><th>Site</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
+</table>
+
+<h2>Episodes</h2>
+<div class="controls">
+  <input type="text" id="search" placeholder="Search by route">
+  <select id="siteFilter"><option value="">Site: All</option></select>
+  <select id="sortSel">
+    <option value="default">Sort: Default</option>
+    <option value="completion_asc">Route Completion (worst first)</option>
+    <option value="collision_desc">Collisions (desc)</option>
+    <option value="curb_desc">Curb Hits (desc)</option>
+  </select>
+  <span class="count" id="count"></span>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<script>
+const ITEMS = __ITEMS_JSON__;
+const SUMMARY = __SUMMARY_JSON__;
+const PALETTE = __PALETTE_JSON__;
+const DEFAULT_METRIC = __DEFAULT_METRIC_JSON__;
+const siteColor = {};
+[...new Set(ITEMS.map(i => i.site))].sort().forEach((s, i) => { siteColor[s] = PALETTE[i % PALETTE.length]; });
+
+const summaryTable = document.getElementById('summaryTable');
+for (const s of SUMMARY) {
+  const tr = document.createElement('tr');
+  const c = siteColor[s.site] || '#888';
+  tr.innerHTML = `
+    <td style="color:${c};font-weight:700">${s.site}</td>
+    <td>${s.n_segments}</td>
+    <td>${(s.route_completion*100).toFixed(0)}%</td>
+    <td>${s.total_collision_events}</td>
+    <td>${s.total_curb_hits}</td>
+    <td>${s.total_snaps}</td>
+    <td>${s.total_red_light_violations}</td>
+    <td>${s.total_strong_brakes}</td>
+    <td>${s.n_segments_diverged}</td>`;
+  summaryTable.appendChild(tr);
+}
+
+const siteFilter = document.getElementById('siteFilter');
+[...new Set(ITEMS.map(i => i.site))].sort().forEach(s => {
+  const o = document.createElement('option'); o.value = s; o.textContent = s; siteFilter.appendChild(o);
+});
+
+const grid = document.getElementById('grid');
+const searchEl = document.getElementById('search');
+const sortEl = document.getElementById('sortSel');
+const countEl = document.getElementById('count');
+
+function num(v) { const n = parseFloat(v); return (v === null || isNaN(n)) ? null : n; }
+
+function card(item) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  const coll = item.n_collision_events || 0, curb = item.n_curb_hits || 0, snaps = item.n_snaps || 0;
+  const redLight = item.n_red_light_violations || 0, brakes = item.n_strong_brakes || 0;
+  const completion = ((item.route_completion || 0)*100).toFixed(0)+'%';
+  const c = siteColor[item.site] || '#888';
+  const videoTag = item.video_path
+    ? `<video controls muted preload="metadata" src="${item.video_path}"></video>`
+    : `<div style="padding:40px;text-align:center;color:var(--muted);">video missing</div>`;
+
+  const metrics = Object.keys(item.colormap_paths || {});
+  const preferred = metrics.includes(DEFAULT_METRIC) ? DEFAULT_METRIC : metrics[0];
+  let colormapBlock = '';
+  if (metrics.length) {
+    const opts = metrics.map(m => `<option value="${m}" ${m===preferred?'selected':''}>${m}</option>`).join('');
+    colormapBlock = `
+      <div class="colormap-controls">
+        <select class="metricSel">${opts}</select>
+      </div>
+      <img class="colormap" src="${item.colormap_paths[preferred]}" loading="lazy" onclick="window.open(this.src,'_blank')" alt="trajectory overlay">`;
+  }
+
+  div.innerHTML = `
+    ${videoTag}
+    ${colormapBlock}
+    <div class="meta">
+      <div class="title">${item.route}</div>
+      <span class="tag" style="background:${c}">${item.site}</span>
+      <span class="tag" style="background:#888">${item.segment}</span>
+      <div class="metrics">
+        <span>Route completion: <b>${completion}</b></span>
+        <span class="${coll>0?'flag':''}">Collisions: <b>${coll}</b></span>
+        <span class="${curb>0?'flag':''}">Curb hits: <b>${curb}</b></span>
+        <span class="${snaps>0?'flag':''}">Stuck: <b>${snaps}</b></span>
+        <span class="${redLight>0?'flag':''}">Red light: <b>${redLight}</b></span>
+        <span class="${brakes>0?'flag':''}">Strong brake: <b>${brakes}</b></span>
+        <span>steps: <b>${item.n_steps_run}</b></span>
+        <span>progress: <b>${item.progress_m}m</b></span>
+        <span class="${item.terminated==='diverged'?'flag':''}">terminated: <b>${item.terminated}</b></span>
+      </div>
+    </div>`;
+
+  if (metrics.length) {
+    const sel = div.querySelector('.metricSel');
+    const img = div.querySelector('.colormap');
+    sel.addEventListener('change', () => { img.src = item.colormap_paths[sel.value]; });
+  }
+  return div;
+}
+
+function render() {
+  const q = searchEl.value.trim().toLowerCase();
+  const s = siteFilter.value;
+  let filtered = ITEMS.filter(i => {
+    const hay = `${i.route} ${i.site}`.toLowerCase();
+    return (!q || hay.includes(q)) && (!s || i.site === s);
+  });
+  const mode = sortEl.value;
+  if (mode === 'collision_desc') filtered.sort((a,b) => (b.n_collision_events||0)-(a.n_collision_events||0));
+  else if (mode === 'curb_desc') filtered.sort((a,b) => (b.n_curb_hits||0)-(a.n_curb_hits||0));
+  else if (mode === 'completion_asc') filtered.sort((a,b) => (a.route_completion??1)-(b.route_completion??1));
+  grid.innerHTML = '';
+  filtered.forEach(i => grid.appendChild(card(i)));
+  countEl.textContent = `${filtered.length} / ${ITEMS.length} episodes`;
+}
+
+[searchEl,siteFilter,sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
+render();
+</script>
+</body>
+</html>
