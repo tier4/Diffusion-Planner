@@ -16,7 +16,7 @@ dimensions:
 
   site:
     description: >
-      Map / area id for this frame (e.g. 1423_shinagawa_odaiba).
+      Map / area id for this frame (e.g. xxxx_site_example).
       Not a native sidecar field. Usually written by a path-based auto-tagger
       as site:<id>. If the path cannot be parsed, write site:unknown
       (do not omit the dimension).

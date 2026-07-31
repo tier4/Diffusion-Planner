@@ -9,10 +9,10 @@ Instead of keeping a separate tag database, each frame's `<stem>.json` holds a
 ```json
 {
   "timestamp": 1738632874843986836,
-  "project_id": "prd_jt",
+  "project_id": "proj_c",
   "vehicle_id": "532d0885-...",
   "tags": [
-    "site:1423_shinagawa_odaiba",
+    "site:xxxx_site_example",
     "split:manual",
     "lateral:turn"
   ]
@@ -72,10 +72,10 @@ Tags are stored in the NPZ sidecar JSON file, alongside native fields:
 ```json
 {
   "timestamp": 1738632874843986836,
-  "project_id": "prd_jt",
+  "project_id": "proj_c",
   "vehicle_id": "532d0885-...",
   "tags": [
-    "site:1423_shinagawa_odaiba",
+    "site:xxxx_site_example",
     "split:manual",
     "lateral:turn"
   ]
@@ -86,7 +86,7 @@ Each tag is `dimension:value` (lowercase `[a-z0-9_]+` on both sides). A frame ma
 zero or more tags. Do not duplicate native sidecar fields (`timestamp`, `project_id`, …)
 as tags.
 
-**Examples:** `site:1423_shinagawa_odaiba`, `split:train`, `lateral:lane_change`,
+**Examples:** `site:xxxx_site_example`, `split:train`, `lateral:lane_change`,
 `override_metric:centerline`.
 
 ## Typical workflows
@@ -149,14 +149,14 @@ print(buckets[0].members[:2])  # route list in this bucket
 ```text
 site                                   split   count
 -------------------------------------  ------  -----
-2231_odaiba_shinagawa_copied_from_xx1  auto    1
-2231_odaiba_shinagawa_copied_from_xx1  train   1
-879_hiratsuka                          manual  1
-879_hiratsuka                          valid   1
+xxxx_site_a  auto    1
+xxxx_site_a  train   1
+xxxx_site_b                          manual  1
+xxxx_site_b                          valid   1
 -------------------------------------  ------  -----
 TOTAL                                          3
 [
-  PosixPath('/path/to/dataset/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/auto/2026-06-23/10-55-13'),
+  PosixPath('/path/to/dataset/proj_a/xxxx_site_a/auto/2026-06-23/10-55-13'),
 ]
 ```
 

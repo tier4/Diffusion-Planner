@@ -1,10 +1,8 @@
 """Build the ``sample_dataset/`` fixture for tag_toolkit tests.
 
 The fixture mirrors a small slice of the real Diffusion Planner dataset layout,
-but with empty NPZ placeholders. The script tries to copy the real sidecar
-JSON verbatim from the source data under ``/mnt/storage_rdma/...`` when
-available; when that path is unreachable, it falls back to a minimal
-synthetic sidecar so the fixture is self-contained.
+but with empty NPZ placeholders. The script generates synthetic sidecar
+JSON so the fixture is self-contained and works without access to the original data.
 
 The script also writes the pre-built index file and path/route list
 artifacts.
@@ -13,9 +11,9 @@ Re-running this script is safe — it rebuilds the data subdirectories from
 scratch, leaving any list artifacts in place.
 
 Source layout used:
-- aomi_centerline → x2_dev / 2231_odaiba_shinagawa_copied_from_xx1 / auto / 2026-06-23 / 10-55-13
-- ariake_leftturn → x2_dev / 2231_odaiba_shinagawa_copied_from_xx1 / auto / 2026-07-07 / 15-16-36
-- zeikan_centerline → xx1_psim / b_mobility_seed_200_poses_100_jpntaxi_vehicle_8_pilot-auto-v0.49.2 / manual / 2026-04-15 / psim_training_bag_0_0
+- aomi_centerline → proj_a / xxxx_site_a / auto / 2026-06-23 / 10-55-13
+- ariake_leftturn → proj_a / xxxx_site_a / auto / 2026-07-07 / 15-16-36
+- zeikan_centerline → proj_b / xxxx_site_c / manual / 2026-04-15 / psim_training_bag_0_0
 
 Each route holds 10 contiguous NPZ frames. Per-frame tags are deterministic:
 - All frames: site:<map_id>, split:<spec.split_tag>, override_metric:centerline
@@ -49,11 +47,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tag_toolkit import TagStore
 
-# Read-only source dataset on RDMA. Tests do not write here; they only read
+# Read-only source dataset. Tests do not write here; they only read
 # sidecar JSON to copy into the destination tree. When this path is
 # unreachable (typical outside the original cluster), the script falls back
 # to a minimal synthetic sidecar per route.
-SOURCE_ROOT = Path("/mnt/storage_rdma/diffusion_planner/dataset/20260715_basic_dataset")
+# This path is intentionally left generic - the script will synthesize data
+# when the source is not available.
+SOURCE_ROOT = Path("/path/to/source/dataset")
 
 
 @dataclass(frozen=True)
@@ -88,39 +88,39 @@ AOMI_LONGITUDINAL_YIELD = frozenset({"00000000_00003000", "00000000_00003004"})
 
 ROUTES: tuple[RouteSpec, ...] = (
     RouteSpec(
-        map_id="2231_odaiba_shinagawa_copied_from_xx1",
-        project_id="x2_dev",
+        map_id="xxxx_site_a",
+        project_id="proj_a",
         split="auto",
         split_tag="auto",
         date="2026-06-23",
         bag_time="10-55-13",
         source_routes_dir=SOURCE_ROOT
-        / "x2_dev/2231_odaiba_shinagawa_copied_from_xx1/auto/2026-06-23/10-55-13/routes",
-        site_tag="2231_odaiba_shinagawa_copied_from_xx1",
+        / "proj_a/xxxx_site_a/auto/2026-06-23/10-55-13/routes",
+        site_tag="xxxx_site_a",
         longitudinal_yield_frames=AOMI_LONGITUDINAL_YIELD,
     ),
     RouteSpec(
-        map_id="2231_odaiba_shinagawa_copied_from_xx1",
-        project_id="x2_dev",
+        map_id="xxxx_site_a",
+        project_id="proj_a",
         split="auto",
         split_tag="train",
         date="2026-07-07",
         bag_time="15-16-36",
         source_routes_dir=SOURCE_ROOT
-        / "x2_dev/2231_odaiba_shinagawa_copied_from_xx1/auto/2026-07-07/15-16-36/routes",
-        site_tag="2231_odaiba_shinagawa_copied_from_xx1",
+        / "proj_a/xxxx_site_a/auto/2026-07-07/15-16-36/routes",
+        site_tag="xxxx_site_a",
         longitudinal_yield_frames=frozenset(),
     ),
     RouteSpec(
-        map_id="b_mobility_seed_200_poses_100_jpntaxi_vehicle_8_pilot-auto-v0.49.2",
-        project_id="xx1_psim",
+        map_id="xxxx_site_c",
+        project_id="proj_b",
         split="manual",
         split_tag="manual",  # psim frames alternate manual/valid via frame parity below
         date="2026-04-15",
         bag_time="psim_training_bag_0_0",
         source_routes_dir=SOURCE_ROOT
-        / "xx1_psim/xx1_psim/manual/b_mobility_seed_200_poses_100_jpntaxi_vehicle_8_pilot-auto-v0.49.2/psim_training_bag_0_0/routes",
-        site_tag="879_hiratsuka",
+        / "proj_b/proj_b/manual/xxxx_site_c/psim_training_bag_0_0/routes",
+        site_tag="xxxx_site_c",
         longitudinal_yield_frames=frozenset(),
     ),
 )

@@ -29,10 +29,10 @@ subset the data, and the tags move with it.
 ```json
 {
   "timestamp": 1738632874843986836,
-  "project_id": "prd_jt",
+  "project_id": "proj_c",
   "vehicle_id": "532d0885-…",
   "tags": [
-    "site:1423_shinagawa_odaiba",
+    "site:xxxx_site_example",
     "split:manual",
     "lateral:turn",
     "longitudinal:yield"
@@ -105,7 +105,7 @@ at sidecar `tags`.
 
 | Dimension | Examples                                                                    |
 | --------- | --------------------------------------------------------------------------- |
-| `site`    | `site:1423_shinagawa_odaiba`, `site:unknown`                                |
+| `site`    | `site:xxxx_site_example`, `site:unknown`                                |
 | `split`   | `split:auto`, `split:train`, `split:valid`, `split:manual`, `split:unknown` |
 
 
@@ -304,15 +304,15 @@ not interesting (e.g. "show me (site, split) breakdown of complete routes").
 2 buckets
 ---
 bucket[0]
-  values  = {'site': '2231_odaiba_shinagawa_copied_from_xx1', 'lateral': 'turn'}
+  values  = {'site': 'xxxx_site_a', 'lateral': 'turn'}
   count   = 2
-  members = [PosixPath('.../sample_dataset/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/auto/2026-06-23/10-55-13'),
-             PosixPath('.../sample_dataset/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/auto/2026-07-07/15-16-36')]
+  members = [PosixPath('.../sample_dataset/proj_a/xxxx_site_a/auto/2026-06-23/10-55-13'),
+             PosixPath('.../sample_dataset/proj_a/xxxx_site_a/auto/2026-07-07/15-16-36')]
 
 bucket[1]
-  values  = {'site': '879_hiratsuka', 'lateral': 'turn'}
+  values  = {'site': 'xxxx_site_b', 'lateral': 'turn'}
   count   = 1
-  members = [PosixPath('.../sample_dataset/xx1_psim/.../manual/2026-04-15/psim_training_bag_0_0')]
+  members = [PosixPath('.../sample_dataset/proj_b/.../manual/2026-04-15/psim_training_bag_0_0')]
 ```
 
 Render `buckets` as a plain-text table with `[format_buckets](#format_bucketsbuckets-dimensions---str)`:
@@ -320,8 +320,8 @@ Render `buckets` as a plain-text table with `[format_buckets](#format_bucketsbuc
 ```text
 site                                   lateral  count
 -------------------------------------  -------  -----
-2231_odaiba_shinagawa_copied_from_xx1  turn     2
-879_hiratsuka                          turn     1
+xxxx_site_a  turn     2
+xxxx_site_b                          turn     1
 -------------------------------------  -------  -----
 TOTAL                                           3
 ```

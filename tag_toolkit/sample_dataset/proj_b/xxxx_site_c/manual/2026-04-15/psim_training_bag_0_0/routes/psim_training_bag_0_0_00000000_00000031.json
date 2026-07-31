@@ -1,0 +1,11 @@
+{
+ "bag_time": "psim_training_bag_0_0",
+ "date": "2026-04-15",
+ "project_id": "proj_b",
+ "tags": [
+  "lateral:turn",
+  "override_metric:centerline",
+  "site:xxxx_site_c",
+  "split:valid"
+ ]
+}

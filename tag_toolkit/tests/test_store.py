@@ -89,20 +89,20 @@ def _route_dirs(built_root: Path) -> dict[str, Path]:
     """
     return {
         "aomi": built_root
-        / "x2_dev"
-        / "2231_odaiba_shinagawa_copied_from_xx1"
+        / "proj_a"
+        / "xxxx_site_a"
         / "auto"
         / "2026-06-23"
         / "10-55-13",
         "ariake": built_root
-        / "x2_dev"
-        / "2231_odaiba_shinagawa_copied_from_xx1"
+        / "proj_a"
+        / "xxxx_site_a"
         / "auto"
         / "2026-07-07"
         / "15-16-36",
         "psim": built_root
-        / "xx1_psim"
-        / "b_mobility_seed_200_poses_100_jpntaxi_vehicle_8_pilot-auto-v0.49.2"
+        / "proj_b"
+        / "xxxx_site_c"
         / "manual"
         / "2026-04-15"
         / "psim_training_bag_0_0",
@@ -245,15 +245,15 @@ def test_add_remove_query_group_by(sample: Path) -> None:
     #   (879, eval)    ← added above via add_tags on zeikan
     assert len(buckets) == 5
     assert {b.values["site"] for b in buckets} == {
-        "2231_odaiba_shinagawa_copied_from_xx1",
-        "879_hiratsuka",
+        "xxxx_site_a",
+        "xxxx_site_c",
     }
     # sum of counts: 1 + 1 + 1 + 1 + 1 = 5 (each bucket = 1 unique member,
     # psim route is shared between manual/valid/eval cells but counted once
     # per cell because there is one bucket per (site, split) combo).
     assert sum(b.count for b in buckets) == 5
-    # psim route should appear in the 879_hiratsuka cell (3 cells share it)
-    psim_cells = [b for b in buckets if b.values["site"] == "879_hiratsuka"]
+    # psim route should appear in the xxxx_site_c cell (3 cells share it)
+    psim_cells = [b for b in buckets if b.values["site"] == "xxxx_site_c"]
     assert len(psim_cells) == 3
     for cell in psim_cells:
         assert cell.members == [zeikan_route]
@@ -286,8 +286,8 @@ def test_route_union_semantics(sample: Path) -> None:
     buckets = store.group_by(["site"])
     sites = {b.values["site"] for b in buckets}
     assert sites == {
-        "2231_odaiba_shinagawa_copied_from_xx1",
-        "879_hiratsuka",
+        "xxxx_site_a",
+        "xxxx_site_c",
     }
     assert sum(b.count for b in buckets) == 3
 
@@ -505,9 +505,9 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
     # site="unknown" by design — skip those.
     paths0 = next(p for p in sorted_paths if parse_site_split(p)[0] != "unknown")
     site, split = parse_site_split(paths0)
-    # sorted_paths lands in the 2231_odaiba_shinagawa_copied_from_xx1 (aomi
+    # sorted_paths lands in the xxxx_site_a (aomi
     # or ariake) route, which has a numeric-prefixed map_id.
-    assert site == "2231_odaiba_shinagawa_copied_from_xx1"
+    assert site == "xxxx_site_a"
     assert split == "auto"
     # apply_path_tags rewrites every frame's site/split tags based on path
     # layout. All 30 frames get their site/split tags overwritten to match
@@ -518,10 +518,10 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
         tags = read_tags(path)
         # site resolves via the path layout. For psim (non-numeric map_id)
         # the resolved site is "unknown", so psim frames end up with
-        # site:unknown. For x2_dev the resolved site is the original map_id.
+        # site:unknown. For proj_a the resolved site is the original map_id.
         assert (
-            "site:2231_odaiba_shinagawa_copied_from_xx1" in tags
-            or "site:879_hiratsuka" in tags
+            "site:xxxx_site_a" in tags
+            or "site:xxxx_site_c" in tags
             or "site:unknown" in tags
         )
         # After apply_path_tags, split matches the directory token:
@@ -538,8 +538,8 @@ def test_generate_from_labeled_layout_is_route_standard(tmp_path: Path) -> None:
     route_dir = (
         tmp_path
         / "data"
-        / "prd_jt"
-        / "1423_shinagawa_odaiba"
+        / "proj_c"
+        / "xxxx_site_example"
         / "manual"
         / "2025-02-04"
         / "10-34-24"
@@ -547,15 +547,15 @@ def test_generate_from_labeled_layout_is_route_standard(tmp_path: Path) -> None:
     npz = _frame(route_dir / "routes", "frame")
     assert route_of(npz) == route_dir
     assert route_of(route_dir) == route_dir
-    assert parse_site_split(npz) == ("1423_shinagawa_odaiba", "manual")
+    assert parse_site_split(npz) == ("xxxx_site_example", "manual")
 
 
 def test_split_labels_refine_generate_from_labeled_manual(tmp_path: Path) -> None:
     route_dir = (
         tmp_path
         / "data"
-        / "prd_jt"
-        / "1423_shinagawa_odaiba"
+        / "proj_c"
+        / "xxxx_site_example"
         / "manual"
         / "2025-02-04"
         / "10-34-24"
@@ -563,12 +563,12 @@ def test_split_labels_refine_generate_from_labeled_manual(tmp_path: Path) -> Non
     npz = _frame(route_dir / "routes", "frame", ["lateral:turn"])
     n = apply_path_tags(
         route_dir,
-        split_labels={"prd_jt/1423_shinagawa_odaiba/2025-02-04/10-34-24": "train"},
+        split_labels={"proj_c/xxxx_site_example/2025-02-04/10-34-24": "train"},
     )
     assert n == 1
     assert read_tags(npz) == [
         "lateral:turn",
-        "site:1423_shinagawa_odaiba",
+        "site:xxxx_site_example",
         "split:train",
     ]
 
@@ -703,7 +703,7 @@ def test_group_by_multi_value_total_is_unique(tmp_path: Path) -> None:
     """Multi-value dimensions count each route only once in TOTAL."""
     root = tmp_path / "data"
     bag = (
-        root / "prd_jt" / "1423_shinagawa_odaiba" / "manual" / "2025-02-04" / "10-34-24" / "routes"
+        root / "proj_c" / "xxxx_site_example" / "manual" / "2025-02-04" / "10-34-24" / "routes"
     )
     _frame(bag, "a", ["site:alpha", "site:beta", "lateral:turn"])
 
@@ -726,19 +726,19 @@ def test_group_by_sort_uses_dimensions_order(sample: Path) -> None:
     # Expected 5 buckets:
     #   (2231_..., auto)   aomi
     #   (2231_..., train)  ariake
-    #   (879_hiratsuka, eval)   psim (added above)
-    #   (879_hiratsuka, manual) psim
-    #   (879_hiratsuka, valid)  psim
+    #   (xxxx_site_c, eval)   psim (added above)
+    #   (xxxx_site_c, manual) psim
+    #   (xxxx_site_c, valid)  psim
     sites = [b.values["site"] for b in buckets]
     splits = [b.values["split"] for b in buckets]
     # Primary sort by site, secondary by split. Alphabetical:
-    #   2231_... < 879_hiratsuka; within 879: eval < manual < valid.
+    #   2231_... < xxxx_site_c; within 879: eval < manual < valid.
     assert sites == [
-        "2231_odaiba_shinagawa_copied_from_xx1",
-        "2231_odaiba_shinagawa_copied_from_xx1",
-        "879_hiratsuka",
-        "879_hiratsuka",
-        "879_hiratsuka",
+        "xxxx_site_a",
+        "xxxx_site_a",
+        "xxxx_site_c",
+        "xxxx_site_c",
+        "xxxx_site_c",
     ]
     assert splits == ["auto", "train", "eval", "manual", "valid"]
 
@@ -1046,7 +1046,7 @@ def test_scope_other_store_intersected_with_self(sample: Path, tmp_path: Path) -
     # Two unrelated scans → two TagStores with disjoint route sets.
     root_a = sample
     root_b = tmp_path / "unrelated"
-    bag = root_b / "prd_jt" / "9999_other" / "manual" / "2026-04-15" / "10-00-00" / "routes"
+    bag = root_b / "proj_c" / "9999_other" / "manual" / "2026-04-15" / "10-00-00" / "routes"
     _frame(bag, "x_00000000_00000001", ["split:manual"])
     other_npz = (bag / "x_00000000_00000001.npz").resolve()
 
@@ -1141,7 +1141,7 @@ def test_incremental_index_adds_new_route(sample: Path, tmp_path: Path) -> None:
     assert len(merged.route_paths()) == 2
 
     # Old frames still resolve under the same tags.
-    aomi = merged.query("site:2231_odaiba_shinagawa_copied_from_xx1")
+    aomi = merged.query("site:xxxx_site_a")
     assert len(aomi) == 2  # both routes share the same site
     # lateral:turn is on 5 frames per route → 10 frames, 2 routes after merge.
     assert len(merged.query("lateral:turn")) == 2
@@ -1205,7 +1205,7 @@ def test_incremental_index_missing_sidecar_aborts(sample: Path, tmp_path: Path) 
 
     # Half-constructed new frame: NPZ present, sidecar missing.
     new_routes = tmp_path / "new_routes"
-    bag = new_routes / "prd_jt" / "9999_new" / "manual" / "2026-04-15" / "10-00-00"
+    bag = new_routes / "proj_c" / "9999_new" / "manual" / "2026-04-15" / "10-00-00"
     routes_dir = bag / "routes"
     routes_dir.mkdir(parents=True)
     (routes_dir / "x_00000000_00000001.npz").write_bytes(b"")
@@ -1254,9 +1254,9 @@ def test_bucket_label_default_separator(sample: Path) -> None:
     buckets = store.group_by(["site", "split"])
     # Pick the bucket whose split is "auto" (aomi only).
     b = next(b for b in buckets if b.values.get("split") == "auto")
-    assert b.label() == f"2231_odaiba_shinagawa_copied_from_xx1 | auto"
+    assert b.label() == f"xxxx_site_a | auto"
     # Custom separator.
-    assert b.label(sep=" / ") == "2231_odaiba_shinagawa_copied_from_xx1 / auto"
+    assert b.label(sep=" / ") == "xxxx_site_a / auto"
 
 
 def test_bucket_label_missing_value(sample: Path) -> None:
@@ -1283,7 +1283,7 @@ def test_bucket_label_missing_value(sample: Path) -> None:
 def test_group_by_frame_granularity(sample: Path) -> None:
     """group_by(granularity='frame') buckets frames, not routes."""
     store = TagStore(sample)
-    # All 30 frames carry site/2231_..._xx1 or site/879_hiratsuka.
+    # All 30 frames carry site/2231_..._xx1 or site/xxxx_site_c.
     # split has 4 values: auto (10), train (10), manual (5), valid (5).
     buckets = store.group_by(["split"], granularity="frame")
     by_split = {b.values["split"]: b.count for b in buckets}
@@ -1400,7 +1400,7 @@ def test_resolve_scope_with_list_of_tagstore(sample: Path) -> None:
     # Build a second store that scans only the ariake route. We give it the
     # parent auto/ directory and rely on TagStore to discover one route.
     ariake_route = (
-        sample / "x2_dev" / "2231_odaiba_shinagawa_copied_from_xx1" / "auto" / "2026-07-07"
+        sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07"
     )
     other_store = TagStore(ariake_route)
     assert len(other_store.route_paths()) == 1
@@ -1488,8 +1488,8 @@ def test_helper_exports_basic(sample: Path) -> None:
 
     npz = (
         sample
-        / "x2_dev"
-        / "2231_odaiba_shinagawa_copied_from_xx1"
+        / "proj_a"
+        / "xxxx_site_a"
         / "auto"
         / "2026-06-23"
         / "10-55-13"
