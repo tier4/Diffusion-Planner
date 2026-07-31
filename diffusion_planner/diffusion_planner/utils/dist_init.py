@@ -12,4 +12,5 @@ from pathlib import Path
 
 def dist_init_file_path() -> Path:
     """Rendezvous store shared by all ranks of one run (see ``ddp_setup_universal``)."""
-    return Path(f"/tmp/tmp_dist_init_uid{os.getuid()}")
+    key = os.environ.get("TORCHELASTIC_RUN_ID") or f"uid{os.getuid()}"
+    return Path(f"/tmp/tmp_dist_init_{key}")
