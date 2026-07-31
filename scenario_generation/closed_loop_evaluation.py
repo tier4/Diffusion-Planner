@@ -14,6 +14,7 @@ route under an npz_root.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scenario_generation.closed_loop_ddp import shard_items
+from scenario_generation.closed_loop_ddp import balance_items, plan_fingerprint, shard_items
 from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
@@ -152,6 +153,15 @@ class ClosedLoopJob:
     """One schedulable unit (route, bag, classification date, …)."""
 
     job_id: str
+
+    def cost(self) -> float:
+        """Relative scheduling weight, used to balance DDP shards (see ``balance_items``).
+
+        Only ratios between jobs matter, and only for load balancing -- a wrong estimate costs
+        wall clock, never correctness. The default treats every job as equal, which is what
+        round-robin sharding already assumed.
+        """
+        return 1.0
 
 
 @dataclass
@@ -379,6 +389,148 @@ class ClosedLoopEvaluation(ABC):
         raise NotImplementedError
 
 
+def _assert_same_plan(job_keys: list[str]) -> None:
+    """Fail loudly unless every rank enumerated the identical job list in the identical order.
+
+    Ranks build their plan independently from the filesystem; anything that makes two ranks
+    enumerate routes differently (glob order feeding ``enumerate_multi_root_routes``'s collision
+    disambiguation, a partially-written dataset, a stale NFS listing) silently turns the plan
+    into a non-partition -- some routes run twice, others never, and the merged summary still
+    looks perfectly healthy.
+    """
+    import torch
+    import torch.distributed as dist
+
+    fp = plan_fingerprint(job_keys)
+    # max(fp) and -max(-fp) == min(fp): equal iff every rank submitted the same fingerprint.
+    probe = torch.tensor([fp, -fp], dtype=torch.int64, device=_collective_device())
+    dist.all_reduce(probe, op=dist.ReduceOp.MAX)
+    hi, lo = int(probe[0].item()), -int(probe[1].item())
+    if hi != lo:
+        raise RuntimeError(
+            "closed-loop DDP: ranks disagree on the job plan "
+            f"(fingerprints span {lo:#x}..{hi:#x}; this rank has {len(job_keys)} job(s), "
+            f"fingerprint {fp:#x}) -- job discovery is not deterministic across ranks, so the "
+            "shards would not form a partition. Refusing to run."
+        )
+
+
+def _sum_across_ranks(values: list[float]) -> list[float]:
+    """Element-wise sum of a per-rank float vector. Collective: every rank must call it."""
+    import torch
+    import torch.distributed as dist
+
+    t = torch.tensor(values, dtype=torch.float64, device=_collective_device())
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return [float(x) for x in t.tolist()]
+
+
+def run_evaluations_ddp(
+    evaluators: list[ClosedLoopEvaluation],
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+    verbose: bool = False,
+) -> list[dict]:
+    """Run several evaluators across all DDP ranks, with ONE barrier for the whole set.
+
+    Returns one summary per evaluator, positionally aligned with ``evaluators`` (``{}`` on
+    non-zero ranks, which hold no merged result). ``world_size <= 1`` is plain
+    ``evaluator.run()`` per evaluator, identical to the sequential behaviour.
+
+    Why this exists rather than calling ``run_distributed()`` per evaluator: that barriers once
+    per evaluator, making the total ``sum over evaluators of max over ranks``. Sites hold wildly
+    different route counts (1 to 14 in the curated manifests), so a per-evaluator barrier pins
+    the single-route sites to single-rank speed no matter how many GPUs are attached, and no
+    amount of load balancing can recover it -- measured ceiling 1.96x on 4 GPUs. Pooling every
+    (evaluator, job) pair into ONE list, balancing that once, and barriering once makes the floor
+    the single longest *job* instead: measured 2.80x on the same manifest.
+
+    Every rank must call this the same number of times in the same order (it is collective).
+    """
+    if world_size <= 1:
+        return [ev.run() for ev in evaluators]
+
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()):
+        raise RuntimeError(
+            f"closed-loop run_evaluations_ddp: world_size={world_size} > 1 but "
+            "torch.distributed is not initialized -- there would be no barrier to guarantee "
+            "every rank finished writing its shard before rank-0 merges."
+        )
+
+    t0 = time.perf_counter()
+    # (evaluator index, job). The evaluator index is part of the sort key so two evaluators that
+    # legitimately share a job_id (the same route under both object modes) stay distinct.
+    tagged: list[tuple[int, ClosedLoopJob]] = []
+    for ei, ev in enumerate(evaluators):
+        jobs = ev.discover_jobs()
+        if ev.config.max_jobs is not None:
+            jobs = jobs[: ev.config.max_jobs]
+        tagged.extend((ei, job) for job in jobs)
+
+    def _key(item: tuple[int, ClosedLoopJob]) -> str:
+        return f"{item[0]:04d}/{item[1].job_id}"
+
+    tagged.sort(key=_key)
+    _assert_same_plan([_key(it) for it in tagged])
+
+    buckets = balance_items(tagged, world_size, cost=lambda it: it[1].cost(), key=_key)
+    mine = buckets[rank]
+    per_eval: list[list[ClosedLoopJob]] = [[] for _ in evaluators]
+    for ei, job in mine:
+        per_eval[ei].append(job)
+    if verbose:
+        loads = [sum(j.cost() for _, j in b) for b in buckets]
+        # stderr, not print(): ``ddp.setup_for_distributed`` silences stdout everywhere but
+        # rank 0, and the per-rank lines are exactly what makes the balance auditable.
+        sys.stderr.write(
+            f"closed-loop DDP rank {rank}/{world_size}: {len(mine)}/{len(tagged)} job(s), "
+            f"planned cost {loads[rank]:.0f} (per-rank {[f'{x:.0f}' for x in loads]})\n"
+        )
+
+    failed_detail = ""
+    t_jobs = time.perf_counter()
+    per_eval_sec = [0.0] * len(evaluators)
+    for ei, (ev, jobs) in enumerate(zip(evaluators, per_eval)):
+        t_ev = time.perf_counter()
+        try:
+            ev.execute_jobs(jobs)
+        except Exception as exc:  # noqa: BLE001 - re-raised for every rank below
+            # Keep going to the barrier no matter what; see _raise_if_any_rank_failed.
+            traceback.print_exc()
+            failed_detail = f"rank {rank} raised in {type(ev).__name__}: {exc!r}"
+            break
+        per_eval_sec[ei] = time.perf_counter() - t_ev
+    rank_sec = time.perf_counter() - t_jobs
+    if verbose:
+        # max across ranks is this call's makespan; the spread across ranks shows how good the
+        # cost proxy was. Not a sequential baseline: ranks share one node's CPU.
+        sys.stderr.write(
+            f"closed-loop DDP rank {rank}/{world_size}: rollouts done in {rank_sec:.1f}s "
+            f"({len(mine)} job(s))\n"
+        )
+
+    dist.barrier()
+    _raise_if_any_rank_failed(failed_detail, rank)
+
+    # Per-combo ``elapsed_sec`` summed over ranks, so each site's summary keeps meaning what it
+    # meant before pooling -- "what this site cost" -- rather than becoming the whole call's
+    # makespan repeated once per site (which is what the shared t0 would otherwise report).
+    combo_sec = _sum_across_ranks(per_eval_sec)
+    if rank != 0:
+        return [{} for _ in evaluators]
+    if verbose:
+        sys.stderr.write(
+            f"closed-loop DDP: makespan {time.perf_counter() - t0:.1f}s, "
+            f"summed rollout cost across ranks {sum(combo_sec):.1f}s\n"
+        )
+    return [
+        ev.merge_ddp_shards(world_size, elapsed_sec=sec) for ev, sec in zip(evaluators, combo_sec)
+    ]
+
+
 @dataclass
 class FullRouteRouteJob(ClosedLoopJob):
     """One route (bag-prefix group) under an NPZ root."""
@@ -387,6 +539,18 @@ class FullRouteRouteJob(ClosedLoopJob):
     route_key: str = ""
     route_paths: list[Path] = field(default_factory=list)
     seg_len: int = 100_000
+
+    def cost(self) -> float:
+        """Frame count: rollout steps are roughly proportional to route length.
+
+        Route lengths in the curated site manifests span an order of magnitude (396..6353
+        frames), so this is the difference between a balanced shard and one rank holding every
+        other rank at the barrier. Read straight off the already-enumerated path list, no extra
+        I/O. It is a good ordering proxy *within* a site and a mediocre one across sites --
+        measured cost ranges 0.026..0.079 s/frame by site -- which is what keeps the achieved
+        speedup below the ideal. See the module docstring note on future work.
+        """
+        return float(len(self.route_paths))
 
 
 class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):

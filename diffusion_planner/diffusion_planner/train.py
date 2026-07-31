@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -138,8 +139,83 @@ def _object_mode_pairs(modes: list[str]) -> tuple[tuple[str, bool], ...]:
     return tuple((m, _OBJECT_MODE_DROP_FLAGS[m]) for m in ("objects", "noobj") if m in modes)
 
 
+@dataclass
+class _ClosedLoopCombo:
+    """One (source/site, object-mode) evaluation unit: what to run and where it writes."""
+
+    label: str | None  # wandb/site label; None only for a single-mode bare --closed_loop_npz_root
+    npz_root: object
+    drop_objects: bool
+    out_dir: str
+    track_for_report: bool
+
+
+def closed_loop_combos(args, out_dir: str) -> list[_ClosedLoopCombo]:
+    """Enumerate every (source/site, object-mode) combo this call will evaluate.
+
+    Split out from the execution so the combo list exists *before* anything runs: under DDP the
+    job plan is pooled across all combos and balanced once (see
+    ``closed_loop_evaluation.run_evaluations_ddp``), which is only possible if we know the full
+    set up front. Purely derived from ``args`` -- deterministic, and therefore identical on every
+    rank, which the plan fingerprint check downstream relies on.
+
+    ``closed_loop_npz_root`` (single arbitrary path) and ``closed_loop_sites_npz_root`` (a
+    curated ``.json`` manifest grouped into per-site route pools) are independent; both
+    contribute when both are set.
+    """
+    from scenario_generation.site_discovery import discover_sites_from_json
+
+    combos: list[_ClosedLoopCombo] = []
+
+    def add(base_name, npz_root, mode_pairs, *, track_for_report: bool) -> None:
+        """``noobj`` gets a distinct label (suffix) rather than a separate axis, so it rides the
+        existing per-site machinery (wandb keys, metric_regex overlay, combined episode table)
+        unchanged. When only "objects" is requested (the common single-mode case), the
+        label/out_dir stay exactly as a bare single call would use (``base_name`` verbatim, no
+        subdir)."""
+        multi = len(mode_pairs) > 1
+        for tag, drop_objects in mode_pairs:
+            if multi:
+                base = base_name or "main"
+                label = f"{base}__noobj" if tag == "noobj" else base
+            else:
+                label = base_name
+            combos.append(
+                _ClosedLoopCombo(
+                    label=label,
+                    npz_root=npz_root,
+                    drop_objects=drop_objects,
+                    out_dir=os.path.join(out_dir, label) if label else out_dir,
+                    track_for_report=track_for_report,
+                )
+            )
+
+    if args.closed_loop_npz_root:
+        add(
+            None,
+            args.closed_loop_npz_root,
+            _object_mode_pairs(args.closed_loop_npz_object_modes),
+            track_for_report=False,
+        )
+    if args.closed_loop_sites_npz_root:
+        sites = discover_sites_from_json(args.closed_loop_sites_npz_root)
+        if not sites:
+            print(f"closed-loop: no sites found under {args.closed_loop_sites_npz_root}")
+        sites_modes = _object_mode_pairs(args.closed_loop_sites_object_modes)
+        for site_name, npz_root in sites.items():
+            add(site_name, npz_root, sites_modes, track_for_report=True)
+    return combos
+
+
 def closed_loop_validate(
-    model, args, epoch: int, out_dir: str, *, is_final_save: bool = False
+    model,
+    args,
+    epoch: int,
+    out_dir: str,
+    *,
+    is_final_save: bool = False,
+    ddp_rank: int = 0,
+    ddp_world_size: int = 1,
 ) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
@@ -149,9 +225,16 @@ def closed_loop_validate(
     per-site route pools by
     :func:`~scenario_generation.site_discovery.discover_sites_from_json`) are independent — both
     fire in the same call when both are set, each contributing its own rows to the combined
-    episode table / cross-site aggregate. Called on the checkpoint-save cadence, rank-0 only:
-    pass the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler
-    runs and produces ``prediction``) and restored afterwards.
+    episode table / cross-site aggregate. Called on the checkpoint-save cadence; pass the
+    unwrapped model, which is switched to eval for the rollout (so the diffusion sampler runs and
+    produces ``prediction``) and restored afterwards.
+
+    **Collective when ``ddp_world_size > 1``**: EVERY rank must call this, the same number of
+    times and in the same order, or the run wedges at the barrier inside ``run_evaluations_ddp``
+    until the process-group timeout. The rollout work is pooled across all (site, object-mode)
+    combos and balanced over the ranks; only rank-0 gets summaries back and does the wandb /
+    HTML-report / print work. Passing the defaults (rank 0, world 1) keeps the plain
+    single-process behaviour, which is what non-DDP callers get.
 
     Per-step matplotlib rendering (PNGs/video/colormap images) is the dominant per-call cost, so
     it's deferred to the last call only (``is_final_save=True``, computed by the caller as "is
@@ -167,9 +250,9 @@ def closed_loop_validate(
         ClosedLoopEvalConfig,
         FullRouteClosedLoopEvaluation,
         RolloutParams,
+        run_evaluations_ddp,
     )
     from scenario_generation.closed_loop_html_report import build_html_report
-    from scenario_generation.site_discovery import discover_sites_from_json
     from scenario_generation.wandb_closed_loop import (
         build_combined_episode_table,
         build_full_closed_loop_wandb_log,
@@ -180,13 +263,12 @@ def closed_loop_validate(
     was_training = net.training
     net.eval()
 
-    def run_one(npz_root, site_out_dir: str, site_name: str | None, drop_objects: bool = False):
-        site_label = f" [{site_name}]" if site_name else ""
-        evaluator = FullRouteClosedLoopEvaluation(
+    def make_evaluator(combo: _ClosedLoopCombo) -> FullRouteClosedLoopEvaluation:
+        return FullRouteClosedLoopEvaluation(
             net,
             args,
             ClosedLoopEvalConfig(
-                out_dir=Path(site_out_dir),
+                out_dir=Path(combo.out_dir),
                 params=RolloutParams(
                     device=args.device,
                     near_miss_thresh=args.closed_loop_near_miss_thresh,
@@ -201,87 +283,60 @@ def closed_loop_validate(
                     abort_deviation_m=args.closed_loop_abort_deviation_m,
                     abort_after=args.closed_loop_abort_after,
                     abort_max_snaps=args.closed_loop_abort_max_snaps,
-                    drop_objects=drop_objects,
+                    drop_objects=combo.drop_objects,
                 ),
                 fps=float(args.closed_loop_fps),
                 verbose=False,
             ),
-            npz_root,
+            combo.npz_root,
             seg_len=args.closed_loop_seg_len,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
         )
-        summary = evaluator.run()
-        if not summary:
-            return {}, {}
-        site_log = build_full_closed_loop_wandb_log(
-            summary,
-            out_dir=site_out_dir,
-            site=site_name,
-            video_pick=args.closed_loop_wandb_video_pick,
-            colormap_metrics=args.closed_loop_colormap_metrics,
-            near_miss_thresh=args.closed_loop_near_miss_thresh,
-            report_base_url=args.closed_loop_report_base_url or None,
-            render_media=is_final_save,
-        )
-        print(
-            f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
-            f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
-            f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
-            f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
-            f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
-            f"{len(summary['video_mp4s'])} video(s)"
-        )
-        return site_log, summary
 
     log: dict = {}
     site_summaries: dict[str, dict] = {}
     episode_data: list = []  # (label, rows, out_dir) for the ONE combined table, across BOTH sources
     site_report_labels: list[str] = []
 
-    def run_labeled(
-        base_name: str | None,
-        npz_root,
-        mode_pairs: tuple[tuple[str, bool], ...],
-        *,
-        track_for_report: bool = False,
-    ) -> None:
-        """Run ``npz_root`` once per requested object-mode, merging into log/site_summaries/episode_data.
-
-        "noobj" gets a distinct label (suffix) rather than a separate axis, so it rides the
-        existing per-site machinery (wandb keys, metric_regex overlay, combined episode table)
-        unchanged. When only "objects" is requested (the common single-mode case), the
-        label/out_dir stay exactly as a bare single call would use (``base_name`` verbatim, no
-        subdir).
-        """
-        multi = len(mode_pairs) > 1
-        for tag, drop_objects in mode_pairs:
-            if multi:
-                base = base_name or "main"
-                label = f"{base}__noobj" if tag == "noobj" else base
-            else:
-                label = base_name
-            site_out_dir = os.path.join(out_dir, label) if label else out_dir
-            site_log, summary = run_one(npz_root, site_out_dir, label, drop_objects=drop_objects)
+    try:
+        combos = closed_loop_combos(args, out_dir)
+        # One collective call for every combo: jobs are pooled and balanced across ranks together
+        # with a single barrier. Non-zero ranks get {} back and fall through the rank-0 logging.
+        summaries = run_evaluations_ddp(
+            [make_evaluator(c) for c in combos],
+            rank=ddp_rank,
+            world_size=ddp_world_size,
+            verbose=True,
+        )
+        for combo, summary in zip(combos, summaries):
             if not summary:
                 continue
-            episode_label = label or "main"
+            site_log = build_full_closed_loop_wandb_log(
+                summary,
+                out_dir=combo.out_dir,
+                site=combo.label,
+                video_pick=args.closed_loop_wandb_video_pick,
+                colormap_metrics=args.closed_loop_colormap_metrics,
+                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                report_base_url=args.closed_loop_report_base_url or None,
+                render_media=is_final_save,
+            )
+            site_label = f" [{combo.label}]" if combo.label else ""
+            print(
+                f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
+                f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+                f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+                f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+                f"{len(summary['video_mp4s'])} video(s)"
+            )
+            episode_label = combo.label or "main"
             log.update(site_log)
             site_summaries[episode_label] = summary
-            episode_data.append((episode_label, summary.get("segments") or [], site_out_dir))
-            if track_for_report:
+            episode_data.append((episode_label, summary.get("segments") or [], combo.out_dir))
+            if combo.track_for_report:
                 site_report_labels.append(episode_label)
-
-    try:
-        if args.closed_loop_npz_root:
-            npz_modes = _object_mode_pairs(args.closed_loop_npz_object_modes)
-            run_labeled(None, args.closed_loop_npz_root, npz_modes)
-
-        if args.closed_loop_sites_npz_root:
-            sites = discover_sites_from_json(args.closed_loop_sites_npz_root)
-            if not sites:
-                print(f"closed-loop: no sites found under {args.closed_loop_sites_npz_root}")
-            sites_modes = _object_mode_pairs(args.closed_loop_sites_object_modes)
-            for site_name, npz_root in sites.items():
-                run_labeled(site_name, npz_root, sites_modes, track_for_report=True)
 
         # One combined, filterable/groupable episode table across every source/site/mode.
         if episode_data:
@@ -298,7 +353,8 @@ def closed_loop_validate(
     finally:
         net.train(was_training)
 
-    if log:
+    # `log` is empty off rank-0 anyway, but wandb is only initialized there: keep the guard explicit.
+    if log and ddp_rank == 0:
         wandb.log(log, step=epoch + 1)
 
 
@@ -306,8 +362,8 @@ def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp
-    global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
-    print(f"{global_rank=}, {rank=}")
+    global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
+    print(f"{global_rank=}, {rank=}, {world_size=}")
 
     if global_rank == 0:
         # Logging
@@ -717,19 +773,6 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
-                    train_epochs - init_epoch
-                ) // save_utd
-                closed_loop_validate(
-                    diffusion_planner,
-                    args,
-                    epoch,
-                    os.path.join(curr_dir, "closed_loop"),
-                    is_final_save=is_final_save,
-                )
-
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
@@ -751,6 +794,26 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+
+        # Runs on the checkpoint-save cadence, outside the `global_rank == 0` block on purpose:
+        # the rollouts are sharded over every rank, so all ranks must reach this call. The cadence
+        # condition uses only rank-invariant values, so they agree without communicating.
+        if (epoch + 1 - init_epoch) % save_utd == 0:
+            # args.save_dir, not save_path: the latter is None off rank-0, and every rank writes
+            # its shard into the same per-epoch directory.
+            curr_dir = os.path.join(args.save_dir, f"epoch{epoch + 1:04d}")
+            is_final_save = (epoch + 1 - init_epoch) // save_utd == (
+                train_epochs - init_epoch
+            ) // save_utd
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(curr_dir, "closed_loop"),
+                is_final_save=is_final_save,
+                ddp_rank=global_rank,
+                ddp_world_size=world_size if args.ddp else 1,
+            )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
