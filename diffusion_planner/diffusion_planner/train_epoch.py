@@ -32,7 +32,15 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+def train_epoch(
+    data_loader,
+    model,
+    optimizer,
+    args,
+    ema,
+    aug: StatePerturbation = None,
+    scheduler=None,
+):
     epoch_loss = []
 
     model.train()
@@ -86,6 +94,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
+        if scheduler is not None and args.lr_scheduler_interval == "batch":
+            scheduler.step()
 
         ema.update(model)
 

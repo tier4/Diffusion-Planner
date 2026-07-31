@@ -20,7 +20,12 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import (
+    apply_legacy_final_phase_lr,
+    build_lr_scheduler,
+    rebuild_lr_scheduler,
+    resolve_lr_schedule_steps,
+)
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
@@ -333,7 +338,22 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    lr_schedule_steps = resolve_lr_schedule_steps(
+        total_epochs=train_epochs,
+        warm_up_epochs=args.warm_up_epoch,
+        steps_per_epoch=len(train_loader),
+        interval=args.lr_scheduler_interval,
+        cosine_t_max_epochs=args.lr_cosine_t_max,
+    )
+    scheduler = build_lr_scheduler(
+        optimizer,
+        lr_schedule_steps["total"],
+        lr_schedule_steps["warmup"],
+        schedule_type=args.lr_schedule_type,
+        start_factor=args.lr_start_factor,
+        eta_min=args.lr_eta_min,
+        cosine_t_max=lr_schedule_steps["cosine_t_max"],
+    )
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
@@ -342,10 +362,32 @@ def model_training(args: TrainConfig):
             args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
         )
 
-        # Override learning rate with the new value
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = args.learning_rate
-        print(f"Learning rate reset to {args.learning_rate}")
+        # Rebuild from the configured base LR at the resumed epoch. Directly
+        # assigning args.learning_rate here would jump a cosine run back to its
+        # peak while leaving the scheduler state at the checkpoint epoch.
+        resume_lr_schedule_steps = resolve_lr_schedule_steps(
+            total_epochs=train_epochs,
+            warm_up_epochs=args.warm_up_epoch,
+            steps_per_epoch=len(train_loader),
+            interval=args.lr_scheduler_interval,
+            cosine_t_max_epochs=args.lr_cosine_t_max,
+            completed_epochs=init_epoch,
+        )
+        scheduler = rebuild_lr_scheduler(
+            optimizer,
+            resume_lr_schedule_steps["total"],
+            resume_lr_schedule_steps["warmup"],
+            completed_epochs=resume_lr_schedule_steps["completed"],
+            learning_rate=args.learning_rate,
+            schedule_type=args.lr_schedule_type,
+            start_factor=args.lr_start_factor,
+            eta_min=args.lr_eta_min,
+            cosine_t_max=resume_lr_schedule_steps["cosine_t_max"],
+        )
+        print(
+            f"Learning rate schedule restored at epoch {init_epoch}: "
+            f"{optimizer.param_groups[0]['lr']}"
+        )
 
     else:
         init_epoch = 0
@@ -432,22 +474,28 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs
-        final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
-                adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
-                adjusted_lr = base_lr * 0.1
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = adjusted_lr
+        # Preserve the old final step-down only for legacy reproduction. The
+        # cosine schedule must remain the sole owner of LR in cosine mode.
+        adjusted_lr = apply_legacy_final_phase_lr(
+            optimizer,
+            current_epoch=epoch,
+            total_epochs=train_epochs,
+            base_lr=args.learning_rate,
+            schedule_type=args.lr_schedule_type,
+        )
+        if adjusted_lr is not None:
             if global_rank == 0:
-                print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
+                print(f"Legacy final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
 
         # training step
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader,
+            diffusion_planner,
+            optimizer,
+            args,
+            model_ema,
+            aug,
+            scheduler=scheduler,
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
@@ -581,7 +629,8 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
-        scheduler.step()
+        if args.lr_scheduler_interval == "epoch":
+            scheduler.step()
         train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
