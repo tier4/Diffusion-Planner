@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,46 @@ from scenario_generation.closed_loop_eval import (
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
+
+
+def _collective_device():
+    """Device the small control-plane collectives must live on for the active backend."""
+    import torch
+    import torch.distributed as dist
+
+    if dist.get_backend() == "nccl":
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
+def _raise_if_any_rank_failed(failed_detail: str, rank: int) -> None:
+    """Turn one rank's exception into a failure on every rank. Collective; call after a barrier.
+
+    Both halves matter, and each covers a distinct failure:
+
+    * The caller must not re-raise before the barrier -- a rank that dies early leaves the others
+      parked there until the process-group timeout (10000s as configured by
+      ``ddp.ddp_setup_universal``), turning a crash into a multi-hour wedge.
+    * Reaching the barrier is not enough on its own, because ``execute_jobs`` writes
+      ``segments_{rank}.jsonl`` inside a ``with`` block: when a rank raises, its partial shard is
+      still flushed and closed, so the file *exists* and ``collect_ddp_shards``'s missing-file
+      check passes. Rank-0 would then merge a truncated shard and publish it as a clean summary.
+
+    Every rank must call this, including rank-0 and including the ranks that succeeded.
+    """
+    import torch
+    import torch.distributed as dist
+
+    flag = torch.tensor(
+        [1.0 if failed_detail else 0.0], dtype=torch.float64, device=_collective_device()
+    )
+    dist.all_reduce(flag, op=dist.ReduceOp.SUM)
+    n_failed = int(flag.item())
+    if n_failed:
+        raise RuntimeError(
+            f"closed-loop DDP: {n_failed} rank(s) failed during evaluation; refusing to merge a "
+            f"partial result. This rank: {failed_detail or f'rank {rank} ok'}"
+        )
 
 
 @dataclass
@@ -188,12 +229,16 @@ class ClosedLoopEvaluation(ABC):
         Requires an initialized process group whenever ``ddp_world_size > 1``: skipping the
         barrier (e.g. because torch.distributed was never initialized) would let rank-0 start
         merging before every other rank has finished writing its ``segments_{rank}.jsonl``
-        shard, silently producing a summary built from a partial/incomplete set of ranks.
+        shard, silently producing a summary built from a partial/incomplete set of ranks. That
+        check runs *before* the rollouts, so a misconfigured launch fails in a second rather
+        than after the full evaluation.
+
+        A rank that raises still reaches the barrier, and the failure is then propagated to
+        every rank -- see ``_raise_if_any_rank_failed`` for why neither half is optional.
         """
         t0 = time.perf_counter()
-        partial = self.run()
         if self.ddp_world_size <= 1:
-            return partial
+            return self.run()
         import torch.distributed as dist
 
         if not (dist.is_available() and dist.is_initialized()):
@@ -202,7 +247,20 @@ class ClosedLoopEvaluation(ABC):
                 "torch.distributed is not initialized -- refusing to merge without a barrier "
                 "to guarantee every rank finished writing its shard first."
             )
+
+        partial: dict = {}
+        failed_detail = ""
+        try:
+            partial = self.run()
+        except Exception as exc:  # noqa: BLE001 - re-raised on every rank below
+            # Deliberately swallowed *here*: an immediate re-raise would skip the barrier and
+            # strand every other rank on it until the process-group timeout.
+            traceback.print_exc()
+            failed_detail = f"rank {self.ddp_rank} raised: {exc!r}"
+
         dist.barrier()
+        _raise_if_any_rank_failed(failed_detail, self.ddp_rank)
+
         if self.ddp_rank != 0:
             return {}
         if partial.get("ddp_shard"):
