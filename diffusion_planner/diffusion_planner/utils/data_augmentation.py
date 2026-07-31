@@ -187,15 +187,11 @@ class StatePerturbation:
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
-        # Interpolate future trajectory
-        interpolated_ego_future = self.interpolation_future_trajectory(
-            aug_ego_current_state, ego_future
-        )
-
-        inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
-        ego_future[aug_flag] = interpolated_ego_future[aug_flag]
-
-        # Scale past trajectory and current state velocity/acceleration
+        # Scale past trajectory and current state velocity/acceleration.
+        # This has to happen BEFORE the future is interpolated: the interpolation uses the
+        # current velocity/acceleration as its start boundary condition, so scaling the state
+        # afterwards left the state reporting a speed the target trajectory does not start
+        # with (up to +-20%, i.e. +-1.6 m/s at 8 m/s).
         B_aug = aug_flag.sum().item()
         if B_aug > 0:
             W = self._ego_past_noise_std
@@ -209,8 +205,16 @@ class StatePerturbation:
             inputs["ego_agent_past"][aug_flag] = ego_past_aug
 
             scale_1d = scale.squeeze(-1)  # (B_aug, 1)
-            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d  # vx, vy
-            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d  # ax, ay
+            aug_ego_current_state[aug_flag, 4:6] *= scale_1d  # vx, vy
+            aug_ego_current_state[aug_flag, 6:8] *= scale_1d  # ax, ay
+
+        # Interpolate future trajectory
+        interpolated_ego_future = self.interpolation_future_trajectory(
+            aug_ego_current_state, ego_future
+        )
+
+        inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
+        ego_future[aug_flag] = interpolated_ego_future[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
@@ -260,6 +264,33 @@ class StatePerturbation:
 
         ego_current_state[:, 8] = steering_angle
         ego_current_state[:, 9] = new_yaw_rate
+
+        # ay is the lateral (centripetal) acceleration, which kinematically equals
+        # vx * yaw_rate. Perturbing vx by up to +-1 m/s while carrying ay over unchanged
+        # breaks that relation by dvx * yaw_rate — up to +-0.48 m/s^2 at yaw_rate 0.48 rad/s,
+        # i.e. several times the +-0.1 m/s^2 the ay perturbation itself is allowed. Rebuild ay
+        # from the perturbed speed and keep the sampled ay noise on top. steering_angle above
+        # is already recomputed the same way.
+        ego_current_state[:, 7] = (
+            ego_current_state[:, 4] * new_yaw_rate + scaled_random_tensor[:, 6]
+        )
+
+        # The perturbed velocity/acceleration above are body-frame quantities, but
+        # centric_transform() will rotate every vector by R(-delta_heading) into the new
+        # (perturbed-heading) frame. Pre-rotate by R(+delta_heading) so those body-frame
+        # components survive the round trip. Without this the velocity vector kept pointing
+        # along the OLD heading while the body turned, which is a sideslip of exactly
+        # delta_heading — 11.5 deg (vy = -1.59 m/s at 8 m/s) at the +-0.2 rad limit, and
+        # -2.38 m/s at 12 m/s. Autoware reports twist.linear.y ~ 0, so that state never
+        # occurs in deployment. It also leaked braking into ay (+0.40 m/s^2 for ax = -2 at
+        # delta_heading = 0.2).
+        cos_h, sin_h = ego_current_state[:, 2].clone(), ego_current_state[:, 3].clone()
+        for lon_idx in (4, 6):  # (vx, vy) then (ax, ay)
+            lat_idx = lon_idx + 1
+            lon = ego_current_state[:, lon_idx].clone()
+            lat = ego_current_state[:, lat_idx].clone()
+            ego_current_state[:, lon_idx] = cos_h * lon - sin_h * lat
+            ego_current_state[:, lat_idx] = sin_h * lon + cos_h * lat
 
         # Discard augmentations that cause collisions
         collision = self._check_aug_validity(ego_current_state, inputs)
@@ -429,7 +460,10 @@ class StatePerturbation:
         inputs["ego_agent_future"] = ego_future
 
         # goal pose (x, y, cos, sin)
-        mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+        # Validity is decided from the position only: heading_to_cos_sin turns an
+        # all-zero (x, y, heading) goal into (0, 0, 1, 0), so a full-width zero test
+        # never fires and an absent goal would survive as a goal at the ego itself.
+        mask = torch.sum(torch.ne(inputs["goal_pose"][..., :2], 0), dim=-1) == 0
         inputs["goal_pose"][..., :2] = vector_transform(
             inputs["goal_pose"][..., :2], transform_matrix, center_xy
         )
@@ -541,30 +575,41 @@ class StatePerturbation:
 
         # state: [x, y, heading, velocity, acceleration, yaw_rate]
 
-        x0, y0, theta0, v0, a0, omega0 = (
+        # theta0 is the heading of the (perturbed) current state, not the chord direction to
+        # a point 1 s ahead. The chord lags the tangent by roughly half the heading change
+        # over that second (~7 deg at 8 m/s on a 0.03 1/m curve), and it ignores the heading
+        # perturbation entirely, so the bridged trajectory used to start off-tangent.
+        x0, y0, theta0, omega0 = (
             aug_current_state[:, 0],
             aug_current_state[:, 1],
-            torch.atan2(
-                (ego_future[:, int(P / 2), 1] - aug_current_state[:, 1]),
-                (ego_future[:, int(P / 2), 0] - aug_current_state[:, 0]),
-            ),
-            torch.norm(aug_current_state[:, 4:6], dim=-1),
-            torch.norm(aug_current_state[:, 6:8], dim=-1),
+            torch.atan2(aug_current_state[:, 3], aug_current_state[:, 2]),
             aug_current_state[:, 9],
         )
+        # v0 / a0 are the TANGENTIAL (along-theta0) components, taken with sign.
+        # torch.norm() would (a) drop the sign, so braking became forward acceleration, and
+        # (b) fold the lateral acceleration into a0 — but ay is the centripetal term v*omega,
+        # which the -v0*sin(theta0)*omega0 term below already accounts for, so the norm
+        # double-counted it. On a constant-speed curve the true tangential acceleration is
+        # exactly 0 while ||(ax, ay)|| = v^2*kappa (3.84 m/s^2 at 8 m/s, kappa=0.06).
+        cos0, sin0 = torch.cos(theta0), torch.sin(theta0)
+        v0 = aug_current_state[:, 4] * cos0 + aug_current_state[:, 5] * sin0
+        a0 = aug_current_state[:, 6] * cos0 + aug_current_state[:, 7] * sin0
 
-        xT, yT, thetaT, vT, aT, omegaT = (
+        xT, yT, thetaT, omegaT = (
             ego_future[:, P, 0],
             ego_future[:, P, 1],
             ego_future[:, P, 2],
-            torch.norm(ego_future[:, P, :2] - ego_future[:, P - 1, :2], dim=-1) / dt,
-            torch.norm(
-                ego_future[:, P, :2] - 2 * ego_future[:, P - 1, :2] + ego_future[:, P - 2, :2],
-                dim=-1,
-            )
-            / dt**2,
             self.normalize_angle(ego_future[:, P, 2] - ego_future[:, P - 1, 2]) / dt,
         )
+        # Same treatment at the terminal end: project the finite differences onto the GT
+        # heading instead of taking their magnitude.
+        cosT, sinT = torch.cos(thetaT), torch.sin(thetaT)
+        d1 = (ego_future[:, P, :2] - ego_future[:, P - 1, :2]) / dt
+        d2 = (
+            ego_future[:, P, :2] - 2 * ego_future[:, P - 1, :2] + ego_future[:, P - 2, :2]
+        ) / dt**2
+        vT = d1[:, 0] * cosT + d1[:, 1] * sinT
+        aT = d2[:, 0] * cosT + d2[:, 1] * sinT
 
         # Boundary conditions
         sx = torch.stack(
