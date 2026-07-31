@@ -919,7 +919,8 @@ class TagStore:
         """Return matching routes (default) or NPZ frames.
 
         Args:
-            clause: Optional. A ``"dim:value"`` string, or one of
+            clause: Optional. A ``"dim:value"`` string, a wildcard
+                ``"dim:*"`` to match any value in that dimension, or one of
                 ``{"all": [...]}`` / ``{"any": [...]}`` / ``{"not": ...}``.
                 ``None`` (default) means "everything in scope".
             granularity: "route" (default) uses union semantics; "frame"
@@ -940,11 +941,10 @@ class TagStore:
 
         if granularity == "frame":
             if isinstance(clause, str):
-                parse_tag(clause)
                 return [
                     p
                     for p in idx.frames
-                    if clause in idx.frame_tags.get(p, frozenset()) and p in scope_set
+                    if self._match(clause, set(idx.frame_tags.get(p, frozenset()))) and p in scope_set
                 ]
             return [
                 p
@@ -953,11 +953,13 @@ class TagStore:
             ]
 
         if isinstance(clause, str):
-            parse_tag(clause)
-            hit = idx.tag_to_routes.get(clause, set())
-            return [r for r in idx.routes if r in hit and r in scope_set]
+            return [
+                r
+                for r in idx.routes
+                if self._match(clause, set(idx.route_tags.get(r, frozenset()))) and r in scope_set
+            ]
         return [
-            r for r in idx.routes if self._match(clause, set(idx.route_tags[r])) and r in scope_set
+            r for r in idx.routes if self._match(clause, set(idx.route_tags.get(r, frozenset()))) and r in scope_set
         ]
 
     def group_by(
@@ -1069,6 +1071,13 @@ class TagStore:
     def _match(self, clause: Clause, tags: set[str]) -> bool:
         """Match a clause against a set of tags."""
         if isinstance(clause, str):
+            if clause.endswith(":*"):
+                # Wildcard match: "dim:*" matches any tag starting with "dim:"
+                dim = clause[:-2]
+                if not dim or ":" in dim:
+                    raise ValueError(f"invalid wildcard dimension: {dim!r}")
+                prefix = f"{dim}:"
+                return any(t.startswith(prefix) for t in tags)
             parse_tag(clause)
             return clause in tags
         if not isinstance(clause, dict) or len(clause) != 1:

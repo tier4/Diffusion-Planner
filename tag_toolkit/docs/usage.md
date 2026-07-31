@@ -232,14 +232,21 @@ store.query(clause="split:auto")      # keyword form
 Clause forms:
 
 - `"dim:value"` — exact match
+- `"dim:*"` — match any value in that dimension (wildcard)
 - `{"all": ["a", "b"]}` — must have all tags
 - `{"any": ["a", "b"]}` — must have at least one
 - `{"not": "dim:value"}` — must not have
 
 ```python
 store.query("split:auto")
+store.query("override:*")              # any override: value (centerline, departure, ...)
 store.query({"all": ["lateral:turn", "longitudinal:yield"]})
 store.query("lateral:turn", granularity="frame")  # returns NPZ paths
+
+# Wildcards can be combined with other operators
+store.query({"not": "override:*"})         # exclude all override frames
+store.query({"all": ["split:auto", "lateral:*"]})  # auto frames with any lateral action
+store.query({"any": ["override:centerline", "override:departure"]})  # equivalent to "override:*"
 
 # Scope usage — passing a real route from this store's index, the scope
 # narrows results to that route. (Unknown path-like scopes raise
@@ -344,10 +351,10 @@ requested tag is not rewritten and is not counted in the return value.
 
 
 ```python
-n = store.add_tags(["override_metric:centerline"])
-n = store.add_tags(["override_metric:centerline"], frame_filter=(31, 100))
-n = store.add_tags(["override_metric:centerline"], scope="/path/to/route")
-n = store.add_tags(["override_metric:centerline"], scope=store.query("split:auto"))
+n = store.add_tags(["override:centerline"])
+n = store.add_tags(["override:centerline"], frame_filter=(31, 100))
+n = store.add_tags(["override:centerline"], scope="/path/to/route")
+n = store.add_tags(["override:centerline"], scope=store.query("split:auto"))
 ```
 
 **Frame filter formats:**
@@ -363,7 +370,7 @@ Remove tags from matching frames. Same `frame_filter` and `scope` shapes as
 `add_tags`. Idempotent: frames without the tag are not rewritten.
 
 ```python
-n = store.remove_tags(["override_metric:centerline"])
+n = store.remove_tags(["override:centerline"])
 n = store.remove_dimension("lateral")
 ```
 

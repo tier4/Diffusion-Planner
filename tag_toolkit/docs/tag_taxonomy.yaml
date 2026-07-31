@@ -94,11 +94,24 @@ dimensions:
       - name: accel_pass
         description: Accelerate for passing / overtaking.
 
-  override_metric:
+  override:
     description: >
-      Curated override / open-loop evaluation subsets (centerline vs departure).
+      Curated override categories. Override frames are human intervention events
+      where the driver took control of the vehicle.
     values:
       - name: centerline
         description: Frames for centerline-keeping override evaluation.
       - name: departure
         description: Frames for departure / off-road override evaluation.
+
+  override_first_frame:
+    description: >
+      First frame of each override event. A frame may have both override and
+      override_first_frame tags. For example, override:centerline marks all
+      frames during a centerline-keeping override event, while
+      override_first_frame:centerline marks only the first frame of that event.
+    values:
+      - name: centerline
+        description: First frame of a centerline-keeping override event.
+      - name: departure
+        description: First frame of a departure / off-road override event.
