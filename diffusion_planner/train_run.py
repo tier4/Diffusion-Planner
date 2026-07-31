@@ -18,8 +18,22 @@ from pathlib import Path
 from diffusion_planner.scenario_based_open_loop.open_loop import (
     load_scenario_based_open_loop_settings,
 )
+from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils.dist_init import dist_init_file_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
+
+
+def boolean(v: str) -> bool:
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def _train_config_default(name: str):
+    return TrainConfig.__dataclass_fields__[name].default
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +63,21 @@ def parse_args() -> argparse.Namespace:
         "site_discovery.discover_sites_from_json and evaluated as independent sites (objects + "
         "no-objects ablation by default). May be set together with --closed_loop_npz_root (each "
         "fires independently). Empty = disabled.",
+    )
+    p.add_argument(
+        "--enable_temporal_stability_eval",
+        type=boolean,
+        default=_train_config_default("enable_temporal_stability_eval"),
+        help="validation-only ego jerk / curvature-rate metrics. Computed from the trajectory the "
+        "normal validation pass already predicts, so turning this off saves little.",
+    )
+    p.add_argument(
+        "--enable_replan_consistency_eval",
+        type=boolean,
+        default=_train_config_default("enable_replan_consistency_eval"),
+        help="validation-only inter-frame replan consistency. Needs a Step-1 valid_set_list and "
+        "runs TWO extra forwards per adjacent frame pair every epoch, so on a full Step-1 list "
+        "this roughly doubles validation cost. Set False to skip it.",
     )
     return p.parse_args()
 
@@ -117,6 +146,10 @@ def main() -> None:
         str(Path(args.closed_loop_sites_npz_root).resolve())
         if args.closed_loop_sites_npz_root
         else "",
+        "--enable_temporal_stability_eval",
+        str(args.enable_temporal_stability_eval),
+        "--enable_replan_consistency_eval",
+        str(args.enable_replan_consistency_eval),
         *optional,
     ]
     rc = tee_run(
