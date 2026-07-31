@@ -7,6 +7,26 @@ import torch.distributed as dist
 from torch.distributed import init_process_group
 
 
+def dist_init_file() -> str:
+    """Path of the FileStore used to rendezvous the process group.
+
+    This must be unique per job. A FileStore keyed on a fixed path silently cross-connects two
+    jobs that land on the same node with the same ``world_size`` -- they rendezvous into each
+    other's process group, and the resulting collectives mix tensors from unrelated runs. Slurm
+    here runs with ``JobContainerType=(null)``, so ``/tmp`` is shared between jobs on a node and
+    the fixed path this used to hardcode was reachable by every concurrent run.
+
+    Defaults to a per-``SLURM_JOB_ID`` path, with ``DP_DDP_INIT_FILE`` as an explicit override
+    for launchers that are not slurm (or for tests). The bare fallback is only for a machine
+    running a single job at a time.
+    """
+    override = os.environ.get("DP_DDP_INIT_FILE")
+    if override:
+        return override
+    job_id = os.environ.get("SLURM_JOB_ID")
+    return f"/tmp/tmp_dist_init_{job_id}" if job_id else "/tmp/tmp_dist_init"
+
+
 def ddp_setup_universal(verbose=False, args=None):
     if args.ddp == False:
         print(f"do not use ddp, train on GPU 0")
@@ -39,7 +59,7 @@ def ddp_setup_universal(verbose=False, args=None):
     dist_backend = "nccl"
     # I don't know why but this is needed for DDP to work instead of 'env://'
     dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
+    file_path = dist_init_file()
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
         init_method=f"{dist_url}{file_path}",
