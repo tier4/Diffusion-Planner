@@ -186,16 +186,26 @@ class DecoderONNXWrapper(nn.Module):
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
 
+        # ONNX input is always 4D (POSE_DIM). Pad to D if trajectory_and_control.
+        D = self.decoder._D
         sampled_trajectories = sampled_trajectories.reshape(
-            batch_size, agent_num, 1 + self.decoder._future_len, 4
+            batch_size, agent_num, 1 + self.decoder._future_len, POSE_DIM
         )
+        if D > POSE_DIM:
+            pad = torch.zeros(
+                *sampled_trajectories.shape[:-1],
+                D - POSE_DIM,
+                device=sampled_trajectories.device,
+                dtype=sampled_trajectories.dtype,
+            )
+            sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
 
         model_output = self.decoder.dit(
             sampled_trajectories,
             diffusion_time,
             encoding,
             neighbor_current_mask,
-        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
+        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, D)
 
         return model_output
 
@@ -210,7 +220,8 @@ class TurnIndicatorONNXWrapper(nn.Module):
     def forward(self, encoding: torch.Tensor, final_x0: torch.Tensor) -> torch.Tensor:
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
-        final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
+        D = self.decoder._D
+        final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, D)
 
         encoding_pooled = torch.mean(encoding, dim=1)
         ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
@@ -246,6 +257,16 @@ class FullONNXWrapper(nn.Module):
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # ONNX input is always 4D (POSE_DIM). Pad to D if trajectory_and_control.
+        D = self.model.decoder._D
+        if D > POSE_DIM:
+            pad = torch.zeros(
+                *sampled_trajectories.shape[:-1],
+                D - POSE_DIM,
+                device=sampled_trajectories.device,
+                dtype=sampled_trajectories.dtype,
+            )
+            sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
         inputs = {
             "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,

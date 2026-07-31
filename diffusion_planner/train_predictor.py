@@ -3,7 +3,11 @@ import argparse
 from diffusion_planner.dimensions import *
 from diffusion_planner.train import model_training
 from diffusion_planner.train_config import TrainConfig
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 
 
 def boolean(v):
@@ -70,7 +74,7 @@ def get_args(args_list=None):
     )
     parser.add_argument(
         "--use_smoothing_future_trajectory",
-        default=True,
+        default=False,
         type=boolean,
         help="whether to apply smoothing to future trajectory",
     )
@@ -170,6 +174,34 @@ def get_args(args_list=None):
         type=int,
         default=10,
         help="Gradient detach window size W for the waypoint loss term",
+    )
+
+    # Output mode: "trajectory", "control", or "trajectory_and_control"
+    parser.add_argument(
+        "--output_mode",
+        type=str,
+        choices=["trajectory", "control", "trajectory_and_control"],
+        default="trajectory_and_control",
+        help="Decoder output representation: trajectory (x,y,cos,sin), "
+        "control (accel,curvature), or both",
+    )
+    parser.add_argument(
+        "--coeff_control_loss",
+        type=float,
+        default=1.0,
+        help="Weight for control loss when output_mode includes control",
+    )
+    parser.add_argument(
+        "--control_traj_loss_horizon",
+        type=int,
+        default=80,
+        help="Sliding-window horizon for control-to-trajectory loss (0 = disabled)",
+    )
+    parser.add_argument(
+        "--coeff_control_traj_loss",
+        type=float,
+        default=0.4,
+        help="Weight for control-to-trajectory sliding-window loss",
     )
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
@@ -294,6 +326,14 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument(
+        "--closed_loop_ego_prediction_from_control",
+        type=boolean,
+        default=_train_config_default("closed_loop_ego_prediction_from_control"),
+        help="trajectory_and_control models: reconstruct the closed-loop ego trajectory from the "
+        "control (accel, curvature) head via the unicycle model (no lateral slip) instead of the "
+        "pose head. No-op for pure-trajectory / pure-control models.",
+    )
     parser.add_argument("--closed_loop_unstick_radius_mult", type=float, default=10.0)
     parser.add_argument("--closed_loop_unstick_teleport_after", type=int, default=300)
     parser.add_argument(
@@ -392,6 +432,14 @@ def main():
 
     train_config.state_normalizer = StateNormalizer.from_json(train_config)
     train_config.observation_normalizer = ObservationNormalizer.from_json(train_config)
+    train_config.control_normalizer = ControlNormalizer(
+        mean=[-0.030108, -0.001032],
+        std=[2.177840, 0.033305],
+    )
+    train_config.neighbor_control_normalizer = ControlNormalizer(
+        mean=[-3.346858, 0.000680],
+        std=[46.111027, 0.295797],
+    )
 
     model_training(train_config)
 

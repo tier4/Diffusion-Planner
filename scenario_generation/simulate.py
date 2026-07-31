@@ -75,6 +75,7 @@ class _OnnxModel:
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in avail]
         self.session = ort.InferenceSession(str(onnx_path), providers=providers)
         self._inputs = [(i.name, i.type) for i in self.session.get_inputs()]
+        self._input_shapes = {i.name: i.shape for i in self.session.get_inputs()}
         self._outputs = [o.name for o in self.session.get_outputs()]
 
     def __call__(self, data):
@@ -87,6 +88,19 @@ class _OnnxModel:
                 arr = arr.astype(np.float32)
             if name == "delay":
                 arr = arr.reshape(-1, 1)[:1]  # graph declares a static [1, 1] delay
+            if name == "sampled_trajectories":
+                # The caller sizes this zero dummy by the checkpoint's output_mode (D=6 for
+                # trajectory_and_control), but exported graphs may bake a different per-step
+                # dim (e.g. POSE_DIM=4 for the ROS interface) — match the graph's declared
+                # static last dim by slicing/zero-padding (the input is all-zero either way).
+                want_d = self._input_shapes[name][-1]
+                got_d = arr.shape[-1]
+                if isinstance(want_d, int) and got_d != want_d:
+                    if got_d > want_d:
+                        arr = arr[..., :want_d]
+                    else:
+                        pad = np.zeros((*arr.shape[:-1], want_d - got_d), dtype=arr.dtype)
+                        arr = np.concatenate([arr, pad], axis=-1)
             feed[name] = arr
         pred, ti = self.session.run(self._outputs, feed)
         outputs = {

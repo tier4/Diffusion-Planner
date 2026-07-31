@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Export ONNX with external data (weights stored as separate files)",
     )
+    parser.add_argument(
+        "--no_ego_from_control",
+        action="store_true",
+        help="Disable control->trajectory conversion for ego (trajectory_and_control models)",
+    )
     return parser.parse_args()
 
 
@@ -231,6 +236,7 @@ def convert_model(
     use_simplify: bool,
     opset_version: int,
     external_data: bool,
+    ego_from_control: bool,
 ) -> None:
     print(f"\n{'=' * 80}")
     print(f"Converting: {ckpt_path}")
@@ -250,6 +256,15 @@ def convert_model(
     torch.manual_seed(seed)
 
     model = load_model(config_json_path, ckpt_path, use_ema)
+
+    if ego_from_control:
+        if model.decoder._output_mode != OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            raise ValueError(
+                f"--ego-from-control requires output_mode='trajectory_and_control', "
+                f"but got '{model.decoder._output_mode}'"
+            )
+        model.decoder._ego_prediction_from_control = True
+        print("Ego prediction will use control->trajectory conversion")
 
     export_model_to_onnx(
         model,
@@ -333,6 +348,7 @@ if __name__ == "__main__":
             use_simplify=args.use_simplify,
             opset_version=args.opset_version,
             external_data=args.external_data,
+            ego_from_control=not args.no_ego_from_control,
         )
 
     print(f"\n{'=' * 80}")

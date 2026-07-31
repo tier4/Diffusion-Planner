@@ -30,6 +30,26 @@ class StateNormalizer:
         }
 
 
+class ControlNormalizer:
+    """Normalizer for control signals (acceleration, curvature)."""
+
+    def __init__(self, mean, std):
+        self.mean = torch.as_tensor(mean, dtype=torch.float32)
+        self.std = torch.as_tensor(std, dtype=torch.float32)
+
+    def __call__(self, data):
+        return (data - self.mean.to(data.device)) / self.std.to(data.device)
+
+    def inverse(self, data):
+        return data * self.std.to(data.device) + self.mean.to(data.device)
+
+    def to_dict(self):
+        return {
+            "mean": self.mean.detach().cpu().numpy().tolist(),
+            "std": self.std.detach().cpu().numpy().tolist(),
+        }
+
+
 class ObservationNormalizer:
     def __init__(self, normalization_dict):
         self._normalization_dict = normalization_dict

@@ -90,6 +90,7 @@ def model_wrapper(
     guidance_scale=1.0,
     classifier_fn=None,
     classifier_kwargs={},
+    D=4,
 ):
     """Create a wrapper function for the noise prediction model.
 
@@ -181,7 +182,7 @@ def model_wrapper(
 
     def noise_pred_fn(x, t_continuous, cond=None):
         if cond is None:
-            x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+            x = x.reshape(x.shape[0], x.shape[1], -1, D)
             output = model(x, t_continuous, **model_kwargs)
         else:
             output = model(x, t_continuous, cond, **model_kwargs)
@@ -251,6 +252,7 @@ class DPM_Solver:
         model_fn,
         noise_schedule,
         correcting_xt_fn=None,
+        D=4,
     ):
         """Construct a DPM-Solver.
 
@@ -282,6 +284,7 @@ class DPM_Solver:
                 xt = ...
                 xt = correcting_xt_fn(xt, t, step)
                 ```
+            D: An `int`. The feature dimension per timestep (e.g., 4 for trajectory, 2 for control).
         [1] Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily Denton, Seyed Kamyar Seyed Ghasemipour,
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
@@ -289,13 +292,14 @@ class DPM_Solver:
         self.model = model_fn
         self.noise_schedule = noise_schedule
         self.correcting_xt_fn = correcting_xt_fn
+        self._D = D
 
     def data_prediction_fn(self, x, t):
         """
         Return the data prediction model (with corrector).
         """
         noise = self.model(x, t)
-        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+        x = x.reshape(x.shape[0], x.shape[1], -1, self._D)
         alpha_t, sigma_t = (
             self.noise_schedule.marginal_alpha(t),
             self.noise_schedule.marginal_std(t),
@@ -411,7 +415,7 @@ class DPM_Solver:
         r0 = h_0 / h
         D1_0 = (1.0 / r0) * (model_prev_0 - model_prev_1)
         phi_1 = torch.expm1(-h)
-        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+        x = x.reshape(x.shape[0], x.shape[1], -1, self._D)
         x_t = (
             (sigma_t / sigma_prev_0) * x
             - (alpha_t * phi_1) * model_prev_0
@@ -499,8 +503,8 @@ class DPM_Solver:
                 "Cannot use adaptive solver when correcting_xt_fn is not None"
             )
         device = x.device
-        T = 81
-        x = x.reshape(x.shape[0], x.shape[1], T, -1)
+        T = x.shape[2] // self._D
+        x = x.reshape(x.shape[0], x.shape[1], T, self._D)
         t_shape = (x.shape[0], x.shape[1], T, 1)
         with torch.no_grad():
             assert steps >= order

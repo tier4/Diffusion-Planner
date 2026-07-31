@@ -2,7 +2,11 @@ import json
 
 import torch
 
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 
 
 class Config:
@@ -12,6 +16,7 @@ class Config:
 
         for key, value in args_dict.items():
             setattr(self, key, value)
+
         self.state_normalizer = StateNormalizer(
             self.state_normalizer["mean"], self.state_normalizer["std"]
         )
@@ -21,9 +26,11 @@ class Config:
                 for k, v in self.observation_normalizer.items()
             }
         )
+        self.control_normalizer = ControlNormalizer(
+            self.control_normalizer["mean"], self.control_normalizer["std"]
+        )
+        self.neighbor_control_normalizer = ControlNormalizer(
+            self.neighbor_control_normalizer["mean"], self.neighbor_control_normalizer["std"]
+        )
 
         self.guidance_fn = guidance_fn
-
-        # Default guidance scale; overridable without reloading the model.
-        if not hasattr(self, "guidance_scale"):
-            self.guidance_scale = 0.5
