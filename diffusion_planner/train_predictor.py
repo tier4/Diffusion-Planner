@@ -60,6 +60,18 @@ def get_args(args_list=None):
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
+        "--use_neighbor_dropout",
+        default=_train_config_default("use_neighbor_dropout"),
+        type=boolean,
+        help="whether to randomly zero out whole neighbor agents (past and future together)",
+    )
+    parser.add_argument(
+        "--neighbor_dropout_prob",
+        type=float,
+        default=_train_config_default("neighbor_dropout_prob"),
+        help="per-agent probability of dropping a valid neighbor",
+    )
+    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(
