@@ -611,3 +611,66 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class NeighborNoiseAugmentation:
+    """
+    Data augmentation that adds per-frame Gaussian noise to the observed
+    neighbor history to simulate tracking noise in the perception output.
+
+    Only `neighbor_agents_past` is perturbed: position (x, y), velocity
+    (vx, vy) and heading (the (cos, sin) pair is rotated by a small random
+    angle, so it stays a unit vector). The prediction target
+    `neighbors_future` and the ego inputs are left clean. Noise is applied
+    only to valid frames so padding rows stay all-zero.
+    """
+
+    def __init__(
+        self,
+        pos_noise_std: float,
+        vel_noise_std: float,
+        heading_noise_std: float,
+        device: torch.device | str,
+    ) -> None:
+        self._pos_noise_std = pos_noise_std
+        self._vel_noise_std = vel_noise_std
+        self._heading_noise_std = heading_noise_std
+        self._device = torch.device(device)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        past = inputs["neighbor_agents_past"]  # (B, N, T, D)
+        B, N, T, _ = past.shape
+        device = past.device
+
+        # A frame is valid when any of its first 8 features is non-zero,
+        # matching the encoder's padding convention.
+        # Build the mask one channel at a time. A single comparison against
+        # past[..., :8] would temporarily allocate a (B, N, T, 8) tensor.
+        valid = torch.ne(past[..., 0], 0)  # (B, N, T)
+        for feature_idx in range(1, 8):
+            valid.logical_or_(torch.ne(past[..., feature_idx], 0))
+        invalid = ~valid
+
+        # Training inputs are disposable batch tensors, so perturb only the relevant
+        # channels in place. Keeping a cloned (B, N, T, D) tensor here adds more than
+        # 200 MiB at the default B=512, N=320, T=31 configuration.
+        noise = torch.randn(B, N, T, 2, device=device, dtype=past.dtype)
+        noise.masked_fill_(invalid.unsqueeze(-1), 0.0)
+        past[..., 0:2].add_(noise, alpha=self._pos_noise_std)
+
+        noise.normal_()
+        noise.masked_fill_(invalid.unsqueeze(-1), 0.0)
+        past[..., 4:6].add_(noise, alpha=self._vel_noise_std)
+        del noise
+
+        # Rotate (cos, sin) by a small random angle. Padding rows have
+        # cos = sin = 0 and are restored to zero after converting through an angle.
+        heading = torch.atan2(past[..., 3], past[..., 2])
+        heading.add_(
+            torch.randn(B, N, T, device=device, dtype=past.dtype),
+            alpha=self._heading_noise_std,
+        )
+        past[..., 2].copy_(torch.cos(heading)).masked_fill_(invalid, 0.0)
+        past[..., 3].copy_(torch.sin(heading)).masked_fill_(invalid, 0.0)
+
+        return inputs, ego_future, neighbors_future

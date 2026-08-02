@@ -15,7 +15,10 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation import (
+    NeighborNoiseAugmentation,
+    StatePerturbation,
+)
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
@@ -239,6 +242,16 @@ def model_training(args: TrainConfig):
     else:
         aug = None
 
+    if args.use_neighbor_noise:
+        neighbor_noise = NeighborNoiseAugmentation(
+            pos_noise_std=args.neighbor_noise_pos_std,
+            vel_noise_std=args.neighbor_noise_vel_std,
+            heading_noise_std=args.neighbor_noise_heading_std,
+            device=args.device,
+        )
+    else:
+        neighbor_noise = None
+
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
@@ -447,7 +460,7 @@ def model_training(args: TrainConfig):
 
         # training step
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader, diffusion_planner, optimizer, args, model_ema, aug, neighbor_noise
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)

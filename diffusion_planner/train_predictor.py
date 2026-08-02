@@ -60,6 +60,30 @@ def get_args(args_list=None):
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
+        "--use_neighbor_noise",
+        default=_train_config_default("use_neighbor_noise"),
+        type=boolean,
+        help="whether to add tracking-like Gaussian noise to the neighbor history",
+    )
+    parser.add_argument(
+        "--neighbor_noise_pos_std",
+        type=float,
+        default=_train_config_default("neighbor_noise_pos_std"),
+        help="std [m] of position noise added to neighbor past frames",
+    )
+    parser.add_argument(
+        "--neighbor_noise_vel_std",
+        type=float,
+        default=_train_config_default("neighbor_noise_vel_std"),
+        help="std [m/s] of velocity noise added to neighbor past frames",
+    )
+    parser.add_argument(
+        "--neighbor_noise_heading_std",
+        type=float,
+        default=_train_config_default("neighbor_noise_heading_std"),
+        help="std [rad] of heading noise added to neighbor past frames",
+    )
+    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(
