@@ -4,6 +4,12 @@ import torch
 
 from diffusion_planner.utils.train_utils import openjson
 
+# Keys that ObservationNormalizer must not mean/std normalize.
+#   ego / neighbor : handled by StateNormalizer instead
+#   goal_pose      : handled by GoalPoseEncoder based on the goal distance
+#                    (>= 100m -> learnable "goal is still far" token, otherwise divided by 100)
+UNNORMALIZED_KEYS = ("ego", "neighbor", "goal_pose")
+
 
 class StateNormalizer:
     def __init__(self, mean, std):
@@ -32,7 +38,11 @@ class StateNormalizer:
 
 class ObservationNormalizer:
     def __init__(self, normalization_dict):
-        self._normalization_dict = normalization_dict
+        # Drop them here so that loading an old config that still contains goal_pose
+        # does not normalize it
+        self._normalization_dict = {
+            k: v for k, v in normalization_dict.items() if k not in UNNORMALIZED_KEYS
+        }
 
     @classmethod
     def from_json(cls, args):
@@ -44,7 +54,7 @@ class ObservationNormalizer:
         data = openjson(path)
         ndt = {}
         for k, v in data.items():
-            if k not in ["ego", "neighbor"]:
+            if k not in UNNORMALIZED_KEYS:
                 ndt[k] = {
                     "mean": torch.tensor(v["mean"], dtype=torch.float32),
                     "std": torch.tensor(v["std"], dtype=torch.float32),

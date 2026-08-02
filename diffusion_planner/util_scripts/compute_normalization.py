@@ -2,7 +2,7 @@
 """path_list*.json の npz を間引いて読み、normalization.json を計算し直す。
 
 学習時 (train_epoch.py) の前処理を再現してから統計を取る。
-  * ego_agent_past / goal_pose / ego_agent_future は heading -> (cos, sin) に変換
+  * ego_agent_past / ego_agent_future は heading -> (cos, sin) に変換
   * 全要素 0 の行 (padding) は ObservationNormalizer と同じ基準で除外
     (neighbor_agents_future のみ train_epoch.py と同じく先頭 3 列で判定)
 
@@ -32,7 +32,8 @@ KEY_SPEC = {
     "polygons": ("polygons", False),
     "line_strings": ("line_strings", False),
     "route_lanes_speed_limit": ("route_lanes_speed_limit", False),
-    "goal_pose": ("goal_pose", True),
+    # goal_pose is not normalized (GoalPoseEncoder handles it based on distance),
+    # so no statistics are collected for it
 }
 
 # padding 判定に先頭 3 列だけを使うキー (train_epoch.py の mask と同じ)

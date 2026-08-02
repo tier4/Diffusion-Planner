@@ -19,6 +19,11 @@ CLASS_TYPE_EGO_SHAPE = 8
 CLASS_TYPE_TURN_INDICATOR = 9
 CLASS_TYPE_NUM = 10
 
+# goal_pose is not mean/std normalized; it is divided by this distance [m] instead.
+# Goals farther than this drop their coordinates and are replaced by a learnable
+# "the goal is still far away" token.
+GOAL_POSE_NEAR_RANGE = 100.0
+
 
 def add_class_type(x, class_type):
     """
@@ -747,23 +752,37 @@ class GoalPoseEncoder(nn.Module):
             drop=drop_path_rate,
         )
 
+        # Token used instead of the coordinates when the goal is at least
+        # GOAL_POSE_NEAR_RANGE away
+        self.far_goal_token = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+
     def forward(self, x):
         """
-        x: B, D=4 (x, y, cos, sin)
+        x: B, D=4 (x, y, cos, sin), raw un-normalized values in the ego frame [m]
         """
         B, D = x.shape
-        pos = x.clone()  # (B, D=4[x, y, cos, sin])
-        pos = pos.unsqueeze(1)  # (B, 1, D=4)
+
+        dist = torch.linalg.vector_norm(x[..., :2], dim=-1, keepdim=True)  # (B, 1)
+        is_far = dist >= GOAL_POSE_NEAR_RANGE  # (B, 1)
+
+        # Near goals are divided by GOAL_POSE_NEAR_RANGE so they roughly fit in [-1, 1].
+        # Far goals do not use their coordinates, so zero them out (the output is
+        # replaced by far_goal_token anyway).
+        near = torch.cat([x[..., :2] / GOAL_POSE_NEAR_RANGE, x[..., 2:4]], dim=-1)  # (B, D=4)
+        near = torch.where(is_far, torch.zeros_like(near), near)
+
+        pos = near.unsqueeze(1)  # (B, 1, D=4)
         pos = add_class_type(pos, CLASS_TYPE_GOAL_POSE)
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
-        x = self.channel_pre_project(x)  # (B, C=channels_mlp_dim)
-        x = x.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
+        h = self.channel_pre_project(near)  # (B, C=channels_mlp_dim)
+        h = h.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
 
-        x = self.emb_project(self.norm(x))  # (B, 1, hidden_dim)
+        h = self.emb_project(self.norm(h))  # (B, 1, hidden_dim)
+        h = torch.where(is_far.unsqueeze(-1), self.far_goal_token.expand(B, -1, -1), h)
 
-        return x, mask, pos
+        return h, mask, pos
 
 
 class FloatsEncoder(nn.Module):
