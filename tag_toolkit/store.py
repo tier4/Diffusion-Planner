@@ -37,6 +37,7 @@ from .sidecar import (
     write_tags,
 )
 from .source import expand_source
+from tqdm import tqdm
 
 Clause = str | dict[str, Any]  # "dim:value" or {"all"|"any"|"not": ...}
 Granularity = Literal["route", "frame"]
@@ -193,7 +194,8 @@ def _build_index_from_frames(frames: list[Path]) -> _Index:
     route_tag_sets: dict[Path, set[str]] = defaultdict(set)
     route_frames: dict[Path, list[Path]] = defaultdict(list)
 
-    for npz in frames:
+    iterator = tqdm(frames, desc="Reading sidecar tags")
+    for npz in iterator:
         # Ensure absolute path
         npz = npz.resolve()
         tags = read_tags(npz)
