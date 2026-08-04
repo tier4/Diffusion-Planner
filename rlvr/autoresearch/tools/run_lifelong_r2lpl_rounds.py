@@ -11,11 +11,13 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from diffusion_planner.utils.dist_init import dist_init_file_path
 
 _CONFIG_REQUIRED = {
     "rounds",
@@ -53,7 +55,7 @@ _RSFT_TRAINING_KEYS = {
     "replay_der_coef",
 }
 _MINING_TOOL = "direct_reproducer_chunks"
-_TORCH_DDP_FILE_STORE = Path("/tmp/tmp_dist_init")
+_TORCH_DDP_FILE_STORE = dist_init_file_path()
 _REPAIR_REFRESH_SCOPES = {"unrepaired", "all"}
 
 
@@ -928,25 +930,58 @@ def _materialize_chunk_manifest_for_shards(
     if scene_list is None:
         return cfg
 
-    manifest = rdir / "planned_chunks.jsonl"
-    cmd = [
-        sys.executable,
-        "-m",
-        "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
-        "--scene_list",
-        str(scene_list),
-        "--segments_jsonl",
-        str(manifest),
-        "--plan_only",
-        "--chunk_len",
-        str(mining.get("chunk_len", 80)),
-        "--start_stride",
-        str(mining.get("start_stride", mining.get("chunk_len", 80))),
-    ]
-    for key in ("expected_frame_step", "min_chunk_len", "max_scenes"):
-        if key in mining and mining[key] is not None:
-            cmd.extend([f"--{key}", str(mining[key])])
-    _run(cmd, rdir / "plan_chunks.log")
+    # The plan pass is a deterministic function of (scene_list, chunking knobs),
+    # which must not change mid-campaign anyway (guard comparability rule) — so
+    # plan once at the CAMPAIGN level and reuse across rounds. A knob mismatch
+    # against an existing campaign plan fails loudly instead of silently
+    # re-planning with different chunking. The scene list is keyed by CONTENT
+    # digest, not pathname: a list regenerated in place before a resumed round
+    # must not silently reuse a plan built over the old pool.
+    plan_key = {
+        "scene_list": str(scene_list),
+        "scene_list_sha256": hashlib.sha256(Path(scene_list).read_bytes()).hexdigest(),
+        "chunk_len": mining.get("chunk_len", 80),
+        "start_stride": mining.get("start_stride", mining.get("chunk_len", 80)),
+        **{
+            key: mining[key]
+            for key in ("expected_frame_step", "min_chunk_len", "max_scenes")
+            if key in mining and mining[key] is not None
+        },
+    }
+    manifest = rdir.parent / "planned_chunks.jsonl"
+    plan_key_path = rdir.parent / "planned_chunks.key.json"
+    # The knob guard hangs off the KEY file alone: a surviving key with a
+    # missing/deleted manifest must still fail loudly on a knob change (the
+    # re-plan branch would otherwise silently overwrite the key), and a
+    # matching key with a lost manifest just re-plans with the same knobs.
+    if plan_key_path.exists():
+        prior_key = json.loads(plan_key_path.read_text())
+        if prior_key != plan_key:
+            raise ValueError(
+                f"campaign chunk plan {manifest} was built with different knobs "
+                f"({prior_key}) than this round requests ({plan_key}); chunking "
+                "must stay constant within a campaign"
+            )
+    if not (manifest.exists() and plan_key_path.exists()):
+        cmd = [
+            sys.executable,
+            "-m",
+            "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
+            "--scene_list",
+            str(scene_list),
+            "--segments_jsonl",
+            str(manifest),
+            "--plan_only",
+            "--chunk_len",
+            str(plan_key["chunk_len"]),
+            "--start_stride",
+            str(plan_key["start_stride"]),
+        ]
+        for key in ("expected_frame_step", "min_chunk_len", "max_scenes"):
+            if key in plan_key:
+                cmd.extend([f"--{key}", str(plan_key[key])])
+        _run(cmd, rdir / "plan_chunks.log")
+        plan_key_path.write_text(json.dumps(plan_key, indent=2, sort_keys=True))
 
     updated = dict(cfg)
     mining["chunk_manifest"] = str(manifest)
@@ -1068,7 +1103,41 @@ def _anchor_slice_paths(
     return picked
 
 
-def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
+_4COL_PASSTHROUGH = "__4col_passthrough__"
+
+
+def _convert_scene_to_4col(src: Path, out_dir: Path) -> str:
+    """Convert one scene; returns the dst basename, or the passthrough marker.
+
+    The converted NPZ is written atomically (tmp + ``os.replace``) so a crash
+    mid-write can never leave a truncated file that a later cached run trusts.
+    """
+    from planner_metrics.scene_format import future_to_4col as _future_to_4col
+
+    with np.load(src) as loaded:
+        future = loaded["neighbor_agents_future"]
+        if future.shape[-1] == 4:
+            return _4COL_PASSTHROUGH
+        if future.shape[-1] != 3:
+            raise ValueError(
+                f"{src}: neighbor_agents_future has {future.shape[-1]} channels; "
+                "expected 3 [x, y, heading] or 4 [x, y, cos, sin]"
+            )
+        data = dict(loaded)
+    data["neighbor_agents_future"] = _future_to_4col(future)
+    # Anchor pools may mix source dirs with colliding basenames — prefix
+    # with a stable hash of the source path.
+    digest = hashlib.sha1(str(src).encode()).hexdigest()[:10]
+    dst_name = f"{digest}_{src.name}"
+    tmp = out_dir / f".tmp_{os.getpid()}_{dst_name}"
+    np.savez_compressed(tmp, **data)
+    os.replace(tmp, out_dir / dst_name)
+    return dst_name
+
+
+def _ensure_4col_neighbor_futures(
+    paths: list[str], out_dir: Path, *, workers: int = 8
+) -> list[str]:
     """Homogenize ``neighbor_agents_future`` to the 4-col training schema.
 
     Repaired/replay scenes carry 4-col ``[x, y, cos, sin]`` neighbor futures
@@ -1078,31 +1147,58 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     copies under ``out_dir`` with the canonical converter (zero padding rows
     stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
     through by original path.
+
+    Conversions are cached in ``out_dir/conversion_manifest.json``: callers
+    pass a CAMPAIGN-level ``out_dir`` so the (large, mostly-static) anchor and
+    normal pools are decompressed/re-compressed once per campaign instead of
+    once per round. A manifest entry is only trusted when its converted file
+    still exists; conversions run on a thread pool (zlib releases the GIL).
     """
-    from planner_metrics.scene_format import future_to_4col as _future_to_4col
+    manifest_path = out_dir / "conversion_manifest.json"
+    manifest: dict[str, dict] = {}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+
+    def _src_stamp(src: str) -> dict:
+        st = Path(src).stat()
+        return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+    def _cached(src: str) -> str | None:
+        entry = manifest.get(src)
+        if not isinstance(entry, dict):
+            return None
+        # The cache is path-keyed; a scene regenerated IN PLACE with different
+        # content must not serve a stale conversion — validate the source stamp.
+        if {k: entry.get(k) for k in ("size", "mtime_ns")} != _src_stamp(src):
+            return None
+        marker = entry.get("marker")
+        if marker == _4COL_PASSTHROUGH:
+            return src
+        dst = out_dir / str(marker)
+        return str(dst) if dst.exists() else None
+
+    todo = sorted({p for p in paths if _cached(p) is None})
+    if todo:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # A crash mid-conversion leaves .tmp_* orphans behind (their conversions
+        # were never recorded in the manifest, so they are pure garbage) — sweep
+        # them before converting rather than letting them accumulate forever.
+        for stale in out_dir.glob(".tmp_*"):
+            stale.unlink()
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            markers = list(pool.map(lambda p: _convert_scene_to_4col(Path(p), out_dir), todo))
+        for src, marker in zip(todo, markers):
+            manifest[src] = {"marker": marker, **_src_stamp(src)}
+        tmp_manifest = out_dir / f".tmp_manifest_{os.getpid()}.json"
+        tmp_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        os.replace(tmp_manifest, manifest_path)
 
     out: list[str] = []
     for path in paths:
-        src = Path(path)
-        with np.load(src) as loaded:
-            future = loaded["neighbor_agents_future"]
-            if future.shape[-1] == 4:
-                out.append(str(src))
-                continue
-            if future.shape[-1] != 3:
-                raise ValueError(
-                    f"{src}: neighbor_agents_future has {future.shape[-1]} channels; "
-                    "expected 3 [x, y, heading] or 4 [x, y, cos, sin]"
-                )
-            data = dict(loaded)
-        data["neighbor_agents_future"] = _future_to_4col(future)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # Anchor pools may mix source dirs with colliding basenames — prefix
-        # with a stable hash of the source path.
-        digest = hashlib.sha1(str(src).encode()).hexdigest()[:10]
-        dst = out_dir / f"{digest}_{src.name}"
-        np.savez_compressed(dst, **data)
-        out.append(str(dst))
+        resolved = _cached(path)
+        if resolved is None:
+            raise RuntimeError(f"4-col conversion did not produce an output for {path}")
+        out.append(resolved)
     return out
 
 
@@ -1192,7 +1288,9 @@ def _rsft_scene_args(
         )
     normal_paths = _ensure_4col_neighbor_futures(
         [str(p) for p in _read_json_list(Path(normal_list))],
-        rdir / "normal_scenes_4col",
+        # Campaign-level cache dir: the normal pool is identical every round,
+        # so the (large) conversion pass runs once per campaign, not per round.
+        rdir.parent / "normal_scenes_4col",
     )
     resolved_normals = rdir / "normal_scenes_resolved.json"
     resolved_normals.write_text(json.dumps(normal_paths, indent=2))
@@ -2759,7 +2857,11 @@ def main() -> None:
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )
         if anchor_paths:
-            anchor_paths = _ensure_4col_neighbor_futures(anchor_paths, rdir / "anchor_scenes_4col")
+            # Campaign-level cache dir: the anchor pool is largely the same
+            # scenes every round, so convert once per campaign, not per round.
+            anchor_paths = _ensure_4col_neighbor_futures(
+                anchor_paths, rdir.parent / "anchor_scenes_4col"
+            )
             print(
                 f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
                 f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"

@@ -786,7 +786,11 @@ def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, t
             assert cmd[cmd.index("--num_shards") + 1] == "2"
             assert cmd[cmd.index("--shard_index") + 1] == str(expected_idx)
             assert "--chunk_manifest" in cmd
-            assert cmd[cmd.index("--chunk_manifest") + 1] == str(rdir / "planned_chunks.jsonl")
+            # The plan pass is cached at the CAMPAIGN level (rdir.parent) so
+            # later rounds reuse it instead of re-planning the full pool.
+            assert cmd[cmd.index("--chunk_manifest") + 1] == str(
+                rdir.parent / "planned_chunks.jsonl"
+            )
             assert "--scene_list" not in cmd
             _arg(cmd, "--out_jsonl").parent.mkdir(parents=True, exist_ok=True)
             _arg(cmd, "--out_jsonl").write_text(
@@ -1804,7 +1808,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             else {"labels": ["clean"], "label": "clean"}
         )
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -1840,6 +1844,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         verify_credit_windows=[
             {
                 "route_key": "bagA",
@@ -1971,7 +1978,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             else {"labels": ["clean"], "label": "clean"}
         )
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -2005,6 +2012,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         route_keys=["bagA"],
         danger_save_dir=tmp_path,
         danger_scorer=_fake_danger_scorer,
@@ -2109,7 +2119,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_clean_realized(*_args, **_kwargs):
         return {"labels": ["clean"], "label": "clean"}
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -2137,6 +2147,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         route_keys=["bagA"],
         danger_save_dir=tmp_path,
         danger_scorer=_fake_clean_scorer,
@@ -3179,11 +3192,17 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "classify_loaded_scene_candidates_batch",
-        lambda *_args, **_kwargs: [[{"labels": ["clean"]}]],
+        # return_subscores=True contract: (rows_per_scene, B-major subscores)
+        lambda *_args, **_kwargs: ([[{"labels": ["clean"]}]], {}),
     )
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "compute_reward_batch",
+        lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
+    )
+    monkeypatch.setattr(
+        build_repaired_targets_tool,
+        "_shape_reward",
         lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
     )
     monkeypatch.setattr(
@@ -4656,6 +4675,85 @@ def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
     batch = [dict(np.load(p)) for p in result]
     stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
     assert stacked.shape == (2, 4, 80, 4)
+
+
+def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
+    """The 4-col rewrite is called with a CAMPAIGN-level out_dir every round; a
+    second call over the same pool must reuse the manifest + converted files
+    instead of re-decompressing/re-compressing every scene, and a converted
+    file deleted out from under the manifest must be rebuilt (a stale manifest
+    entry is never trusted blindly)."""
+    three = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((4, 80, 3), dtype=np.float32),
+    }
+    three["neighbor_agents_future"][0, :, 0] = 1.0
+    p3 = tmp_path / "logged_scene.npz"
+    np.savez(p3, **three)
+    out_dir = tmp_path / "converted"
+
+    first = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    manifest = json.loads((out_dir / "conversion_manifest.json").read_text())
+    assert manifest[str(p3)]["marker"] == Path(first[0]).name
+    mtime = Path(first[0]).stat().st_mtime_ns
+
+    second = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert second == first
+    assert Path(first[0]).stat().st_mtime_ns == mtime  # cached: not rewritten
+
+    Path(first[0]).unlink()  # simulate a lost/partial conversion
+    third = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert third == first
+    assert Path(first[0]).exists()  # rebuilt, not blindly trusted
+
+    # A source regenerated IN PLACE (same path, new content/mtime) must be
+    # reconverted — the cache is path-keyed but stamped with size+mtime.
+    three["neighbor_agents_future"][0, :, 1] = 5.0
+    np.savez(p3, **three)
+    fourth = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert fourth == first
+    with np.load(fourth[0]) as d:
+        np.testing.assert_allclose(d["neighbor_agents_future"][0, :, 1], 5.0)
+
+
+def test_materialize_chunk_manifest_campaign_cache(tmp_path, monkeypatch):
+    """The plan_only chunk pass is planned once per CAMPAIGN and reused across
+    rounds; a knob change against the cached plan fails loudly (chunking must
+    stay constant within a campaign for guard comparability)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    out_dir = tmp_path / "campaign"
+    r1 = out_dir / "r2lpl_round_001"
+    r2 = out_dir / "r2lpl_round_002"
+    r1.mkdir(parents=True)
+    r2.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, log_path, env=None):
+        calls.append([str(c) for c in cmd])
+        Path(out_dir / "planned_chunks.jsonl").write_text("")
+        return 0.0
+
+    monkeypatch.setattr(round_runner, "_run", fake_run)
+    cfg = {"perception_mining": {"scene_list": str(scene_list), "chunk_len": 160}}
+
+    got1 = round_runner._materialize_chunk_manifest_for_shards(cfg, r1)
+    assert len(calls) == 1
+    assert got1["perception_mining"]["chunk_manifest"] == str(out_dir / "planned_chunks.jsonl")
+
+    got2 = round_runner._materialize_chunk_manifest_for_shards(cfg, r2)
+    assert len(calls) == 1  # reused, no second plan pass
+    assert got2["perception_mining"]["chunk_manifest"] == str(out_dir / "planned_chunks.jsonl")
+
+    bad_cfg = {"perception_mining": {"scene_list": str(scene_list), "chunk_len": 80}}
+    with pytest.raises(ValueError, match="different knobs"):
+        round_runner._materialize_chunk_manifest_for_shards(bad_cfg, r2)
+
+    # A scene list regenerated IN PLACE (same path, new content) must fail
+    # loudly too — the plan is keyed by content digest, not pathname.
+    scene_list.write_text('["/data/new_scene.npz"]')
+    with pytest.raises(ValueError, match="different knobs"):
+        round_runner._materialize_chunk_manifest_for_shards(cfg, r2)
 
 
 def test_replay_capacity_is_required():

@@ -4,7 +4,8 @@
 Thin launcher only: it resolves the run dir, saves git info, sets NCCL env and runs
 train_predictor.py under torch.distributed.run. train_predictor.py itself is unchanged.
 
---closed_loop_npz_root (optional) is forwarded to train_predictor.py's flag of the same name.
+--closed_loop_npz_root / --closed_loop_sites_npz_root (both optional, may be set together) are
+forwarded to train_predictor.py's flags of the same name.
 """
 
 import argparse
@@ -14,7 +15,25 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from diffusion_planner.scenario_based_open_loop.open_loop import (
+    load_scenario_based_open_loop_settings,
+)
+from diffusion_planner.train_config import TrainConfig
+from diffusion_planner.utils.dist_init import dist_init_file_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
+
+
+def boolean(v: str) -> bool:
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def _train_config_default(name: str):
+    return TrainConfig.__dataclass_fields__[name].default
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +51,34 @@ def parse_args() -> argparse.Namespace:
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
         "list of such dirs (like --train_set_list). Empty = disabled.",
     )
+    p.add_argument(
+        "--scenario_based_open_loop_list",
+        default="",
+        help="optional JSON mapping Scenario-based Open-loop metric names to NPZ path lists. Empty = disabled.",
+    )
+    p.add_argument(
+        "--closed_loop_sites_npz_root",
+        default="",
+        help="optional: a curated .json path-list manifest, grouped into per-site route pools by "
+        "site_discovery.discover_sites_from_json and evaluated as independent sites (objects + "
+        "no-objects ablation by default). May be set together with --closed_loop_npz_root (each "
+        "fires independently). Empty = disabled.",
+    )
+    p.add_argument(
+        "--enable_temporal_stability_eval",
+        type=boolean,
+        default=_train_config_default("enable_temporal_stability_eval"),
+        help="validation-only ego jerk / curvature-rate metrics. Computed from the trajectory the "
+        "normal validation pass already predicts, so turning this off saves little.",
+    )
+    p.add_argument(
+        "--enable_replan_consistency_eval",
+        type=boolean,
+        default=_train_config_default("enable_replan_consistency_eval"),
+        help="validation-only inter-frame replan consistency. Needs a Step-1 valid_set_list and "
+        "runs TWO extra forwards per adjacent frame pair every epoch, so on a full Step-1 list "
+        "this roughly doubles validation cost. Set False to skip it.",
+    )
     return p.parse_args()
 
 
@@ -39,6 +86,9 @@ def main() -> None:
     args = parse_args()
 
     here = Path(__file__).resolve().parent
+    if args.scenario_based_open_loop_list:
+        load_scenario_based_open_loop_settings(args.scenario_based_open_loop_list)
+
     save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
 
@@ -60,7 +110,7 @@ def main() -> None:
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    dist_init_file_path().unlink(missing_ok=True)
 
     cmd = [
         sys.executable,
@@ -88,6 +138,18 @@ def main() -> None:
         "10",
         "--closed_loop_npz_root",
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
+        "--scenario_based_open_loop_list",
+        str(Path(args.scenario_based_open_loop_list).resolve())
+        if args.scenario_based_open_loop_list
+        else "",
+        "--closed_loop_sites_npz_root",
+        str(Path(args.closed_loop_sites_npz_root).resolve())
+        if args.closed_loop_sites_npz_root
+        else "",
+        "--enable_temporal_stability_eval",
+        str(args.enable_temporal_stability_eval),
+        "--enable_replan_consistency_eval",
+        str(args.enable_replan_consistency_eval),
         *optional,
     ]
     rc = tee_run(

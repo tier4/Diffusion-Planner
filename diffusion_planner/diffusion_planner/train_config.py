@@ -153,10 +153,24 @@ class TrainConfig:
 
     # ---------------------------------------------------------
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
-    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route NPZ frames,
-    # one route).
+    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` or ``closed_loop_sites_npz_root`` is set.
+    #
+    # ``closed_loop_sites_npz_root`` is an alternative/addition to ``closed_loop_npz_root`` for
+    # multi-site validation: a curated .json path-list manifest, grouped into per-site route pools
+    # by scenario_generation.site_discovery.discover_sites_from_json and evaluated as independent
+    # npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>". Both may be set at
+    # once — each fires independently and contributes its own rows to the combined episode table /
+    # cross-site aggregate.
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
+    closed_loop_sites_npz_root: str = ""
+    # Object-mode ablation per source: "objects"=normal, "noobj"=empty-world (no dynamic/static
+    # objects, map kept — isolates "reacts badly to traffic" from "can't follow the
+    # route/map"). npz_root defaults to objects-only (usually a single curated scene);
+    # sites_root defaults to both (the objects-vs-noobj comparison).
+    closed_loop_npz_object_modes: list[str] = field(default_factory=lambda: ["objects"])
+    closed_loop_sites_object_modes: list[str] = field(default_factory=lambda: ["objects", "noobj"])
+    closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
     closed_loop_replan_interval: int = 4
@@ -167,6 +181,37 @@ class TrainConfig:
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
     closed_loop_unstick_advance_m: float = 5.0
+    closed_loop_unstick_radius_mult: float = 10.0
+    closed_loop_unstick_teleport_after: int = 300
+    # Early-abort a badly-diverged segment instead of burning the full step budget (see
+    # RolloutParams / reproducer_rollout.render_segment for the exact trigger condition).
+    # 0 = disabled for either knob.
+    closed_loop_abort_deviation_m: float = 50.0
+    closed_loop_abort_after: int = 30
+    closed_loop_abort_max_snaps: int = 0
+    # wandb payload shaping (see scenario_generation.wandb_closed_loop): only ONE representative
+    # episode's video + trajectory-colormap image is uploaded per site per checkpoint (not all
+    # routes — those stay in the local out_dir), picked by "worst" (default, most collisions) /
+    # "first" / "longest".
+    closed_loop_wandb_video_pick: str = "worst"
+    closed_loop_colormap_metrics: list[str] = field(
+        default_factory=lambda: [
+            "clearance",
+            "collision",
+            "near_miss",
+            "speed",
+            "road_border",
+            "red_light",
+            "strong_brake",
+        ]
+    )
+    closed_loop_report_base_url: str = ""
+
+    # Scenario-based Open-loop validation. The list JSON maps metric names to NPZ paths.
+    scenario_based_open_loop_list: str = ""
+    scenario_centerline_horizon_seconds: float = 8.0
+    scenario_departure_horizon_seconds: float = 3.0
+    scenario_departure_minimum_displacement_m: float = 2.0
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

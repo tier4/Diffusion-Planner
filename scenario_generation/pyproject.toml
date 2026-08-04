@@ -29,7 +29,7 @@ packages = [
 package-dir = { "scenario_generation" = "." }
 
 [tool.setuptools.package-data]
-scenario_generation = ["configs/*.json"]
+scenario_generation = ["configs/*.json", "*.html"]
 
 [tool.uv.sources]
 diffusion-planner = { workspace = true }

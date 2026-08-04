@@ -174,6 +174,23 @@ if(BUILD_TESTING)
     target_include_directories(test_bag_metadata PRIVATE include src)
   endif()
 
+  # processing/stopped_tail + the ego-future hold it gates in processing/ego_sequence
+  ament_add_gtest(test_stopped_tail
+    test/test_stopped_tail.cpp
+    src/processing/ego_sequence.cpp
+  )
+  if(TARGET test_stopped_tail)
+    target_include_directories(test_stopped_tail PRIVATE include src)
+    ament_target_dependencies(test_stopped_tail SYSTEM
+      nav_msgs
+      autoware_perception_msgs
+      autoware_planning_msgs
+      autoware_vehicle_msgs
+      geometry_msgs
+      autoware_diffusion_planner
+    )
+  endif()
+
   # processing/neighbor_processor — future array filling; needs autoware_diffusion_planner
   ament_add_gtest(test_neighbor_processor
     test/test_neighbor_processor.cpp

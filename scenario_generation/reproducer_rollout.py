@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -335,16 +336,33 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
 
     # Extract scoring inputs (+ optional save dicts) BEFORE normalization, so they match
     # the un-normalized arrays build_input_np returns.
-    nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()  # (N,320,11)
-    neighbors_live = [nb_all[i].copy() for i in range(N)]
     np_dicts = None
     if want_np_dicts:
-        np_dicts = [
-            {k: batch[k][i : i + 1].detach().cpu().numpy() for k in batch} for i in range(N)
-        ]
+        # ONE D2H transfer per key for the whole batch (16 transfers/step),
+        # then numpy slicing per segment — replaces the previous N x n_keys
+        # per-segment `.cpu()` calls (B x 16 transfers + syncs per step).
+        # The per-segment arrays are VIEWS into the batch-sized host arrays;
+        # every consumer (scorers, credit-window dump) is read-only on them.
+        # Memory caveat: while ALL N segments are alive this equals the old
+        # N standalone copies, but a single long-lived segment's save buffer
+        # now pins the whole tick's batch arrays (up to Bx its own slice) —
+        # bounded by the save-buffer deque cap, and irrelevant at B<=64.
+        host = {k: batch[k].detach().cpu().numpy() for k in batch}
+        np_dicts = [{k: host[k][i : i + 1] for k in host} for i in range(N)]
+        nb_all = host["neighbor_agents_past"][:, :, -1, :]  # (N,320,11)
+    else:
+        nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()
+    neighbors_live = [nb_all[i].copy() for i in range(N)]
 
+    # Un-normalized GPU tensors with the same key set as np_dicts (snapshot
+    # BEFORE the static inputs land): per-segment slices of these feed the
+    # per-step scorers directly, replacing the old GPU->CPU->GPU round trip
+    # (np_dict D2H above, then a per-segment H2D re-upload in every scorer).
+    # The normalizer below shallow-copies and REPLACES keys, so these tensors
+    # stay un-normalized.
+    raw_gpu = dict(batch)
     _add_static_inputs(batch, model_args, N, device)
-    return model_args.observation_normalizer(batch), neighbors_live, np_dicts
+    return model_args.observation_normalizer(batch), neighbors_live, np_dicts, raw_gpu
 
 
 # --------------------------------------------------------------------------- #
@@ -501,7 +519,7 @@ def _seed_state(
     neighbor_history_mode="recorded",
     goal_mode="segment",
     replay_mode="pose",
-    tracker_mode="mpc",
+    tracker_mode="mpc_batched",
     strong_brake_mps2=-2.5,
     yaw_gate: bool = True,
 ) -> _SegState:
@@ -535,10 +553,15 @@ def _seed_state(
     turn_hist = np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
     if tracker_mode == "perfect":
         tracker = PerfectTracker(dt=DT)
-    elif tracker_mode == "mpc":
+    elif tracker_mode in ("mpc", "mpc_batched"):
+        # mpc_batched keeps the identical per-segment MPCTracker (warm start +
+        # telemetry live on it); only the per-tick SOLVE is batched across
+        # segments in run_segments_batched (see mpc_tracker_batched.track_many).
         tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
     else:
-        raise ValueError(f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect' or 'mpc'")
+        raise ValueError(
+            f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect', 'mpc', or 'mpc_batched'"
+        )
     return _SegState(
         tl=tl,
         start=start,
@@ -685,7 +708,7 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
-def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
+def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
     ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
@@ -693,6 +716,12 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
     PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
     multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
     applied directly, which is the faithful "perfect tracking" of the cached plan.
+
+    ``tracked`` = ``(new_pose(3,), new_speed)`` from a BATCHED tracker solve
+    (``mpc_tracker_batched.track_many``): the caller already ran the tracker for
+    this segment, so the tracker branch is skipped and its result applied with
+    the same telemetry reads (``track_many`` set ``last_yaw_rate``/``last_steering``
+    on ``s.tracker`` exactly like ``track()`` does).
     """
     from scenario_generation.mpc_tracker import postprocess_reference
 
@@ -709,6 +738,11 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             dh = (float(new_pose[2]) - float(s.live_pose[2]) + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = float(dh / DT)
             steering = 0.0
+        elif tracked is not None:
+            new_pose = np.asarray(tracked[0], dtype=np.float64)
+            new_speed = float(tracked[1])
+            yaw_rate = float(getattr(s.tracker, "last_yaw_rate", 0.0))
+            steering = float(getattr(s.tracker, "last_steering", 0.0))
         else:
             wxy, wh = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
@@ -957,7 +991,7 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) ego frame
+        nb = tl.neighbor_last(idx)  # (320, 11) ego frame — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
@@ -982,6 +1016,42 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             np.unwrap(np.array([k[3] for k in kept])),
         )
     return interp
+
+
+# Track anchors depend only on the recorded data, not on the model or the epoch, yet
+# render_segment rebuilds them on every call that builds them -- one NPZ read per frame of the
+# whole route -- and closed_loop_validate re-evaluates the same routes in the same process.
+#
+# Unbounded on purpose, the same argument the per-map caches use: a process sees as many
+# (route, span) pairs as the suite has routes, not as many as it runs evaluations.
+#
+# No lock needed: the anchors are read-only downstream and the single call site runs before
+# render_segment starts its thread pool.
+_INTERP_ANCHOR_CACHE: dict[tuple, dict] = {}
+
+
+def _neighbor_interp_cached(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1) -> dict:
+    """``_build_neighbor_interp`` memoised per (route, span, sidecar, eps) for the process.
+
+    The sidecar path is part of the key because the same NPZ files paired with a different
+    sidecar directory report different track ids, and so yield different anchors.
+    """
+    key = (
+        str(tl.npz_paths[lo]),
+        str(tl.npz_paths[hi - 1]),
+        str(tl.sidecar_path(lo)),
+        hi - lo,  # the endpoints plus the count pin the file set: npz_paths is sorted
+        eps,
+    )
+    hit = _INTERP_ANCHOR_CACHE.get(key)
+    if hit is not None:
+        # counted so a profile shows the scan was skipped rather than silently missing
+        tl.timers.add("interp_build_cached", 0.0)
+        return hit
+    with tl.timers("interp_build"):
+        anchors = _build_neighbor_interp(tl, lo, hi, eps)
+    _INTERP_ANCHOR_CACHE[key] = anchors
+    return anchors
 
 
 def _interp_pose(anchors: tuple, idx: int) -> tuple[float, float, float]:
@@ -1327,7 +1397,7 @@ def render_segment(
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
     timeline_progress_mode: str = "pose",
-    tracker_mode: str = "mpc",
+    tracker_mode: str = "mpc_batched",
     goal_mode: str = "segment",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
@@ -1336,7 +1406,7 @@ def render_segment(
     yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
-    draw_every: int = 1,
+    draw_every: int | None = 1,
     abort_deviation_m: float = 0.0,
     abort_after: int = 30,
     abort_max_snaps: int = 0,
@@ -1358,6 +1428,9 @@ def render_segment(
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
     throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
     play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
+    ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/
+    ``rollout.jsonl`` (and anything downstream that reads it, e.g. trajectory-colormap images)
+    are unaffected, only the video/PNG artifacts disappear.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1372,7 +1445,10 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
-    ``tracker_mode="mpc"`` (default) uses the bicycle-model MPC tracker for ego advance while
+    ``tracker_mode="mpc_batched"`` (default) uses the bicycle-model MPC tracker for ego advance
+    (in the batched rollout, one vectorized solve for all segments per tick; in THIS
+    single-segment path it behaves exactly like ``"mpc"``, the serial per-segment scipy
+    solve) while
     keeping the same reproduced perception inputs. ``tracker_mode="perfect"`` is *complete* perfect
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
@@ -1390,9 +1466,10 @@ def render_segment(
     fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
 
     Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
-    ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
-    carries no lane geometry) alongside the ego pose — see
-    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+    ``collision``, ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
+    carries no lane geometry), and ``red_light_violation`` alongside the ego pose — see
+    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
+    (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
 
     ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
     ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
@@ -1433,10 +1510,12 @@ def render_segment(
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
-    # margin covers any overrun without scanning the whole route.
+    # margin covers any overrun without scanning the whole route. Skipped under drop_objects:
+    # every neighbor row is zeroed before _apply_neighbor_interp runs and that function skips
+    # all-zero rows, so the anchors cannot be read.
     interp = (
-        _build_neighbor_interp(tl, start, min(end + 100, len(tl)))
-        if interpolate and neighbor_history_mode != "sim"
+        _neighbor_interp_cached(tl, start, min(end + 100, len(tl)))
+        if interpolate and neighbor_history_mode != "sim" and not drop_objects
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
@@ -1565,6 +1644,7 @@ def render_segment(
                     "rb_dist_m": round(float(s.rb_dists[k]), 4)
                     if np.isfinite(s.rb_dists[k])
                     else None,
+                    "red_light_violation": bool(s.red_light[k]),
                     "gt_deviation_m": round(gt_deviation_m, 3),
                 }
             )
@@ -1621,7 +1701,11 @@ def render_segment(
             )
             spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
             override = (np.array([tx, ty, th], dtype=np.float64), spd)
-        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+        if (
+            draw_every is not None
+            and (window is None or (window[0] <= k <= window[1]))
+            and k % draw_every == 0
+        ):
             _draw_step(
                 np_dict,
                 pred_cur,
@@ -1676,7 +1760,7 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
-    tracker_mode: str = "mpc",
+    tracker_mode: str = "mpc_batched",
     timeline_progress_mode: str = "pose",
     strong_brake_mps2: float = -2.5,
     yaw_gate: bool = True,
@@ -1840,7 +1924,7 @@ def run_segments_batched(
                         # ONE batched on-device world_to_ego_frame; downstream identical.
                         raw_payloads = [pre for _s, pre in live]
                         with timers("to_torch"):
-                            data, nb_list, npd_list = _to_torch_batch_gpu(
+                            data, nb_list, npd_list, raw_gpu = _to_torch_batch_gpu(
                                 raw_payloads,
                                 model_args,
                                 device,
@@ -1850,6 +1934,11 @@ def run_segments_batched(
                                     or danger_save_dir is not None
                                 ),
                             )
+                        # Per-segment GPU-resident scene slices for the per-step
+                        # scorers (same keys/values as np_dict, no host round trip).
+                        gpu_scenes = [
+                            {k: raw_gpu[k][i : i + 1] for k in raw_gpu} for i in range(len(live))
+                        ]
                         built = [
                             (
                                 s,
@@ -1863,6 +1952,7 @@ def run_segments_batched(
                         ]
                     else:
                         built = [(s, *pre) for s, pre in live]
+                        gpu_scenes = None  # CPU build: scorers consume the numpy np_dicts
                         with timers("to_torch"):
                             data = _to_torch_batch([b[1] for b in built], model_args, device)
                     with timers("model_forward"):
@@ -1889,11 +1979,13 @@ def run_segments_batched(
                         score_list = score_object_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    danger_rows = (
-                        danger_scorer(built, preds, data, device)
-                        if danger_scorer is not None
-                        else [None] * len(built)
-                    )
+                    with timers("danger_scorer"):
+                        danger_rows = (
+                            danger_scorer(built, preds, data, device)
+                            if danger_scorer is not None
+                            else [None] * len(built)
+                        )
+                    realized_t0 = time.perf_counter()
                     realized_rows = []
                     for _row_i, (
                         (_s, np_dict, _nb, _idx, _suuid, _wbu),
@@ -1955,7 +2047,7 @@ def run_segments_batched(
                                     _s.realized_lag_streak = 0
                         realized_rows.append(
                             realized_event_scorer(
-                                np_dict,
+                                gpu_scenes[_row_i] if gpu_scenes is not None else np_dict,
                                 collided=bool(col),
                                 step=_s.k,
                                 model_pred_world=model_pred_world,
@@ -1966,6 +2058,7 @@ def run_segments_batched(
                                 realized_lag_gap_m=realized_lag_gap_m,
                             )
                         )
+                    timers.add("realized_events", time.perf_counter() - realized_t0)
                     for row_idx, (
                         (s, _np, nb, idx, suuid, wbu),
                         (cl, col, _M, collider_slot),
@@ -1977,7 +2070,9 @@ def run_segments_batched(
                             nb,
                             device,
                             timers,
-                            np_dict=_np,
+                            # GPU-resident slice when available: the rb / red-light
+                            # scorers then skip their per-step H2D re-upload.
+                            np_dict=gpu_scenes[row_idx] if gpu_scenes is not None else _np,
                             object_cl=float(cl),
                             object_col=bool(col),
                         )
@@ -2016,6 +2111,7 @@ def run_segments_batched(
                                 extra_manifest={
                                     "offense_frame_id": int(s.credit_window["offense_frame"])
                                 },
+                                timers=timers,
                             )
                             s.credit_saved = True
                             s.terminated = "credit_window_saved"
@@ -2096,6 +2192,7 @@ def run_segments_batched(
                                                 )
                                             ),
                                         },
+                                        timers=timers,
                                     )
                                     if manifest is not None:
                                         if danger_manifest_callback is not None:
@@ -2153,6 +2250,7 @@ def run_segments_batched(
                                             extra_manifest=_credit_event_metadata(
                                                 event_row_by_label.get(label)
                                             ),
+                                            timers=timers,
                                         )
                                         if (
                                             manifest is not None
@@ -2227,14 +2325,50 @@ def run_segments_batched(
                                         min_post_snap_frames=save_min_post_snap_frames,
                                         min_pre_frames=save_min_pre_frames,
                                         min_ego_speed=save_min_ego_speed,
+                                        timers=timers,
                                     )
                                     if mani is not None:
                                         s.episode_saved = True
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
+                    tracked_by_row: dict[int, tuple] = {}
+                    if tracker_mode == "mpc_batched":
+                        # ONE vectorized L-BFGS-B solve for every tracker-branch
+                        # segment this tick, instead of B serial scipy solves
+                        # inside _advance_step (its `tracked` fast path applies
+                        # the results; warmup segments keep their own branch).
+                        from scenario_generation.mpc_tracker import postprocess_reference
+                        from scenario_generation.mpc_tracker_batched import track_many
+
+                        with timers("advance_solve"):
+                            rows_b: list[int] = []
+                            trks_b, x0s_b, refs_b = [], [], []
+                            for i, (s, *_rest) in enumerate(built):
+                                if s.k < s.warmup_steps:
+                                    continue
+                                wxy, wh = _ego_pred_to_world(
+                                    preds[i][:, :2],
+                                    preds[i][:, 2:4],
+                                    s.live_pose[0],
+                                    s.live_pose[1],
+                                    s.live_pose[2],
+                                )
+                                refs_b.append(postprocess_reference(wxy, wh, dt=DT))
+                                x0s_b.append(
+                                    [s.live_pose[0], s.live_pose[1], s.live_pose[2], s.dyn.speed]
+                                )
+                                rows_b.append(i)
+                                trks_b.append(s.tracker)
+                            if rows_b:
+                                solved = track_many(
+                                    trks_b, np.asarray(x0s_b, dtype=np.float64), refs_b
+                                )
+                                tracked_by_row = dict(zip(rows_b, solved))
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.snap_count
-                        _advance_step(s, preds[i], idx, device, timers)
+                        _advance_step(
+                            s, preds[i], idx, device, timers, tracked=tracked_by_row.get(i)
+                        )
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
@@ -2271,6 +2405,7 @@ def _dump_credit_window(
     seg_end: int,
     label: str,
     extra_manifest: dict | None = None,
+    timers: Timers | None = None,
 ) -> dict | None:
     """Write an inclusive R2LPL credit window ending before the offense step.
 
@@ -2314,6 +2449,7 @@ def _dump_credit_window(
         min_post_snap_frames=0,
         min_pre_frames=0,
         min_ego_speed=0.0,
+        timers=timers,
     )
     if manifest is None:
         return None
@@ -2553,6 +2689,7 @@ def _dump_precollision_window(
     min_post_snap_frames: int = 0,
     min_pre_frames: int = 30,
     min_ego_speed: float = 0.5,
+    timers: Timers | None = None,
 ) -> dict | None:
     """Write the scenes before collision step ``t_c`` from a live buffer.
 
@@ -2575,6 +2712,9 @@ def _dump_precollision_window(
     import json
     from pathlib import Path
 
+    if timers is None:
+        timers = Timers()  # throwaway sink: standalone callers without a report
+    t_window = time.perf_counter()
     out_dir = Path(out_dir)
     # Clear any prior batch in this dir FIRST — before the skip early-return — so that a
     # re-mine which now SKIPS this segment (or writes a shorter window) never leaves stale
@@ -2670,6 +2810,7 @@ def _dump_precollision_window(
                 f"[{start_k}, {t_c}] but it is absent (window-clamp / buffer regression)"
             )
         _, idx, live_pose, np_dict, slot_uuids, _wbu = live_by_step[step_k]
+        _t = time.perf_counter()
         scene = _scene_npz_from_np_dict(np_dict)
         ep = scene["ego_agent_past"]
         scene["ego_agent_past"] = np.column_stack(
@@ -2760,6 +2901,8 @@ def _dump_precollision_window(
             if naf is not None:
                 dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
                 scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
+        timers.add("dump_naf", time.perf_counter() - _t)
+        _t = time.perf_counter()
         eaf = np.zeros((fut_len, 4), dtype=np.float32)
         for j in range(1, fut_len + 1):
             fk = step_k + j
@@ -2808,9 +2951,12 @@ def _dump_precollision_window(
         if 0 < n_recorded < fut_len:
             recorded_eaf[n_recorded:] = recorded_eaf[n_recorded - 1]
         scene["ego_recorded_future"] = recorded_eaf
+        timers.add("dump_futures", time.perf_counter() - _t)
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
+        _t = time.perf_counter()
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
+        timers.add("dump_savez", time.perf_counter() - _t)
         saved.append(int(step_k))
         saved_frame_ids.append(_frame_id(tl, idx))
 
@@ -2832,4 +2978,5 @@ def _dump_precollision_window(
         "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    timers.add("dump_window", time.perf_counter() - t_window)
     return manifest

@@ -2759,11 +2759,11 @@ def run_route_replay(
                         step,
                         spawn_config.max_steps,
                         route_polylines,
-                        _VIEW_HALF_M,
-                        _route_vis_ll_ids,
-                        step * 0.1,
-                        road_border_polylines,
-                        overlay_metrics,
+                        view_half_m=_VIEW_HALF_M,
+                        route_lanelet_ids=_route_vis_ll_ids,
+                        sim_time=step * 0.1,
+                        road_border_polylines=road_border_polylines,
+                        metrics=overlay_metrics,
                     )
                 )
 

@@ -3,7 +3,10 @@ repositories:
   core/autoware_msgs:
     type: git
     url: https://github.com/autowarefoundation/autoware_msgs.git
-    version: 1.3.0
+    # 1.7.0: ObjectClassification の ANIMAL/HAZARD 等が入り、かつ
+    # TrafficLightGroup に predictions が追加される 1.8.0 の手前。
+    # これより上げると既存 rosbag の TrafficLightGroupArray が読めなくなる。
+    version: 1.7.0
   core/autoware_adapi_msgs:
     type: git
     url: https://github.com/autowarefoundation/autoware_adapi_msgs.git
@@ -15,7 +18,7 @@ repositories:
   core/autoware_cmake:
     type: git
     url: https://github.com/autowarefoundation/autoware_cmake.git
-    version: 1.1.0
+    version: 1.4.0
   core/autoware_utils:
     type: git
     url: https://github.com/autowarefoundation/autoware_utils.git
@@ -23,11 +26,11 @@ repositories:
   core/autoware_lanelet2_extension:
     type: git
     url: https://github.com/autowarefoundation/autoware_lanelet2_extension.git
-    version: 0.12.0
+    version: 1.2.0
   core/autoware_core:
     type: git
     url: https://github.com/autowarefoundation/autoware_core.git
-    version: e95111267c142f8f04cf7223e74fb5d2fab4ec37
+    version: 8f4a78d9339909760f30bd423f7701370efd80ec
   core/autoware_rviz_plugins:
     type: git
     url: https://github.com/autowarefoundation/autoware_rviz_plugins.git
@@ -36,7 +39,7 @@ repositories:
   universe/autoware_universe:
     type: git
     url: https://github.com/autowarefoundation/autoware_universe.git
-    version: main
+    version: c7a6d0a1aac3a00c1c26277f66277bcfb25d8bf6
   universe/external/tier4_autoware_msgs:
     type: git
     url: https://github.com/tier4/tier4_autoware_msgs.git
