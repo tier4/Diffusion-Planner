@@ -451,7 +451,6 @@ class NeighborEncoder(nn.Module):
         x = torch.cat([x[..., :4], torch.zeros_like(x[..., 4:6]), x[..., 6:]], dim=-1)
 
         valid_indices = ~mask_p.view(-1)
-        neighbor_type = neighbor_type.view(B * P, -1)
 
         if not self.training:
             # Static-shape (mask) path used for eval and ONNX export. ONNX cannot
@@ -468,7 +467,9 @@ class NeighborEncoder(nn.Module):
             for block in self.blocks:
                 x = block(x)
             x = torch.mean(x, dim=1)  # pooling
-            type_embedding = self.type_emb(neighbor_type)
+            # Reshaped here rather than before the branch so the traced op order (and hence the
+            # exported ONNX bytes) stays identical to the pre-speed-up implementation.
+            type_embedding = self.type_emb(neighbor_type.view(B * P, -1))
             x = x + type_embedding
             x = self.emb_project(self.norm(x))
             x_result = x * valid_indices.float().unsqueeze(-1)
@@ -476,6 +477,7 @@ class NeighborEncoder(nn.Module):
 
         # Fast gather path (training): the temporal encoder only runs on the ~few
         # dozen valid neighbours instead of all 320 padded slots.
+        neighbor_type = neighbor_type.view(B * P, -1)
         x = x[valid_indices]
 
         x = self.channel_pre_project(x)
