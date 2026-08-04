@@ -16,21 +16,19 @@ For more examples, see docs/usage.md and docs/design.md.
 
 Note: ``TagStore.add_tags`` and friends update the in-memory index
 immediately, but a previously-saved ``.tag`` file on disk is **not**
-rewritten. After on-the-fly mutations, call :meth:`TagStore.build_index`
-again to re-persist the index — otherwise later sessions will see the
-old, pre-mutation state.
+rewritten by those calls. To refresh the on-disk pickle after on-the-fly
+mutations, call :meth:`TagStore.build_index` again (with the same source)
+— otherwise later sessions will see the old, pre-mutation state.
 """
 
-from .routes import route_of
+from .routes import extract_frame_number, route_of
 from .sidecar import format_tag, normalize_tags, parse_tag, read_tags, write_tags
 from .source import expand_source, load_json
 from .store import (
     Bucket,
-    Clause,
-    FrameFilter,
-    Granularity,
-    Scope,
-    ScopeItem,
+    FrameTagDiff,
+    IndexDiff,
+    StaleIndexError,
     TagStore,
     format_buckets,
 )
@@ -40,13 +38,12 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Bucket",
-    "Clause",
-    "FrameFilter",
-    "Granularity",
-    "Scope",
-    "ScopeItem",
+    "FrameTagDiff",
+    "IndexDiff",
+    "StaleIndexError",
     "TagStore",
     "expand_source",
+    "extract_frame_number",
     "format_buckets",
     "format_tag",
     "list_known_tags",

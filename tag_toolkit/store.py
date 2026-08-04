@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """TagStore — query and mutate ``tags`` from sidecar JSON files.
 
 Tags travel with each NPZ's sidecar JSON. The store scans a source (one
@@ -10,33 +11,53 @@ loaded back via ``TagStore("path/to/index.tag")`` for fast repeated queries.
 Read methods are lock-free; concurrent writers are serialised via an
 internal ``RLock``. Mutations update the in-memory index immediately;
 ``.tag`` files persist on disk only when ``build_index`` runs again.
+
+Index ownership contract:
+    The in-memory index is the **authoritative** view of tag state during
+    the lifetime of a ``TagStore`` instance. Every mutation verifies that
+    the sidecar on disk matches what the index thinks is there — if it
+    doesn't, the mutation aborts with :class:`StaleIndexError` and tells
+    the caller to reconcile via :meth:`TagStore.reindex_tags`. The store
+    never silently overwrites a sidecar it doesn't recognise and never
+    creates a sidecar that didn't exist before.
+
+    The atomic-write / fsync / verify-then-write protocol lives in
+    :mod:`sidecar`; ``TagStore`` is responsible only for resolving scope,
+    updating the in-memory index, and routing to :func:`sidecar.write_tags`.
+    If you suspect the sidecar JSONs on disk have drifted from the
+    in-memory index, call :meth:`TagStore.diff_index_against_disk` for a
+    structured report and :meth:`TagStore.reindex_tags` to bring the
+    index back in line.
 """
 
 from __future__ import annotations
 
 import fnmatch
-import os
 import pickle
-import re
 import threading
-import warnings
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from itertools import product
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence, Union
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
-from .routes import route_of
+from .routes import extract_frame_number, route_of
 from .sidecar import (
+    StaleIndexError,
+    _atomic_write_bytes,
+    _fsync_dir,
     format_tag,
     is_valid_dimension,
     normalize_tags,
     parse_tag,
     read_tags,
+    read_sidecar,
     sidecar_path,
     write_tags,
 )
 from .source import expand_source
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from tqdm import tqdm
 
 Clause = str | dict[str, Any]  # "dim:value" or {"all"|"any"|"not": ...}
@@ -45,12 +66,11 @@ FrameFilter = tuple[int, int] | str | None
 _GRANULARITIES = ("route", "frame")
 _CLAUSE_OPS = frozenset({"all", "any", "not"})
 
-# Scope: a single route/npz, list of routes/npz, TagStore, or None
-# Accepts the same flexibility as expand_source - operates on the npz set
-ScopeItem = Union[Path, "TagStore"]
-Scope = Union[None, ScopeItem, Sequence[ScopeItem]]
+# Scope: a path-like, a TagStore, a sequence of those, or None.
+# Anything outside the index is silently dropped — scope never adds new frames.
+Scope = "None | TagStore | Path | Sequence[None | TagStore | Path | Sequence]"
 
-# Pickle index on-disk format (C1): 4-byte magic + 1-byte version, then a
+# Pickle index on-disk format: 4-byte magic + 1-byte version, then a
 # standard pickle. Legacy files without the header still load — the loader
 # detects "no magic" and falls back to unpickling the whole file.
 _PICKLE_MAGIC = b"TGID"
@@ -66,17 +86,21 @@ class Bucket:
         values: One entry per requested dimension (the same order as the
             ``dimensions`` arg of ``group_by``). A value of ``None`` means
             no member of this cell carries that dimension.
-        count: Number of unique paths in this cell.
         members: Concrete paths in this cell, sorted by ``str(path)``.
             Always populated (an empty list when ``group_by`` finds no
             items matching the clause / scope).
     """
 
     values: dict[str, str | None]
-    count: int
     members: list[Path] = field(default_factory=list)
 
+    @property
+    def count(self) -> int:
+        """Number of unique paths in this cell (== len(members))."""
+        return len(self.members)
+
     def label(self, sep: str = " | ") -> str:
+        """Join dimension values with *sep*; ``None`` renders as ``-``."""
         return sep.join("-" if v is None else v for v in self.values.values())
 
 
@@ -97,6 +121,62 @@ class _Index:
     route_tag_counts: dict[str, dict[Path, int]] = field(default_factory=lambda: defaultdict(dict))
 
 
+@dataclass
+class FrameTagDiff:
+    """Per-frame tag drift between the in-memory index and a sidecar on disk.
+
+    Both ``index_tags`` and ``disk_tags`` are full snapshots at the moment
+    of the comparison — their symmetric difference is what changed.
+    """
+
+    npz: Path
+    index_tags: frozenset[str]
+    disk_tags: frozenset[str]
+
+
+@dataclass
+class IndexDiff:
+    """Structured report comparing the in-memory index to on-disk sidecars.
+
+    Produced by :meth:`TagStore.diff_index_against_disk`. The report is
+    read-only — it never mutates the index.
+
+    Attributes:
+        frames_checked: Number of NPZ paths the report looked at (i.e. the
+            size of the in-memory frame set).
+        frames_with_tag_diff: Number of frames whose sidecar content differs
+            from ``index.frame_tags``. Computed only for frames whose
+            sidecar still exists; orphan frames (no sidecar) are counted in
+            ``orphan_frames`` instead.
+        orphan_frames: NPZ paths present in the index whose sidecar JSON is
+            missing on disk. These are reported, not removed — see
+            :meth:`TagStore.reindex_tags` for the rule about orphans.
+        tags_added: ``Counter[tag]`` of tags present on disk but absent from
+            the index. Counter is summed across frames.
+        tags_removed: ``Counter[tag]`` of tags present in the index but
+            absent from disk. Counter is summed across frames.
+        per_frame: First ``max_per_frame`` detailed diff entries, useful
+            for human inspection when the report is small. When the diff is
+            large this list is capped — rely on the counters for totals.
+    """
+
+    frames_checked: int
+    frames_with_tag_diff: int
+    orphan_frames: list[Path]
+    tags_added: Counter[str]
+    tags_removed: Counter[str]
+    per_frame: list[FrameTagDiff]
+
+    @property
+    def is_consistent(self) -> bool:
+        """``True`` when the index exactly matches every existing sidecar.
+
+        Orphan frames (missing sidecars) are still treated as inconsistency:
+        a frame the index thinks exists has no authoritative source on disk.
+        """
+        return self.frames_with_tag_diff == 0 and not self.orphan_frames
+
+
 def format_buckets(buckets: list[Bucket], dimensions: Sequence[str]) -> str:
     """Plain-text table for CLI / notebooks.
 
@@ -105,54 +185,39 @@ def format_buckets(buckets: list[Bucket], dimensions: Sequence[str]) -> str:
     so deduping is correct regardless of how many cells a member lands in.
     """
     headers = list(dimensions) + ["count"]
-    rows: list[list[str]] = []
-    for b in buckets:
-        row = [("-" if b.values.get(d) is None else str(b.values.get(d))) for d in dimensions]
-        row.append(str(b.count))
-        rows.append(row)
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
+    n_cols = len(headers)
+    rows = [
+        [("-" if b.values.get(d) is None else str(b.values.get(d))) for d in dimensions]
+        + [str(b.count)]
+        for b in buckets
+    ]
+    cell_widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(n_cols)
+    ]
     lines = [
-        "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)),
-        "  ".join("-" * widths[i] for i in range(len(headers))),
+        "  ".join(headers[i].ljust(cell_widths[i]) for i in range(n_cols)),
+        "  ".join("-" * cell_widths[i] for i in range(n_cols)),
     ]
     for row in rows:
-        lines.append("  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
+        lines.append(
+            "  ".join(row[i].ljust(cell_widths[i]) for i in range(n_cols))
+        )
 
     unique_members: set[Path] = set()
     for b in buckets:
         unique_members.update(b.members)
-    lines.append("  ".join("-" * widths[i] for i in range(len(headers))))
-    total_row: list[str] = []
-    for i in range(len(headers)):
-        if i == 0:
-            total_row.append("TOTAL".ljust(widths[i]))
-        elif headers[i] == "count":
-            total_row.append(str(len(unique_members)).ljust(widths[i]))
-        else:
-            total_row.append("".ljust(widths[i]))
-    lines.append("  ".join(total_row))
+    lines.append("  ".join("-" * cell_widths[i] for i in range(n_cols)))
+    total_count = str(len(unique_members))
+    lines.append(
+        "  ".join(
+            [
+                "TOTAL".ljust(cell_widths[0]),
+                total_count.ljust(cell_widths[1]),
+                *("".ljust(cell_widths[i]) for i in range(2, n_cols)),
+            ]
+        )
+    )
     return "\n".join(lines)
-
-
-#: Regex to extract frame number from filename like "XXX_00000000_XXXXXXXX.npz"
-_FRAME_NUMBER_RE = re.compile(r"_(\d{8})\.npz$")
-
-
-def _extract_frame_number(path: Path) -> int | None:
-    """Extract frame number from NPZ filename.
-
-    Filenames follow the pattern: <bag_time>_<prefix>_<frame_number>.npz
-    where frame_number is an 8-digit zero-padded integer.
-
-    Returns the frame number as int, or None if extraction fails.
-    """
-    match = _FRAME_NUMBER_RE.search(path.name)
-    if match:
-        return int(match.group(1))
-    return None
 
 
 def _match_frame_filter(path: Path, frame_filter: FrameFilter) -> bool:
@@ -177,7 +242,7 @@ def _match_frame_filter(path: Path, frame_filter: FrameFilter) -> bool:
         return fnmatch.fnmatch(path.name, frame_filter)
 
     # Range filter: (min, max) inclusive
-    frame_num = _extract_frame_number(path)
+    frame_num = extract_frame_number(path)
     if frame_num is None:
         return False
     return frame_filter[0] <= frame_num <= frame_filter[1]
@@ -194,20 +259,20 @@ def _build_index_from_frames(frames: list[Path]) -> _Index:
     route_tag_sets: dict[Path, set[str]] = defaultdict(set)
     route_frames: dict[Path, list[Path]] = defaultdict(list)
 
-    iterator = tqdm(frames, desc="Reading sidecar tags")
-    for npz in iterator:
-        # Ensure absolute path
-        npz = npz.resolve()
-        tags = read_tags(npz)
-        tags_set = frozenset(tags)
-        route = route_of(npz).resolve()
+    def read_one(npz: Path) -> tuple[Path, frozenset[str], Path]:
+        return (npz, frozenset(read_tags(npz)), route_of(npz))
 
-        idx.frames.append(npz)
-        idx.frame_tags[npz] = tags_set
-        idx.route_of_frame[npz] = route
-        route_frames[route].append(npz)
-
-        route_tag_sets[route].update(tags_set)
+    with ThreadPoolExecutor(max_workers=4) as exc:
+        futures = {exc.submit(read_one, npz): npz for npz in frames}
+        with tqdm(total=len(frames), desc="Reading sidecar tags") as pbar:
+            for future in as_completed(futures):
+                npz, tags_set, route = future.result()
+                idx.frames.append(npz)
+                idx.frame_tags[npz] = tags_set
+                idx.route_of_frame[npz] = route
+                route_frames[route].append(npz)
+                route_tag_sets[route].update(tags_set)
+                pbar.update(1)
 
     for route in sorted(route_frames.keys()):
         frames_list = sorted(route_frames[route])
@@ -221,55 +286,66 @@ def _build_index_from_frames(frames: list[Path]) -> _Index:
         for frame in frames_list:
             for tag in idx.frame_tags[frame]:
                 idx.tag_to_frames[tag].add(frame)
-
-    # Build tag counts per route for O(1) index updates
-    for route, frames_list in idx.frames_of_route.items():
-        for frame in frames_list:
-            for tag in idx.frame_tags[frame]:
                 idx.route_tag_counts[tag][route] = idx.route_tag_counts[tag].get(route, 0) + 1
 
     return idx
+
+
+class MutationScope:
+    """Context manager for batched fsync.
+
+    Defers fsync calls until the context exits while allowing index updates
+    to happen immediately. This gives accurate progress reporting while still
+    providing fast batch fsync.
+
+    Example::
+
+        with store.mutation_scope():
+            store.add_tags(["site:foo"], scope=route1)
+            store.remove_tags(["site:bar"], scope=route2)
+            store.add_tags_to_route(["env:prod"], route3)
+        # All fsync happens here
+
+    Note:
+        If an exception escapes the context, fsync is still attempted
+        to ensure data durability; any fsync errors are swallowed by
+        :func:`sidecar._fsync_dir`.
+    """
+
+    def __init__(self, sync: bool = True) -> None:
+        self._sync = sync
+        # Directories that need fsync at the end
+        self._dirs_to_fsync: set[Path] = set()
+
+    def __enter__(self) -> "MutationScope":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._sync:
+            for directory in self._dirs_to_fsync:
+                _fsync_dir(directory)
+            self._dirs_to_fsync.clear()
+
+    def add_dir_for_fsync(self, directory: Path) -> None:
+        """Register a directory for deferred fsync."""
+        self._dirs_to_fsync.add(directory)
 
 
 def _save_index_to_pickle(idx: _Index, output: str | Path) -> None:
     """Atomically write the index to a pickle file.
 
     On-disk format: ``_PICKLE_MAGIC + _PICKLE_VERSION + pickle_bytes``.
-    Writes go through a sibling ``.tmp`` and ``os.replace``; the parent
-    directory is fsync'd so a power-loss cannot leave a renamed file
-    whose directory entry hasn't been durably committed.
+    Delegates the tmp → fsync → rename → dir-fsync dance to
+    :func:`sidecar._atomic_write_bytes` so the durability contract is in
+    one place.
     """
     out = Path(output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    try:
-        with open(tmp, "wb") as f:
-            f.write(_PICKLE_MAGIC + _PICKLE_VERSION)
-            pickle.dump(idx, f, protocol=pickle.HIGHEST_PROTOCOL)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, out)
-    except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-    _fsync_dir(out.parent)
 
+    def write(f) -> None:
+        f.write(_PICKLE_MAGIC + _PICKLE_VERSION)
+        pickle.dump(idx, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-def _fsync_dir(directory: Path) -> None:
-    """Best-effort fsync of a directory entry. Some filesystems don't support it."""
-    try:
-        fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
+    _atomic_write_bytes(out, write)
 
 
 def _load_index_from_pickle(path: str | Path) -> _Index:
@@ -332,6 +408,7 @@ class TagStore:
         self._source = source
         self._index: _Index | None = None
         self._lock = threading.RLock()
+        self._mutation_scope: MutationScope | None = None
 
         if source is None:
             return
@@ -366,10 +443,9 @@ class TagStore:
         return self._index
 
     @staticmethod
-    def _check_granularity(g: str) -> str:
+    def _validate_granularity(g: Granularity) -> None:
         if g not in _GRANULARITIES:
             raise ValueError(f"bad granularity {g!r}; expected one of {_GRANULARITIES}")
-        return g
 
     @property
     def source(self) -> str | Path | None:
@@ -391,7 +467,7 @@ class TagStore:
 
     @staticmethod
     def build_index(
-        source: str | Path | Sequence[str | Path],
+        source: str | Path | Sequence[str | Path] | "TagStore",
         output: str | Path,
     ) -> "TagStore":
         """Scan *source*, build an in-memory index, and pickle it to *output*.
@@ -401,7 +477,9 @@ class TagStore:
         ``TagStore("path/to/index.tag")``.
 
         Args:
-            source: Directory, path-list JSON, list of paths, or single NPZ.
+            source: Directory, path-list JSON, list of paths, single NPZ,
+                or an already-built ``TagStore`` (in which case the existing
+                in-memory index is pickled directly — no rescan).
             output: Where to write the pickled index. The file name MUST
                     end with ``.tag``: ``TagStore`` only reloads files whose
                     suffix is ``.tag``, so a ``.pkl`` or unsuffixed file
@@ -412,7 +490,11 @@ class TagStore:
             raise ValueError(
                 f"output must end with '.tag' so TagStore can reload it; got {out.name!r}"
             )
-        store = TagStore(source)
+        store: TagStore
+        if isinstance(source, TagStore):
+            store = source
+        else:
+            store = TagStore(source)
         if store._index is None:
             raise ValueError("source produced no frames; cannot build index")
         _save_index_to_pickle(store._index, out)
@@ -432,6 +514,64 @@ class TagStore:
         """True if this store has a loaded index."""
         return self._index is not None
 
+    def _resolve_sync(self, sync: bool | None) -> bool:
+        """Resolve ``sync=None`` for mutating methods.
+
+        Returns ``True`` (per-file fsync) by default — the safe durable
+        choice when there's no surrounding batch. Returns ``False``
+        inside an active ``mutation_scope`` so callers don't need to
+        spell ``sync=False`` on every call.
+
+        Explicit ``True`` / ``False`` always wins (overrides both the
+        default and the scope).
+        """
+        if sync is not None:
+            return sync
+        return self._mutation_scope is None
+
+    def _post_mutation(self, npz: Path) -> None:
+        """Register ``npz.parent`` for deferred fsync if inside a scope."""
+        scope = self._mutation_scope
+        if scope is not None:
+            scope.add_dir_for_fsync(npz.parent)
+
+    @contextmanager
+    def mutation_scope(self, sync: bool = True):
+        """Context manager for batched mutations with deferred fsync.
+
+        Inside this scope, every mutating method (``add_tags``,
+        ``remove_tags``, ``replace_tags``, ``add_tags_to_route``) is
+        **automatically batched** — per-file fsync is suppressed and the
+        scope performs directory-level fsync once on exit. Callers do NOT
+        need to pass ``sync=False`` to inner calls.
+
+        Example::
+
+            with store.mutation_scope():
+                store.add_tags(["site:foo"], scope=route1)
+                store.remove_tags(["site:bar"], scope=route2)
+                store.add_tags_to_route(["env:prod"], route3)
+            # One directory-fsync happens here
+
+        Args:
+            sync: If True (default), fsync directories at scope exit so
+                  the new sidecar filenames survive a crash. If False,
+                  skip fsync entirely (caller handles durability; useful
+                  inside larger pipelines that already do their own
+                  fsync).
+
+        Explicit ``sync=`` on inner calls overrides this default — pass
+        ``sync=True`` to force a per-file fsync even inside the scope,
+        ``sync=False`` to skip per-file fsync outside the scope too.
+        """
+        if self._mutation_scope is not None:
+            raise RuntimeError("mutation_scope cannot be nested")
+        self._mutation_scope = MutationScope(sync=sync)
+        try:
+            yield self._mutation_scope
+        finally:
+            self._mutation_scope = None
+
     # --- mutate -----------------------------------------------------------
 
     def _mutate_frames(
@@ -445,69 +585,93 @@ class TagStore:
             frame_filter: Optional filter - either (min, max) tuple for frame number
                          range, a glob pattern string, or None for all frames.
             scope: Limit to specific npz/route paths (None = entire index).
-        """
-        if self._index is None:
-            return []
 
+        Raises:
+            ValueError: if no index is loaded.
+            FileNotFoundError: if any frame in scope+filter lacks a sidecar.
+        """
+        idx = self._require_index()
         scope_npzs = self._resolve_scope(scope, granularity="frame")
-        frames = [f for f in self._index.frames if f in scope_npzs]
+        frames = [f for f in idx.frames if f in scope_npzs]
 
         if frame_filter is not None:
             frames = [f for f in frames if _match_frame_filter(f, frame_filter)]
 
-        missing = [sidecar_path(npz) for npz in frames if not sidecar_path(npz).is_file()]
+        missing: list[Path] = []
+        for npz in frames:
+            side = sidecar_path(npz)
+            if not side.is_file():
+                missing.append(side)
         if missing:
             preview = ", ".join(str(p) for p in missing[:5])
             more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
             raise FileNotFoundError(f"missing sidecar(s) before mutate: {preview}{more}")
         return frames
 
-    def _update_index_for(self, npz: Path) -> None:
-        """Update in-memory index for a mutated NPZ.
+    def _update_index(
+        self,
+        npz: Path,
+        old_tags: Iterable[str],
+        new_tags: Iterable[str],
+    ) -> None:
+        """Fold a ``(old_tags → new_tags)`` diff into the in-memory index.
 
-        Uses precomputed route_tag_counts for O(1) tag presence checks.
-        Raises RuntimeError if *npz* is not in the route index — that means
-        a mutation slipped past `_mutate_frames`'s scope check, or someone
-        called this helper with a path outside the authoritative set.
+        This helper **never reads from disk**. The caller is the source of
+        truth for both states: ``old_tags`` is what the index *thinks* was
+        about to be replaced, and ``new_tags`` is what was just written to
+        the sidecar. The mutation pipeline (``add_tags`` / ``remove_tags`` /
+        ``remove_dimension`` / ``replace_tags``) has both pieces in hand
+        already, so threading them through keeps the index path free of
+        round-trips to the OS page cache.
+
+        Behaviour:
+
+        - If ``old_tags == new_tags`` the call is a no-op: no dict writes,
+          no counter updates.
+        - ``route_of_frame[npz]`` must be set; otherwise the npz isn't part
+          of an indexed route and we'd corrupt the route-level indexes by
+          maintaining them against a route we never registered. That state
+          would only come from bypassing ``_mutate_frames``'s preflight,
+          so we raise.
+
+        Concurrency:
+            All counter / set updates happen under the store's ``RLock``,
+            so this helper is safe to call from any mutating method.
         """
         idx = self._index
         if idx is None:
             return
-        new_tags = read_tags(npz)
-        new_tags_set = frozenset(new_tags)
-        old_tags_set = idx.frame_tags.get(npz, frozenset())
+        new_set = frozenset(new_tags)
+        old_set = frozenset(old_tags)
+        if new_set == old_set:
+            return
 
-        idx.frame_tags[npz] = new_tags_set
+        idx.frame_tags[npz] = new_set
 
         route = idx.route_of_frame.get(npz)
         if route is None:
             raise RuntimeError(
-                f"_update_index_for: {npz} not in route index; "
+                f"_update_index: {npz} not in route index; "
                 f"refusing to mutate an inconsistent in-memory state"
             )
 
-        # For each removed tag, check count to decide whether to remove from route index
-        for tag in old_tags_set - new_tags_set:
-            route_counts = idx.route_tag_counts.get(tag, {})
-            if route in route_counts:
-                route_counts[route] -= 1
-                count = route_counts[route]
-                if count <= 0:
-                    # No frames in this route have this tag anymore
-                    idx.tag_to_routes.get(tag, set()).discard(route)
-                    idx.tag_to_frames.get(tag, set()).discard(npz)
-                    # Clean up zero count
-                    del route_counts[route]
+        for tag in old_set - new_set:
+            counts = idx.route_tag_counts.get(tag)
+            if not counts or route not in counts:
+                continue
+            counts[route] -= 1
+            if counts[route] <= 0:
+                del counts[route]
+                idx.tag_to_routes.get(tag, set()).discard(route)
+                idx.tag_to_frames.get(tag, set()).discard(npz)
 
-        # Add new tags
-        for tag in new_tags_set - old_tags_set:
+        for tag in new_set - old_set:
             idx.tag_to_routes.setdefault(tag, set()).add(route)
             idx.tag_to_frames.setdefault(tag, set()).add(npz)
             idx.route_tag_counts[tag][route] = idx.route_tag_counts[tag].get(route, 0) + 1
 
-        # Update route_tags
         idx.route_tags[route] = frozenset(
-            (idx.route_tags.get(route, frozenset()) - old_tags_set) | new_tags_set
+            (idx.route_tags.get(route, frozenset()) - old_set) | new_set
         )
 
     # --- scope resolution -------------------------------------------------
@@ -650,6 +814,7 @@ class TagStore:
         *,
         frame_filter: FrameFilter = None,
         scope: Scope = None,
+        sync: bool | None = None,
     ) -> int:
         """Union *tags* onto matching frames. Returns files changed.
 
@@ -661,24 +826,39 @@ class TagStore:
             frame_filter: Optional filter - (min, max) tuple for frame number range,
                          or glob pattern string (e.g. "*_0000003[1-9]*.npz")
             scope: Limit to specific routes (None = entire index)
+            sync: ``True`` forces per-file fsync; ``False`` suppresses it;
+                default ``None`` follows the surrounding ``mutation_scope``
+                (batch=False outside, batch=True inside).
 
         Raises:
             ValueError: if no index is loaded (empty store). Use
                 ``TagStore(source)`` or ``TagStore.build_index(source, ...)``
                 before mutating.
             FileNotFoundError: if any matching frame lacks a sidecar.
+            StaleIndexError: if any matching sidecar's tag set on disk has
+                drifted from ``index.frame_tags[npz]``. The whole call is
+                aborted; no sidecar is written. Reconcile via
+                :meth:`TagStore.reindex_tags` and retry.
         """
-        self._require_index()
+        idx = self._require_index()
         to_add = normalize_tags(tags)
         to_add_set = frozenset(to_add)
         n = 0
+        sync = self._resolve_sync(sync)
         with self._lock:
             for npz in self._mutate_frames(frame_filter=frame_filter, scope=scope):
-                current = read_tags(npz)
-                if to_add_set - frozenset(current):
+                # Idempotent check uses the in-memory index: if every tag is
+                # already present we skip the write entirely (no disk read).
+                current = idx.frame_tags.get(npz, frozenset())
+                if to_add_set - current:
                     merged = normalize_tags(list(current) + to_add)
-                    write_tags(npz, merged)
-                    self._update_index_for(npz)
+                    # write_tags reads the sidecar to preserve non-tag
+                    # fields; that same read also lets it verify the on-disk
+                    # tag set still matches ``current``. A mismatch raises
+                    # StaleIndexError and leaves the sidecar untouched.
+                    write_tags(npz, merged, sync=sync, expected_tags=current)
+                    self._update_index(npz, current, merged)
+                    self._post_mutation(npz)
                     n += 1
         return n
 
@@ -688,6 +868,7 @@ class TagStore:
         *,
         frame_filter: FrameFilter = None,
         scope: Scope = None,
+        sync: bool | None = None,
     ) -> int:
         """Delete exact tag strings from matching frames. Returns files changed.
 
@@ -700,22 +881,34 @@ class TagStore:
             frame_filter: Optional filter - (min, max) tuple for frame number range,
                          or glob pattern string
             scope: Limit to specific routes (None = entire index)
+            sync: ``True`` forces per-file fsync; ``False`` suppresses it;
+                default ``None`` follows the surrounding ``mutation_scope``
+                (batch=False outside, batch=True inside).
 
         Raises:
             ValueError: if no index is loaded.
             FileNotFoundError: if any matching frame lacks a sidecar.
+            StaleIndexError: if any matching sidecar's tag set on disk has
+                drifted from ``index.frame_tags[npz]``. The whole call is
+                aborted; no sidecar is written. Reconcile via
+                :meth:`TagStore.reindex_tags` and retry.
         """
-        self._require_index()
+        idx = self._require_index()
         # Validate upfront — fail fast on malformed input.
         to_remove = set(normalize_tags(tags))
         n = 0
+        sync = self._resolve_sync(sync)
         with self._lock:
             for npz in self._mutate_frames(frame_filter=frame_filter, scope=scope):
-                current = read_tags(npz)
+                current = idx.frame_tags.get(npz, frozenset())
                 remaining = [t for t in current if t not in to_remove]
                 if len(remaining) != len(current):
-                    write_tags(npz, remaining)
-                    self._update_index_for(npz)
+                    # Verify-then-write: write_tags reads the sidecar to
+                    # preserve non-tag fields, then compares on-disk tags
+                    # against ``current``. StaleIndexError on drift.
+                    write_tags(npz, remaining, sync=sync, expected_tags=current)
+                    self._update_index(npz, current, remaining)
+                    self._post_mutation(npz)
                     n += 1
         return n
 
@@ -725,6 +918,7 @@ class TagStore:
         *,
         scope: Scope = None,
         frame_filter: FrameFilter = None,
+        sync: bool | None = None,
     ) -> int:
         """Delete every tag whose dimension is *dimension*. Returns files changed.
 
@@ -733,25 +927,36 @@ class TagStore:
             scope: Limit to specific routes (None = entire index).
             frame_filter: Optional filter - (min, max) tuple for frame number range,
                          or glob pattern string.
+            sync: ``True`` forces per-file fsync; ``False`` suppresses it;
+                default ``None`` follows the surrounding ``mutation_scope``.
 
         Raises:
             ValueError: if no index is loaded, or *dimension* fails the
                 ``[a-z0-9_]+`` regex.
             FileNotFoundError: if any matching frame lacks a sidecar.
+            StaleIndexError: if any matching sidecar's tag set on disk has
+                drifted from ``index.frame_tags[npz]``. The whole call is
+                aborted; no sidecar is written. Reconcile via
+                :meth:`TagStore.reindex_tags` and retry.
         """
-        self._require_index()
+        idx = self._require_index()
         if not is_valid_dimension(dimension):
             raise ValueError(f"bad dimension {dimension!r}: expected [a-z0-9_]+")
         n = 0
+        sync = self._resolve_sync(sync)
         with self._lock:
             for npz in self._mutate_frames(frame_filter=frame_filter, scope=scope):
-                current = read_tags(npz)
-                # read_tags already validated every tag is "dim:value", so
+                current = sorted(idx.frame_tags.get(npz, frozenset()))
+                # Index already validated every tag is "dim:value", so
                 # splitting is safe and avoids a parse_tag call per tag.
                 kept = [t for t in current if t.split(":", 1)[0] != dimension]
                 if len(kept) != len(current):
-                    write_tags(npz, kept)
-                    self._update_index_for(npz)
+                    # Verify-then-write: pass the index's view of current
+                    # so write_tags aborts with StaleIndexError if disk
+                    # has drifted.
+                    write_tags(npz, kept, sync=sync, expected_tags=current)
+                    self._update_index(npz, current, kept)
+                    self._post_mutation(npz)
                     n += 1
         return n
 
@@ -761,6 +966,7 @@ class TagStore:
         tag_pairs: Mapping[str, str],
         scope: Scope = None,
         frame_filter: FrameFilter = None,
+        sync: bool | None = None,
     ) -> int:
         """Replace specific tags with specific other tags, atomically.
 
@@ -776,11 +982,17 @@ class TagStore:
             scope: Limit to specific routes (None = entire index).
             frame_filter: Optional filter - (min, max) tuple for frame number range,
                          or glob pattern string.
+            sync: ``True`` forces per-file fsync; ``False`` suppresses it;
+                default ``None`` follows the surrounding ``mutation_scope``.
 
         Raises:
             ValueError: if no index is loaded, or any key/value fails
                 ``parse_tag``.
             FileNotFoundError: if any matching frame lacks a sidecar.
+            StaleIndexError: if any matching sidecar's tag set on disk has
+                drifted from ``index.frame_tags[npz]``. The whole call is
+                aborted; no sidecar is written. Reconcile via
+                :meth:`TagStore.reindex_tags` and retry.
         """
         self._require_index()
         # Validate all keys/values up front so a bad call fails fast and
@@ -790,10 +1002,12 @@ class TagStore:
             parse_tag(old)  # raises ValueError on invalid
             parse_tag(new)
             validated[old] = new
+        idx = self._require_index()
         n = 0
+        sync = self._resolve_sync(sync)
         with self._lock:
             for npz in self._mutate_frames(frame_filter=frame_filter, scope=scope):
-                current = read_tags(npz)
+                current = sorted(idx.frame_tags.get(npz, frozenset()))
                 current_set = set(current)
                 # Skip frames where the rewrite would be a no-op: old tag is
                 # absent, or the new tag is already present (a prior replace
@@ -822,8 +1036,12 @@ class TagStore:
                             new_list.append(t)
                             seen.add(t)
                 if changed:
-                    write_tags(npz, new_list)
-                    self._update_index_for(npz)
+                    # Verify-then-write: write_tags reads the sidecar, then
+                    # compares on-disk tags against ``current_set``. Drift
+                    # raises StaleIndexError and the sidecar is untouched.
+                    write_tags(npz, new_list, sync=sync, expected_tags=current_set)
+                    self._update_index(npz, current_set, new_list)
+                    self._post_mutation(npz)
                     n += 1
         return n
 
@@ -833,6 +1051,7 @@ class TagStore:
         route: str | Path,
         *,
         frame_filter: FrameFilter = None,
+        sync: bool | None = None,
     ) -> int:
         """Merge *tags* into every frame of a known route. Returns files changed.
 
@@ -849,17 +1068,181 @@ class TagStore:
             route: Route directory. Must be present in the index.
             frame_filter: Optional filter (range or glob) applied to that
                          route's frames.
+            sync: ``True`` forces per-file fsync; ``False`` suppresses it;
+                default ``None`` follows the surrounding ``mutation_scope``.
 
         Raises:
             ValueError: if no index is loaded, or *route* is not in the index.
+            FileNotFoundError: if any frame in the route lacks a sidecar.
+            StaleIndexError: if any matching sidecar's tag set on disk has
+                drifted from the index. The whole call is aborted; no
+                sidecar is written. Reconcile via
+                :meth:`TagStore.reindex_tags` and retry.
         """
         idx = self._require_index()
-        route_path = Path(route)
+        route_path = Path(route).resolve()
         if route_path not in idx.frames_of_route:
             raise ValueError(f"route not in index: {route_path}")
         # Reuse the standard scope path so preflight + index-update logic
         # stays in one place. The scope is a single known route.
-        return self.add_tags(tags, frame_filter=frame_filter, scope=route_path)
+        return self.add_tags(tags, frame_filter=frame_filter, scope=route_path, sync=sync)
+
+    # --- diagnostic / reconciliation --------------------------------------
+
+    def diff_index_against_disk(
+        self,
+        *,
+        max_per_frame: int = 100,
+    ) -> IndexDiff:
+        """Compare the in-memory index to every sidecar on disk.
+
+        This is a **read-only** diagnostic. It never mutates the index;
+        even a perfect mismatch produces the same in-memory state on
+        return.
+
+        For each NPZ in the index, the sidecar JSON is read and its tag
+        set compared against ``index.frame_tags[npz]``. Mismatches are
+        summarised:
+
+        - ``frames_with_tag_diff`` — count of frames where the tag sets
+          differ but the sidecar still exists.
+        - ``orphan_frames`` — frames in the index whose sidecar is
+          missing on disk (e.g. deleted by an out-of-band process).
+        - ``tags_added`` / ``tags_removed`` — ``Counter[tag]`` of tag
+          drift summed across all frames. ``tags_added[t]`` is the number
+          of frames whose sidecar carries ``t`` while the index doesn't;
+          ``tags_removed[t]`` is the opposite.
+        - ``per_frame`` — first ``max_per_frame`` detailed entries
+          (``FrameTagDiff``) for human inspection. When the diff is
+          large this list is capped.
+
+        Args:
+            max_per_frame: Cap on the ``per_frame`` list size. ``None``
+                keeps them all (may be slow on huge indexes).
+
+        Returns:
+            An :class:`IndexDiff`. ``IndexDiff.is_consistent`` is True
+            iff there is no tag drift and no orphans.
+
+        Raises:
+            ValueError: if no index is loaded.
+
+        Example::
+
+            store = TagStore("index.tag")
+            diff = store.diff_index_against_disk()
+            if not diff.is_consistent:
+                print(diff)                  # user sees the report
+                store.reindex_tags()         # one-call convergence
+        """
+        idx = self._require_index()
+
+        orphan_frames: list[Path] = []
+        tags_added: Counter[str] = Counter()
+        tags_removed: Counter[str] = Counter()
+        per_frame: list[FrameTagDiff] = []
+        frames_with_tag_diff = 0
+
+        for npz in idx.frames:
+            sidecar = sidecar_path(npz)
+            if not sidecar.is_file():
+                orphan_frames.append(npz)
+                continue
+            disk_tags = frozenset(read_tags(npz))
+            index_tags = idx.frame_tags.get(npz, frozenset())
+            if disk_tags == index_tags:
+                continue
+            frames_with_tag_diff += 1
+            tags_added.update(disk_tags - index_tags)
+            tags_removed.update(index_tags - disk_tags)
+            if max_per_frame is None or len(per_frame) < max_per_frame:
+                per_frame.append(
+                    FrameTagDiff(npz=npz, index_tags=index_tags, disk_tags=disk_tags)
+                )
+
+        return IndexDiff(
+            frames_checked=len(idx.frames),
+            frames_with_tag_diff=frames_with_tag_diff,
+            orphan_frames=orphan_frames,
+            tags_added=tags_added,
+            tags_removed=tags_removed,
+            per_frame=per_frame,
+        )
+
+    def reindex_tags(self) -> tuple[int, list[Path]]:
+        """Re-read every sidecar and rebuild ``frame_tags`` + reverse indexes.
+
+        The **structural** fields — ``frames``, ``route_of_frame``,
+        ``frames_of_route``, ``routes`` — are **not** touched. Only the
+        tag content is refreshed:
+
+        - ``frame_tags`` is overwritten from each sidecar's current state.
+        - ``tag_to_frames`` and ``tag_to_routes`` are rebuilt from scratch
+          against the new ``frame_tags``.
+        - ``route_tag_counts`` is recomputed for the new tag distribution.
+        - ``route_tags`` is recomputed as the union of each route's frames.
+
+        Missing sidecars (orphan frames) are **not** an error: they are
+        listed in the returned ``orphan_frames`` and the index keeps the
+        previous (stale) ``frame_tags[npz]`` for them. Cleaning up
+        orphans requires :meth:`TagStore.build_index`, which rescans the
+        source.
+
+        Returns:
+            ``(reindexed_count, orphan_frames)`` where ``reindexed_count``
+            is the number of frames whose sidecar was successfully
+            re-read and used to update ``frame_tags``.
+
+        Raises:
+            ValueError: if no index is loaded.
+
+        Example::
+
+            store = TagStore("index.tag")
+            store.reindex_tags()
+            # Now ``store.frame_tags`` mirrors disk truth; structural
+            # fields (frame/route lists) are unchanged.
+        """
+        idx = self._require_index()
+
+        # First pass: read every sidecar, accumulating new tag sets and
+        # noting orphans. Per-frame ``read_tags`` is the only IO here.
+        orphan_frames: list[Path] = []
+        new_frame_tags: dict[Path, frozenset[str]] = {}
+        reindexed_count = 0
+        for npz in idx.frames:
+            sidecar = sidecar_path(npz)
+            if not sidecar.is_file():
+                orphan_frames.append(npz)
+                # Keep the existing entry as-is — orphan cleanup is
+                # ``build_index``'s job.
+                new_frame_tags[npz] = idx.frame_tags.get(npz, frozenset())
+                continue
+            new_frame_tags[npz] = frozenset(read_tags(npz))
+            reindexed_count += 1
+
+        idx.frame_tags = new_frame_tags
+        idx.tag_to_frames = defaultdict(set)
+        idx.tag_to_routes = defaultdict(set)
+        idx.route_tag_counts = defaultdict(dict)
+        idx.route_tags = {}
+
+        # Single pass: rebuild tag_to_frames, tag_to_routes, route_tag_counts,
+        # and route_tags together so we walk new_frame_tags once.
+        for route in idx.routes:
+            tag_union: set[str] = set()
+            for frame in idx.frames_of_route.get(route, []):
+                frame_tags = new_frame_tags.get(frame, frozenset())
+                tag_union.update(frame_tags)
+                for tag in frame_tags:
+                    idx.tag_to_frames[tag].add(frame)
+                    idx.tag_to_routes[tag].add(route)
+                    idx.route_tag_counts[tag][route] = (
+                        idx.route_tag_counts[tag].get(route, 0) + 1
+                    )
+            idx.route_tags[route] = frozenset(tag_union)
+
+        return reindexed_count, orphan_frames
 
     # --- query ------------------------------------------------------------
 
@@ -886,18 +1269,16 @@ class TagStore:
             Sorted unique list of ``dim:value`` strings.
         """
         idx = self._require_index()
-        self._check_granularity(granularity)
+        self._validate_granularity(granularity)
         for d in dimensions or []:
             if not is_valid_dimension(d):
                 raise ValueError(f"bad dimension {d!r}: expected [a-z0-9_]+")
 
         scope_set = self._resolve_scope(scope, granularity=granularity)
         if granularity == "frame":
-            items = [f for f in idx.frames if f in scope_set]
-            tags_iter = (idx.frame_tags[f] for f in items)
+            tags_iter = (idx.frame_tags[f] for f in idx.frames if f in scope_set)
         else:
-            items = [r for r in idx.routes if r in scope_set]
-            tags_iter = (idx.route_tags[r] for r in items)
+            tags_iter = (idx.route_tags[r] for r in idx.routes if r in scope_set)
 
         out: set[str] = set()
         if dimensions is None:
@@ -931,7 +1312,7 @@ class TagStore:
             scope: Limit to specific routes (None = entire index)
         """
         idx = self._require_index()
-        self._check_granularity(granularity)
+        self._validate_granularity(granularity)
         scope_set = self._resolve_scope(scope, granularity=granularity)
 
         # Convenience "show me everything in scope" — saves callers a
@@ -942,26 +1323,15 @@ class TagStore:
             return [r for r in idx.routes if r in scope_set]
 
         if granularity == "frame":
-            if isinstance(clause, str):
-                return [
-                    p
-                    for p in idx.frames
-                    if self._match(clause, set(idx.frame_tags.get(p, frozenset()))) and p in scope_set
-                ]
             return [
                 p
                 for p in idx.frames
-                if self._match(clause, set(idx.frame_tags.get(p, frozenset()))) and p in scope_set
-            ]
-
-        if isinstance(clause, str):
-            return [
-                r
-                for r in idx.routes
-                if self._match(clause, set(idx.route_tags.get(r, frozenset()))) and r in scope_set
+                if self._match(clause, idx.frame_tags.get(p, frozenset())) and p in scope_set
             ]
         return [
-            r for r in idx.routes if self._match(clause, set(idx.route_tags.get(r, frozenset()))) and r in scope_set
+            r
+            for r in idx.routes
+            if self._match(clause, idx.route_tags.get(r, frozenset())) and r in scope_set
         ]
 
     def group_by(
@@ -1000,7 +1370,7 @@ class TagStore:
             dimensions.
         """
         idx = self._require_index()
-        self._check_granularity(granularity)
+        self._validate_granularity(granularity)
 
         dims = [dimensions] if isinstance(dimensions, str) else list(dimensions)
         for d in dims:
@@ -1011,12 +1381,12 @@ class TagStore:
         if granularity == "frame":
             items = [p for p in idx.frames if p in scope_set]
             if clause is not None:
-                items = [p for p in items if self._match(clause, set(idx.frame_tags[p]))]
+                items = [p for p in items if self._match(clause, idx.frame_tags[p])]
             tags_of = idx.frame_tags
         else:
             items = [r for r in idx.routes if r in scope_set]
             if clause is not None:
-                items = [r for r in items if self._match(clause, set(idx.route_tags[r]))]
+                items = [r for r in items if self._match(clause, idx.route_tags[r])]
             tags_of = idx.route_tags
 
         buckets: dict[tuple[str | None, ...], list[Path]] = defaultdict(list)
@@ -1025,13 +1395,18 @@ class TagStore:
             per_dim: list[list[str | None]] = []
             item_skipped = False
             for dim in dims:
-                vals = sorted({parse_tag(t)[1] for t in tags if parse_tag(t)[0] == dim})
-                if not vals:
+                vals: set[str] = set()
+                for t in tags:
+                    d, v = parse_tag(t)
+                    if d == dim:
+                        vals.add(v)
+                vals_sorted = sorted(vals)
+                if not vals_sorted:
                     if drop_missing:
                         item_skipped = True
                         break
-                    vals = [None]
-                per_dim.append(vals)
+                    vals_sorted = [None]
+                per_dim.append(vals_sorted)
             if item_skipped:
                 continue
             for combo in product(*per_dim):
@@ -1061,17 +1436,11 @@ class TagStore:
                     seen.add(m)
                     uniq.append(m)
             uniq.sort(key=str)
-            out.append(
-                Bucket(
-                    values=values,
-                    count=len(uniq),
-                    members=uniq,
-                )
-            )
+            out.append(Bucket(values=values, members=uniq))
         return out
 
-    def _match(self, clause: Clause, tags: set[str]) -> bool:
-        """Match a clause against a set of tags."""
+    def _match(self, clause: Clause, tags: Iterable[str]) -> bool:
+        """Match a clause against a collection of tags."""
         if isinstance(clause, str):
             if clause.endswith(":*"):
                 # Wildcard match: "dim:*" matches any tag starting with "dim:"

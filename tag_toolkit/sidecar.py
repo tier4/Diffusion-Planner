@@ -20,7 +20,7 @@ import os
 import re
 import warnings
 from pathlib import Path
-from typing import Iterable
+from typing import IO, Callable, Iterable
 
 TAG_RE = re.compile(r"^([a-z0-9_]+):([a-z0-9_]+)$")
 DIM_RE = re.compile(r"^[a-z0-9_]+$")
@@ -109,6 +109,16 @@ def read_sidecar(npz: str | Path) -> dict:
     return data
 
 
+class StaleIndexError(RuntimeError):
+    """The on-disk sidecar has drifted from the in-memory index.
+
+    Raised by :func:`write_tags` when the caller supplies
+    ``expected_tags`` and the actual ``tags`` field on disk does not match.
+    The sidecar is left untouched on this error — re-read the index
+    (:meth:`TagStore.reindex_tags`) and retry.
+    """
+
+
 def read_tags(npz: str | Path) -> list[str]:
     """Return the ``tags`` list for *npz* (missing ≡ ``[]``).
 
@@ -137,24 +147,42 @@ def read_tags(npz: str | Path) -> list[str]:
     return sorted(set(good))
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write *text* to *path* atomically (write tmp, fsync, rename).
+def _atomic_write_bytes(
+    path: Path,
+    write_fn: Callable[[IO[bytes]], None],
+    *,
+    sync: bool = True,
+) -> None:
+    """Atomically write *path* by calling *write_fn* with an open binary file.
 
-    On any error the tmp file is removed and *path* is left untouched.
-    Creates parent directories if needed. After the rename the parent
-    directory entry is fsync'd so a power-loss cannot leave a renamed
-    file whose directory entry hasn't been durably committed (best-effort:
-    some filesystems reject directory fsync with ``OSError``).
+    Writes go through a sibling ``.tmp`` (so the rename is atomic on the same
+    filesystem), get an ``os.fsync`` on the file before ``os.replace``, and
+    finally ``os.fsync`` the parent directory so the new name is durable on
+    power-loss. *write_fn* may write as many times and as much as it likes;
+    the file is flushed and fsync'd after it returns and before the rename.
+
+    On any error inside the ``with``, the tmp file is removed and *path* is
+    left untouched.
+
+    Args:
+        path: Target file path.
+        write_fn: Callable receiving the open binary file handle. Must do
+            its own encoding if it wants text on disk.
+        sync: If True (default), fsync file and directory for durability.
+            If False, skip both fsyncs; caller is responsible for durability
+            (typically via ``store.mutation_scope``).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+        with open(tmp, "wb") as f:
+            write_fn(f)
             f.flush()
-            os.fsync(f.fileno())
+            if sync:
+                os.fsync(f.fileno())
         os.replace(tmp, path)
-        _fsync_dir(path.parent)
+        if sync:
+            _fsync_dir(path.parent)
     except Exception:
         # Best-effort cleanup; tmp may not exist if open() failed early.
         try:
@@ -162,6 +190,16 @@ def _atomic_write_text(path: Path, text: str) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _atomic_write_text(path: Path, text: str, *, sync: bool = True) -> None:
+    """Atomic text write. Thin wrapper over :func:`_atomic_write_bytes`."""
+    payload = text.encode("utf-8")
+    _atomic_write_bytes(
+        path,
+        lambda f: f.write(payload),
+        sync=sync,
+    )
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -195,30 +233,61 @@ def cleanup_tmp_files(directory: Path) -> int:
     return removed
 
 
-def write_tags(npz: str | Path, tags: Iterable[str], *, create: bool = False) -> list[str]:
+def write_tags(
+    npz: str | Path,
+    tags: Iterable[str],
+    *,
+    sync: bool = True,
+    expected_tags: Iterable[str] | None = None,
+) -> list[str]:
     """Write normalized ``tags`` into the sidecar, preserving other fields.
 
     Atomic: a sibling ``.json.tmp`` is written and renamed over the target
-    on success. If the sidecar is missing and *create* is false, raises
-    ``FileNotFoundError``.
+    on success. If the sidecar is missing, raises :class:`FileNotFoundError`
+    — :func:`write_tags` will never create a sidecar that didn't already
+    exist.
+
+    Args:
+        npz: Path to the NPZ file.
+        tags: Tags to write.
+        sync: If True (default), fsync for durability. If False, skip fsync
+              for batch operations where caller flushes separately.
+        expected_tags: If given, the current ``tags`` list on disk must
+              equal ``frozenset(expected_tags)`` exactly — otherwise
+              :class:`StaleIndexError` is raised and the sidecar is left
+              untouched. Pass ``None`` (the default) to skip the check;
+              useful when callers don't have an index to compare against.
     """
     side = sidecar_path(npz)
-    if side.is_file():
-        data = read_sidecar(npz)
-    elif create:
-        data = {}
-    else:
+    if not side.is_file():
         raise FileNotFoundError(f"sidecar not found: {side}")
+    data = read_sidecar(npz)
+
+    # Structural check: 'tags' must be a list (possibly empty). Non-list
+    # values are a corruption signal we cannot recover from silently —
+    # coerce them to a set and the bug is hidden.
+    raw_tags = data.get("tags")
+    if raw_tags is None:
+        raw_tags = []
+    if not isinstance(raw_tags, list):
+        raise ValueError(
+            f"sidecar {side} has non-list 'tags' field: "
+            f"type={type(raw_tags).__name__}"
+        )
+    on_disk = frozenset(raw_tags)
+
+    if expected_tags is not None:
+        expected = frozenset(expected_tags)
+        if on_disk != expected:
+            raise StaleIndexError(
+                f"sidecar {side} has drifted from index: "
+                f"disk={sorted(on_disk)} expected={sorted(expected)}"
+            )
+
     normalized = normalize_tags(tags)
     data["tags"] = normalized
-    _atomic_write_text(side, json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+    _atomic_write_text(side, json.dumps(data, indent=1, ensure_ascii=False) + "\n", sync=sync)
     return normalized
-
-
-def tag_values_for(tags: Iterable[str], dimension: str) -> list[str]:
-    """Values for *dimension* present in *tags*, sorted unique."""
-    values = {parse_tag(t)[1] for t in tags if parse_tag(t)[0] == dimension}
-    return sorted(values)
 
 
 def drop_dimension(tags: Iterable[str], dimension: str) -> list[str]:

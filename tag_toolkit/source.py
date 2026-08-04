@@ -108,7 +108,7 @@ def _expand_spec(path_s: str) -> list[Path]:
     """Expand a single source specification."""
     # NPZ file: return as-is (light exists check — 1 stat() call, no rglob)
     if path_s.endswith(".npz"):
-        p = Path(path_s)
+        p = Path(os.path.abspath(path_s))
         if not p.exists():
             raise FileNotFoundError(f"source not found: {path_s}")
         return [p]
@@ -142,7 +142,9 @@ def _expand_path_list_file(path: Path) -> list[Path]:
 
     # Training lists: every entry is an npz path — no stat, no rglob.
     if all(_is_npz_path(entry) for entry in data):
-        return _dedupe_npz_strings([os.path.expanduser(entry) for entry in data])
+        return _dedupe_npz_strings(
+            [os.path.abspath(os.path.expanduser(entry)) for entry in data]
+        )
 
     # Mixed / closed-loop lists may contain route directories — expand those only.
     out: list[Path] = []
@@ -158,6 +160,7 @@ def _expand_path_list_file(path: Path) -> list[Path]:
 
 def _expand_directory(root: Path) -> list[Path]:
     """Collect ``*.npz`` under *root*. Prefer a path list for large datasets."""
+    root = os.path.abspath(root)
     out: list[Path] = []
     # os.walk is lighter than Path.rglob on deep trees; still O(files).
     for dirpath, _dirnames, filenames in os.walk(root):

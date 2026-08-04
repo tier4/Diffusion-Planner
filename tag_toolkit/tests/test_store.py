@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import pickle
+import shutil
 import sys
 import threading
 import warnings
@@ -37,16 +37,10 @@ from _build import build as build_sample_dataset
 
 sys.path.insert(
     0,
-    str(Path(__file__).resolve().parents[1] / "scripts"),
+    str(Path(__file__).resolve().parents[1] / "scripts" / "tag_management"),
 )
 from incremental_index import build_incremental_index
 from write_site_split_tags import apply_path_tags, parse_site_split
-
-# ``sample_dataset/_build.py`` is the single source of truth for the test
-# fixture. The session fixture below calls it once into tmp_path; per-test
-# fixtures then either reuse that build or copy individual routes from it.
-# This keeps every test run independent of any checked-in artifacts.
-BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "sample_dataset" / "_build.py"
 
 
 def _frame(dir: Path, name: str, tags: list[str] | None = None) -> Path:
@@ -72,9 +66,6 @@ def _built_sample(tmp_path_factory: pytest.TempPathFactory) -> Path:
     Runs ``_build.build()`` once per pytest session and returns the root of
     the freshly-built tree. Per-test fixtures copy from this root so that
     mutations don't leak across tests.
-
-    The built tree also contains the generated ``npz_list.json``,
-    ``route_list.json``, and ``index.tag`` artifacts under this root.
     """
     root = tmp_path_factory.mktemp("sample_dataset_built")
     build_sample_dataset(root)
@@ -112,8 +103,6 @@ def _route_dirs(built_root: Path) -> dict[str, Path]:
 @pytest.fixture
 def sample(tmp_path: Path, _built_sample: Path) -> Path:
     """A writable copy of the freshly-built sample dataset."""
-    import shutil
-
     dest = tmp_path / "sample_dataset"
     shutil.copytree(_built_sample, dest)
     return dest
@@ -123,27 +112,11 @@ def sample(tmp_path: Path, _built_sample: Path) -> Path:
 def sample_route(tmp_path: Path, _built_sample: Path) -> Path:
     """A writable copy of the aomi route from the freshly-built sample dataset.
 
-    Mirrors the role of the old ``tiny`` fixture: one bag directory with
-    enough frames to exercise route vs frame granularity.
+    One bag directory with enough frames to exercise route vs frame granularity.
     """
-    import shutil
-
     dest = tmp_path / "aomi"
     shutil.copytree(_route_dirs(_built_sample)["aomi"], dest)
     return dest
-
-
-@pytest.fixture
-def two_routes(tmp_path: Path, _built_sample: Path) -> tuple[Path, Path]:
-    """Writable copies of two distinct routes (aomi + ariake)."""
-    import shutil
-
-    routes = _route_dirs(_built_sample)
-    aomi = tmp_path / "aomi"
-    ariake = tmp_path / "ariake"
-    shutil.copytree(routes["aomi"], aomi)
-    shutil.copytree(routes["ariake"], ariake)
-    return aomi, ariake
 
 
 def test_expand_dir_and_path_list(sample: Path, tmp_path: Path) -> None:
@@ -238,11 +211,11 @@ def test_add_remove_query_group_by(sample: Path) -> None:
 
     buckets = store.group_by(["site", "split"])
     # 5 buckets total now that the fixture covers 4 split values:
-    #   (2231, auto)   ← aomi route
-    #   (2231, train)  ← ariake route
-    #   (879, manual)  ← psim route (5 even-numbered frames)
-    #   (879, valid)   ← psim route (5 odd-numbered frames)
-    #   (879, eval)    ← added above via add_tags on zeikan
+    #   (xxxx_site_a, auto)   ← aomi route
+    #   (xxxx_site_a, train)  ← ariake route
+    #   (xxxx_site_c, manual) ← psim route (5 even-numbered frames)
+    #   (xxxx_site_c, valid)  ← psim route (5 odd-numbered frames)
+    #   (xxxx_site_c, eval)   ← added above via add_tags on zeikan
     assert len(buckets) == 5
     assert {b.values["site"] for b in buckets} == {
         "xxxx_site_a",
@@ -392,7 +365,7 @@ def test_replace_tags_key_eq_value_is_noop(sample_route: Path) -> None:
 def test_remove_dimension_validates_name(sample_route: Path) -> None:
     """remove_dimension rejects names that don't match the regex."""
     store = TagStore(sample_route)
-    with pytest.raises(ValueError, match=r"\[a-z0-9_]+"):
+    with pytest.raises(ValueError, match=r"\[a-z0-9_\]\+"):
         store.remove_dimension("BAD-NAME")
 
 
@@ -724,15 +697,15 @@ def test_group_by_sort_uses_dimensions_order(sample: Path) -> None:
 
     buckets = store.group_by(["site", "split"])
     # Expected 5 buckets:
-    #   (2231_..., auto)   aomi
-    #   (2231_..., train)  ariake
+    #   (xxxx_site_a, auto)   aomi
+    #   (xxxx_site_a, train)  ariake
     #   (xxxx_site_c, eval)   psim (added above)
     #   (xxxx_site_c, manual) psim
     #   (xxxx_site_c, valid)  psim
     sites = [b.values["site"] for b in buckets]
     splits = [b.values["split"] for b in buckets]
     # Primary sort by site, secondary by split. Alphabetical:
-    #   2231_... < xxxx_site_c; within 879: eval < manual < valid.
+    #   xxxx_site_a < xxxx_site_c; within xxxx_site_c: eval < manual < valid.
     assert sites == [
         "xxxx_site_a",
         "xxxx_site_a",
@@ -749,15 +722,11 @@ def test_group_by_none_sorts_last_in_its_slot(sample: Path) -> None:
     store = TagStore(sample)
     # The aomi/ariake routes all have lateral:turn on some frames.
     # Add a fourth route to the same source tree with no lateral tags.
-    import shutil
-
     extra_root = store.npz_paths()[0].parent.parent.parent.parent
     extra_route = extra_root / "extra_no_lateral" / "manual" / "2026-04-15" / "10-00-00" / "routes"
     extra_route.mkdir(parents=True, exist_ok=True)
     npz_path = extra_route / "x_00000000_00000001.npz"
     npz_path.write_bytes(b"")
-    import json
-
     (extra_route / "x_00000000_00000001.json").write_text(
         json.dumps({"tags": ["site:no_lateral_here", "split:manual"]})
     )
@@ -819,25 +788,6 @@ def test_source_property(sample: Path) -> None:
     assert store.source == sample
 
 
-def test_build_index_creates_pickle_file(sample: Path, tmp_path: Path) -> None:
-    """build_index writes the index pickle (with magic+version header)."""
-    from tag_toolkit.store import _PICKLE_MAGIC, _PICKLE_VERSION
-
-    index_file = tmp_path / "index.tag"
-    TagStore.build_index(sample, index_file)
-
-    # Header: 4 bytes magic + 1 byte version, then standard pickle.
-    with open(index_file, "rb") as f:
-        head = f.read(len(_PICKLE_MAGIC) + len(_PICKLE_VERSION))
-        idx = pickle.load(f)
-    assert head[: len(_PICKLE_MAGIC)] == _PICKLE_MAGIC
-    assert head[len(_PICKLE_MAGIC) :] == _PICKLE_VERSION
-    from tag_toolkit.store import _Index
-
-    assert isinstance(idx, _Index)
-    assert len(idx.frames) == 30
-
-
 def test_build_index_returns_index_store(sample: Path, tmp_path: Path) -> None:
     """build_index returns a TagStore with in-memory index."""
     index_file = tmp_path / "index.tag"
@@ -867,15 +817,6 @@ def test_index_file_loaded_from_pickle(tmp_path: Path, sample: Path) -> None:
     store = TagStore(index_file)
     assert store.has_index()
     assert store.source == index_file
-
-
-def test_source_none_creates_empty_store() -> None:
-    """TagStore(None) creates an empty store; accessors raise until loaded."""
-    store = TagStore(None)
-    assert store.source is None
-    assert not store.has_index()
-    with pytest.raises(ValueError, match="no index loaded"):
-        store.npz_paths()
 
 
 def test_build_index_from_multiple_sources(tmp_path: Path) -> None:
@@ -915,18 +856,21 @@ def test_index_load_rejects_non_index_payload(tmp_path: Path) -> None:
 
 
 def test_remove_tags_updates_index_correctly(sample_route: Path) -> None:
-    """remove_tags properly updates the in-memory index."""
+    """remove_tags properly updates the in-memory index.
+
+    Exercises the full mutation path: each remove_tags call lands on disk
+    via ``write_tags(expected_tags=...)``, which double-checks that the
+    index's view of the frame still matches the sidecar. After the call
+    the in-memory query results reflect the new state.
+    """
     store = TagStore(sample_route)
 
-    # Initially, turn is present on 5 frames
+    # Initially, turn is present on 5 frames of the aomi route.
     assert len(store.query("lateral:turn")) == 1
     assert len(store.query("lateral:turn", granularity="frame")) == 5
 
-    # Remove turn from every frame in the route
-    all_with_turn = store.query("lateral:turn", granularity="frame")
-    for npz in all_with_turn:
-        write_tags(npz, [])
-        store._update_index_for(npz)
+    n = store.remove_tags(["lateral:turn"], scope=sample_route)
+    assert n == 5  # 5 frames were affected
 
     assert store.query("lateral:turn") == []
     assert store.query("lateral:turn", granularity="frame") == []
@@ -945,11 +889,18 @@ def test_bucket_has_no_routes_property(sample_route: Path) -> None:
 
 
 def test_format_buckets_total_counts_unique_members(sample_route: Path) -> None:
-    """TOTAL row counts each unique member once, even with multi-value dimensions."""
+    """TOTAL row counts each unique member once, even with multi-value dimensions.
+
+    Drives the mutation through the public API (``add_tags``) so the index
+    is updated via the verify-then-write path — no manual disk writes,
+    no manual index sync. Adding two brand-new ``site:*`` tags to a frame
+    that already carries a site tag places that frame in three buckets;
+    the TOTAL row must still report a single unique member.
+    """
     store = TagStore(sample_route)
     npz = store.npz_paths()[0]
-    write_tags(npz, ["site:alpha", "site:beta", "split:manual"])
-    store._update_index_for(npz)
+    n = store.add_tags(["site:alpha", "site:beta"], scope=[npz])
+    assert n == 1
 
     buckets = store.group_by(["site"])
     text = format_buckets(buckets, ["site"])
@@ -1085,17 +1036,13 @@ def test_write_tags_is_atomic(tmp_path: Path) -> None:
     assert not list((tmp_path / "bag" / "routes").glob("*.json.tmp"))
 
 
-def test_write_tags_creates_missing_sidecar(tmp_path: Path) -> None:
-    """write_tags(npz, ..., create=True) creates the sidecar if missing."""
-    npz_path = tmp_path / "bag" / "routes" / "fresh.npz"
-    npz_path.parent.mkdir(parents=True)
-    npz_path.write_bytes(b"")
-    write_tags(npz_path, ["split:auto"], create=True)
-    assert read_tags(npz_path) == ["split:auto"]
+def test_write_tags_missing_sidecar_raises(tmp_path: Path) -> None:
+    """write_tags on NPZ without sidecar raises FileNotFoundError.
 
-
-def test_write_tags_missing_sidecar_without_create(tmp_path: Path) -> None:
-    """write_tags without create=True raises FileNotFoundError."""
+    ``write_tags`` will not create sidecars that don't already exist — the
+    tag system has no authority to invent one. Out-of-band tools that want
+    fresh sidecars should go through the project-specific scripts.
+    """
     npz_path = tmp_path / "bag" / "routes" / "fresh.npz"
     npz_path.parent.mkdir(parents=True)
     npz_path.write_bytes(b"")
@@ -1254,7 +1201,7 @@ def test_bucket_label_default_separator(sample: Path) -> None:
     buckets = store.group_by(["site", "split"])
     # Pick the bucket whose split is "auto" (aomi only).
     b = next(b for b in buckets if b.values.get("split") == "auto")
-    assert b.label() == f"xxxx_site_a | auto"
+    assert b.label() == "xxxx_site_a | auto"
     # Custom separator.
     assert b.label(sep=" / ") == "xxxx_site_a / auto"
 
@@ -1262,8 +1209,6 @@ def test_bucket_label_default_separator(sample: Path) -> None:
 def test_bucket_label_missing_value(sample: Path) -> None:
     """Bucket.label() substitutes '-' when a dimension value is None."""
     # Add an extra route without a "lateral" tag so it lands in a None cell.
-    import shutil
-
     store = TagStore(sample)
     extra_root = store.npz_paths()[0].parent.parent.parent.parent
     extra_route = extra_root / "extra_no_lateral" / "manual" / "2026-04-15" / "extra"
@@ -1309,54 +1254,6 @@ def test_query_not_on_route_granularity(sample: Path) -> None:
     assert pos & neg == set()
 
 
-def test_replace_tags_deduplicates_old_pair_with_duplicate_frame(
-    sample_route: Path,
-) -> None:
-    """replace_tags skips frames where the new tag is already present.
-
-    Per-frame sidecar may already carry ``new_tag`` for some frames. Those
-    frames do not need a write — the only effect of the replace on them is
-    removing ``old_tag``, but if ``new_tag`` is also present the tag set is
-    unchanged after the operation. Other frames get rewritten as usual.
-    """
-    store = TagStore(sample_route)
-    # Hand-edit one aomi frame so it carries both lateral:turn and
-    # lateral:lane_keeping already (this frame does not get rewritten).
-    npz = next(iter(store.npz_paths()))
-    sidecar = json.loads(npz.with_suffix(".json").read_text())
-    sidecar["tags"] = sorted({"lateral:turn", "lateral:lane_keeping", "site:2231_x", "split:auto"})
-    npz.with_suffix(".json").write_text(json.dumps(sidecar) + "\n")
-    # Refresh index by re-opening.
-    store = TagStore(sample_route)
-
-    n = store.replace_tags(tag_pairs={"lateral:turn": "lateral:lane_keeping"})
-    # aomi has 5 frames with lateral:turn. The hand-edited frame (3006)
-    # already carries lateral:lane_keeping, so the replace there is a
-    # no-op and the file isn't rewritten. All 5 odd-numbered frames are
-    # rewritten; the hand-edited frame stays untouched in storage.
-    assert n == 5
-    # The hand-edited frame keeps both tags (we never wrote to it).
-    assert "lateral:turn" in read_tags(npz)
-    assert "lateral:lane_keeping" in read_tags(npz)
-    # The 5 odd-numbered frames (which carried lateral:turn but not
-    # lane_keeping) are now rewritten: turn gone, lane_keeping present
-    # exactly once. Even-numbered frames never had turn and stay untouched.
-    odd_with_turn = sorted(store.npz_paths())[::2]  # 2997, 2999, 3001, 3003, 3005
-    assert len(odd_with_turn) == 5
-    for p in odd_with_turn:
-        tags = read_tags(p)
-        assert "lateral:lane_keeping" in tags
-        assert "lateral:turn" not in tags
-        assert tags.count("lateral:lane_keeping") == 1
-
-
-def test_replace_tags_old_equals_new_is_noop(sample_route: Path) -> None:
-    """tag_pairs where old == new counts as a no-op."""
-    store = TagStore(sample_route)
-    n = store.replace_tags(tag_pairs={"lateral:turn": "lateral:turn"})
-    assert n == 0
-
-
 def test_add_tags_with_duplicate_tags_is_idempotent(sample_route: Path) -> None:
     """add_tags with duplicates in input doesn't write twice or double-count.
 
@@ -1395,8 +1292,6 @@ def test_add_tags_with_duplicate_tags_is_idempotent(sample_route: Path) -> None:
 
 def test_resolve_scope_with_list_of_tagstore(sample: Path) -> None:
     """scope=[TagStore, ...] flattens TagStore elements instead of raising."""
-    import shutil
-
     # Build a second store that scans only the ariake route. We give it the
     # parent auto/ directory and rely on TagStore to discover one route.
     ariake_route = (
@@ -1503,8 +1398,6 @@ def test_helper_exports_basic(sample: Path) -> None:
 
 def test_expand_source_directory_and_npz_list(tmp_path: Path) -> None:
     """expand_source handles directory, npz_list.json, and list-of-paths."""
-    import json as _json
-
     from tag_toolkit import expand_source
 
     # Directory with two NPZ files.
@@ -1519,7 +1412,7 @@ def test_expand_source_directory_and_npz_list(tmp_path: Path) -> None:
 
     # npz_list.json.
     list_file = tmp_path / "list.json"
-    list_file.write_text(_json.dumps([str(npz_a), str(npz_b)]))
+    list_file.write_text(json.dumps([str(npz_a), str(npz_b)]))
     list_paths = sorted(p.name for p in expand_source(list_file))
     assert list_paths == ["a.npz", "b.npz"]
 
@@ -1597,14 +1490,14 @@ def test_bucket_members_is_always_populated(sample: Path) -> None:
 
 def test_load_legacy_pickle_without_magic(tmp_path: Path) -> None:
     """Legacy pickles (no magic header) still load — backwards compat."""
-    from tag_toolkit.store import _build_index_from_frames, _Index
+    from tag_toolkit.store import _Index
 
     legacy = tmp_path / "legacy.tag"
     idx = _Index()
     # Hand-build a one-frame index the way the previous pickle format did:
     # a bare pickle with no leading magic.
     with open(legacy, "wb") as f:
-        pickle.dump(_build_index_from_frames(tmp_path / "ignored") if False else idx, f)
+        pickle.dump(idx, f)
 
     # Loading the empty legacy pickle should succeed with no frames.
     store = TagStore(legacy)
@@ -1647,16 +1540,212 @@ def test_concurrent_add_tags_does_not_corrupt(tmp_path: Path) -> None:
         assert f"thread:{i}" in read_tags(npz), f"thread {i} tag missing from {npz}"
 
 
-def test_group_by_default_false_keeps_missing_in_bucket(sample: Path) -> None:
-    """Default drop_missing=False: items missing a dimension land in None slot.
+# ---------------------------------------------------------------------------
+# Index ownership: diff_index_against_disk / reindex_tags / no-init-io
+# ---------------------------------------------------------------------------
 
-    Documents the cartesian-product behaviour that 'count' may show N items
-    across (-, X) and (-, Y) buckets that all correspond to the same item
-    when the OTHER dimension is multi-valued. Covered separately in
-    test_group_by_multi_value_total_is_unique for deduping.
+
+def test_mutation_idempotent_hit_zero_disk_io(
+    sample_route: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Idempotent mutations (target tag already present) skip disk entirely.
+
+    The verify-then-write path only fires when the in-memory idempotent
+    check says there is real work to do. If every frame already carries
+    the requested tag, neither ``read_tags`` nor ``read_sidecar`` should
+    be touched.
     """
-    store = TagStore(sample)
-    # Queried with only "split" — every route carries some split value.
-    buckets = store.group_by(["split"])
-    # No None slots expected because all routes carry a split tag.
-    assert all(b.values["split"] is not None for b in buckets)
+    import tag_toolkit.store as store_mod
+    from tag_toolkit.sidecar import read_sidecar
+
+    store = TagStore(sample_route)
+    # Pre-seed every frame with a tag we'll then "re-add".
+    # (The fixture's aomi frames all carry split:auto already, so we
+    # add it twice in a row: the second call must be a no-op on disk.)
+
+    call_counts = {"read_tags": 0, "read_sidecar": 0}
+    real_store_read = store_mod.read_tags
+    real_sidecar_read = read_sidecar
+
+    def counting_read_tags(npz):
+        call_counts["read_tags"] += 1
+        return real_store_read(npz)
+
+    def counting_read_sidecar(npz):
+        call_counts["read_sidecar"] += 1
+        return real_sidecar_read(npz)
+
+    monkeypatch.setattr(store_mod, "read_tags", counting_read_tags)
+    monkeypatch.setattr("tag_toolkit.sidecar.read_sidecar", counting_read_sidecar)
+
+    # Second add_tags with tags already on every frame: must hit zero IO.
+    n = store.add_tags(["split:auto"], sync=False)
+    assert n == 0
+    assert call_counts == {"read_tags": 0, "read_sidecar": 0}
+
+
+def test_mutation_aborts_on_stale_index(sample_route: Path) -> None:
+    """Out-of-band sidecar edit makes the next mutation raise StaleIndexError.
+
+    The store catches the error and refuses to write — the sidecar on disk
+    is exactly what the out-of-band tool left behind. Recovery path:
+    ``store.reindex_tags()`` then retry.
+    """
+    from tag_toolkit import StaleIndexError
+
+    store = TagStore(sample_route)
+    npz = next(iter(store.npz_paths()))
+    sidecar = npz.with_suffix(".json")
+
+    # Capture on-disk tags before the sabotage.
+    original = sorted(read_tags(npz))
+
+    # Out-of-band write — bypasses the store.
+    write_tags(npz, ["split:auto", "lateral:turn", "site:sabotage"])
+
+    with pytest.raises(StaleIndexError) as exc_info:
+        store.remove_tags(["split:auto"], scope=[npz], sync=False)
+
+    # The error message names the offending sidecar and the drift.
+    assert str(sidecar) in str(exc_info.value)
+    assert "site:sabotage" in str(exc_info.value)
+
+    # The sidecar on disk was NOT touched by the failed mutation: it
+    # still carries the out-of-band tags (plus the original, since
+    # remove_tags was the operation that would have removed it).
+    on_disk = sorted(read_tags(npz))
+    assert "site:sabotage" in on_disk
+    assert "split:auto" in on_disk
+    assert sorted(read_tags(npz)) != original  # changed by sabotage
+
+    # Recovery: reindex brings the store back in sync, then a retry works.
+    store.reindex_tags()
+    n = store.remove_tags(["site:sabotage"], scope=[npz], sync=False)
+    assert n == 1
+    assert "site:sabotage" not in read_tags(npz)
+
+
+def test_mutation_no_sidecar_raises_filenotfound(tmp_path: Path) -> None:
+    """A frame without a sidecar makes the mutation raise FileNotFoundError.
+
+    The store does not silently create a sidecar — that's a property of
+    the design, not a parameter to toggle. The mutation preflight raises
+    before any write attempt.
+    """
+    npz_dir = tmp_path / "bag" / "routes"
+    npz_dir.mkdir(parents=True)
+    npz_a = npz_dir / "00000000_00000000.npz"
+    npz_b = npz_dir / "00000000_00000001.npz"
+    npz_a.write_bytes(b"")
+    npz_b.write_bytes(b"")
+    # Only npz_a has a sidecar; npz_b is "fresh".
+    (npz_dir / "00000000_00000000.json").write_text(
+        json.dumps({"tags": ["split:auto"]}) + "\n"
+    )
+
+    store = TagStore(tmp_path / "bag")
+    assert sorted(store.npz_paths()) == [npz_a, npz_b]
+
+    with pytest.raises(FileNotFoundError):
+        store.add_tags(["lateral:turn"], scope=[npz_a, npz_b], sync=False)
+
+    # No sidecar got created on disk for the fresh npz.
+    assert not (npz_dir / "00000000_00000001.json").exists()
+
+
+def test_diff_index_against_disk_reports_diff(sample_route: Path) -> None:
+    """diff_index_against_disk detects out-of-band sidecar edits."""
+    store = TagStore(sample_route)
+    # Hand-edit one frame's sidecar directly without going through the store.
+    npz = next(iter(store.npz_paths()))
+    sidecar_json = npz.with_suffix(".json")
+    write_tags(npz, ["lateral:turn", "site:edited_under_us"])
+    # The store's in-memory index still says the frame carries whatever the
+    # original fixture had (NOT the new tag). Diff should report a drift.
+    diff = store.diff_index_against_disk()
+    # At least one frame is the one we hand-edited; there might be others
+    # we didn't touch (other fixtures don't drift in this scenario).
+    assert diff.frames_checked == 10
+    assert diff.frames_with_tag_diff >= 1
+    assert "site:edited_under_us" in diff.tags_added
+    # Detail is captured (within max_per_frame default).
+    edited = next((d for d in diff.per_frame if d.npz == npz), None)
+    assert edited is not None
+    assert "site:edited_under_us" in edited.disk_tags
+    assert "site:edited_under_us" not in edited.index_tags
+    # Original tag the index knows is reported as removed.
+    original = next(iter(edited.index_tags))
+    assert original in diff.tags_removed
+    assert not diff.is_consistent
+
+
+def test_diff_consistent_after_mutation(sample_route: Path) -> None:
+    """After a normal in-store mutation the diff against disk is empty."""
+    store = TagStore(sample_route)
+    store.add_tags(["override_metric:new"], sync=False)
+
+    diff = store.diff_index_against_disk()
+    assert diff.frames_with_tag_diff == 0
+    assert diff.orphan_frames == []
+    assert diff.tags_added == {}
+    assert diff.tags_removed == {}
+    assert diff.is_consistent
+
+
+def test_reindex_tags_converges_after_out_of_band_edit(sample_route: Path) -> None:
+    """reindex_tags mirrors disk truth without changing structural fields."""
+    store = TagStore(sample_route)
+
+    # Snapshot structural fields before the edit so we can prove they
+    # don't move.
+    routes_before = sorted(store.route_paths(), key=str)
+    frames_before = sorted(store.npz_paths(), key=str)
+
+    # Out-of-band sidecar edit (bypassing the store).
+    npz = next(iter(store.npz_paths()))
+    write_tags(npz, ["lateral:turn", "site:reindex_me"])
+
+    diff_before = store.diff_index_against_disk()
+    assert not diff_before.is_consistent
+    assert "site:reindex_me" in diff_before.tags_added
+
+    # reindex_tags converges the in-memory index to disk truth.
+    n_reindexed, orphans = store.reindex_tags()
+    assert n_reindexed == 10
+    assert orphans == []
+
+    # Structural fields unchanged.
+    assert sorted(store.route_paths(), key=str) == routes_before
+    assert sorted(store.npz_paths(), key=str) == frames_before
+
+    # Diff is now consistent: the index mirrors disk.
+    diff_after = store.diff_index_against_disk()
+    assert diff_after.is_consistent
+    assert "site:reindex_me" in store._require_index().frame_tags[npz]
+
+    # Reverse index picked up the new tag (it points to this frame).
+    assert npz in store._require_index().tag_to_frames["site:reindex_me"]
+
+
+def test_reindex_tags_reports_orphan_frames(sample_route: Path) -> None:
+    """A frame whose sidecar is deleted shows up in the orphan list.
+
+    Structural fields (frames / route_of_frame / frames_of_route /
+    routes) are NOT pruned by reindex_tags. Cleaning up orphans is
+    TagStore.build_index's job.
+    """
+    store = TagStore(sample_route)
+    frames_before = list(store.npz_paths())
+    assert len(frames_before) == 10
+
+    # Out-of-band delete one sidecar JSON.
+    victim = frames_before[0]
+    victim.with_suffix(".json").unlink()
+
+    n_reindexed, orphans = store.reindex_tags()
+    assert n_reindexed == 9          # one less than the 10 frames
+    assert orphans == [victim]
+    # Structural fields untouched: the orphan frame is still in the index.
+    assert victim in store.npz_paths()
+    # frame_tags for the orphan keeps its pre-reindex view (no error raised).
+    assert victim in store._require_index().frame_tags

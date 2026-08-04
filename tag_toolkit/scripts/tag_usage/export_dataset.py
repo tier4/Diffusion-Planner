@@ -74,26 +74,11 @@ Output Structure:
 import argparse
 import json
 import os
-import re
 from collections import defaultdict
 from pathlib import Path
 
-from tag_toolkit.routes import route_of
+from tag_toolkit.routes import extract_frame_number, route_of
 from tag_toolkit.store import TagStore
-
-_FRAME_NUMBER_RE = re.compile(r"_(\d{8})\.npz$")
-
-
-def _extract_frame_number(path: Path) -> int | None:
-    """Extract frame number from NPZ filename.
-
-    Filenames follow the pattern: <bag_time>_<prefix>_<frame_number>.npz
-    where frame_number is an 8-digit zero-padded integer.
-    """
-    match = _FRAME_NUMBER_RE.search(path.name)
-    if match:
-        return int(match.group(1))
-    return None
 
 
 def _merge_segments(
@@ -218,7 +203,7 @@ def export_close_loop(
 
     for npz in matching_frames:
         r = route_of(npz)
-        frame_num = _extract_frame_number(npz)
+        frame_num = extract_frame_number(npz)
         if frame_num is not None:
             route_frames[r].append(frame_num)
             # Cache dimension value for this npz

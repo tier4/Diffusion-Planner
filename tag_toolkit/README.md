@@ -34,36 +34,37 @@ For small datasets or one-off queries, pass a directory directly:
 ```python
 from tag_toolkit import TagStore
 
-# Scan and build in-memory index
 store = TagStore("/path/to/dataset")
 routes = store.query("split:auto")  # instant
 ```
 
 ### 2. Index mode (fast for large datasets)
 
-For large datasets, build a pickled index once and load it for repeated queries:
+For large datasets, build a pickled index once and load it for repeated
+queries. The output path must end in `.tag` — `TagStore` only reloads
+files whose suffix is `.tag`, so a `.pkl` or unsuffixed file would be
+re-scanned as a dataset and silently fail to load.
 
 ```python
 from tag_toolkit import TagStore
 
-# Build index (do once after updating tags). The output path must end in
-# `.tag` — TagStore only reloads files whose suffix is `.tag`, so a `.pkl`
-# or unsuffixed file would be re-scanned as a dataset and silently fail
-# to load.
 TagStore.build_index("/path/to/dataset", "/path/to/tags.tag")
-
-# Load from index (fast)
 store = TagStore("/path/to/tags.tag")
 routes = store.query("split:auto")
 ```
+
+Note: `add_tags` and friends update the in-memory index immediately, but
+they do **not** rewrite the saved `.tag` file. To refresh the on-disk
+pickle after on-the-fly mutations, run `build_index` again (with the same
+source).
 
 ## Route vs frame
 
 Tags are stored per frame, but most workflows care about whole routes. So
 `query(...)` and `group_by(...)` default to `granularity="route"`.
 
-At route granularity, a route has a tag if **any** frame under it has that tag.
-Use `granularity="frame"` when you need per-frame results instead.
+At route granularity, a route has a tag if **any** frame under it has
+that tag. Use `granularity="frame"` when you need per-frame results.
 
 ## Tag format
 
@@ -117,7 +118,6 @@ routes = store.query("split:auto")
 ### 3. Add tags to frames
 
 ```python
-from pathlib import Path
 from tag_toolkit import TagStore
 
 store = TagStore("/path/to/tags.tag")
@@ -126,16 +126,50 @@ store = TagStore("/path/to/tags.tag")
 n = store.add_tags(["override_metric:centerline"])
 print(f"updated {n} sidecars")
 
-# Or tag just one NPZ by passing it as scope. Use ``npz_paths()`` (or a
-# known route) so the scope hits something already in the index — paths
-# outside the index are silently dropped, but unknown paths that look like
-# directories raise FileNotFoundError during scope expansion.
+# Or tag just one NPZ by passing it as scope. Use npz_paths() (or a known
+# route) so the scope hits something already in the index.
 target_npz = store.npz_paths()[0]
 n = store.add_tags(["override_metric:centerline"], scope=target_npz)
 print(f"updated {n} sidecar for {target_npz}")
 ```
 
-### 4. Group by multiple labels
+Mutations verify that the on-disk sidecar matches the in-memory index
+before writing. If anything has drifted (for example an out-of-band
+script edited a sidecar), the mutation raises `StaleIndexError` and
+leaves the sidecar untouched. Reconcile with `store.reindex_tags()` and
+retry:
+
+```python
+from tag_toolkit import StaleIndexError
+
+try:
+    store.add_tags(["override_metric:centerline"], scope=target_npz)
+except StaleIndexError:
+    print("drift detected — reindexing")
+    store.reindex_tags()
+    store.add_tags(["override_metric:centerline"], scope=target_npz)
+```
+
+### 4. Batch writes (fast for large datasets)
+
+For bulk operations, use `mutation_scope` — all per-file fsyncs are
+automatically batched and a single directory-fsync happens at scope exit:
+
+```python
+from tag_toolkit import TagStore
+
+store = TagStore("/path/to/tags.tag")
+
+# Every mutating call inside the scope is automatically batched —
+# no per-file fsync, just one directory-fsync on exit.
+with store.mutation_scope():
+    store.add_tags(["site:foo"], scope=route1)
+    store.add_tags(["site:bar"], scope=route2)
+    store.add_tags_to_route(["env:prod"], route3)
+# All fsync happens here, once.
+```
+
+### 5. Group by multiple labels
 
 ```python
 from tag_toolkit import TagStore, format_buckets
@@ -149,18 +183,15 @@ print(buckets[0].members[:2])  # route list in this bucket
 ```text
 site                                   split   count
 -------------------------------------  ------  -----
-xxxx_site_a  auto    1
-xxxx_site_a  train   1
-xxxx_site_b                          manual  1
-xxxx_site_b                          valid   1
+xxxx_site_a                            auto    1
+xxxx_site_a                            train   1
+xxxx_site_c                            manual  1
+xxxx_site_c                            valid   1
 -------------------------------------  ------  -----
 TOTAL                                          3
-[
-  PosixPath('/path/to/dataset/proj_a/xxxx_site_a/auto/2026-06-23/10-55-13'),
-]
 ```
 
-### 5. Replace and remove
+### 6. Replace and remove
 
 ```python
 from tag_toolkit import TagStore
@@ -177,8 +208,6 @@ store.remove_tags(["lateral:turn"])
 store.remove_dimension("lateral")
 
 # Replace one specific tag with another, atomically per sidecar.
-# Like add_tags, scopes resolve against the in-memory index; paths not in
-# the index are silently skipped.
 store.replace_tags(tag_pairs={"split:eval": "split:train"})
 ```
 

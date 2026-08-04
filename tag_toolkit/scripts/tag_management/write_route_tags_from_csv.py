@@ -14,8 +14,10 @@ Usage::
         /path/to/mapping.csv \\
         --match-col t4_dataset_id \\
         --tag-dimensions devops_site devops_override_label \\
-        [--dry-run] \\
         [--index /path/to/output.tag]
+
+All file writes are batched (per-file fsync deferred) and synced once at
+the end for maximum performance.
 
 Example CSV (scenario_t4_mapping.csv)::
 
@@ -48,6 +50,7 @@ if _TAG_TOOLKIT_PATH.exists():
 
 from tag_toolkit import TagStore
 from tag_toolkit.sidecar import format_tag, is_valid_dimension, read_sidecar
+from tqdm import tqdm
 
 
 # =============================================================================
@@ -183,9 +186,10 @@ def apply_csv_tags_to_routes(
     Returns:
         Dict with statistics:
             - total_routes: total routes in the store
-            - matched_routes: routes that matched a CSV row
-            - tagged_files: files actually written (excludes dry_run)
-            - unmatched_csv_rows: CSV rows with no matching route
+            - csv_matched_routes: routes found in the CSV
+            - store_unmatched_routes: routes in store but not in CSV
+            - dim_tagged_counts: dict of {dimension: count} for tagged routes
+            - tagged_files: number of routes successfully tagged
             - errors: number of errors encountered
 
     Raises:
@@ -200,7 +204,7 @@ def apply_csv_tags_to_routes(
             "total_routes": 0,
             "matched_routes": 0,
             "tagged_files": 0,
-            "unmatched_csv_rows": 0,
+            "unmatched_csv_keys": [],
             "errors": 0,
         }
 
@@ -215,10 +219,14 @@ def apply_csv_tags_to_routes(
     idx = store._require_index()
     routes = idx.routes
     total_routes = len(routes)
-    matched_routes = 0
+    csv_matched_routes = 0
+    store_unmatched_routes: list[str] = []
     tagged_files = 0
-    unmatched_csv_keys = set(csv_index.keys())
+    dim_tagged_counts: dict[str, int] = {dim: 0 for dim in tag_dimensions}
     errors = 0
+
+    # Collect all route-tag pairs first (for dry-run or batch processing)
+    route_tags_to_apply: list[tuple[Path, list[str]]] = []
 
     for route in routes:
         # Get match value from route's sidecar
@@ -229,10 +237,10 @@ def apply_csv_tags_to_routes(
         # Look up in CSV index
         csv_row = csv_index.get(match_value)
         if csv_row is None:
+            store_unmatched_routes.append(match_value)
             continue
 
-        matched_routes += 1
-        unmatched_csv_keys.discard(match_value)
+        csv_matched_routes += 1
 
         # Build tag list from CSV
         tags_to_add: list[str] = []
@@ -259,23 +267,37 @@ def apply_csv_tags_to_routes(
         if not tags_to_add:
             continue
 
-        # Apply tags
-        if dry_run:
+        # Track per-dimension counts
+        for dim in tag_dimensions:
+            if any(tag.startswith(f"{_normalize_for_tag(dim)}:") for tag in tags_to_add):
+                dim_tagged_counts[dim] += 1
+
+        route_tags_to_apply.append((route, tags_to_add))
+
+    # Apply tags (batch or individual)
+    if dry_run:
+        for route, tags_to_add in route_tags_to_apply:
             tags_str = ", ".join(tags_to_add)
             print(f"  [DRY-RUN] Would add [{tags_str}] to {route.name}")
-        else:
-            try:
-                store.add_tags_to_route(tags_to_add, route)
-                tagged_files += 1
-            except Exception as e:
-                print(f"  Error: Failed to update {route}: {e}")
-                errors += 1
+    else:
+        with store.mutation_scope():
+            with tqdm(total=len(route_tags_to_apply), desc="Tagging routes", unit="route") as pbar:
+                for route, tags_to_add in route_tags_to_apply:
+                    try:
+                        store.add_tags_to_route(tags_to_add, route)
+                        tagged_files += 1
+                        pbar.update(1)
+                    except Exception as e:
+                        print(f"\n  Error: Failed to update {route}: {e}")
+                        errors += 1
+                        pbar.update(1)
 
     return {
         "total_routes": total_routes,
-        "matched_routes": matched_routes,
+        "csv_matched_routes": csv_matched_routes,
+        "store_unmatched_routes": store_unmatched_routes,
+        "dim_tagged_counts": dim_tagged_counts,
         "tagged_files": tagged_files,
-        "unmatched_csv_rows": len(unmatched_csv_keys),
         "errors": errors,
     }
 
@@ -355,6 +377,7 @@ def main() -> int:
 
     # Apply tags
     print("[2/3] Applying tags...")
+
     stats = apply_csv_tags_to_routes(
         store,
         args.csv_path,
@@ -377,16 +400,21 @@ def main() -> int:
     print("Summary")
     print("=" * 60)
     print(f"  Total routes in store: {stats['total_routes']}")
-    print(f"  Routes matched from CSV: {stats['matched_routes']}")
-    print(f"  Files tagged: {stats['tagged_files']}")
-    print(f"  Unmatched CSV rows: {stats['unmatched_csv_rows']}")
+    print(f"  Routes found in CSV: {stats['csv_matched_routes']}")
     print(f"  Errors: {stats['errors']}")
     print()
+    print("  Per-dimension tagged routes:")
+    for dim, count in stats["dim_tagged_counts"].items():
+        print(f"    {dim}: {count}")
 
-    if not args.dry_run and stats['unmatched_csv_rows'] > 0:
-        print("Note: Some CSV rows had no matching route. "
-              "This is normal if the CSV contains routes not in the dataset.")
+    unmatched_routes = stats.get("store_unmatched_routes", [])
+    if unmatched_routes:
+        print()
+        print("  Routes in store but not in CSV:")
+        for key in sorted(unmatched_routes):
+            print(f"    {key}")
 
+    print()
     print("Done!")
     return 0
 
