@@ -74,6 +74,7 @@ def pick_representative_row(rows: list[dict], mode: str = "worst") -> dict | Non
 
 EPISODE_TABLE_COLUMNS = [
     "site",
+    "vehicle_type",
     "route",
     "segment",
     "n_steps_run",
@@ -89,13 +90,20 @@ EPISODE_TABLE_COLUMNS = [
 ]
 
 
-def _episode_row(table: wandb.Table, site: str, r: dict, out_dir: str | Path | None) -> None:
+def _episode_row(
+    table: wandb.Table,
+    site: str,
+    r: dict,
+    out_dir: str | Path | None,
+    vehicle_type: str | None = None,
+) -> None:
     seg = r.get("segment")
     seg_str = f"[{seg[0]},{seg[1]}]" if seg else ""
     video_path = str(_segment_paths(out_dir, r)[1]) if out_dir is not None else ""
     comp = r.get("route_completion")
     table.add_data(
         site,
+        vehicle_type or "",
         r.get("route", ""),
         seg_str,
         int(r.get("n_steps_run", 0)),
@@ -112,17 +120,19 @@ def _episode_row(table: wandb.Table, site: str, r: dict, out_dir: str | Path | N
 
 
 def build_combined_episode_table(
-    site_episodes: list[tuple[str, list[dict], str | Path | None]],
+    site_episodes: list[tuple[str, list[dict], str | Path | None]]
+    | list[tuple[str, list[dict], str | Path | None, str | None]],
 ) -> wandb.Table:
-    """ONE episode table across every site (``site`` column filled per row), so the W&B UI's
-    native sort/filter/group-by works across the whole run — group by ``site``, sort by
-    ``n_collision_events`` desc, etc. — in a single interactive panel instead of one table
-    per site. ``site_episodes`` is ``[(site_name, rows, out_dir), ...]``.
+    """ONE episode table across every site, so the W&B UI's native sort/filter/group-by
+    works across the whole run in a single panel. ``site_episodes`` is
+    ``[(site_name, rows, out_dir), ...]``, optionally with a 4th ``vehicle_type`` element.
     """
     table = wandb.Table(columns=EPISODE_TABLE_COLUMNS)
-    for site, rows, out_dir in site_episodes:
+    for entry in site_episodes:
+        site, rows, out_dir, *rest = entry
+        vehicle_type = rest[0] if rest else None
         for r in rows:
-            _episode_row(table, site, r, out_dir)
+            _episode_row(table, site, r, out_dir, vehicle_type)
     return table
 
 
@@ -140,7 +150,32 @@ def resolve_report_link(out_dir: str | Path, report_base_url: str | None = None)
     return str(out_dir.resolve())
 
 
-def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
+def _aggregate_rollup(prefix: str, values: list[dict], objects_values: list[dict]) -> dict:
+    """Rollup under ``{prefix}/...``, shared by the overall and per-vehicle logs."""
+    log: dict = {}
+    n_sites = len(values)
+    total_segments = sum(int(s.get("n_segments", 0)) for s in values)
+
+    log[f"{prefix}/n_sites"] = n_sites
+    log[f"{prefix}/n_segments"] = total_segments
+
+    comp_num = sum(
+        float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
+    )
+    log[f"{prefix}/route_completion"] = comp_num / total_segments if total_segments else 0.0
+
+    for key in COMPARISON_OVERVIEW_SUM_KEYS:
+        log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
+    for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
+        log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in objects_values)
+
+    return log
+
+
+def build_sites_aggregate_log(
+    summaries: dict[str, dict],
+    site_vehicle_types: dict[str, str] | None = None,
+) -> dict:
     """Cross-site rollup under ``closed_loop_overview/`` (the at-a-glance block): the segment-
     weighted mean route-completion (so long routes aren't under-weighted), plus the plain
     cross-site SUM of each event count. Deliberately just the small non-saturating set — no
@@ -150,31 +185,33 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
     collision-style sums (``OBJECTS_ONLY_OVERVIEW_SUM_KEYS``), since those are 0 by
     construction in the empty-world ablation and would just dilute the objects-mode number
     with zeros.
+
+    If ``site_vehicle_types`` (``{site_label: vehicle_type}``) is given, the same rollup is
+    also computed per vehicle type under ``closed_loop_overview_by_vehicle/{vehicle_type}/...``.
     """
     log: dict = {}
     if not summaries:
         return log
     values = list(summaries.values())
     objects_values = [s for label, s in summaries.items() if not _is_noobj_label(label)]
-    n_sites = len(values)
-    total_segments = sum(int(s.get("n_segments", 0)) for s in values)
+    log.update(_aggregate_rollup("closed_loop_overview", values, objects_values))
 
-    log["closed_loop_overview/n_sites"] = n_sites
-    log["closed_loop_overview/n_segments"] = total_segments
-
-    comp_num = sum(
-        float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
-    )
-    log["closed_loop_overview/route_completion"] = (
-        comp_num / total_segments if total_segments else 0.0
-    )
-
-    for key in COMPARISON_OVERVIEW_SUM_KEYS:
-        log[f"closed_loop_overview/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
-    for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
-        log[f"closed_loop_overview/{key}"] = sum(
-            int(extract_score(s, key) or 0) for s in objects_values
-        )
+    if site_vehicle_types:
+        by_vehicle: dict[str, list[str]] = {}
+        for label in summaries:
+            base_label = label[: -len("__noobj")] if _is_noobj_label(label) else label
+            vehicle_type = site_vehicle_types.get(base_label) or site_vehicle_types.get(label)
+            if vehicle_type is None:
+                continue
+            by_vehicle.setdefault(vehicle_type, []).append(label)
+        for vehicle_type, labels in by_vehicle.items():
+            v_values = [summaries[label] for label in labels]
+            v_objects_values = [summaries[label] for label in labels if not _is_noobj_label(label)]
+            log.update(
+                _aggregate_rollup(
+                    f"closed_loop_overview_by_vehicle/{vehicle_type}", v_values, v_objects_values
+                )
+            )
 
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 
