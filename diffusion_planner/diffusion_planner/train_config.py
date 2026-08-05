@@ -164,6 +164,9 @@ class TrainConfig:
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
     closed_loop_sites_npz_root: str = ""
+    # optional JSON file of {project_code_name: vehicle_type_label} for labeling
+    # closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.
+    closed_loop_project_vehicle_map: str = ""
     # Object-mode ablation per source: "objects"=normal, "noobj"=empty-world (no dynamic/static
     # objects, map kept — isolates "reacts badly to traffic" from "can't follow the
     # route/map"). npz_root defaults to objects-only (usually a single curated scene);
