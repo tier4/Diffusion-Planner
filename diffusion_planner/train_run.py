@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         "fires independently). Empty = disabled.",
     )
     p.add_argument(
+        "--closed_loop_project_vehicle_map",
+        default="",
+        help="optional JSON file of {project_code_name: vehicle_type_label} for labeling "
+        "--closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.",
+    )
+    p.add_argument(
         "--enable_temporal_stability_eval",
         type=boolean,
         default=_train_config_default("enable_temporal_stability_eval"),
@@ -145,6 +151,10 @@ def main() -> None:
         "--closed_loop_sites_npz_root",
         str(Path(args.closed_loop_sites_npz_root).resolve())
         if args.closed_loop_sites_npz_root
+        else "",
+        "--closed_loop_project_vehicle_map",
+        str(Path(args.closed_loop_project_vehicle_map).resolve())
+        if args.closed_loop_project_vehicle_map
         else "",
         "--enable_temporal_stability_eval",
         str(args.enable_temporal_stability_eval),
