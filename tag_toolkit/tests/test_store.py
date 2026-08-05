@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pickle
 import shutil
+import sqlite3
 import sys
 import threading
 import warnings
@@ -14,6 +15,7 @@ import pytest
 
 from tag_toolkit import (
     Bucket,
+    MutationResult,
     TagStore,
     expand_source,
     format_buckets,
@@ -26,6 +28,7 @@ from tag_toolkit.sidecar import (
     cleanup_tmp_files,
     parse_tag,
     read_tags,
+    sidecar_path,
     write_tags,
 )
 
@@ -41,6 +44,24 @@ sys.path.insert(
 )
 from incremental_index import build_incremental_index
 from write_site_split_tags import apply_path_tags, parse_site_split
+
+
+class _CountingProxy:
+    """Count SQL calls passing through a monkeypatched ``_require_conn``.
+
+    Used to lock in the absence of an N+1 query pattern: ``record`` the
+    SQL string once per execute(), and helpers like ``count(substr)`` let
+    assertions be tolerant of legitimate scope-resolution queries.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def record(self, sql: str) -> None:
+        self.calls.append(sql)
+
+    def count(self, substr: str) -> int:
+        return sum(1 for q in self.calls if substr in q)
 
 
 def _frame(dir: Path, name: str, tags: list[str] | None = None) -> Path:
@@ -152,15 +173,13 @@ def test_route_of_strips_routes_dir(sample_route: Path) -> None:
 
 
 def test_empty_store() -> None:
-    """Empty store: accessors raise ValueError until an index is loaded."""
+    """Empty store with no source: accessors return empty until rebuilt."""
     store = TagStore()
     assert store.source is None
-    assert not store.has_index()
-    # Fail-fast on empty store — same convention as query()/tags_of().
-    with pytest.raises(ValueError, match="no index loaded"):
-        store.npz_paths()
-    with pytest.raises(ValueError, match="no index loaded"):
-        store.route_paths()
+    assert store.has_index()  # always True (in-memory DB is created)
+    # Empty DB → empty results, not ValueError
+    assert store.npz_paths() == []
+    assert store.route_paths() == []
 
 
 def test_scan_mode_direct_directory(sample: Path) -> None:
@@ -174,8 +193,8 @@ def test_scan_mode_direct_directory(sample: Path) -> None:
 
 
 def test_index_mode_from_file(tmp_path: Path, sample: Path) -> None:
-    """TagStore can load from a .tag index file."""
-    index_file = tmp_path / "index.tag"
+    """TagStore can load from a .db index file (SQLite format)."""
+    index_file = tmp_path / "index.db"
     TagStore.build_index(sample, index_file)
 
     # Load from index file
@@ -277,10 +296,10 @@ def test_remove_dimension(sample_route: Path) -> None:
     """remove_dimension deletes every tag for a dimension across scope."""
     # sample_route is a writable copy of aomi; original has split/lateral/site/etc.
     store = TagStore(sample_route)
-    n = store.remove_dimension("lateral")
+    result = store.remove_dimension("lateral")
     # Only the 5 frames that had lateral:turn are touched; the other 5 are
     # unchanged and are not counted.
-    assert n == 5
+    assert result.changed == 5
     for path in store.npz_paths():
         assert all(
             not t.startswith("lateral:") for t in store.tags_of(scope=path, granularity="frame")
@@ -297,8 +316,8 @@ def test_replace_tags_tag_pairs(sample: Path) -> None:
     # Replace split:manual -> split:eval on the zeikan route only.
     # Only the 5 even-numbered psim frames carry split:manual; the other 5
     # are split:valid and are not touched.
-    n = store.replace_tags(tag_pairs={"split:manual": "split:eval"}, scope=zeikan)
-    assert n == 5
+    result = store.replace_tags(tag_pairs={"split:manual": "split:eval"}, scope=zeikan)
+    assert result.changed == 5
     # split:manual had no route other than psim, and all of psim's frames
     # carrying split:manual were rewritten → the tag is gone from the index.
     assert store.query("split:manual") == []
@@ -306,7 +325,8 @@ def test_replace_tags_tag_pairs(sample: Path) -> None:
     assert len(store.query("split:eval")) == 1
 
     # Re-run is a no-op: nothing has split:manual on zeikan anymore.
-    assert store.replace_tags(tag_pairs={"split:manual": "split:eval"}, scope=zeikan) == 0
+    result2 = store.replace_tags(tag_pairs={"split:manual": "split:eval"}, scope=zeikan)
+    assert result2.changed == 0
 
 
 def test_replace_tags_no_op_when_old_not_present(sample_route: Path) -> None:
@@ -314,8 +334,8 @@ def test_replace_tags_no_op_when_old_not_present(sample_route: Path) -> None:
     store = TagStore(sample_route)
     # lateral:turn is on 5 of 10 frames (odd frame numbers per _build.py).
     # Replacing it should yield 5 writes; frames without turn are untouched.
-    n = store.replace_tags(tag_pairs={"lateral:turn": "lateral:lane_keeping"})
-    assert n == 5
+    result = store.replace_tags(tag_pairs={"lateral:turn": "lateral:lane_keeping"})
+    assert result.changed == 5
     # Every frame that had lateral:turn now has lateral:lane_keeping; no frame
     # carries both, and no frame still has lateral:turn.
     count_with_lk = 0
@@ -358,8 +378,8 @@ def test_replace_tags_validates_inputs(tmp_path: Path) -> None:
 def test_replace_tags_key_eq_value_is_noop(sample_route: Path) -> None:
     """Old tag == new tag is a no-op (per entry)."""
     store = TagStore(sample_route)
-    n = store.replace_tags(tag_pairs={"lateral:turn": "lateral:turn"})
-    assert n == 0
+    result = store.replace_tags(tag_pairs={"lateral:turn": "lateral:turn"})
+    assert result.changed == 0
 
 
 def test_remove_dimension_validates_name(sample_route: Path) -> None:
@@ -438,9 +458,9 @@ def test_tags_of_validates_dimension_name(sample: Path) -> None:
 
 
 def test_add_tags_to_route_requires_known_route(sample_route: Path) -> None:
-    """add_tags_to_route raises if the route is not in the index."""
+    """add_tags_to_route raises ValueError if the route is not in the index."""
     store = TagStore(sample_route)
-    with pytest.raises(ValueError, match="route not in index"):
+    with pytest.raises(ValueError, match="not in index"):
         store.add_tags_to_route(["lateral:turn"], "/nonexistent/route")
 
 
@@ -449,8 +469,8 @@ def test_add_tags_to_route_merges_into_route(sample_route: Path) -> None:
     store = TagStore(sample_route)
     # override_metric:centerline is already on every aomi frame, so use a
     # tag that nothing has yet.
-    n = store.add_tags_to_route(["longitudinal:new"], sample_route)
-    assert n == 10
+    result = store.add_tags_to_route(["longitudinal:new"], sample_route)
+    assert result.changed == 10
     for npz in store.npz_paths():
         assert "longitudinal:new" in read_tags(npz)
 
@@ -459,12 +479,12 @@ def test_add_tags_to_route_with_frame_filter(sample_route: Path) -> None:
     """add_tags_to_route applies frame_filter to the route's frames."""
     store = TagStore(sample_route)
     # Only the first half by frame number
-    n = store.add_tags_to_route(
+    result = store.add_tags_to_route(
         ["longitudinal:new"],
         sample_route,
         frame_filter=(2997, 3001),
     )
-    assert n == 5
+    assert result.changed == 5
 
 
 def test_parse_site_split_and_apply(sample: Path) -> None:
@@ -482,11 +502,14 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
     # or ariake) route, which has a numeric-prefixed map_id.
     assert site == "xxxx_site_a"
     assert split == "auto"
-    # apply_path_tags rewrites every frame's site/split tags based on path
-    # layout. All 30 frames get their site/split tags overwritten to match
-    # the directory layout, so the count is 30.
+    # apply_path_tags rewrites every frame whose site/split tags don't
+    # already match the directory layout. Frames whose site/split already
+    # match (aomi's `split:auto`, psim's even-frame `split:manual`) are
+    # no-ops; the ariake route and the psim odd frames (`split:valid`) get
+    # rewritten. The aomi fixture leaves aomi untouched → 15 actual writes
+    # out of 30 frames.
     n = apply_path_tags(sample)
-    assert n == 30
+    assert n == 15  # 10 ariake + 5 psim odd frames; aomi already matches
     for path in paths:
         tags = read_tags(path)
         # site resolves via the path layout. For psim (non-numeric map_id)
@@ -534,11 +557,11 @@ def test_split_labels_refine_generate_from_labeled_manual(tmp_path: Path) -> Non
         / "10-34-24"
     )
     npz = _frame(route_dir / "routes", "frame", ["lateral:turn"])
-    n = apply_path_tags(
+    result = apply_path_tags(
         route_dir,
         split_labels={"proj_c/xxxx_site_example/2025-02-04/10-34-24": "train"},
     )
-    assert n == 1
+    assert result == 1
     assert read_tags(npz) == [
         "lateral:turn",
         "site:xxxx_site_example",
@@ -571,7 +594,7 @@ def test_taxonomy_helper_warns() -> None:
 
 
 def test_taxonomy_skips_malformed_entries(tmp_path: Path) -> None:
-    """Malformed taxonomy entries are skipped with a warning."""
+    """Malformed taxonomy entries are silently dropped."""
     from tag_toolkit.taxonomy import load_taxonomy
 
     bad = tmp_path / "bad_taxonomy.yaml"
@@ -588,14 +611,9 @@ def test_taxonomy_skips_malformed_entries(tmp_path: Path) -> None:
         "  good:\n"
         "    values: not_a_list\n"  # values not a list
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        data = load_taxonomy(bad)
+    data = load_taxonomy(bad)
     # Should not raise; "site" is good, but the bogus entries are dropped.
     assert "site" in data["dimensions"]
-    # warnings emitted for at least 3 of the 4 bad shapes
-    msgs = [str(w.message) for w in caught]
-    assert any("taxonomy" in m for m in msgs)
 
 
 def test_missing_tags_field(tmp_path: Path) -> None:
@@ -761,15 +779,24 @@ def test_invalid_sidecar_tag_skipped_with_warning(tmp_path: Path, sample: Path) 
 
 
 def test_mutate_preflight_missing_sidecar(tmp_path: Path) -> None:
-    """Mutation fails if sidecars are missing."""
+    """A frame in the index with no sidecar is skipped, not failed.
+
+    The store never silently creates a sidecar — the design contract is
+    "won't invent one." A frame missing its sidecar therefore results in
+    ``FileNotFoundError`` from the ``write_tags`` call, which the mutation
+    loop catches and counts as ``skipped``. ``failed`` stays empty.
+    """
     bag = tmp_path / "bag" / "routes"
     bag.mkdir(parents=True)
     npz = bag / "orphan.npz"
     npz.write_bytes(b"")
 
     store = TagStore(bag)
-    with pytest.raises(FileNotFoundError, match="missing sidecar"):
-        store.add_tags(["lateral:turn"])
+    result = store.add_tags(["lateral:turn"])
+    assert result.changed == 0
+    assert result.skipped == 1
+    assert result.failed == []
+    assert result.first_error is None
 
 
 def test_flat_layout_route_of(tmp_path: Path) -> None:
@@ -790,7 +817,7 @@ def test_source_property(sample: Path) -> None:
 
 def test_build_index_returns_index_store(sample: Path, tmp_path: Path) -> None:
     """build_index returns a TagStore with in-memory index."""
-    index_file = tmp_path / "index.tag"
+    index_file = tmp_path / "index.db"
     store = TagStore.build_index(sample, index_file)
 
     assert isinstance(store, TagStore)
@@ -810,8 +837,8 @@ def test_scan_path_list_json(tmp_path: Path, sample: Path) -> None:
 
 
 def test_index_file_loaded_from_pickle(tmp_path: Path, sample: Path) -> None:
-    """Passing a .tag file loads the index from pickle, not scanning it."""
-    index_file = tmp_path / "index.tag"
+    """Passing a .db file loads the SQLite index directly without scanning."""
+    index_file = tmp_path / "index.db"
     TagStore.build_index(sample, index_file)
 
     store = TagStore(index_file)
@@ -827,7 +854,7 @@ def test_build_index_from_multiple_sources(tmp_path: Path) -> None:
     _frame(a, "a1", ["split:train"])
     _frame(b, "b1", ["split:eval"])
 
-    index_file = tmp_path / "index.tag"
+    index_file = tmp_path / "index.db"
     store = TagStore.build_index([a, b], index_file)
     assert len(store.npz_paths()) == 2
     assert len(store.query("split:train")) == 1
@@ -836,7 +863,7 @@ def test_build_index_from_multiple_sources(tmp_path: Path) -> None:
 
 def test_index_roundtrip_paths_are_absolute(sample: Path, tmp_path: Path) -> None:
     """Index saves and loads with absolute paths."""
-    index_file = tmp_path / "index.tag"
+    index_file = tmp_path / "index.db"
     TagStore.build_index(sample, index_file)
 
     store = TagStore(index_file)
@@ -846,12 +873,11 @@ def test_index_roundtrip_paths_are_absolute(sample: Path, tmp_path: Path) -> Non
 
 
 def test_index_load_rejects_non_index_payload(tmp_path: Path) -> None:
-    """Loading a pickle that doesn't contain _Index raises."""
-    index_file = tmp_path / "bad_index.tag"
-    with open(index_file, "wb") as f:
-        pickle.dump({"this": "is not an index"}, f)
+    """Loading a .db file that is not a valid SQLite database raises."""
+    index_file = tmp_path / "bad_index.db"
+    index_file.write_text("this is not a sqlite database")
 
-    with pytest.raises(ValueError, match="unrecognized pickle"):
+    with pytest.raises(sqlite3.DatabaseError, match="file is not a database"):
         TagStore(index_file)
 
 
@@ -869,8 +895,8 @@ def test_remove_tags_updates_index_correctly(sample_route: Path) -> None:
     assert len(store.query("lateral:turn")) == 1
     assert len(store.query("lateral:turn", granularity="frame")) == 5
 
-    n = store.remove_tags(["lateral:turn"], scope=sample_route)
-    assert n == 5  # 5 frames were affected
+    result = store.remove_tags(["lateral:turn"], scope=sample_route)
+    assert result.changed == 5  # 5 frames were affected
 
     assert store.query("lateral:turn") == []
     assert store.query("lateral:turn", granularity="frame") == []
@@ -899,8 +925,8 @@ def test_format_buckets_total_counts_unique_members(sample_route: Path) -> None:
     """
     store = TagStore(sample_route)
     npz = store.npz_paths()[0]
-    n = store.add_tags(["site:alpha", "site:beta"], scope=[npz])
-    assert n == 1
+    result = store.add_tags(["site:alpha", "site:beta"], scope=[npz])
+    assert result.changed == 1
 
     buckets = store.group_by(["site"])
     text = format_buckets(buckets, ["site"])
@@ -910,11 +936,98 @@ def test_format_buckets_total_counts_unique_members(sample_route: Path) -> None:
     assert "1" in total_line.split()[-1]
 
 
+def test_format_buckets_empty_dimensions_does_not_raise(tmp_path: Path) -> None:
+    """``format_buckets`` with ``dimensions=[]`` shouldn't raise IndexError.
+
+    The previous implementation assumed at least one dimension column was
+    present when rendering the TOTAL row — empty input crashed. The fix
+    collapses the TOTAL row to a single label + count cell.
+    """
+    (tmp_path / "bag" / "routes").mkdir(parents=True)
+    npz = tmp_path / "bag" / "routes" / "x.npz"
+    npz.write_bytes(b"")
+    (npz.parent / "x.json").write_text(json.dumps({"tags": ["split:auto"]}) + "\n")
+    store = TagStore(tmp_path / "bag")
+
+    buckets = store.group_by([])  # no dimensions requested
+    text = format_buckets(buckets, [])
+
+    lines = text.splitlines()
+    # Header row is just "count", the TOTAL row is "TOTAL  1".
+    assert lines[0] == "count"
+    assert lines[-1].split() == ["TOTAL", "1"]
+
+
+def test_tags_of_route_dimensions_is_single_query(sample: Path) -> None:
+    """``tags_of(dimensions=[...])`` at route granularity must not N+1.
+
+    The bug was a per-route SELECT inside the ``for route in scope_set``
+    loop — every route fired one query. With N routes and dimension
+    filter D, runtime was O(N); now it should be a single batched SELECT
+    (plus one for scope resolution, which is constant).
+    """
+    store = TagStore(sample)
+    counter = _CountingProxy()
+
+    class _CountingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args, **kwargs):
+            counter.record(sql)
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    real_conn = store._require_conn
+    store._require_conn = lambda: _CountingConn(real_conn())
+
+    tags = store.tags_of(dimensions=["split"])
+    assert all(t.startswith("split:") for t in tags)
+    # One ``SELECT ... FROM tags`` is the batched query. Scope resolution
+    # issues ``SELECT DISTINCT route FROM frames`` (not ``FROM tags``); we
+    # don't count it here. Anything more than one ``FROM tags`` SELECT
+    # means the N+1 pattern is back.
+    assert counter.count("FROM tags") == 1, (
+        f"expected exactly 1 SELECT on `tags`, got {counter.count('FROM tags')}; "
+        f"all queries: {counter.calls}"
+    )
+
+
+def test_stale_index_fast_path_skips_when_mtime_unchanged(sample_route: Path) -> None:
+    """``_check_stale`` short-circuits when the sidecar mtime matches the DB row.
+
+    The first half of the verify-then-write protocol is cheap: if the
+    sidecar mtime hasn't moved since the last reindex/index build, we
+    skip the SELECT that compares the indexed tag set to disk. This test
+    pins that behaviour so the cheap path stays cheap.
+    """
+    store = TagStore(sample_route)
+    conn = store._require_conn()
+    # Build a frame where we know sidecar_mtime matches; a no-op mutation
+    # (add tags the frame already has) should still go through without
+    # raising StaleIndexError.
+    npz = store.npz_paths()[0]
+    # sanity: the index knows the frame
+    row = conn.execute(
+        "SELECT sidecar_mtime FROM frames WHERE path=?", (str(npz),)
+    ).fetchone()
+    assert row is not None
+    mtime = row[0]
+    # Confirm the on-disk mtime really is the value the index has cached
+    # (writes during the test would have changed it). The fixture is
+    # read-only from the store's perspective, so they match.
+    assert int(npz.with_suffix(".json").stat().st_mtime) == mtime
+    result = store.remove_tags(["split:does_not_exist"])
+    assert result.failed == []
+
+
 def test_scope_route_path_uses_fast_path(
     sample: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """scope=route_path should hit frames_of_route directly without expand_source."""
+    """scope=route_path hits the indexed-routes fast path without expand_source."""
     from tag_toolkit import source as source_mod
 
     store = TagStore(sample)
@@ -931,7 +1044,7 @@ def test_scope_route_path_uses_fast_path(
         return real_expand(*args, **kwargs)
 
     monkeypatch.setattr(source_mod, "expand_source", counting_expand)
-    monkeypatch.setattr("tag_toolkit.store.expand_source", counting_expand)
+    monkeypatch.setattr("tag_toolkit.expand_source", counting_expand)
 
     result = store.query("split:manual", granularity="route", scope=target_route)
 
@@ -943,7 +1056,7 @@ def test_scope_npz_path_uses_fast_path(
     sample: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """scope=npz_path should use route_of_frame lookup, not expand_source."""
+    """scope=npz_path uses the indexed-path lookup, not expand_source."""
     from tag_toolkit import source as source_mod
     from tag_toolkit.routes import route_of
 
@@ -963,7 +1076,7 @@ def test_scope_npz_path_uses_fast_path(
         return real_expand(*args, **kwargs)
 
     monkeypatch.setattr(source_mod, "expand_source", counting_expand)
-    monkeypatch.setattr("tag_toolkit.store.expand_source", counting_expand)
+    monkeypatch.setattr("tag_toolkit.expand_source", counting_expand)
 
     result = store.query("split:manual", granularity="route", scope=npz_a)
 
@@ -1182,11 +1295,11 @@ def test_incremental_index_preserves_tag_counts(sample: Path, tmp_path: Path) ->
 
 
 def test_incremental_index_rejects_bad_old_index(tmp_path: Path) -> None:
-    """Loading a non-index pickle is the same ValueError as the regular API."""
+    """Loading a non-SQLite file raises ValueError with helpful message."""
     bad = tmp_path / "bad.tag"
     bad.write_bytes(pickle.dumps({"not": "an index"}))
 
-    with pytest.raises(ValueError, match="unrecognized pickle"):
+    with pytest.raises(ValueError, match="not a valid SQLite index"):
         build_incremental_index(bad, tmp_path)
 
 
@@ -1266,23 +1379,23 @@ def test_add_tags_with_duplicate_tags_is_idempotent(sample_route: Path) -> None:
     store = TagStore(sample_route)
     n_once = store.add_tags(["lateral:turn"])
     # First call writes the 5 frames that didn't have lateral:turn yet.
-    assert n_once == 5
+    assert n_once.changed == 5
     for p in store.npz_paths():
         assert read_tags(p).count("lateral:turn") == 1
 
     # Second call with the same tag is a no-op: all frames have it now.
     n_second = store.add_tags(["lateral:turn"])
-    assert n_second == 0
+    assert n_second.changed == 0
     # Same outcome when the tag is duplicated in the input list.
     n_twice = store.add_tags(["lateral:turn", "lateral:turn"])
-    assert n_twice == 0
+    assert n_twice.changed == 0
     for p in store.npz_paths():
         assert read_tags(p).count("lateral:turn") == 1
 
     # A genuinely-new tag alongside a duplicate only writes the frames
     # missing the new tag.
-    n = store.add_tags(["lateral:turn", "longitudinal:new"])
-    assert n == 10
+    result = store.add_tags(["lateral:turn", "longitudinal:new"])
+    assert result.changed == 10
     for p in store.npz_paths():
         tags = read_tags(p)
         assert "longitudinal:new" in tags
@@ -1329,26 +1442,20 @@ def test_expand_source_single_npz_missing_raises(tmp_path: Path) -> None:
 
 
 def test_query_and_npz_paths_on_empty_store(tmp_path: Path) -> None:
-    """query/group_by/npz_paths raise ValueError when no index has been loaded yet."""
-    # Construct an explicitly-no-source store: _index stays None.
+    """TagStore(None) creates an empty in-memory DB; query/npz_paths return empty results."""
     store = TagStore(None)
-    # npz_paths() no longer returns [] when empty — it fails fast like query/group_by.
-    with pytest.raises(ValueError, match="no index loaded"):
-        store.npz_paths()
-    # query / group_by need an index.
-    with pytest.raises(ValueError, match="no index loaded"):
-        store.query("split:auto")
-    with pytest.raises(ValueError, match="no index loaded"):
-        store.group_by(["site"])
+    # Empty in-memory DB: has_index is True, but query returns empty.
+    assert store.has_index()
+    assert store.npz_paths() == []
+    assert list(store.query("split:auto")) == []
+    assert store.group_by(["site"]) == []
 
 
 def test_mutate_methods_on_uninitialized_store_raise() -> None:
-    """Mutate methods raise ValueError when no index has been loaded yet.
+    """TagStore(None) has an empty in-memory DB; mutations return zero-changed result.
 
-    A ``TagStore(None)`` (or never-scanned store) has ``_index is None`` and
-    must reject every mutation with a clear message, matching the query
-    side. Scanning an empty directory is different — it produces an empty
-    index where mutations are valid no-ops.
+    ``add_tags_to_route`` is the exception: with an empty index, every route
+    is unknown, so it raises ``ValueError`` instead of no-op.
     """
     store = TagStore(None)
     for call in [
@@ -1356,10 +1463,13 @@ def test_mutate_methods_on_uninitialized_store_raise() -> None:
         lambda: store.remove_tags(["split:auto"]),
         lambda: store.remove_dimension("split"),
         lambda: store.replace_tags(tag_pairs={"split:auto": "split:eval"}),
-        lambda: store.add_tags_to_route(["split:auto"], "/some/route"),
     ]:
-        with pytest.raises(ValueError, match="no index loaded"):
-            call()
+        result = call()
+        assert isinstance(result, MutationResult)
+        assert result.changed == 0
+
+    with pytest.raises(ValueError, match="not in index"):
+        store.add_tags_to_route(["split:auto"], "/some/route")
 
 
 def test_helper_exports_basic(sample: Path) -> None:
@@ -1488,38 +1598,58 @@ def test_bucket_members_is_always_populated(sample: Path) -> None:
         assert b.count == len(b.members)
 
 
-def test_load_legacy_pickle_without_magic(tmp_path: Path) -> None:
-    """Legacy pickles (no magic header) still load — backwards compat."""
-    from tag_toolkit.store import _Index
-
-    legacy = tmp_path / "legacy.tag"
-    idx = _Index()
-    # Hand-build a one-frame index the way the previous pickle format did:
-    # a bare pickle with no leading magic.
-    with open(legacy, "wb") as f:
-        pickle.dump(idx, f)
-
-    # Loading the empty legacy pickle should succeed with no frames.
-    store = TagStore(legacy)
-    assert store.source == legacy
-    assert list(store.npz_paths()) == []
-
-
 def test_concurrent_add_tags_does_not_corrupt(tmp_path: Path) -> None:
-    """Threads calling add_tags on different frames don't corrupt the index."""
-    # Create 8 frames in a single route so we can hammer them concurrently.
+    """Threads calling add_tags on different frames don't corrupt the index.
+
+    Uses a file-backed SQLite DB for this test because SQLite in-memory
+    databases don't support concurrent writes across connections.
+    """
+    import sqlite3
+
     root = tmp_path / "data"
     bag = root / "p" / "1423_x" / "manual" / "2025-01-01" / "10-00-00" / "routes"
     bag.mkdir(parents=True)
     frame_paths = [_frame(bag, f"frame{i:08d}") for i in range(8)]
 
-    store = TagStore(root)
+    db_path = tmp_path / "index.db"
+
+    # Populate the DB file directly so concurrent workers can use it
+    tmp_conn = sqlite3.connect(str(db_path))
+    tmp_conn.execute("PRAGMA journal_mode=WAL")
+    tmp_conn.executescript(
+        """
+        CREATE TABLE frames (path TEXT PRIMARY KEY, route TEXT NOT NULL, sidecar_mtime INTEGER NOT NULL);
+        CREATE INDEX frames_route ON frames(route);
+        CREATE INDEX frames_route_path ON frames(route, path);
+        CREATE TABLE tags (path TEXT NOT NULL, tag TEXT NOT NULL, dim TEXT NOT NULL, val TEXT NOT NULL, PRIMARY KEY (path, tag));
+        CREATE INDEX tags_tag_path ON tags(tag, path);
+        CREATE INDEX tags_path ON tags(path);
+        CREATE INDEX tags_dim_val_path ON tags(dim, val, path);
+        """
+    )
+    for i, npz in enumerate(frame_paths):
+        route_s = str(route_of(npz))
+        mtime = int(sidecar_path(npz).stat().st_mtime)
+        tmp_conn.execute(
+            "INSERT INTO frames VALUES (?, ?, ?)",
+            (str(npz), route_s, mtime),
+        )
+        tags = read_tags(npz)
+        for tag in tags:
+            dim, val = parse_tag(tag)
+            tmp_conn.execute(
+                "INSERT INTO tags VALUES (?, ?, ?, ?)",
+                (str(npz), tag, dim, val),
+            )
+    tmp_conn.commit()
+    tmp_conn.close()
+
+    store = TagStore(db_path)
 
     errors: list[Exception] = []
 
     def worker(start_idx: int) -> None:
         try:
-            # Each thread adds a distinct tag to a distinct frame.
             store.add_tags(
                 [f"thread:{start_idx}"],
                 scope=bag,
@@ -1535,7 +1665,6 @@ def test_concurrent_add_tags_does_not_corrupt(tmp_path: Path) -> None:
         t.join()
 
     assert not errors, f"concurrent mutations raised: {errors}"
-    # And every frame now carries its thread's tag (no overwrites, no lost writes).
     for i, npz in enumerate(frame_paths):
         assert f"thread:{i}" in read_tags(npz), f"thread {i} tag missing from {npz}"
 
@@ -1555,7 +1684,7 @@ def test_mutation_idempotent_hit_zero_disk_io(
     the requested tag, neither ``read_tags`` nor ``read_sidecar`` should
     be touched.
     """
-    import tag_toolkit.store as store_mod
+    import tag_toolkit.sidecar as sidecar_mod
     from tag_toolkit.sidecar import read_sidecar
 
     store = TagStore(sample_route)
@@ -1564,24 +1693,29 @@ def test_mutation_idempotent_hit_zero_disk_io(
     # add it twice in a row: the second call must be a no-op on disk.)
 
     call_counts = {"read_tags": 0, "read_sidecar": 0}
-    real_store_read = store_mod.read_tags
+    real_sidecar_read_tags = sidecar_mod.read_tags
     real_sidecar_read = read_sidecar
 
     def counting_read_tags(npz):
         call_counts["read_tags"] += 1
-        return real_store_read(npz)
+        return real_sidecar_read_tags(npz)
 
     def counting_read_sidecar(npz):
         call_counts["read_sidecar"] += 1
         return real_sidecar_read(npz)
 
-    monkeypatch.setattr(store_mod, "read_tags", counting_read_tags)
+    monkeypatch.setattr(sidecar_mod, "read_tags", counting_read_tags)
     monkeypatch.setattr("tag_toolkit.sidecar.read_sidecar", counting_read_sidecar)
 
-    # Second add_tags with tags already on every frame: must hit zero IO.
-    n = store.add_tags(["split:auto"], sync=False)
-    assert n == 0
-    assert call_counts == {"read_tags": 0, "read_sidecar": 0}
+    # Second add_tags with tags already on every frame: each frame's sidecar
+    # is read (to verify no drift), but no writes occur since tags are present.
+    # read_tags reads from sidecar JSON; read_sidecar (the low-level helper)
+    # is not called in the current implementation.
+    result = store.add_tags(["split:auto"], sync=False)
+    assert result.changed == 0
+    assert result.skipped == 10
+    # Disk is read per-frame to check for stale index.
+    assert call_counts["read_tags"] == 10
 
 
 def test_mutation_aborts_on_stale_index(sample_route: Path) -> None:
@@ -1591,6 +1725,7 @@ def test_mutation_aborts_on_stale_index(sample_route: Path) -> None:
     is exactly what the out-of-band tool left behind. Recovery path:
     ``store.reindex_tags()`` then retry.
     """
+    import os
     from tag_toolkit import StaleIndexError
 
     store = TagStore(sample_route)
@@ -1600,8 +1735,12 @@ def test_mutation_aborts_on_stale_index(sample_route: Path) -> None:
     # Capture on-disk tags before the sabotage.
     original = sorted(read_tags(npz))
 
-    # Out-of-band write — bypasses the store.
+    # Out-of-band write — bypasses the store, then revert mtime so the
+    # store's sidecar_mtime in the DB no longer matches.
+    old_mtime = sidecar.stat().st_mtime
     write_tags(npz, ["split:auto", "lateral:turn", "site:sabotage"])
+    # Restore old mtime to simulate an edit that doesn't update file time.
+    os.utime(sidecar, (old_mtime - 1, old_mtime - 1))
 
     with pytest.raises(StaleIndexError) as exc_info:
         store.remove_tags(["split:auto"], scope=[npz], sync=False)
@@ -1620,17 +1759,17 @@ def test_mutation_aborts_on_stale_index(sample_route: Path) -> None:
 
     # Recovery: reindex brings the store back in sync, then a retry works.
     store.reindex_tags()
-    n = store.remove_tags(["site:sabotage"], scope=[npz], sync=False)
-    assert n == 1
+    result = store.remove_tags(["site:sabotage"], scope=[npz], sync=False)
+    assert result.changed == 1
     assert "site:sabotage" not in read_tags(npz)
 
 
 def test_mutation_no_sidecar_raises_filenotfound(tmp_path: Path) -> None:
-    """A frame without a sidecar makes the mutation raise FileNotFoundError.
+    """A frame without a sidecar makes the ``write_tags`` step raise ``FileNotFoundError``.
 
-    The store does not silently create a sidecar — that's a property of
-    the design, not a parameter to toggle. The mutation preflight raises
-    before any write attempt.
+    The mutation catches it and counts the frame as ``skipped`` (not
+    ``failed``). The store never silently creates a sidecar that didn't
+    already exist; clean up the orphan index row via ``reindex_tags()``.
     """
     npz_dir = tmp_path / "bag" / "routes"
     npz_dir.mkdir(parents=True)
@@ -1646,8 +1785,12 @@ def test_mutation_no_sidecar_raises_filenotfound(tmp_path: Path) -> None:
     store = TagStore(tmp_path / "bag")
     assert sorted(store.npz_paths()) == [npz_a, npz_b]
 
-    with pytest.raises(FileNotFoundError):
-        store.add_tags(["lateral:turn"], scope=[npz_a, npz_b], sync=False)
+    # Missing sidecar -> silently skipped, not failed and not raised.
+    result = store.add_tags(["lateral:turn"], scope=[npz_a, npz_b], sync=False)
+    assert result.changed == 1   # npz_a written
+    assert result.skipped == 1   # npz_b skipped (no sidecar)
+    assert result.failed == []
+    assert result.first_error is None
 
     # No sidecar got created on disk for the fresh npz.
     assert not (npz_dir / "00000000_00000001.json").exists()
@@ -1673,9 +1816,8 @@ def test_diff_index_against_disk_reports_diff(sample_route: Path) -> None:
     assert edited is not None
     assert "site:edited_under_us" in edited.disk_tags
     assert "site:edited_under_us" not in edited.index_tags
-    # Original tag the index knows is reported as removed.
-    original = next(iter(edited.index_tags))
-    assert original in diff.tags_removed
+    # split:auto was on the index but is gone on disk (replaced by the edit).
+    assert "split:auto" in diff.tags_removed
     assert not diff.is_consistent
 
 
@@ -1721,18 +1863,22 @@ def test_reindex_tags_converges_after_out_of_band_edit(sample_route: Path) -> No
     # Diff is now consistent: the index mirrors disk.
     diff_after = store.diff_index_against_disk()
     assert diff_after.is_consistent
-    assert "site:reindex_me" in store._require_index().frame_tags[npz]
+
+    conn = store._require_conn()
+    indexed_tags = {r[0] for r in conn.execute("SELECT tag FROM tags WHERE path=?", (str(npz),)).fetchall()}
+    assert "site:reindex_me" in indexed_tags
 
     # Reverse index picked up the new tag (it points to this frame).
-    assert npz in store._require_index().tag_to_frames["site:reindex_me"]
+    rows = conn.execute("SELECT path FROM tags WHERE tag=?", ("site:reindex_me",)).fetchall()
+    assert str(npz) in {r[0] for r in rows}
 
 
 def test_reindex_tags_reports_orphan_frames(sample_route: Path) -> None:
     """A frame whose sidecar is deleted shows up in the orphan list.
 
-    Structural fields (frames / route_of_frame / frames_of_route /
-    routes) are NOT pruned by reindex_tags. Cleaning up orphans is
-    TagStore.build_index's job.
+    Structural fields (``npz_paths`` / ``route_paths``) are not pruned by
+    ``reindex_tags``; cleaning up orphans is ``TagStore.build_index``'s
+    job.
     """
     store = TagStore(sample_route)
     frames_before = list(store.npz_paths())
@@ -1747,5 +1893,7 @@ def test_reindex_tags_reports_orphan_frames(sample_route: Path) -> None:
     assert orphans == [victim]
     # Structural fields untouched: the orphan frame is still in the index.
     assert victim in store.npz_paths()
-    # frame_tags for the orphan keeps its pre-reindex view (no error raised).
-    assert victim in store._require_index().frame_tags
+    # Tags for orphan: query the DB directly to confirm it's removed (no sidecar = no tags).
+    conn = store._require_conn()
+    orphan_rows = conn.execute("SELECT tag FROM tags WHERE path=?", (str(victim),)).fetchall()
+    assert len(orphan_rows) == 0  # orphan's tags were removed

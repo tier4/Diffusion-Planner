@@ -95,9 +95,13 @@ def sidecar_path(npz: str | Path) -> Path:
     return path.with_suffix(".json")
 
 
-def read_sidecar(npz: str | Path) -> dict:
-    """Load sidecar JSON. Missing file -> empty dict."""
-    side = sidecar_path(npz)
+def read_sidecar(path_like: str | Path) -> dict:
+    """Load sidecar JSON from a path. Accepts either an NPZ or a sidecar path.
+
+    Missing file -> empty dict. Structural errors (bad JSON, non-object)
+    raise :class:`ValueError`.
+    """
+    side = path_like if str(path_like).endswith(".json") else sidecar_path(path_like)
     if not side.is_file():
         return {}
     try:
@@ -126,10 +130,12 @@ def read_tags(npz: str | Path) -> list[str]:
     ``^[a-z0-9_]+:[a-z0-9_]+$``) are dropped with a warning. Structural
     errors — bad JSON, top-level not a JSON object, ``tags`` not a list
     — raise :class:`ValueError`, since those mean the sidecar itself is
-    broken.
+    broken. Result is sorted and free of duplicates — callers can rely on
+    the contract: ``read_tags`` is idempotent against repeat reads of the
+    same sidecar.
     """
     side = sidecar_path(npz)
-    data = read_sidecar(npz)
+    data = read_sidecar(side)
     tags = data.get("tags", [])
     if not isinstance(tags, list):
         raise ValueError(f"sidecar 'tags' must be a list: {side}")
@@ -169,8 +175,7 @@ def _atomic_write_bytes(
         write_fn: Callable receiving the open binary file handle. Must do
             its own encoding if it wants text on disk.
         sync: If True (default), fsync file and directory for durability.
-            If False, skip both fsyncs; caller is responsible for durability
-            (typically via ``store.mutation_scope``).
+            If False, skip both fsyncs; caller is responsible for durability.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -261,7 +266,7 @@ def write_tags(
     side = sidecar_path(npz)
     if not side.is_file():
         raise FileNotFoundError(f"sidecar not found: {side}")
-    data = read_sidecar(npz)
+    data = read_sidecar(side)
 
     # Structural check: 'tags' must be a list (possibly empty). Non-list
     # values are a corruption signal we cannot recover from silently —

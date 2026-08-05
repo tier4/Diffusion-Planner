@@ -1,24 +1,22 @@
-"""tag_toolkit — tags live on each NPZ sidecar; query and mutate from an index file.
+"""tag_toolkit — tags live on each NPZ sidecar; query and mutate via SQLite.
 
 Quick start::
 
-    # Build index once (slow, do once after updating tags)
+    # Open or create a SQLite index
     from tag_toolkit import TagStore
-    TagStore.build_index("/path/to/dataset", "/path/to/tags.tag")
+    store = TagStore("/path/to/dataset.db")   # persisted
+    # or:
+    store = TagStore("/path/to/dataset/")     # in-memory, mutations stay in memory
 
-    # Use index (fast, no NPZ reading)
-    store = TagStore("/path/to/tags.tag")
-    store.query("split:auto")                                # routes with split:auto
-    store.add_tags(["override_metric:centerline"])           # add tags
-    store.tags_of(granularity="frame")                       # union of all tags
+    # Build index from sidecars
+    store.rebuild_index("/path/to/dataset/")
+
+    # Query
+    store.query("split:auto")                              # routes with split:auto
+    store.add_tags(["override_metric:centerline"])          # add tags
+    store.tags_of(granularity="frame")                    # union of all tags
 
 For more examples, see docs/usage.md and docs/design.md.
-
-Note: ``TagStore.add_tags`` and friends update the in-memory index
-immediately, but a previously-saved ``.tag`` file on disk is **not**
-rewritten by those calls. To refresh the on-disk pickle after on-the-fly
-mutations, call :meth:`TagStore.build_index` again (with the same source)
-— otherwise later sessions will see the old, pre-mutation state.
 """
 
 from .routes import extract_frame_number, route_of
@@ -28,10 +26,11 @@ from .store import (
     Bucket,
     FrameTagDiff,
     IndexDiff,
-    StaleIndexError,
+    MutationResult,
     TagStore,
     format_buckets,
 )
+from .sidecar import StaleIndexError
 from .taxonomy import list_known_tags, load_taxonomy
 
 __version__ = "0.1.0"
@@ -40,6 +39,7 @@ __all__ = [
     "Bucket",
     "FrameTagDiff",
     "IndexDiff",
+    "MutationResult",
     "StaleIndexError",
     "TagStore",
     "expand_source",

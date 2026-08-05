@@ -1,186 +1,88 @@
 #!/usr/bin/env python3
-"""Append new frames to an existing ``.tag`` index, without rescanning old frames.
+"""Append new frames to an existing tag index, without rescanning old frames.
 
-This script is a helper for the common "only new data is added" workflow:
+The script walks *new_source* through ``expand_source``, drops anything already
+in the old index, and merges the rest into a SQLite database. Old frames are
+never read, never re-tagged, never re-validated.
 
-    day 1: dataset has 1k routes  -> TagStore.build_index(data, "tags.tag")
-    day 2: dataset has 1k + N     -> incremental_index("tags.tag", data)
-    day 3: dataset has 1k + N + M -> incremental_index("tags.tag", data)
-    ...
+Usage::
 
-Every call uses the existing on-disk sidecars for the **new** frames only.
-Old frames are never read, never re-tagged, never re-validated. The resulting
-``.tag`` index contains the union of (old index) and (newly-scanned frames).
-
-This script is *not* part of the public ``tag_toolkit`` API; it lives next to
-the other dataset helper. It uses ``tag_toolkit``'s public ``expand_source``
-plus the package-private helpers that build / persist the ``_Index`` pickle.
-If those internals change, this script must follow.
-
-Assumptions
------------
-
-1. **Old frames are immutable.** Tags on frames already in the old index are
-   not changed by adding new data. If you change a tag on an existing frame
-   *and* add new frames, this script will quietly ignore the tag change —
-   you must rebuild the index from scratch for that.
-
-2. **Old index has already been built.** Pass the path to a previously-written
-   ``.tag`` file. If the file is missing or corrupt, the script fails fast.
-
-3. **The "new" source contains the new frames.** The source is fed through
-   ``expand_source`` (any form ``TagStore`` accepts: directory, NPZ, path-list
-   JSON, list of paths, or any combination). Every NPZ it returns is treated
-   as a candidate new frame.
-
-4. **NPZ already in the old index is silently skipped.** The script warns and
-   drops the frame; nothing on disk is rewritten. This makes the script
-   idempotent — re-running it on the same new data yields the same index.
-
-5. **New frames must have a sidecar.** The script uses the same
-   "missing sidecar" check as ``TagStore.add_tags`` and refuses to start
-   if any candidate frame lacks a ``<stem>.json``. This mirrors the
-   behaviour of the regular ``TagStore.build_index`` flow: a half-built
-   index is worse than no new run.
-
-Output
-------
-
-By default the new index overwrites the old index file in place. Pass
-``--output`` to write to a different path instead (the old file is left
-untouched in that case).
-
-Usage
------
-
-::
-
-    # In-place (the usual case)
-    python incremental_index.py existing.tags.tag /path/to/dataset
-
-    # To a new file
-    python incremental_index.py existing.tags.tag /path/to/dataset \\
-        --output new.tags.tag
-
-    # Multiple sources / path-list JSON (any shape expand_source takes)
-    python incremental_index.py existing.tags.tag /path/to/added/routes \\
-        --output new.tags.tag
+    python incremental_index.py existing.db /path/to/dataset
+    python incremental_index.py existing.db /path/to/dataset --output new.db
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 
-# Make ``import tag_toolkit`` work when this script is run directly (the
-# editable install covers the package path for pytest, but not for ad-hoc
-# runs of the script).
+# Make `tag_toolkit` importable when the script is run directly (an editable
+# install isn't always present).
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(_REPO_ROOT / "Diffusion-Planner"))
 
+from tag_toolkit import TagStore
 from tag_toolkit.sidecar import sidecar_path
 from tag_toolkit.source import Source, expand_source
-from tag_toolkit.store import (
-    _build_index_from_frames,
-    _load_index_from_pickle,
-    _save_index_to_pickle,
-)
 
 
 def _partition_new_and_skipped(
     source: Source,
-    *,
-    known_frame_keys: set[Path],
+    known_paths: set[str],
 ) -> tuple[list[Path], list[Path]]:
-    """Expand *source* and split into (new_frames, skipped_frames).
-
-    Comparison is on the resolved absolute ``Path``, the canonical form
-    every ``_Index`` field uses internally (and the natural key type for
-    the index's ``frame_tags`` dict). A frame already in the old index
-    goes into *skipped_frames* and is warned about.
-    """
+    """Split *source* into (new, skipped) frames. Already-indexed paths warn."""
     new_frames: list[Path] = []
     skipped: list[Path] = []
     for npz in expand_source(source, sort=False):
-        resolved = npz.resolve()
-        if resolved in known_frame_keys:
+        if str(npz) in known_paths:
             skipped.append(npz)
-            continue
-        new_frames.append(resolved)
+        else:
+            new_frames.append(npz)
     for dup in skipped:
-        warnings.warn(
-            f"skipping frame already in old index: {dup}",
-            stacklevel=2,
-        )
+        warnings.warn(f"skipping frame already in old index: {dup}", stacklevel=2)
     return new_frames, skipped
 
 
 def _check_sidecars_present(frames: list[Path]) -> None:
-    """Raise ``FileNotFoundError`` if any candidate frame lacks its sidecar.
-
-    Same semantics as ``TagStore._mutate_frames``: the whole job is rejected
-    rather than partially started, so a failed run never leaves a half-built
-    index.
-    """
-    missing = [sidecar_path(npz) for npz in frames if not sidecar_path(npz).is_file()]
+    """Fail fast if any new frame lacks a sidecar."""
+    missing = [p for p in frames if not sidecar_path(p).is_file()]
     if missing:
         preview = ", ".join(str(p) for p in missing[:5])
         more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
         raise FileNotFoundError(f"missing sidecar(s) for new frames: {preview}{more}")
 
 
-def _merge_indices(old, new) -> None:
-    """Merge *new* into *old* in-place.
+def _merge(
+    old_index_path: Path,
+    new_source: Source,
+    output_path: Path,
+) -> dict:
+    """Build the merged index in a temp file then move it to *output_path*.
 
-    *old* and *new* are both ``tag_toolkit.store._Index``. After this call
-    *old* contains the union of the two. The merge assumes every NPZ in
-    *new* is **not** in *old* (caller is responsible for de-duplication).
+    Working in a temp copy keeps the original index byte-identical (TagStore
+    triggers WAL mode, which checkpoints back to the main file on close).
     """
-    # Frame-level dicts: keys from new are guaranteed disjoint.
-    old.frames.extend(new.frames)
-    old.frame_tags.update(new.frame_tags)
-    old.route_of_frame.update(new.route_of_frame)
-
-    # Per-route: append new frames, then re-sort so frame order stays stable.
-    for route, new_frames in new.frames_of_route.items():
-        combined = old.frames_of_route.get(route, []) + new_frames
-        old.frames_of_route[route] = sorted(combined)
-
-    # Route-level tag union.
-    for route, new_route_tags in new.route_tags.items():
-        existing = old.route_tags.get(route, frozenset())
-        old.route_tags[route] = existing | new_route_tags
-
-    # Routes list: dedupe by identity, keep a stable sorted order.
-    seen_routes: set = set()
-    merged_routes: list[Path] = []
-    for r in list(old.routes) + list(new.routes):
-        if r not in seen_routes:
-            seen_routes.add(r)
-            merged_routes.append(r)
-    old.routes = sorted(merged_routes)
-
-    # tag_to_frames / tag_to_routes: union, preserving defaultdict-on-write.
-    for tag, frame_set in new.tag_to_frames.items():
-        merged = old.tag_to_frames.get(tag)
-        if merged is None:
-            old.tag_to_frames[tag] = set(frame_set)
-        else:
-            merged.update(frame_set)
-    for tag, route_set in new.tag_to_routes.items():
-        merged = old.tag_to_routes.get(tag)
-        if merged is None:
-            old.tag_to_routes[tag] = set(route_set)
-        else:
-            merged.update(route_set)
-
-    # route_tag_counts[tag][route]: sum counts.
-    for tag, route_counts in new.route_tag_counts.items():
-        target = old.route_tag_counts[tag]
-        for route, count in route_counts.items():
-            target[route] = target.get(route, 0) + count
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir) / "merged.db"
+        shutil.copy2(old_index_path, tmp_path)
+        store = TagStore(str(tmp_path))
+        try:
+            known_paths = {str(p) for p in store.npz_paths()}
+            new_frames, skipped = _partition_new_and_skipped(new_source, known_paths)
+            _check_sidecars_present(new_frames)
+            if not new_frames:
+                return {"new_frames": 0, "skipped": len(skipped), "output": output_path}
+            store.append_frames(new_frames)
+        finally:
+            # Drop the in-memory reference so the connection closes and the
+            # WAL is checkpointed to tmp_path before the tempdir is removed.
+            store = None
+        shutil.move(str(tmp_path), output_path)
+    return {"new_frames": len(new_frames), "skipped": len(skipped), "output": output_path}
 
 
 def build_incremental_index(
@@ -192,59 +94,47 @@ def build_incremental_index(
     """Merge frames from *new_source* into the index at *old_index_path*.
 
     Args:
-        old_index_path: Path to a previously-written ``.tag`` index.
-        new_source: Anything ``expand_source`` accepts — directory, NPZ,
-                    path-list JSON, list of paths, or any combination.
-                    Frames already in the old index are skipped (warned).
-                    Frames without a sidecar cause the whole call to fail.
-        output_path: Where to write the merged index. ``None`` (default)
-                     means overwrite *old_index_path* in place.
+        old_index_path: Path to a previously-written SQLite index.
+        new_source: Anything ``expand_source`` accepts.
+        output_path: Where to write the merged index. ``None`` means overwrite
+            *old_index_path* in place.
 
     Returns:
-        Summary dict with counts of (new frames added), (skipped frames)
-        and the path that was written.
-
-    Raises:
-        FileNotFoundError: if any candidate new frame lacks a sidecar.
-        ValueError: if *old_index_path* is not a valid pickled index.
+        Summary dict with counts of new frames added / skipped frames
+        already in the index, plus the output path written.
     """
     old_index_path = Path(old_index_path)
     output_path = Path(output_path) if output_path is not None else old_index_path
 
-    old = _load_index_from_pickle(old_index_path)
-    # Index dict keys are Path objects — match by Path, not str, so the
-    # comparison is the same identity test the rest of the toolkit uses.
-    known_keys = set(old.frame_tags.keys())
+    if not old_index_path.is_file():
+        raise FileNotFoundError(f"old index not found: {old_index_path}")
 
-    new_frames, skipped = _partition_new_and_skipped(new_source, known_frame_keys=known_keys)
-    _check_sidecars_present(new_frames)
+    # Fail fast on non-SQLite files so the caller gets a clear ValueError
+    # rather than a stray sqlite3.DatabaseError from inside _init_db.
+    import sqlite3
 
-    if not new_frames:
-        # No new work — still rewrite the file so callers can rely on it
-        # existing after the call. The content is identical to the old
-        # index, so the atomic rename is a safe no-op semantically.
-        _save_index_to_pickle(old, output_path)
-        return {
-            "new_frames": 0,
-            "skipped": len(skipped),
-            "output": output_path,
-        }
+    try:
+        probe = sqlite3.connect(f"file:{old_index_path}?mode=ro", uri=True, timeout=1)
+        try:
+            probe.execute("SELECT 1 FROM frames LIMIT 1")
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                f"'{old_index_path}' is not a valid SQLite index: {exc}"
+            ) from exc
+        finally:
+            probe.close()
+    except sqlite3.Error as exc:
+        raise ValueError(
+            f"'{old_index_path}' is not a valid SQLite index: {exc}"
+        ) from exc
 
-    new_idx = _build_index_from_frames(new_frames)
-    _merge_indices(old, new_idx)
-    _save_index_to_pickle(old, output_path)
-
-    return {
-        "new_frames": len(new_frames),
-        "skipped": len(skipped),
-        "output": output_path,
-    }
+    return _merge(old_index_path, new_source, output_path)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Append new frames to an existing tag_toolkit .tag index without "
+            "Append new frames to an existing tag_toolkit SQLite index without "
             "rescanning old frames. Old index is overwritten in place unless "
             "--output is given."
         )
@@ -252,7 +142,7 @@ def main() -> int:
     parser.add_argument(
         "old_index",
         type=Path,
-        help="path to the existing .tag index file",
+        help="path to the existing SQLite index file (.db, .sqlite, or .tags.db)",
     )
     parser.add_argument(
         "new_source",
@@ -271,21 +161,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.old_index.is_file():
-        raise FileNotFoundError(f"old index not found: {args.old_index}")
-
-    # If the user passed multiple sources, hand them to expand_source as a
-    # list. If just one, pass it directly so a single NPZ / single path
-    # works without ceremony.
     new_source = args.new_source if len(args.new_source) > 1 else args.new_source[0]
-
-    summary = build_incremental_index(
-        args.old_index,
-        new_source,
-        output_path=args.output,
-    )
+    summary = build_incremental_index(args.old_index, new_source, output_path=args.output)
     print(
-        f"new frames added: {summary['new_frames']}, already-in-index skipped: {summary['skipped']}"
+        f"new frames added: {summary['new_frames']}, "
+        f"already-in-index skipped: {summary['skipped']}"
     )
     print(f"wrote {summary['output']}")
     return 0

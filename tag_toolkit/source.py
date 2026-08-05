@@ -64,7 +64,7 @@ def expand_source(source: Source, *, sort: bool = False) -> list[Path]:
         keep file order (same as training loaders).
     """
     if isinstance(source, (str, Path)):
-        paths = list(_expand_spec(os.path.expanduser(str(source))))
+        paths = list(_expand_spec(os.path.abspath(os.path.expanduser(str(source)))))
     else:
         paths = list(_expand_sequence(source))
     if sort:

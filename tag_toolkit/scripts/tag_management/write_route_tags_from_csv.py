@@ -14,7 +14,7 @@ Usage::
         /path/to/mapping.csv \\
         --match-col t4_dataset_id \\
         --tag-dimensions devops_site devops_override_label \\
-        [--index /path/to/output.tag]
+        [--output-index /path/to/output.db]
 
 All file writes are batched (per-file fsync deferred) and synced once at
 the end for maximum performance.
@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
 
@@ -49,6 +50,7 @@ if _TAG_TOOLKIT_PATH.exists():
     sys.path.insert(0, str(_TAG_TOOLKIT_PATH.parent))
 
 from tag_toolkit import TagStore
+from tag_toolkit.routes import route_of
 from tag_toolkit.sidecar import format_tag, is_valid_dimension, read_sidecar
 from tqdm import tqdm
 
@@ -56,10 +58,6 @@ from tqdm import tqdm
 # =============================================================================
 # match_col dispatch mechanism
 # =============================================================================
-
-# Supported match_col values
-SUPPORTED_MATCH_COLS = {"t4_dataset_id"}
-
 
 def _normalize_for_tag(value: str) -> str:
     """Normalize a value for use in tags (dimension or value).
@@ -106,61 +104,70 @@ def load_csv_index(csv_path: Path, match_col: str) -> dict[str, dict]:
     return index
 
 
-# Supported match_col values
-SUPPORTED_MATCH_COLS = {"t4_dataset_id"}
-
-
 def _get_field_from_sidecar(
-    store: TagStore, route: Path, field_name: str
+    by_route: dict[Path, list[Path]],
+    route: Path,
+    field_name: str,
 ) -> str | None:
-    """Extract a field from a route's NPZ sidecar.
+    """Extract a field from a route's first NPZ sidecar.
 
-    Reads the first NPZ in the route and extracts the specified field.
+    Uses a pre-built route -> [npz] index built once per call site to
+    avoid an O(N_routes × N_npz) scan inside the per-route loop.
 
     Args:
-        store: TagStore instance
-        route: Route path
-        field_name: Field name to extract from sidecar
+        by_route: Pre-built mapping from route path to its NPZ paths.
+        route: Route path whose first NPZ sidecar should be read.
+        field_name: Field name to extract from the sidecar.
 
     Returns:
-        Field value, or None if not found
+        Field value, or None if the route has no NPZ in the index.
     """
-    idx = store._require_index()
-    frames = idx.frames_of_route.get(route)
-    if not frames:
+    route_npz_paths = by_route.get(route)
+    if not route_npz_paths:
         return None
-    first_npz = frames[0]
+
+    first_npz = route_npz_paths[0]
     sidecar_data = read_sidecar(first_npz)
     return sidecar_data.get(field_name)
 
 
-# Registry of match value getters
-# To add a new match_col, implement a getter function and register it here
+# Registry of match value getters. To add a new ``--match-col`` value,
+# add an entry mapping the column name to a callable
+# ``(by_route, route) -> match_value | None``. ``_get_match_value`` validates
+# the key against this mapping, so we don't need a separate
+# ``SUPPORTED_MATCH_COLS`` set.
 MATCH_VALUE_GETTERS = {
-    "t4_dataset_id": lambda store, route: _get_field_from_sidecar(store, route, "t4_dataset_id"),
+    "t4_dataset_id": lambda by_route, route: _get_field_from_sidecar(
+        by_route, route, "t4_dataset_id"
+    ),
 }
 
 
-def _get_match_value(store: TagStore, route: Path, match_col: str) -> str | None:
-    """Dispatch to the appropriate getter based on match_col.
+def _get_match_value(
+    by_route: dict[Path, list[Path]],
+    route: Path,
+    match_col: str,
+) -> str | None:
+    """Dispatch to the per-match_col getter registered in ``MATCH_VALUE_GETTERS``.
 
     Args:
-        store: TagStore instance
-        route: Route path to extract value from
-        match_col: The match column type (e.g., 't4_dataset_id')
+        by_route: Pre-built mapping from route path to NPZ paths.
+        route: Route path to extract the match value from.
+        match_col: The match column type (e.g., 't4_dataset_id').
 
     Returns:
-        The match value, or None if not found
+        The match value, or None if not found.
 
     Raises:
-        ValueError: If match_col is not supported
+        ValueError: If match_col is not registered.
     """
-    if match_col not in SUPPORTED_MATCH_COLS:
+    getter = MATCH_VALUE_GETTERS.get(match_col)
+    if getter is None:
         raise ValueError(
-            f"Unsupported match_col: '{match_col}'. Supported: {sorted(SUPPORTED_MATCH_COLS)}"
+            f"Unsupported match_col: '{match_col}'. "
+            f"Supported: {sorted(MATCH_VALUE_GETTERS)}"
         )
-    getter = MATCH_VALUE_GETTERS[match_col]
-    return getter(store, route)
+    return getter(by_route, route)
 
 
 def apply_csv_tags_to_routes(
@@ -202,9 +209,10 @@ def apply_csv_tags_to_routes(
     if not csv_index:
         return {
             "total_routes": 0,
-            "matched_routes": 0,
+            "csv_matched_routes": 0,
+            "store_unmatched_routes": [],
+            "dim_tagged_counts": {dim: 0 for dim in tag_dimensions},
             "tagged_files": 0,
-            "unmatched_csv_keys": [],
             "errors": 0,
         }
 
@@ -216,8 +224,14 @@ def apply_csv_tags_to_routes(
                 f"tag_dimension '{dim}' not found in CSV. Available columns: {available}"
             )
 
-    idx = store._require_index()
-    routes = idx.routes
+    # Pre-build route -> [npz] index so the per-route lookup is O(1)
+    # instead of O(N_npz). Without this the loop is O(N_routes × N_npz).
+    by_route: dict[Path, list[Path]] = defaultdict(list)
+    for npz in store.npz_paths():
+        by_route[route_of(npz)].append(npz)
+
+    # Get all routes from the store
+    routes = store.route_paths()
     total_routes = len(routes)
     csv_matched_routes = 0
     store_unmatched_routes: list[str] = []
@@ -230,7 +244,7 @@ def apply_csv_tags_to_routes(
 
     for route in routes:
         # Get match value from route's sidecar
-        match_value = _get_match_value(store, route, match_col)
+        match_value = _get_match_value(by_route, route, match_col)
         if not match_value:
             continue
 
@@ -242,8 +256,10 @@ def apply_csv_tags_to_routes(
 
         csv_matched_routes += 1
 
-        # Build tag list from CSV
+        # Build tag list from CSV. Record which raw columns actually produced
+        # a tag so per-dimension counts are accurate without re-normalising.
         tags_to_add: list[str] = []
+        tagged_dims: list[str] = []
         for dim in tag_dimensions:
             raw_value = csv_row.get(dim, "").strip()
             if not raw_value:
@@ -260,6 +276,7 @@ def apply_csv_tags_to_routes(
 
             try:
                 tags_to_add.append(format_tag(norm_dim, norm_value))
+                tagged_dims.append(dim)
             except ValueError as e:
                 print(f"  Warning: skipping invalid tag '{norm_dim}:{norm_value}': {e}")
                 continue
@@ -267,10 +284,9 @@ def apply_csv_tags_to_routes(
         if not tags_to_add:
             continue
 
-        # Track per-dimension counts
-        for dim in tag_dimensions:
-            if any(tag.startswith(f"{_normalize_for_tag(dim)}:") for tag in tags_to_add):
-                dim_tagged_counts[dim] += 1
+        # Track per-dimension counts (one increment per raw column that yielded a tag)
+        for dim in tagged_dims:
+            dim_tagged_counts[dim] += 1
 
         route_tags_to_apply.append((route, tags_to_add))
 
@@ -280,17 +296,27 @@ def apply_csv_tags_to_routes(
             tags_str = ", ".join(tags_to_add)
             print(f"  [DRY-RUN] Would add [{tags_str}] to {route.name}")
     else:
-        with store.mutation_scope():
-            with tqdm(total=len(route_tags_to_apply), desc="Tagging routes", unit="route") as pbar:
-                for route, tags_to_add in route_tags_to_apply:
-                    try:
-                        store.add_tags_to_route(tags_to_add, route)
-                        tagged_files += 1
-                        pbar.update(1)
-                    except Exception as e:
-                        print(f"\n  Error: Failed to update {route}: {e}")
-                        errors += 1
-                        pbar.update(1)
+        with tqdm(total=len(route_tags_to_apply), desc="Tagging routes", unit="route") as pbar:
+            for route, tags_to_add in route_tags_to_apply:
+                try:
+                    # Pass the precomputed NPZ list as scope so add_tags hits
+                    # the SQL frames table directly — avoids the os.walk that
+                    # add_tags_to_route triggers through scope resolution.
+                    result = store.add_tags(
+                        tags_to_add, scope=by_route[route], sync=False
+                    )
+                    if result.failed:
+                        errors += len(result.failed)
+                        print(
+                            f"\n  Error: {len(result.failed)}/{len(by_route[route])} "
+                            f"frame(s) failed in {route}: {result.first_error}"
+                        )
+                    tagged_files += 1
+                    pbar.update(1)
+                except Exception as e:
+                    print(f"\n  Error: Failed to update {route}: {e}")
+                    errors += 1
+                    pbar.update(1)
 
     return {
         "total_routes": total_routes,
@@ -310,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "source",
         type=Path,
-        help="Data source: directory, .tag index, NPZ file, or path-list JSON",
+        help="Data source: directory, .db index, NPZ file, or path-list JSON",
     )
     parser.add_argument(
         "csv_path",
@@ -336,11 +362,11 @@ def parse_args() -> argparse.Namespace:
         help="Show what would be done without making changes",
     )
     parser.add_argument(
-        "--index",
+        "--output-index",
         type=Path,
         default=None,
-        dest="index_path",
-        help="Output path for the .tag index file (optional)",
+        dest="output_index",
+        help="Output path for the .db index file (optional)",
     )
     return parser.parse_args()
 
@@ -367,9 +393,6 @@ def main() -> int:
     print("[1/3] Loading data source...")
     try:
         store = TagStore(args.source)
-        if not store.has_index():
-            print(f"Error: No index available for source: {args.source}", file=sys.stderr)
-            return 1
         print(f"  Loaded {len(store.route_paths())} routes")
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -387,12 +410,12 @@ def main() -> int:
     )
 
     # Save index if requested
-    if args.index_path and not args.dry_run:
-        print(f"[3/3] Saving index to {args.index_path}...")
-        TagStore.build_index(store, args.index_path)
-        print(f"  Index saved to {args.index_path}")
+    if args.output_index and not args.dry_run:
+        print(f"[3/3] Saving index to {args.output_index}...")
+        store.export_index(args.output_index)
+        print(f"  Index saved to {args.output_index}")
     else:
-        print("[3/3] Skipping index save (use --index to save)")
+        print("[3/3] Skipping index save (use --output-index to save)")
 
     # Summary
     print()

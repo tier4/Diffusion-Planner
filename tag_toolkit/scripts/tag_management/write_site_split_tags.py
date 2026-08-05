@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -30,8 +29,6 @@ from tag_toolkit.sidecar import drop_dimension, format_tag, normalize_tags, read
 from tag_toolkit.source import Source, expand_source
 
 MODE_TOKENS = frozenset({"manual", "auto", "train", "valid"})
-# Site is whatever is between project and mode — kept permissive
-SITE_RE = re.compile(r"^.+$")
 
 
 def _default_split_labels(data_root: Path) -> Path | None:
@@ -50,9 +47,7 @@ def parse_site_split(npz: str | Path) -> tuple[str, str]:
 
     site = "unknown"
     if mode_idx is not None and mode_idx > 0:
-        candidate = parts[mode_idx - 1]
-        if SITE_RE.match(candidate):
-            site = candidate
+        site = parts[mode_idx - 1]
 
     split = "unknown"
     if mode_idx is not None:
@@ -80,6 +75,13 @@ def load_split_labels(path: str | Path) -> dict[str, str]:
 
 
 def _route_key_candidates(npz: Path) -> list[str]:
+    """Generate lookup keys for ``split_labels.json`` from an NPZ path.
+
+    The dataset layout is ``<project>/<site>/[<mode>/]<date>/<bag_time>``.
+    Labels files historically use either the with-mode or without-mode form;
+    we emit both so a single path matches whichever form the labels file
+    has, instead of duplicating the search loop.
+    """
     parts = list(npz.resolve().parts)
     if parts and parts[-1].endswith(".npz"):
         parts = parts[:-1]
@@ -89,6 +91,7 @@ def _route_key_candidates(npz: Path) -> list[str]:
         return []
     bag_time, date = parts[-1], parts[-2]
     if len(parts) >= 5 and parts[-3] in MODE_TOKENS:
+        # parts[-3] is the mode token; the real site is parts[-4].
         mode = parts[-3]
         site = parts[-4]
         proj = parts[-5]
@@ -128,7 +131,7 @@ def apply_path_tags(
         desired = [format_tag("site", site), format_tag("split", split)]
         current = drop_dimension(drop_dimension(read_tags(npz), "site"), "split")
         merged = normalize_tags(list(current) + desired)
-        if merged != normalize_tags(current):
+        if merged != normalize_tags(read_tags(npz)):
             write_tags(npz, merged)
             n += 1
     return n

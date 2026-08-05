@@ -40,22 +40,22 @@ routes = store.query("split:auto")  # instant
 
 ### 2. Index mode (fast for large datasets)
 
-For large datasets, build a pickled index once and load it for repeated
-queries. The output path must end in `.tag` — `TagStore` only reloads
-files whose suffix is `.tag`, so a `.pkl` or unsuffixed file would be
-re-scanned as a dataset and silently fail to load.
+For large datasets, build a SQLite index once and load it for repeated
+queries. The output path should end in `.db` (or `.sqlite` / `.tags.db`)
+— `TagStore` recognises those suffixes and reopens the file as a
+database.
 
 ```python
 from tag_toolkit import TagStore
 
-TagStore.build_index("/path/to/dataset", "/path/to/tags.tag")
-store = TagStore("/path/to/tags.tag")
+TagStore.build_index("/path/to/dataset", "/path/to/tags.db")
+store = TagStore("/path/to/tags.db")
 routes = store.query("split:auto")
 ```
 
 Note: `add_tags` and friends update the in-memory index immediately, but
-they do **not** rewrite the saved `.tag` file. To refresh the on-disk
-pickle after on-the-fly mutations, run `build_index` again (with the same
+they do **not** rewrite the saved `.db` file. To refresh the on-disk
+index after on-the-fly mutations, run `build_index` again (with the same
 source).
 
 ## Route vs frame
@@ -108,10 +108,10 @@ print(f"Found {len(routes)} routes")
 from tag_toolkit import TagStore
 
 # Build once (slow)
-TagStore.build_index("/path/to/large_dataset", "/path/to/tags.tag")
+TagStore.build_index("/path/to/large_dataset", "/path/to/tags.db")
 
 # Load from index (fast, repeated use)
-store = TagStore("/path/to/tags.tag")
+store = TagStore("/path/to/tags.db")
 routes = store.query("split:auto")
 ```
 
@@ -120,17 +120,17 @@ routes = store.query("split:auto")
 ```python
 from tag_toolkit import TagStore
 
-store = TagStore("/path/to/tags.tag")
+store = TagStore("/path/to/tags.db")
 
 # Tag every frame in the index — the typical "label the whole dataset" case.
-n = store.add_tags(["override_metric:centerline"])
-print(f"updated {n} sidecars")
+result = store.add_tags(["override_metric:centerline"])
+print(f"updated {result.changed} sidecars (skipped {result.skipped})")
 
 # Or tag just one NPZ by passing it as scope. Use npz_paths() (or a known
 # route) so the scope hits something already in the index.
 target_npz = store.npz_paths()[0]
-n = store.add_tags(["override_metric:centerline"], scope=target_npz)
-print(f"updated {n} sidecar for {target_npz}")
+result = store.add_tags(["override_metric:centerline"], scope=target_npz)
+print(f"updated {result.changed} sidecar for {target_npz}")
 ```
 
 Mutations verify that the on-disk sidecar matches the in-memory index
@@ -150,23 +150,17 @@ except StaleIndexError:
     store.add_tags(["override_metric:centerline"], scope=target_npz)
 ```
 
-### 4. Batch writes (fast for large datasets)
+### 4. Bulk writes (skip per-file fsync)
 
-For bulk operations, use `mutation_scope` — all per-file fsyncs are
-automatically batched and a single directory-fsync happens at scope exit:
+For bulk operations, pass `sync=False` to skip the per-file fsync on
+each call. The SQLite WAL keeps the index consistent; the on-disk
+sidecars are still flushed before each call returns.
 
 ```python
-from tag_toolkit import TagStore
+store = TagStore("/path/to/tags.db")
 
-store = TagStore("/path/to/tags.tag")
-
-# Every mutating call inside the scope is automatically batched —
-# no per-file fsync, just one directory-fsync on exit.
-with store.mutation_scope():
-    store.add_tags(["site:foo"], scope=route1)
-    store.add_tags(["site:bar"], scope=route2)
-    store.add_tags_to_route(["env:prod"], route3)
-# All fsync happens here, once.
+for route in store.route_paths():
+    store.add_tags(["site:foo"], scope=route, sync=False)
 ```
 
 ### 5. Group by multiple labels
@@ -174,7 +168,7 @@ with store.mutation_scope():
 ```python
 from tag_toolkit import TagStore, format_buckets
 
-store = TagStore("/path/to/tags.tag")
+store = TagStore("/path/to/tags.db")
 buckets = store.group_by(["site", "split"])
 print(format_buckets(buckets, ["site", "split"]))
 print(buckets[0].members[:2])  # route list in this bucket
@@ -194,9 +188,7 @@ TOTAL                                          3
 ### 6. Replace and remove
 
 ```python
-from tag_toolkit import TagStore
-
-store = TagStore("/path/to/tags.tag")
+store = TagStore("/path/to/tags.db")
 
 # Add
 store.add_tags(["lateral:turn"])
@@ -211,9 +203,18 @@ store.remove_dimension("lateral")
 store.replace_tags(tag_pairs={"split:eval": "split:train"})
 ```
 
+All mutation methods return a `MutationResult` with `.changed`,
+`.skipped`, `.failed`, and `.first_error` fields.
+
 ## More detail
 
-- **Usage (format, route, API examples)**: [`docs/usage.md`](docs/usage.md)
-- **Design (source contract, scope resolution, atomic writes)**: [`docs/design.md`](docs/design.md)
+- **API reference (every method, dataclass, error)**: [`docs/api.md`](docs/api.md)
+- **Usage recipes**: [`docs/usage.md`](docs/usage.md)
+- **Design (source contract, scope resolution, atomic writes)**:
+  [`docs/design.md`](docs/design.md)
+- **Persistence (schema, indexes, PRAGMAs)**:
+  [`docs/database.md`](docs/database.md)
 - **Reference taxonomy** (draft only; not used by query/mutate):
   [`docs/tag_taxonomy.yaml`](docs/tag_taxonomy.yaml)
+- **CLI scripts (one-line descriptions)**:
+  [`scripts/README.md`](scripts/README.md)

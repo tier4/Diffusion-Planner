@@ -3,7 +3,7 @@
 Tags for Diffusion Planner data live on each NPZ's sidecar JSON (`<stem>.json`
 next to `<stem>.npz`). `tag_toolkit` reads and writes the `tags` field, and
 queries at **route** or **frame** granularity. For large datasets, build the
-index once with `TagStore.build_index` and load the pickled `.tag` file
+index once with `TagStore.build_index` and load the resulting `.db` file
 thereafter.
 
 Scope resolution rules live in [design.md](design.md).
@@ -78,7 +78,7 @@ point).
 is not an allow-list — any `dimension:value` on a sidecar is valid. Query
 and mutate ignore this file. `list_known_tags()` loads it and warns that it
 can differ from tags actually present on disk; malformed entries are
-skipped with a warning rather than raised.
+skipped silently.
 
 ---
 
@@ -89,7 +89,7 @@ skipped with a warning rather than raised.
 | `source`               | Behavior                                           |
 | ---------------------- | -------------------------------------------------- |
 | `None`                 | Empty in-memory store                              |
-| `"/path/to/index.tag"` | Load pre-built pickled index                       |
+| `"/path/to/index.db"`  | Open pre-built SQLite index                        |
 | `"/path/to/dataset"`   | Scan directory recursively for NPZ + sidecar pairs |
 | `"/path/to/list.json"` | Scan paths listed in the JSON file                 |
 | `[path1, path2, ...]`  | Scan multiple sources                              |
@@ -98,19 +98,20 @@ skipped with a warning rather than raised.
 ```python
 store = TagStore()                       # empty
 store = TagStore("/path/to/dataset")     # scan on init
-store = TagStore("/path/to/index.tag")   # load index
+store = TagStore("/path/to/index.db")    # open pre-built index
 ```
 
-The output path of `build_index` must end with `.tag`; only that suffix
-is recognised as an index on reload.
+`TagStore` recognises `.db`, `.sqlite`, and `.tags.db` as SQLite index
+extensions on init.
 
 ### `TagStore.build_index(source, output)`
 
-Scan `source`, build the in-memory index, and pickle it to `output`.
-Returns the store with the built index in memory.
+Scan `source`, build the in-memory index, and persist it to `output`
+(typically a `.db` file) via `VACUUM INTO`. Returns a `TagStore` backed
+by the file at `output`.
 
 ```python
-TagStore.build_index("/path/to/dataset", "/path/to/tags.tag")
+store = TagStore.build_index("/path/to/dataset", "/path/to/tags.db")
 ```
 
 ### Scope
@@ -178,57 +179,41 @@ sorts last in its slot.
 buckets = store.group_by(["site", "lateral"], clause="split:auto")
 ```
 
-### `store.add_tags(tags, *, frame_filter=None, scope=None, sync=None) -> int`
+### `store.add_tags(tags, *, frame_filter=None, scope=None, sync=None) -> MutationResult`
 
 Union `tags` onto matching frames. Idempotent — a frame that already has
-every requested tag is not rewritten and is not counted. Returns the
-number of files written.
+every requested tag is not rewritten and is not counted. Returns a
+`MutationResult` with `.changed`, `.skipped`, `.failed`, `.first_error`.
 
 `frame_filter` is `(min, max)` for a frame-number range (inclusive), or a
-glob pattern string, or `None`.
+glob pattern string, or `None`. `sync=False` skips the fsync for this
+write (the data is still flushed).
 
 ```python
-n = store.add_tags(["override:centerline"])
-n = store.add_tags(["override:centerline"], frame_filter=(31, 100))
-n = store.add_tags(["override:centerline"], scope=route)
+result = store.add_tags(["override:centerline"])
+result = store.add_tags(["override:centerline"], frame_filter=(31, 100))
+result = store.add_tags(["override:centerline"], scope=route, sync=False)
 ```
 
-### `store.remove_tags(tags, *, frame_filter=None, scope=None, sync=None) -> int`
+### `store.remove_tags(tags, *, frame_filter=None, scope=None, sync=None) -> MutationResult`
 
 Remove exact tag strings. `remove_dimension(dimension, ...)` removes
-every tag whose dimension matches.
+every tag whose dimension matches. Returns a `MutationResult`.
 
-### `store.replace_tags(*, tag_pairs, scope=None, frame_filter=None, sync=None) -> int`
+### `store.replace_tags(*, tag_pairs, scope=None, frame_filter=None, sync=None) -> MutationResult`
 
 `tag_pairs` maps `old_tag → new_tag`. Frames without the old tag are
-skipped. Entries where key == value are no-ops.
+skipped. Entries where key == value are no-ops. Returns a `MutationResult`.
 
 ```python
-n = store.replace_tags(tag_pairs={"split:eval": "split:train"})
+result = store.replace_tags(tag_pairs={"split:eval": "split:train"})
 ```
 
-### `store.add_tags_to_route(tags, route, *, frame_filter=None, sync=None) -> int`
+### `store.add_tags_to_route(tags, route, *, frame_filter=None, sync=None) -> MutationResult`
 
-Same as `add_tags(scope=route)` but raises `ValueError` if the route is
-not in the index (rather than silently dropping the unknown route).
-
-### `store.mutation_scope(sync=True)`
-
-Context manager for batched mutations. Inside the scope, every mutating
-method skips per-file fsync; all directory-level fsync is deferred to
-scope exit. Inner calls do not need to pass `sync=False`.
-
-```python
-with store.mutation_scope():
-    store.add_tags(["site:foo"], scope=route1)
-    store.remove_tags(["site:bar"], scope=route2)
-    store.add_tags_to_route(["env:prod"], route3)
-# One directory-fsync per touched directory happens here.
-```
-
-The `sync` argument on `mutation_scope` itself controls whether the
-scope performs the directory-level fsync at all (`True`, default) or
-skips it entirely (`False`).
+Same as `add_tags(scope=route)`, but `route` is a required path. Raises
+`ValueError` if the route is not in the index (rather than silently
+dropping the unknown route).
 
 ### `format_buckets(buckets, dimensions) -> str`
 
@@ -238,8 +223,8 @@ counts each unique member once across cells.
 ### Concurrency
 
 Read methods are lock-free. Concurrent writers are serialised via an
-internal `RLock`; the in-memory index and `mutation_scope` batched fsync
-are the two invariants a multi-threaded caller can rely on.
+internal `RLock`; the per-thread SQLite connection and the route-tags
+cache are the two invariants a multi-threaded caller can rely on.
 
 ### Out-of-band edits
 
