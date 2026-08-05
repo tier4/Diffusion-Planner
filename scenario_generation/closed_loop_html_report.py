@@ -28,11 +28,24 @@ _DEFAULT_METRIC = "clearance"
 _PALETTE = ["#1a73e8", "#d68a1f", "#8a4ad6", "#2a8a6d", "#d63a3a", "#2aa5d6"]
 
 
+def _vehicle_type_for_site(site_name: str, site_vehicle_types: dict[str, str] | None) -> str:
+    """Look up a site's vehicle type, stripping the ``__noobj`` suffix if present."""
+    if not site_vehicle_types:
+        return ""
+    if site_name in site_vehicle_types:
+        return site_vehicle_types[site_name] or ""
+    if site_name.endswith("__noobj"):
+        base = site_name[: -len("__noobj")]
+        return site_vehicle_types.get(base) or ""
+    return ""
+
+
 def collect_site_data(
     out_root: str | Path,
     site_names: list[str],
     *,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
+    site_vehicle_types: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Read each site's ``summary.json`` + ``segments.jsonl`` into (items, summaries) for
     :func:`build_html_report`. ``items`` is one dict per episode (with a resolved, relative
@@ -40,6 +53,9 @@ def collect_site_data(
     path}`` — one rendered image per metric in ``colormap_metrics`` that actually produced
     something, so the report's per-card dropdown can switch between them); ``summaries`` is
     one aggregate dict per site.
+
+    ``site_vehicle_types`` (``{site_label: vehicle_type}``, optional) adds a ``vehicle_type``
+    field to every item/summary.
     """
     out_root = Path(out_root)
     items: list[dict[str, Any]] = []
@@ -53,9 +69,11 @@ def collect_site_data(
         s = json.loads(summary_path.read_text(encoding="utf-8"))
         near_miss_thresh = s.get("near_miss_thresh", 0.5)
         strong_brake_mps2 = s.get("strong_brake", {}).get("thresh_mps2", -2.5)
+        vehicle_type = _vehicle_type_for_site(site_name, site_vehicle_types)
         summaries.append(
             {
                 "site": site_name,
+                "vehicle_type": vehicle_type,
                 "n_segments": s.get("n_segments", 0),
                 "total_steps": s.get("total_steps", 0),
                 "route_completion": s.get("mean_route_completion", 0.0),
@@ -112,6 +130,7 @@ def collect_site_data(
                 items.append(
                     {
                         "site": site_name,
+                        "vehicle_type": vehicle_type,
                         "route": r["route"],
                         "segment": f"[{start},{end}]",
                         "n_steps_run": r.get("n_steps_run", 0),
@@ -142,6 +161,7 @@ def build_html_report(
     subtitle: str = "",
     report_filename: str = "report.html",
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
+    site_vehicle_types: dict[str, str] | None = None,
 ) -> Path | None:
     """Write the self-contained gallery HTML to ``<out_root>/<report_filename>``.
 
@@ -150,9 +170,17 @@ def build_html_report(
     trajectory colormap image rendered (default: all of them) — each episode card shows
     one image at a time with a dropdown to switch between the metrics that rendered for
     it, see :mod:`scenario_generation.trajectory_colormap`.
+
+    ``site_vehicle_types`` (``{site_label: vehicle_type}``, optional) adds a vehicle-type
+    filter/column to the report.
     """
     out_root = Path(out_root)
-    items, summaries = collect_site_data(out_root, site_names, colormap_metrics=colormap_metrics)
+    items, summaries = collect_site_data(
+        out_root,
+        site_names,
+        colormap_metrics=colormap_metrics,
+        site_vehicle_types=site_vehicle_types,
+    )
     if not summaries:
         return None
 
