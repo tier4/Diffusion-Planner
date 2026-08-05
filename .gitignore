@@ -10,6 +10,7 @@ sample*
 .datasets/
 
 */.agents/
+docs/superpowers/
 
 rlvr/configs/autoresearch/
 CLAUDE.md

@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-23T05:08:44.49130837Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -406,12 +406,15 @@ source = { virtual = "." }
 dependencies = [
     { name = "diffusion-planner" },
     { name = "exploration-policy" },
+    { name = "faiss-cpu" },
     { name = "guidance-gui" },
+    { name = "lightgbm" },
     { name = "planner-metrics" },
     { name = "preference-optimization" },
     { name = "rlvr" },
     { name = "scenario-generation" },
     { name = "scene-search" },
+    { name = "scikit-learn" },
 ]
 
 [package.dev-dependencies]
@@ -425,12 +428,15 @@ dev = [
 requires-dist = [
     { name = "diffusion-planner", editable = "diffusion_planner" },
     { name = "exploration-policy", editable = "exploration_policy" },
+    { name = "faiss-cpu", specifier = ">=1.7.0" },
     { name = "guidance-gui", editable = "guidance_gui" },
+    { name = "lightgbm", specifier = ">=4.6.0" },
     { name = "planner-metrics", editable = "planner_metrics" },
     { name = "preference-optimization", editable = "preference_optimization" },
     { name = "rlvr", editable = "rlvr" },
     { name = "scenario-generation", editable = "scenario_generation" },
     { name = "scene-search", editable = "scene_search" },
+    { name = "scikit-learn", specifier = ">=1.7.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -489,6 +495,24 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26,<2" },
     { name = "timm" },
     { name = "torch" },
+]
+
+[[package]]
+name = "faiss-cpu"
+version = "1.14.3"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+]
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/83/b0/48c083d01b7b68c463c1d56507147a9d733f791e1c469a77215a872a9fb5/faiss_cpu-1.14.3-cp310-abi3-macosx_14_0_arm64.whl", hash = "sha256:a9369863290a3f0e033757e4c10577b6ef7431f1cede394dabd0a137e4e2ed45", size = 4768290, upload-time = "2026-06-13T02:19:03.427Z" },
+    { url = "https://pypi.flatt.tech/files/packages/ab/34/6b04ef5bae3eada6b5a9457d7875cce041c040d53c890815cbd1e9821c65/faiss_cpu-1.14.3-cp310-abi3-macosx_15_0_x86_64.whl", hash = "sha256:f9d0e84d909194f63f027bbd3c1e35e905e48c9345c2db6e6f24da09a6bc5906", size = 6925734, upload-time = "2026-06-13T02:19:05.232Z" },
+    { url = "https://pypi.flatt.tech/files/packages/7c/8a/b451af4b3c6dd18749ecfb58ccb68503b77e49c9aa4a89d950e9d521e058/faiss_cpu-1.14.3-cp310-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1d734cfa9ac90b6a5dfed3a27cb706d05f22824703dafc3969b4e2071877a31c", size = 9661210, upload-time = "2026-06-13T02:19:06.99Z" },
+    { url = "https://pypi.flatt.tech/files/packages/a0/ed/57335bc18c9e18677587bec9bf070c675b29c8e683e13f4def0440731ca0/faiss_cpu-1.14.3-cp310-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8780b526c06e57aad90a8c4655dfba2ff1b3195bd600ff4499752fc45159c9fc", size = 18506292, upload-time = "2026-06-13T02:19:09.621Z" },
+    { url = "https://pypi.flatt.tech/files/packages/e7/d3/c6ca8c44a63b909e78aa8a69e14501c79c89613e62261d58455ea603d710/faiss_cpu-1.14.3-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:b28ba083e8c02f2c9be03783402537fd3f00d27e68799c44bf88931500ee12ec", size = 11238800, upload-time = "2026-06-13T02:19:12.821Z" },
+    { url = "https://pypi.flatt.tech/files/packages/93/5f/b405692913a301251749cb175cb3f564ed257fdaa80a22c9a36444d0095d/faiss_cpu-1.14.3-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:cdcb90850cb4b7c27d270839b37bcc0dc8d1fb6a62d1e13053e51ac95061ca25", size = 19237637, upload-time = "2026-06-13T02:19:15.531Z" },
+    { url = "https://pypi.flatt.tech/files/packages/3f/b2/bee73e3514afd88602e606a52f99559872e277ed0010fd04769a6eff41d3/faiss_cpu-1.14.3-cp310-cp310-win_amd64.whl", hash = "sha256:20414d5c98fb6ab9eedfb3df79841865911c2d67b6efe829dc46adfeab6f51b1", size = 16158545, upload-time = "2026-06-13T02:19:18.007Z" },
 ]
 
 [[package]]
@@ -832,6 +856,15 @@ wheels = [
 ]
 
 [[package]]
+name = "joblib"
+version = "1.5.3"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/41/f2/d34e8b3a08a9cc79a50b2208a93dce981fe615b64d5a4d4abee421d898df/joblib-1.5.3.tar.gz", hash = "sha256:8561a3269e6801106863fd0d6d84bb737be9e7631e33aaed3fb9ce5953688da3", size = 331603, upload-time = "2025-12-15T08:41:46.427Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl", hash = "sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713", size = 309071, upload-time = "2025-12-15T08:41:44.973Z" },
+]
+
+[[package]]
 name = "kiwisolver"
 version = "1.5.0"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -855,6 +888,23 @@ wheels = [
     { url = "https://pypi.flatt.tech/files/packages/c8/b9/1d50e610ecadebe205b71d6728fd224ce0e0ca6aba7b9cbe1da049203ac5/kiwisolver-1.5.0-pp310-pypy310_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b83af57bdddef03c01a9138034c6ff03181a3028d9a1003b301eb1a55e161a3f", size = 79888, upload-time = "2026-03-09T13:15:43.317Z" },
     { url = "https://pypi.flatt.tech/files/packages/cd/ee/b85ffcd75afed0357d74f0e6fc02a4507da441165de1ca4760b9f496390d/kiwisolver-1.5.0-pp310-pypy310_pp73-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bf4679a3d71012a7c2bf360e5cd878fbd5e4fcac0896b56393dec239d81529ed", size = 77584, upload-time = "2026-03-09T13:15:44.605Z" },
     { url = "https://pypi.flatt.tech/files/packages/6b/dd/644d0dde6010a8583b4cd66dd41c5f83f5325464d15c4f490b3340ab73b4/kiwisolver-1.5.0-pp310-pypy310_pp73-win_amd64.whl", hash = "sha256:41024ed50e44ab1a60d3fe0a9d15a4ccc9f5f2b1d814ff283c8d01134d5b81bc", size = 73390, upload-time = "2026-03-09T13:15:45.832Z" },
+]
+
+[[package]]
+name = "lightgbm"
+version = "4.6.0"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/68/0b/a2e9f5c5da7ef047cc60cef37f86185088845e8433e54d2e7ed439cce8a3/lightgbm-4.6.0.tar.gz", hash = "sha256:cb1c59720eb569389c0ba74d14f52351b573af489f230032a1c9f314f8bab7fe", size = 1703705, upload-time = "2025-02-15T04:03:03.111Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/f2/75/cffc9962cca296bc5536896b7e65b4a7cdeb8db208e71b9c0133c08f8f7e/lightgbm-4.6.0-py3-none-macosx_10_15_x86_64.whl", hash = "sha256:b7a393de8a334d5c8e490df91270f0763f83f959574d504c7ccb9eee4aef70ed", size = 2010151, upload-time = "2025-02-15T04:02:50.961Z" },
+    { url = "https://pypi.flatt.tech/files/packages/21/1b/550ee378512b78847930f5d74228ca1fdba2a7fbdeaac9aeccc085b0e257/lightgbm-4.6.0-py3-none-macosx_12_0_arm64.whl", hash = "sha256:2dafd98d4e02b844ceb0b61450a660681076b1ea6c7adb8c566dfd66832aafad", size = 1592172, upload-time = "2025-02-15T04:02:53.937Z" },
+    { url = "https://pypi.flatt.tech/files/packages/64/41/4fbde2c3d29e25ee7c41d87df2f2e5eda65b431ee154d4d462c31041846c/lightgbm-4.6.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:4d68712bbd2b57a0b14390cbf9376c1d5ed773fa2e71e099cac588703b590336", size = 3454567, upload-time = "2025-02-15T04:02:56.443Z" },
+    { url = "https://pypi.flatt.tech/files/packages/42/86/dabda8fbcb1b00bcfb0003c3776e8ade1aa7b413dff0a2c08f457dace22f/lightgbm-4.6.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:cb19b5afea55b5b61cbb2131095f50538bd608a00655f23ad5d25ae3e3bf1c8d", size = 3569831, upload-time = "2025-02-15T04:02:58.925Z" },
+    { url = "https://pypi.flatt.tech/files/packages/5e/23/f8b28ca248bb629b9e08f877dd2965d1994e1674a03d67cd10c5246da248/lightgbm-4.6.0-py3-none-win_amd64.whl", hash = "sha256:37089ee95664b6550a7189d887dbf098e3eadab03537e411f52c63c121e3ba4b", size = 1451509, upload-time = "2025-02-15T04:03:01.515Z" },
 ]
 
 [[package]]
@@ -1875,6 +1925,25 @@ requires-dist = [
 ]
 
 [[package]]
+name = "scikit-learn"
+version = "1.7.2"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "joblib" },
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "threadpoolctl" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/98/c2/a7855e41c9d285dfe86dc50b250978105dce513d6e459ea66a6aeb0e1e0c/scikit_learn-1.7.2.tar.gz", hash = "sha256:20e9e49ecd130598f1ca38a1d85090e1a600147b9c02fa6f15d69cb53d968fda", size = 7193136, upload-time = "2025-09-09T08:21:29.075Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/ba/3e/daed796fd69cce768b8788401cc464ea90b306fb196ae1ffed0b98182859/scikit_learn-1.7.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:6b33579c10a3081d076ab403df4a4190da4f4432d443521674637677dc91e61f", size = 9336221, upload-time = "2025-09-09T08:20:19.328Z" },
+    { url = "https://pypi.flatt.tech/files/packages/1c/ce/af9d99533b24c55ff4e18d9b7b4d9919bbc6cd8f22fe7a7be01519a347d5/scikit_learn-1.7.2-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:36749fb62b3d961b1ce4fedf08fa57a1986cd409eff2d783bca5d4b9b5fce51c", size = 8653834, upload-time = "2025-09-09T08:20:22.073Z" },
+    { url = "https://pypi.flatt.tech/files/packages/58/0e/8c2a03d518fb6bd0b6b0d4b114c63d5f1db01ff0f9925d8eb10960d01c01/scikit_learn-1.7.2-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7a58814265dfc52b3295b1900cfb5701589d30a8bb026c7540f1e9d3499d5ec8", size = 9660938, upload-time = "2025-09-09T08:20:24.327Z" },
+    { url = "https://pypi.flatt.tech/files/packages/2b/75/4311605069b5d220e7cf5adabb38535bd96f0079313cdbb04b291479b22a/scikit_learn-1.7.2-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4a847fea807e278f821a0406ca01e387f97653e284ecbd9750e3ee7c90347f18", size = 9477818, upload-time = "2025-09-09T08:20:26.845Z" },
+    { url = "https://pypi.flatt.tech/files/packages/7f/9b/87961813c34adbca21a6b3f6b2bea344c43b30217a6d24cc437c6147f3e8/scikit_learn-1.7.2-cp310-cp310-win_amd64.whl", hash = "sha256:ca250e6836d10e6f402436d6463d6c0e4d8e0234cfb6a9a47835bd392b852ce5", size = 8886969, upload-time = "2025-09-09T08:20:29.329Z" },
+]
+
+[[package]]
 name = "scipy"
 version = "1.15.3"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -1994,6 +2063,15 @@ dependencies = [
 sdist = { url = "https://pypi.flatt.tech/files/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://pypi.flatt.tech/files/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "threadpoolctl"
+version = "3.6.0"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/b7/4d/08c89e34946fce2aec4fbb45c9016efd5f4d7f24af8e5d93296e935631d8/threadpoolctl-3.6.0.tar.gz", hash = "sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e", size = 21274, upload-time = "2025-03-13T13:49:23.031Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl", hash = "sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb", size = 18638, upload-time = "2025-03-13T13:49:21.846Z" },
 ]
 
 [[package]]

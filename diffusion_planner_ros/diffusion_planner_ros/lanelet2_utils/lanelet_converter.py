@@ -248,7 +248,12 @@ def _identify_current_light_status(turn_direction: int, traffic_light_elements: 
 
 
 def convert_lanelet(filename: str) -> LaneletMap:
-    """Convert lanelet (.osm) to map info.
+    """Convert lanelet (.osm or .bin) to map info.
+
+    For .osm files, coordinates are loaded via MGRSProjector.
+    For .bin files, coordinates are loaded directly (native frame).
+    Use .bin files from extract_map_bin_from_bag.py to preserve the
+    bag's native coordinate system for ego-position lane lookups.
 
     Note:
     ----
@@ -257,7 +262,7 @@ def convert_lanelet(filename: str) -> LaneletMap:
 
     Args:
     ----
-        filename (str): Path to osm file.
+        filename (str): Path to .osm or .bin lanelet2 map file.
 
     Returns:
     -------

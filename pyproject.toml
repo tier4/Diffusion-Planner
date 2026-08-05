@@ -6,12 +6,15 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
     "diffusion-planner",
     "exploration-policy",
+    "faiss-cpu>=1.7.0",
     "guidance-gui",
+    "lightgbm>=4.6.0",
     "planner-metrics",
     "preference-optimization",
     "rlvr",
     "scenario-generation",
     "scene-search",
+    "scikit-learn>=1.7.2",
 ]
 
 [dependency-groups]
