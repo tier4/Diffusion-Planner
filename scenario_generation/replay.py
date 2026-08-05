@@ -1510,11 +1510,15 @@ def save_step_figure(
     road_border_polylines: list[np.ndarray] | None = None,
     metrics: dict | None = None,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
     Viewport is fixed to ``±view_half_m`` metres around the ego, so lane
     borders stay visible and NPC detail remains readable at every step.
+
+    ``reproducer_ego``: optional ``(x, y, heading)`` in the live-ego frame for the
+    recorded cursor ego, drawn as a hollow outline in ``_EGO_COLOR``.
     """
     from matplotlib.figure import Figure
 
@@ -1688,6 +1692,36 @@ def save_step_figure(
                 width=agent.width,
                 wheelbase=agent.wheelbase if is_ego else None,
             )
+
+    # 3a) Hollow reproducer ego (recorded cursor pose in the live-ego frame).
+    # Same color as live ego, outline-only, so divergence from the closed-loop ego is visible.
+    if reproducer_ego is not None:
+        rx, ry, rh = float(reproducer_ego[0]), float(reproducer_ego[1]), float(reproducer_ego[2])
+        draw_agent_box(
+            ax,
+            rx,
+            ry,
+            rh,
+            ego.length,
+            ego.width,
+            _EGO_COLOR,
+            alpha=0.9,
+            lw=2.0,
+            zorder=23,
+            wheelbase=ego.wheelbase,
+            filled=False,
+        )
+        ax.annotate(
+            "reproducer",
+            (rx, ry),
+            fontsize=6,
+            color=_EGO_COLOR,
+            ha="center",
+            va="top",
+            xytext=(0, -8),
+            textcoords="offset points",
+            zorder=24,
+        )
 
     # 3b) Extra ego-frame trajectories (e.g. GT vs model output side by side).
     # Each entry: (traj[T, >=4] with x, y, cos, sin in the CURRENT ego frame,

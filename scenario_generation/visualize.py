@@ -147,12 +147,16 @@ def draw_agent_box(
     lw=1.5,
     zorder=10,
     wheelbase: float | None = None,
+    filled: bool = True,
 ):
     """Draw an oriented bounding box for an agent.
 
     When ``wheelbase`` is provided, (x, y) is treated as rear-axle midpoint
     (ego convention). When None, (x, y) is the bbox centroid (neighbor
     convention from the perception pipeline).
+
+    ``filled=False`` draws an outline-only (hollow) box: face is transparent,
+    ``alpha`` applies to the edge only.
     """
     if wheelbase is not None:
         rear_overhang = (length - wheelbase) / 2
@@ -165,7 +169,7 @@ def draw_agent_box(
         width,
         lw=lw,
         ec=color,
-        fc=color,
+        fc=color if filled else "none",
         alpha=alpha,
         zorder=zorder,
         transform=t_rot,

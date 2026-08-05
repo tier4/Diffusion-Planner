@@ -1322,6 +1322,7 @@ def _draw_step(
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1335,6 +1336,9 @@ def _draw_step(
     ``neighbor_ids``: per-slot track UUIDs from the sidecar. When given, neighbor
     agents are renamed to their UUID so the sim's own ``_stable_color`` keeps one
     color per track across frames (vs the flickering distance-sorted slot colors).
+
+    ``reproducer_ego``: optional ``(x, y, heading)`` of the recorded cursor ego in
+    the live-ego frame, drawn as a hollow outline matching the live ego color.
     """
     from pathlib import Path
 
@@ -1370,6 +1374,7 @@ def _draw_step(
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
         extra_ego_trajectories=extra_ego_trajectories,
+        reproducer_ego=reproducer_ego,
     )
 
 
@@ -1706,6 +1711,7 @@ def render_segment(
             and (window is None or (window[0] <= k <= window[1]))
             and k % draw_every == 0
         ):
+            repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
             _draw_step(
                 np_dict,
                 pred_cur,
@@ -1717,6 +1723,7 @@ def render_segment(
                 title_prefix=title_prefix,
                 distance_label_offset_m=distance_label_offset_m,
                 view_half_m=view_half_m,
+                reproducer_ego=repro_xyh,
             )
         snaps_before = s.snap_count
         _advance_step(s, pred_cur, idx, device, timers, override=override)
