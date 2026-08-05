@@ -169,7 +169,7 @@ def closed_loop_validate(
         RolloutParams,
     )
     from scenario_generation.closed_loop_html_report import build_html_report
-    from scenario_generation.site_discovery import discover_sites_from_json
+    from scenario_generation.site_discovery import discover_sites_with_vehicles_from_json
     from scenario_generation.wandb_closed_loop import (
         build_combined_episode_table,
         build_full_closed_loop_wandb_log,
@@ -234,8 +234,9 @@ def closed_loop_validate(
 
     log: dict = {}
     site_summaries: dict[str, dict] = {}
-    episode_data: list = []  # (label, rows, out_dir) for the ONE combined table, across BOTH sources
+    episode_data: list = []  # (label, rows, out_dir, vehicle_type) for the ONE combined table
     site_report_labels: list[str] = []
+    site_vehicle_types: dict[str, str] = {}
 
     def run_labeled(
         base_name: str | None,
@@ -243,6 +244,7 @@ def closed_loop_validate(
         mode_pairs: tuple[tuple[str, bool], ...],
         *,
         track_for_report: bool = False,
+        vehicle_type: str | None = None,
     ) -> None:
         """Run ``npz_root`` once per requested object-mode, merging into log/site_summaries/episode_data.
 
@@ -266,9 +268,13 @@ def closed_loop_validate(
             episode_label = label or "main"
             log.update(site_log)
             site_summaries[episode_label] = summary
-            episode_data.append((episode_label, summary.get("segments") or [], site_out_dir))
+            episode_data.append(
+                (episode_label, summary.get("segments") or [], site_out_dir, vehicle_type)
+            )
             if track_for_report:
                 site_report_labels.append(episode_label)
+            if vehicle_type:
+                site_vehicle_types[episode_label] = vehicle_type
 
     try:
         if args.closed_loop_npz_root:
@@ -276,23 +282,38 @@ def closed_loop_validate(
             run_labeled(None, args.closed_loop_npz_root, npz_modes)
 
         if args.closed_loop_sites_npz_root:
-            sites = discover_sites_from_json(args.closed_loop_sites_npz_root)
+            project_vehicle_map = None
+            if args.closed_loop_project_vehicle_map:
+                project_vehicle_map = json.loads(
+                    Path(args.closed_loop_project_vehicle_map).read_text()
+                )
+            sites = discover_sites_with_vehicles_from_json(
+                args.closed_loop_sites_npz_root, project_vehicle_map
+            )
             if not sites:
                 print(f"closed-loop: no sites found under {args.closed_loop_sites_npz_root}")
             sites_modes = _object_mode_pairs(args.closed_loop_sites_object_modes)
-            for site_name, npz_root in sites.items():
-                run_labeled(site_name, npz_root, sites_modes, track_for_report=True)
+            for site_name, info in sites.items():
+                run_labeled(
+                    site_name,
+                    info["npz_roots"],
+                    sites_modes,
+                    track_for_report=True,
+                    vehicle_type=info["vehicle_type"],
+                )
 
         # One combined, filterable/groupable episode table across every source/site/mode.
         if episode_data:
             log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
         # Cross-source/site pooled rollup under closed_loop_overview/*.
         if len(site_summaries) > 1:
-            log.update(build_sites_aggregate_log(site_summaries))
+            log.update(build_sites_aggregate_log(site_summaries, site_vehicle_types))
         # Local HTML gallery, sites only (see site_report_labels above) -- only built on
         # is_final_save, same as the media (videos/colormap images) it links to.
         if is_final_save and site_report_labels:
-            report_path = build_html_report(out_dir, site_report_labels)
+            report_path = build_html_report(
+                out_dir, site_report_labels, site_vehicle_types=site_vehicle_types
+            )
             if report_path:
                 print(f"closed-loop: wrote {report_path}")
     finally:
