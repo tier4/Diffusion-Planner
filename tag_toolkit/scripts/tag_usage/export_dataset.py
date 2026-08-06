@@ -222,6 +222,11 @@ def export_close_loop(
                         os.symlink(src, dst)
                     linked_count += 1
 
+                    sidecar_json = src.with_suffix(".json")
+                    dst_json = seg_dir / sidecar_json.name
+                    if sidecar_json.exists() and not dst_json.exists():
+                        os.symlink(sidecar_json, dst_json)
+
             entry_dimension = dim_value if dimension else "unbucketed"
             buckets[entry_dimension].append(str(seg_dir.resolve()))
             print(
