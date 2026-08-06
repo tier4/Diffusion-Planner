@@ -23,6 +23,7 @@ import numpy as np
 
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
@@ -460,6 +461,7 @@ def run_closed_loop_eval(
     abort_after: int = 30,
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
+    draw_workers: int = 1,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -508,6 +510,8 @@ def run_closed_loop_eval(
     digests_name = "tdigests.jsonl" if shard is None else f"tdigests_{shard[0]}.jsonl"
     fout = open(out_dir / segments_name, "w")
     fdigest = open(out_dir / digests_name, "w")
+    # One pool for every route: a spawned worker re-imports torch and matplotlib.
+    draw_pool = render_pool(draw_workers)
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=route_sidecar_dir[key], timers=timers)
@@ -538,6 +542,7 @@ def run_closed_loop_eval(
                 abort_after=abort_after,
                 abort_max_snaps=abort_max_snaps,
                 drop_objects=drop_objects,
+                draw_pool=draw_pool,
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
@@ -574,6 +579,7 @@ def run_closed_loop_eval(
     finally:
         fout.close()
         fdigest.close()
+        draw_pool.shutdown()
 
     # In-memory ``rows`` still carry digests for this process's aggregate.
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)

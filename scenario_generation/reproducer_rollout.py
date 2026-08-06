@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import math
 import time
+from concurrent.futures import Executor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,6 +43,7 @@ from scenario_generation.metrics import (
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
@@ -1411,6 +1414,7 @@ def render_segment(
     abort_after: int = 30,
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
+    draw_pool: Executor | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1431,6 +1435,10 @@ def render_segment(
     ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/
     ``rollout.jsonl`` (and anything downstream that reads it, e.g. trajectory-colormap images)
     are unaffected, only the video/PNG artifacts disappear.
+
+    ``draw_pool`` (see ``render_pool``): the workers the PNGs are rendered on. The step loop
+    hands the arrays off and waits once, at the end of the segment. Pass one to share workers
+    across segments; ``None`` opens a one-worker pool for this segment.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1520,11 +1528,16 @@ def render_segment(
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
+    pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
     # reach). One JSONL line per step + a start header + a terminated line, next to the PNGs.
-    with open(out_dir / "rollout.jsonl", "w", buffering=1) as dbg:
+    with (
+        open(out_dir / "rollout.jsonl", "w", buffering=1) as dbg,
+        # Only a pool opened here gets shut down.
+        nullcontext(draw_pool) if draw_pool is not None else render_pool(1) as draw,
+    ):
         dbg.write(
             json.dumps(
                 {
@@ -1706,17 +1719,20 @@ def render_segment(
                 and (window is None or (window[0] <= k <= window[1]))
                 and k % draw_every == 0
             ):
-                _draw_step(
-                    np_dict,
-                    pred_cur,
-                    s.ego_shape,
-                    out_dir / f"{k:05d}.png",
-                    neighbor_ids=nids if color_by_uuid else None,
-                    step=k,
-                    total=cap,
-                    title_prefix=title_prefix,
-                    distance_label_offset_m=distance_label_offset_m,
-                    view_half_m=view_half_m,
+                pending.append(
+                    draw.submit(
+                        _draw_step,
+                        np_dict,
+                        pred_cur,
+                        s.ego_shape,
+                        out_dir / f"{k:05d}.png",
+                        neighbor_ids=nids if color_by_uuid else None,
+                        step=k,
+                        total=cap,
+                        title_prefix=title_prefix,
+                        distance_label_offset_m=distance_label_offset_m,
+                        view_half_m=view_half_m,
+                    )
                 )
             snaps_before = s.snap_count
             _advance_step(s, pred_cur, idx, device, timers, override=override)
@@ -1725,6 +1741,10 @@ def render_segment(
                 # world location, so executing it next step would drag the ego right back. Invalidate
                 # it to force a fresh inference at the snapped pose (else the snap never sticks).
                 plan_world = None
+    # Every PNG must be on disk before the caller globs the directory for ffmpeg, and a worker
+    # exception only surfaces here.
+    for f in pending:
+        f.result()
     return _finalize(s)
 
 

@@ -288,6 +288,13 @@ def get_args(args_list=None):
         default=4,
         help="render 1 of every N steps (matplotlib render is the dominant cost)",
     )
+    parser.add_argument(
+        "--closed_loop_draw_workers",
+        type=int,
+        default=_train_config_default("closed_loop_draw_workers"),
+        help="render the PNGs on this many worker processes (minimum 1). Output is "
+        "byte-identical whatever the count; costs ~780 MB of RSS per worker",
+    )
     parser.add_argument("--closed_loop_fps", type=int, default=10)
     parser.add_argument("--closed_loop_near_miss_thresh", type=float, default=0.5)
     parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)

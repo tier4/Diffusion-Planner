@@ -175,6 +175,8 @@ class TrainConfig:
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
     closed_loop_replan_interval: int = 4
     closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
+    # draw on this many worker processes (minimum 1)
+    closed_loop_draw_workers: int = 4
     closed_loop_fps: int = 10
     closed_loop_near_miss_thresh: float = 0.5
     closed_loop_search_radius: float = 1.5

@@ -197,6 +197,7 @@ def closed_loop_validate(
                     unstick_radius_mult=args.closed_loop_unstick_radius_mult,
                     unstick_teleport_after=args.closed_loop_unstick_teleport_after,
                     draw_every=args.closed_loop_draw_every if is_final_save else None,
+                    draw_workers=args.closed_loop_draw_workers,
                     replan_interval=args.closed_loop_replan_interval,
                     abort_deviation_m=args.closed_loop_abort_deviation_m,
                     abort_after=args.closed_loop_abort_after,
