@@ -57,4 +57,3 @@ if __name__ == "__main__":
     with open(args.output, "w") as f:
         json.dump({k: [str(p) for p in v] for k, v in groups.items()}, f, indent=2)
     print(f"Wrote {len(groups)} groups to {args.output}")
-

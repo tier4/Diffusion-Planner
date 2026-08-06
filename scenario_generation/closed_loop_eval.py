@@ -92,8 +92,8 @@ def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[s
     route_sidecar_dir: dict[str, Path] = {}
     for root in roots:
         for key, paths in enumerate_routes(root).items():
-    # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
-    # dirs and MP4s carry the location + date, not just the ambiguous time-of-day bag prefix.
+            # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
+            # dirs and MP4s carry the location + date, not just the ambiguous time-of-day bag prefix.
             label = route_label(paths[0], key)
             uniq, n = label, 1
             while uniq in routes:

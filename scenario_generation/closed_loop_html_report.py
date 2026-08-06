@@ -124,7 +124,9 @@ def collect_group_data(
                         or 0,
                         "n_strong_brakes": extract_score(r, "total_strong_brakes") or 0,
                         "progress_m": round(r.get("progress_m", 0.0), 1),
-                        "video_path": f"{group_name}/{video_name}" if video_path.is_file() else None,
+                        "video_path": f"{group_name}/{video_name}"
+                        if video_path.is_file()
+                        else None,
                         "colormap_paths": colormap_paths,
                     }
                 )

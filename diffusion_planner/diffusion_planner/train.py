@@ -149,6 +149,7 @@ def closed_loop_validate(
         return
 
     from run_all_groups_closed_loop import run_closed_loop_main
+
     from scenario_generation.closed_loop_html_report import build_html_report
     from scenario_generation.wandb_closed_loop import (
         build_combined_episode_table,

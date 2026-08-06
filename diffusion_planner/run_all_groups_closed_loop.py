@@ -303,7 +303,9 @@ def run_closed_loop_main(
                 )
 
                 # Update groups_summary.json at json_out_dir (or out_root for __noobj)
-                summary_out_dir = json_out_dir if mode == "objects" else out_root / f"{json_name}__noobj"
+                summary_out_dir = (
+                    json_out_dir if mode == "objects" else out_root / f"{json_name}__noobj"
+                )
                 update_groups_summary(
                     summary_out_dir,
                     summary_key,
@@ -339,10 +341,21 @@ def run_closed_loop_main(
             all_group_names,
             title="Per-Group Closed-Loop Evaluation",
             subtitle=f"groups_npz_root={groups_npz_root}",
-            colormap_metrics=tuple(getattr(args, "report_colormap_metrics", [
-                "clearance", "collision", "near_miss", "speed",
-                "road_border", "red_light", "strong_brake",
-            ])),
+            colormap_metrics=tuple(
+                getattr(
+                    args,
+                    "report_colormap_metrics",
+                    [
+                        "clearance",
+                        "collision",
+                        "near_miss",
+                        "speed",
+                        "road_border",
+                        "red_light",
+                        "strong_brake",
+                    ],
+                )
+            ),
         )
         if report_path:
             print(f"Wrote {report_path}")
@@ -542,10 +555,21 @@ def _log_to_wandb(
                     out_dir=group_out_dir,
                     group=group_name,
                     video_pick=getattr(args, "wandb_video_pick", "worst"),
-                    colormap_metrics=tuple(getattr(args, "wandb_colormap_metrics", [
-                        "clearance", "collision", "near_miss", "speed",
-                        "road_border", "red_light", "strong_brake",
-                    ])),
+                    colormap_metrics=tuple(
+                        getattr(
+                            args,
+                            "wandb_colormap_metrics",
+                            [
+                                "clearance",
+                                "collision",
+                                "near_miss",
+                                "speed",
+                                "road_border",
+                                "red_light",
+                                "strong_brake",
+                            ],
+                        )
+                    ),
                     near_miss_thresh=summary.get("near_miss_thresh", 0.5),
                     report_base_url=getattr(args, "report_base_url", None),
                     wandb_key_prefix=wandb_key_prefix,

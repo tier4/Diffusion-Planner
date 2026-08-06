@@ -170,16 +170,12 @@ def build_groups_aggregate_log(
     comp_num = sum(
         float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
     )
-    log[f"{prefix}/route_completion"] = (
-        comp_num / total_segments if total_segments else 0.0
-    )
+    log[f"{prefix}/route_completion"] = comp_num / total_segments if total_segments else 0.0
 
     for key in COMPARISON_OVERVIEW_SUM_KEYS:
         log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
     for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
-        log[f"{prefix}/{key}"] = sum(
-            int(extract_score(s, key) or 0) for s in objects_values
-        )
+        log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in objects_values)
 
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 
