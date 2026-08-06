@@ -17,10 +17,11 @@ from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_traje
 
 
 def _is_noobj_label(label: str) -> bool:
-    """True for the empty-world-ablation group label convention (``{group}__noobj``). Used to
-    exclude ablation labels from collision-style aggregates that are 0 by construction in that
-    mode."""
-    return label.endswith("__noobj")
+    """True for the empty-world-ablation group label convention.
+
+    Supports both old format ``{group}__noobj`` and new format ``{json_name}__noobj/{group}``.
+    """
+    return "__noobj" in label
 
 
 def episode_stem(out_dir: str | Path, row: dict) -> str:
@@ -140,13 +141,17 @@ def resolve_report_link(out_dir: str | Path, report_base_url: str | None = None)
     return str(out_dir.resolve())
 
 
-def build_groups_aggregate_log(summaries: dict[str, dict]) -> dict:
-    """Cross-group rollup under ``closed_loop_overview/`` (the at-a-glance block): the segment-
+def build_groups_aggregate_log(
+    summaries: dict[str, dict],
+    *,
+    prefix: str = "closed_loop_overview",
+) -> dict:
+    """Cross-group rollup under ``<prefix>/`` (default: ``closed_loop_overview/``): the segment-
     weighted mean route-completion (so long routes aren't under-weighted), plus the plain
     cross-group SUM of each event count. Deliberately just the small non-saturating set — no
     segment-rates / min-clearances / means (those stay in each group's summary.json only).
 
-    ``summaries`` is keyed by group LABEL — a ``{group}__noobj`` label is excluded from
+    ``summaries`` is keyed by group LABEL — a ``__noobj`` label is excluded from
     collision-style sums (``OBJECTS_ONLY_OVERVIEW_SUM_KEYS``), since those are 0 by
     construction in the empty-world ablation and would just dilute the objects-mode number
     with zeros.
@@ -159,20 +164,20 @@ def build_groups_aggregate_log(summaries: dict[str, dict]) -> dict:
     n_groups = len(values)
     total_segments = sum(int(s.get("n_segments", 0)) for s in values)
 
-    log["closed_loop_overview/n_groups"] = n_groups
-    log["closed_loop_overview/n_segments"] = total_segments
+    log[f"{prefix}/n_groups"] = n_groups
+    log[f"{prefix}/n_segments"] = total_segments
 
     comp_num = sum(
         float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
     )
-    log["closed_loop_overview/route_completion"] = (
+    log[f"{prefix}/route_completion"] = (
         comp_num / total_segments if total_segments else 0.0
     )
 
     for key in COMPARISON_OVERVIEW_SUM_KEYS:
-        log[f"closed_loop_overview/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
+        log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
     for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
-        log[f"closed_loop_overview/{key}"] = sum(
+        log[f"{prefix}/{key}"] = sum(
             int(extract_score(s, key) or 0) for s in objects_values
         )
 
@@ -194,6 +199,7 @@ def build_full_closed_loop_wandb_log(
     near_miss_thresh: float = 0.5,
     report_base_url: str | None = None,
     render_media: bool = True,
+    wandb_key_prefix: str | None = None,
 ) -> dict:
     """Per-group full-route closed-loop wandb payload, keyed into role-based sections so the
     workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
@@ -206,6 +212,10 @@ def build_full_closed_loop_wandb_log(
       per-card metric dropdown; ``closed_loop_media/{group}__video`` — that episode's video.
     - ``closed_loop_links/{group}`` — where the full report (all videos + HTML) lives.
 
+    If ``wandb_key_prefix`` is set (e.g. ``override/departure``), it replaces the
+    ``closed_loop_scores/``, ``closed_loop_media/``, ``closed_loop_links/`` prefix, allowing
+    arbitrary nesting like ``closed_loop/<metric>/override/departure``.
+
     ``render_media=False`` skips the video + colormap-image block entirely (scores/links are
     unaffected) -- for a caller that already skipped rendering (e.g. train.py's RolloutParams
     ``draw=False`` on most epochs), so there's no colormap image to render from anyway.
@@ -215,17 +225,39 @@ def build_full_closed_loop_wandb_log(
     """
     label = _group_label(group)
     log: dict = {}
+
+    def _key(suffix: str) -> str:
+        """Build wandb key, optionally prefixed.
+
+        suffix format: "scores/{metric}/{label}" or "media/{label}" or "links/{label}"
+
+        Without prefix: "closed_loop_scores/collision/label" (original format)
+        With prefix "override/departure": "closed_loop/collision/override/departure/label"
+        """
+        if wandb_key_prefix is None:
+            return f"closed_loop_{suffix}"
+        # Extract metric from "scores/{metric}/..." or put everything after prefix
+        parts = suffix.split("/", 3)
+        if parts[0] == "scores" and len(parts) >= 3:
+            # "scores/collision/label" -> metric=collision, rest=label
+            metric = parts[1]
+            label = parts[2]
+            return f"closed_loop/{metric}/{wandb_key_prefix}/{label}"
+        # media, links: "media/label__video" or "links/label"
+        rest = "/".join(parts[1:])
+        return f"closed_loop/{wandb_key_prefix}/{rest}"
+
     for key in SCORE_KEYS:
         val = extract_score(summary, key)
         if _wandb_scalar(val):
-            log[f"closed_loop_scores/{key}/{label}"] = val
+            log[_key(f"scores/{key}/{label}")] = val
 
     rows = summary.get("segments") or []
     rep = pick_representative_row(rows, mode=video_pick)
     if render_media and rep is not None and out_dir is not None:
         png_dir, mp4_path = _segment_paths(out_dir, rep)
         if mp4_path.is_file():
-            log[f"closed_loop_media/{label}__video"] = wandb.Video(str(mp4_path), format="mp4")
+            log[_key(f"media/{label}__video")] = wandb.Video(str(mp4_path), format="mp4")
         try:
             rendered = render_trajectory_colormaps(
                 png_dir,
@@ -239,19 +271,16 @@ def build_full_closed_loop_wandb_log(
         except Exception as e:  # pragma: no cover - rendering must never break training
             print(f"closed_loop: trajectory colormap failed for {mp4_path.stem}: {e}")
             rendered = {}
-        # One gallery panel per group: a list of images under a single key (captioned by metric)
-        # -> the metric becomes an in-panel selector, not N separate panels. Ordered by the
-        # requested colormap_metrics so the gallery is stable across epochs/groups.
         gallery = [
             wandb.Image(str(rendered[m]), caption=m) for m in colormap_metrics if m in rendered
         ]
         if gallery:
-            log[f"closed_loop_media/{label}"] = gallery
+            log[_key(f"media/{label}")] = gallery
 
     if out_dir is not None:
-        log[f"closed_loop_links/{label}"] = resolve_report_link(out_dir, report_base_url)
+        log[_key(f"links/{label}")] = resolve_report_link(out_dir, report_base_url)
     elif summary.get("npz_root"):
-        log[f"closed_loop_links/{label}"] = str(summary["npz_root"])
+        log[_key(f"links/{label}")] = str(summary["npz_root"])
     return log
 
 
