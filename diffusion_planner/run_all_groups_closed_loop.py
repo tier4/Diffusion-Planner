@@ -236,6 +236,124 @@ def _make_summary_key(json_name: str, group_name: str, mode: str) -> str:
     return f"{json_name}/{group_name}"
 
 
+def run_closed_loop_main(
+    model,  # PyTorch model (for train.py direct call) or None for subprocess
+    groups_npz_root: list[str],
+    args: argparse.Namespace,
+    out_root: str | Path,
+    *,
+    wandb_run=None,  # Optional wandb.Run instance; if None, creates own session
+    only_json: list[str] | None = None,
+    object_modes: list[str] | None = None,
+) -> dict[str, dict]:
+    """Unified entry point for closed-loop evaluation.
+
+    Works both as:
+    - Direct API call from train.py (model provided, wandb_run provided)
+    - CLI entry point via main() (model=None, wandb_run=None)
+
+    Output directory structure:
+        <out_root>/<json_name>/<group_name>          (objects mode)
+        <out_root>/<json_name>__noobj/<group_name>   (noobj mode)
+
+    Returns:
+        merged root manifest: {summary_key: {npz_root, out_dir, summary}}
+    """
+    resolved = resolve_closed_loop_inputs(groups_npz_root)
+
+    if only_json:
+        resolved = {k: v for k, v in resolved.items() if k in only_json}
+    if not resolved:
+        print(f"No inputs found under {groups_npz_root}", file=sys.stderr)
+        return {}
+
+    out_root = Path(out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    modes = object_modes or ["objects", "noobj"]
+
+    all_summary_keys: list[str] = []
+
+    # Triple loop: json_name -> group_name -> mode
+    for json_name, groups in resolved.items():
+        json_out_dir = out_root / json_name
+        json_out_dir.mkdir(parents=True, exist_ok=True)
+
+        for group_name, npz_paths in groups.items():
+            for mode in modes:
+                # Label and out_dir
+                if mode == "objects":
+                    mode_out_dir = json_out_dir / group_name
+                    summary_key = _make_summary_key(json_name, group_name, mode)
+                    label = summary_key  # e.g. "override/departure"
+                else:  # noobj
+                    json_mode_name = f"{json_name}__noobj"
+                    mode_out_dir = out_root / json_mode_name / group_name
+                    summary_key = _make_summary_key(json_mode_name, group_name, mode)
+                    label = summary_key  # e.g. "override__noobj/departure"
+
+                print(f"=== [{label}] npz={npz_paths} -> out={mode_out_dir} ===")
+
+                _, summary, _ = run_one_group(
+                    model,
+                    npz_paths,
+                    mode_out_dir,
+                    args,
+                    group_name=label,
+                )
+
+                # Update groups_summary.json at json_out_dir (or out_root for __noobj)
+                summary_out_dir = json_out_dir if mode == "objects" else out_root / f"{json_name}__noobj"
+                update_groups_summary(
+                    summary_out_dir,
+                    summary_key,
+                    npz_paths,
+                    mode_out_dir,
+                    summary,
+                )
+                all_summary_keys.append(summary_key)
+
+    # Merge all per-json groups_summary.json into root groups_summary.json
+    root_manifest: dict[str, dict] = {}
+    for json_name in resolved:
+        for mode in modes:
+            if mode == "objects":
+                manifest_path = out_root / json_name / "groups_summary.json"
+            else:
+                manifest_path = out_root / f"{json_name}__noobj" / "groups_summary.json"
+
+            if manifest_path.is_file():
+                partial = json.loads(manifest_path.read_text())
+                root_manifest.update(partial)
+
+    root_manifest_path = out_root / "groups_summary.json"
+    root_manifest_path.write_text(json.dumps(root_manifest, indent=2, ensure_ascii=False))
+
+    all_group_names = sorted(k for k, v in root_manifest.items() if v.get("summary") is not None)
+
+    # Build HTML report (only if not using existing wandb session)
+    report_path = None
+    if wandb_run is None and all_group_names:
+        report_path = build_html_report(
+            out_root,
+            all_group_names,
+            title="Per-Group Closed-Loop Evaluation",
+            subtitle=f"groups_npz_root={groups_npz_root}",
+            colormap_metrics=tuple(getattr(args, "report_colormap_metrics", [
+                "clearance", "collision", "near_miss", "speed",
+                "road_border", "red_light", "strong_brake",
+            ])),
+        )
+        if report_path:
+            print(f"Wrote {report_path}")
+
+    # Log to wandb (supports both passed run and own session)
+    if all_group_names:
+        _log_to_wandb(args, all_group_names, root_manifest, report_path, wandb_run)
+
+    return root_manifest
+
+
 def update_groups_summary(
     out_dir: Path | str,
     summary_key: str,
@@ -361,81 +479,14 @@ def main() -> int:
 
     args.out_root.mkdir(parents=True, exist_ok=True)
 
-    all_summary_keys: list[str] = []  # for reporting
-
-    # Triple loop: json_name -> group_name -> mode
-    for json_name, groups in resolved.items():
-        json_out_dir = args.out_root / json_name
-        json_out_dir.mkdir(parents=True, exist_ok=True)
-
-        for group_name, npz_paths in groups.items():
-            for mode in args.object_modes:
-                # Label and out_dir
-                if mode == "objects":
-                    mode_out_dir = json_out_dir / group_name
-                    summary_key = _make_summary_key(json_name, group_name, mode)
-                    label = summary_key  # e.g. "override/departure"
-                else:  # noobj
-                    json_mode_name = f"{json_name}__noobj"
-                    mode_out_dir = args.out_root / json_mode_name / group_name
-                    summary_key = _make_summary_key(json_mode_name, group_name, mode)
-                    label = summary_key  # e.g. "override__noobj/departure"
-
-                print(f"=== [{label}] npz={npz_paths} -> out={mode_out_dir} ===")
-
-                _, summary, _ = run_one_group(
-                    None,  # CLI mode: subprocess
-                    npz_paths,
-                    mode_out_dir,
-                    args,
-                    group_name=label,
-                )
-
-                # Update groups_summary.json at json_out_dir (or args.out_root for __noobj)
-                summary_out_dir = json_out_dir if mode == "objects" else args.out_root / f"{json_name}__noobj"
-                update_groups_summary(
-                    summary_out_dir,
-                    summary_key,
-                    npz_paths,
-                    mode_out_dir,
-                    summary,
-                )
-                all_summary_keys.append(summary_key)
-
-    # Merge all per-json groups_summary.json into root groups_summary.json
-    root_manifest: dict[str, dict] = {}
-    for json_name in resolved:
-        for mode in args.object_modes:
-            if mode == "objects":
-                manifest_path = args.out_root / json_name / "groups_summary.json"
-            else:
-                manifest_path = args.out_root / f"{json_name}__noobj" / "groups_summary.json"
-
-            if manifest_path.is_file():
-                partial = json.loads(manifest_path.read_text())
-                root_manifest.update(partial)
-
-    root_manifest_path = args.out_root / "groups_summary.json"
-    root_manifest_path.write_text(json.dumps(root_manifest, indent=2, ensure_ascii=False))
-
-    all_group_names = sorted(k for k, v in root_manifest.items() if v.get("summary") is not None)
-
-    # Build HTML report
-    report_path = None
-    if not args.no_report and all_group_names:
-        report_path = build_html_report(
-            args.out_root,
-            all_group_names,
-            title="Per-Group Closed-Loop Evaluation",
-            subtitle=f"groups_npz_root={args.groups_npz_root}",
-            colormap_metrics=tuple(args.report_colormap_metrics),
-        )
-        if report_path:
-            print(f"Wrote {report_path}")
-
-    # Log to wandb
-    if args.wandb_project and all_group_names:
-        _log_to_wandb(args, all_group_names, root_manifest, report_path)
+    run_closed_loop_main(
+        model=None,  # CLI mode: subprocess
+        groups_npz_root=args.groups_npz_root,
+        args=args,
+        out_root=args.out_root,
+        only_json=args.only_json,
+        object_modes=args.object_modes,
+    )
 
     return 0
 
@@ -445,8 +496,12 @@ def _log_to_wandb(
     group_names: list[str],
     merged: dict,
     report_path: Path | None,
+    run: "wandb.sdk.wandb_run.Run | None" = None,  # type: ignore[name-defined]
 ) -> None:
-    """One wandb run: closed_loop/<metric>/<json_name>/<group_name> + per-json aggregates."""
+    """One wandb run: closed_loop/<metric>/<json_name>/<group_name> + per-json aggregates.
+
+    If run is provided (passed from train.py), uses it. Otherwise creates own session.
+    """
     import wandb
 
     from scenario_generation.wandb_closed_loop import (
@@ -456,7 +511,12 @@ def _log_to_wandb(
         resolve_report_link,
     )
 
-    run = wandb.init(project=args.wandb_project, name=args.wandb_run_name)
+    if run is None:
+        run = wandb.init(project=args.wandb_project, name=args.wandb_run_name)
+        own_run = True
+    else:
+        own_run = False
+
     try:
         log: dict = {}
         group_summaries: dict[str, dict] = {}
@@ -481,10 +541,13 @@ def _log_to_wandb(
                     summary_with_rows,
                     out_dir=group_out_dir,
                     group=group_name,
-                    video_pick=args.wandb_video_pick,
-                    colormap_metrics=tuple(args.wandb_colormap_metrics),
+                    video_pick=getattr(args, "wandb_video_pick", "worst"),
+                    colormap_metrics=tuple(getattr(args, "wandb_colormap_metrics", [
+                        "clearance", "collision", "near_miss", "speed",
+                        "road_border", "red_light", "strong_brake",
+                    ])),
                     near_miss_thresh=summary.get("near_miss_thresh", 0.5),
-                    report_base_url=args.report_base_url,
+                    report_base_url=getattr(args, "report_base_url", None),
                     wandb_key_prefix=wandb_key_prefix,
                 )
             )
@@ -497,8 +560,6 @@ def _log_to_wandb(
         # Per-json aggregates: group by json_name (before __noobj or /)
         json_aggregates: dict[str, dict[str, dict]] = {}
         for name, summary in group_summaries.items():
-            # name is "json/group" or "json__noobj/group"
-            # extract json_name
             if "/" in name:
                 json_name = name.split("/")[0]
             else:
@@ -514,12 +575,13 @@ def _log_to_wandb(
 
         if report_path is not None:
             log["closed_loop_links/report"] = resolve_report_link(
-                args.out_root, args.report_base_url
+                args.out_root, getattr(args, "report_base_url", None)
             )
-        wandb.log(log)
+        run.log(log)
         print(f"wandb: logged {len(group_summaries)} group(s) to run {run.id}")
     finally:
-        wandb.finish()
+        if own_run:
+            wandb.finish()
 
 
 if __name__ == "__main__":

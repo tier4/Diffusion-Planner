@@ -131,8 +131,7 @@ def closed_loop_validate(
 ) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
-    Runs :class:`~scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`
-    per (group, object-mode) pair via :func:`~diffusion_planner.run_all_groups_closed_loop.run_one_group`.
+    Unified entry point via :func:`~diffusion_planner.run_all_groups_closed_loop.run_closed_loop_main`.
     Supports multiple input formats via :func:`~diffusion_planner.run_all_groups_closed_loop.resolve_closed_loop_inputs`.
 
     Called on the checkpoint-save cadence, rank-0 only: pass the unwrapped model; it is switched
@@ -149,11 +148,7 @@ def closed_loop_validate(
     if not args.closed_loop_npz_root:
         return
 
-    from run_all_groups_closed_loop import (
-        resolve_closed_loop_inputs,
-        run_one_group,
-        update_groups_summary,
-    )
+    from run_all_groups_closed_loop import run_closed_loop_main
     from scenario_generation.closed_loop_html_report import build_html_report
     from scenario_generation.wandb_closed_loop import (
         build_combined_episode_table,
@@ -164,89 +159,60 @@ def closed_loop_validate(
     was_training = net.training
     net.eval()
 
-    # Set render_media flag based on is_final_save
-    args.render_media = is_final_save
-
-    log: dict = {}
-    group_summaries: dict[str, dict] = {}
-    episode_data: list = []  # (label, rows, out_dir) for the ONE combined table
-    group_report_labels: list[str] = []
-
     try:
-        # Use unified resolve_closed_loop_inputs to parse input
-        # Returns: {json_name: {group_name: [route_dirs]}}
-        all_groups = resolve_closed_loop_inputs([str(p) for p in args.closed_loop_npz_root])
-        if not all_groups:
-            print(f"closed-loop: no groups found under {args.closed_loop_npz_root}")
+        args.render_media = is_final_save
+
+        root_manifest = run_closed_loop_main(
+            model=net,
+            groups_npz_root=[str(p) for p in args.closed_loop_npz_root],
+            args=args,
+            out_root=out_dir,
+            wandb_run=wandb.run,
+            object_modes=args.closed_loop_object_modes or ["objects"],
+        )
+
+        # Build episode_data and group_summaries from the manifest for additional wandb logging
+        episode_data: list = []
+        group_summaries: dict[str, dict] = {}
+        group_report_labels: list[str] = []
+
+        for summary_key, info in root_manifest.items():
+            summary = info.get("summary")
+            if not summary:
+                continue
+            group_out_dir = info.get("out_dir", "")
+            group_summaries[summary_key] = summary
+            segments = summary.get("segments") or []
+            episode_data.append((summary_key, segments, group_out_dir))
+            group_report_labels.append(summary_key)
+
+            print(
+                f"closed-loop [{summary_key}] @epoch {epoch + 1}: {summary['n_segments']} seg in "
+                f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+                f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+                f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+                f"{len(summary.get('video_mp4s', []))} video(s)"
+            )
+
+        if not episode_data:
             return
 
-        # Determine modes to run
-        object_modes = args.closed_loop_object_modes or ["objects"]
-
-        for json_name, group_dict in all_groups.items():
-            for group_name, npz_paths in group_dict.items():
-                group_label = f" [{json_name}/{group_name}]" if json_name else f" [{group_name}]"
-                group_out_dir = os.path.join(out_dir, json_name, group_name) if json_name else os.path.join(out_dir, group_name)
-
-            # Run each mode separately
-            for mode in object_modes:
-                mode_label = group_name if mode == "objects" else f"{group_name}__noobj"
-                # Directory structure: out_dir/json_name/group_name[__noobj]
-                mode_out_dir = os.path.join(group_out_dir, mode_label)
-
-                group_log, summary, returned_label = run_one_group(
-                    net,
-                    npz_paths,
-                    mode_out_dir,
-                    args,
-                    group_name=mode_label,
-                )
-                log.update(group_log)
-
-                # Update groups_summary.json with this mode's result
-                update_groups_summary(
-                    group_out_dir,
-                    returned_label,
-                    npz_paths,
-                    mode_out_dir,
-                    summary,
-                )
-
-                if not summary:
-                    continue
-
-                # Use full mode label (e.g. "groupA__noobj") as key for proper distinction
-                group_summaries[returned_label] = summary
-                episode_data.append((returned_label, summary.get("segments") or [], mode_out_dir))
-                if returned_label not in group_report_labels:
-                    group_report_labels.append(returned_label)
-
-                print(
-                    f"closed-loop{group_label} [{returned_label}] @epoch {epoch + 1}: {summary['n_segments']} seg in "
-                    f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
-                    f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
-                    f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
-                    f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
-                    f"{len(summary.get('video_mp4s', []))} video(s)"
-                )
-
-        # One combined, filterable/groupable episode table across every group/mode.
-        if episode_data:
+        log: dict = {}
+        if len(episode_data) > 0:
             log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
-        # Cross-group pooled rollup under closed_loop_overview/*.
         if len(group_summaries) > 1:
             log.update(build_groups_aggregate_log(group_summaries))
-        # Local HTML gallery -- only built on is_final_save, same as the media
-        # (videos/colormap images) it links to.
         if is_final_save and group_report_labels:
             report_path = build_html_report(out_dir, group_report_labels)
             if report_path:
                 print(f"closed-loop: wrote {report_path}")
+
+        if log:
+            wandb.log(log, step=epoch + 1)
+
     finally:
         net.train(was_training)
-
-    if log:
-        wandb.log(log, step=epoch + 1)
 
 
 def model_training(args: TrainConfig):
