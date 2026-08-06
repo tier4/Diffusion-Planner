@@ -55,7 +55,6 @@ import math
 import os
 import random
 import zlib
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -93,6 +92,7 @@ from scenario_generation.gui.lanelet_scene_builder import (
     _obb_collides,
     _obb_corners,
 )
+from scenario_generation.render_pool import render_pool
 from scenario_generation.route import Route
 from scenario_generation.scene_context import Agent, AgentType, SceneContext
 from scenario_generation.simulate import (
@@ -2450,7 +2450,10 @@ def run_route_replay(
         )
 
     # --- Main loop. ---
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
+    # save_step_figure builds its figure in Python, which the GIL serialises across threads, so
+    # the saves go to worker processes (see render_pool). REPLAY_SAVE_WORKERS trades RSS for
+    # throughput.
+    with render_pool(int(os.environ.get("REPLAY_SAVE_WORKERS", "4"))) as save_pool:
         pending_saves: list = []
         for step in range(spawn_config.max_steps):
             # Keep NPC manager's sim time in sync for TL writes on spawn.
