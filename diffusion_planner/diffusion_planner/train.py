@@ -149,7 +149,7 @@ def closed_loop_validate(
     if not args.closed_loop_npz_root:
         return
 
-    from diffusion_planner.run_all_groups_closed_loop import (
+    from run_all_groups_closed_loop import (
         resolve_closed_loop_inputs,
         run_one_group,
         update_groups_summary,
@@ -174,7 +174,7 @@ def closed_loop_validate(
 
     try:
         # Use unified resolve_closed_loop_inputs to parse input
-        groups = resolve_closed_loop_inputs([str(args.closed_loop_npz_root)])
+        groups = resolve_closed_loop_inputs([str(p) for p in args.closed_loop_npz_root])
         if not groups:
             print(f"closed-loop: no groups found under {args.closed_loop_npz_root}")
             return
@@ -189,22 +189,22 @@ def closed_loop_validate(
             # Run each mode separately
             for mode in object_modes:
                 mode_label = group_name if mode == "objects" else f"{group_name}__noobj"
-                mode_out_dir = os.path.join(group_out_dir, mode_label)
+                # Directory structure: out_dir/mode_label (e.g. out_dir/override or out_dir/override__noobj)
+                mode_out_dir = os.path.join(out_dir, mode_label)
 
-                # run_one_group: single group, single mode
                 group_log, summary, returned_label = run_one_group(
                     net,
                     npz_paths,
-                    group_out_dir,
+                    mode_out_dir,
                     args,
-                    group_name=group_name,
-                    mode=mode,
+                    group_name=mode_label,
                 )
                 log.update(group_log)
 
                 # Update groups_summary.json with this mode's result
+                summary_out_dir = out_dir if mode == "objects" else os.path.join(out_dir, f"{group_name}__noobj")
                 update_groups_summary(
-                    group_out_dir,
+                    summary_out_dir,
                     returned_label,
                     npz_paths,
                     mode_out_dir,

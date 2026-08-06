@@ -238,10 +238,10 @@ def get_args(args_list=None):
     parser.add_argument(
         "--closed_loop_npz_root",
         type=str,
-        default="",
-        help="dir tree, flat JSON, or grouped JSON for closed-loop validation, run on the checkpoint-save "
-        "cadence (save_utd). Empty = disabled. Supports: folder (route dir containing .npz files), "
-        "flat JSON (list of paths), or grouped JSON (dict of group_name -> paths).",
+        nargs="+",
+        default=[],
+        help="JSON file(s) or folder(s) for closed-loop validation. Supports: folder, flat JSON, grouped JSON. "
+        "Empty = disabled.",
     )
     parser.add_argument(
         "--closed_loop_object_modes",
