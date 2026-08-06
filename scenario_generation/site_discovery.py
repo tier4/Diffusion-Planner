@@ -34,11 +34,11 @@ def discover_sites_from_json(json_path: str | Path) -> dict[str, list[Path]]:
 
     Site name is the path component immediately before the first recognized split
     dir (see ``_SPLIT_DIR_NAMES``) in each entry. Entries with no recognized split dir are
-    skipped. Multiple entries resolving to the same site (e.g. several curated
-    date/time roots under one site) are merged into that site's list of roots.
+    skipped. Merged only within the same project; a site name shared across two projects
+    stays split (see :func:`discover_sites_with_vehicles_from_json`).
 
-    Thin wrapper around :func:`discover_sites_with_vehicles_from_json` for callers that
-    don't need vehicle type.
+    Thin wrapper around :func:`discover_sites_with_vehicles_from_json` that drops the
+    vehicle_type/project info.
     """
     sites = discover_sites_with_vehicles_from_json(json_path)
     return {name: info["npz_roots"] for name, info in sites.items()}
