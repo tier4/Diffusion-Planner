@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from scenario_generation.closed_loop_html_report import build_html_report
+from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
 
 class GroupEntry(TypedDict):
@@ -326,6 +327,10 @@ def run_closed_loop_main(
 
             if manifest_path.is_file():
                 partial = json.loads(manifest_path.read_text())
+                # Drop the per-json overview sentinel before merging into root_manifest — it's a
+                # per-file aggregate, not a group entry, and _log_to_wandb would otherwise try to
+                # log it as a group (and crash on its non-summary value).
+                partial.pop("__overview__", None)
                 root_manifest.update(partial)
 
     root_manifest_path = out_root / "groups_summary.json"
@@ -377,6 +382,10 @@ def update_groups_summary(
     """Update groups_summary.json at <out_dir>/ with one mode's result.
 
     summary_key is e.g. 'override/departure' or 'site/all'.
+
+    Also writes an ``__overview__`` entry at the top of the same file with the segment-weighted
+    per-json aggregate from ``build_groups_aggregate_log``, so the at-a-glance rollup is visible
+    on disk alongside the per-group summaries without needing a wandb session.
     """
     out_dir = Path(out_dir)
     manifest_path = out_dir / "groups_summary.json"
@@ -390,6 +399,16 @@ def update_groups_summary(
         "out_dir": str(mode_out_dir),
         "summary": summary,
     }
+
+    # Refresh the per-json overview every time a group is written, so it's always in sync with
+    # the on-disk state. The aggregate function returns {} for an empty summaries dict, which is
+    # the same shape we'd write anyway in the degenerate single/in-progress case.
+    summaries = {
+        k: v["summary"] for k, v in merged.items() if not k.startswith("__") and v.get("summary")
+    }
+    merged["__overview__"] = build_groups_aggregate_log(
+        summaries, prefix="closed_loop_overview"
+    )
 
     manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
 
