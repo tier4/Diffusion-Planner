@@ -6,10 +6,21 @@ then organized and symlinked into an output directory.
 
 Usage::
 
+    # Export close-loop segments from a directory, grouped by devops_override_label value
     python export_dataset.py --base /path/to/dataset --output /data/out \\
-        --query "override:*" --mode close_loop
+        --mode close_loop --dimension devops_override_label
+
+    # Export only frames where devops_override_label equals "a"
+    python export_dataset.py --base /path/to/dataset --output /data/out \\
+        --query "devops_override_label:a" --mode close_loop --dimension devops_override_label
+
+    # Export only frames where devops_override_label equals "b"
+    python export_dataset.py --base /path/to/dataset --output /data/out \\
+        --query "devops_override_label:b" --mode close_loop --dimension devops_override_label
+
+    # Use a pre-built SQLite index for faster startup on large datasets
     python export_dataset.py --db /data/tags.db --output /data/out \\
-        --query "override:*" --mode close_loop
+        --mode close_loop --dimension devops_override_label
 
 The script accepts either a dataset source (directory, path-list JSON,
 .npz) or a pre-built SQLite index. The database mode is the fast path
@@ -248,7 +259,10 @@ def main():
         ),
     )
     parser.add_argument("--output", type=Path, required=True, help="Output directory.")
-    parser.add_argument("--query", required=True, help="Tag query clause.")
+    parser.add_argument(
+        "--query",
+        help="Tag query clause. Defaults to '<dimension>:*' if --dimension is set but --query is not.",
+    )
     parser.add_argument(
         "--mode",
         required=True,
@@ -257,7 +271,7 @@ def main():
     )
     parser.add_argument(
         "--dimension",
-        help="Optional dimension for sub-directory grouping.",
+        help="Dimension for sub-directory grouping and default query when --query is omitted.",
     )
     parser.add_argument(
         "--margin-before",
@@ -273,6 +287,16 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.query is None and args.dimension is None:
+        print(
+            "Error: at least one of --query or --dimension must be provided",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.query is None:
+        args.query = f"{args.dimension}:*"
 
     if args.db is not None:
         if not args.db.exists():
