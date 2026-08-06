@@ -174,23 +174,25 @@ def closed_loop_validate(
 
     try:
         # Use unified resolve_closed_loop_inputs to parse input
-        groups = resolve_closed_loop_inputs([str(p) for p in args.closed_loop_npz_root])
-        if not groups:
+        # Returns: {json_name: {group_name: [route_dirs]}}
+        all_groups = resolve_closed_loop_inputs([str(p) for p in args.closed_loop_npz_root])
+        if not all_groups:
             print(f"closed-loop: no groups found under {args.closed_loop_npz_root}")
             return
 
         # Determine modes to run
         object_modes = args.closed_loop_object_modes or ["objects"]
 
-        for group_name, npz_paths in groups.items():
-            group_label = f" [{group_name}]" if group_name else ""
-            group_out_dir = os.path.join(out_dir, group_name) if group_name else out_dir
+        for json_name, group_dict in all_groups.items():
+            for group_name, npz_paths in group_dict.items():
+                group_label = f" [{json_name}/{group_name}]" if json_name else f" [{group_name}]"
+                group_out_dir = os.path.join(out_dir, json_name, group_name) if json_name else os.path.join(out_dir, group_name)
 
             # Run each mode separately
             for mode in object_modes:
                 mode_label = group_name if mode == "objects" else f"{group_name}__noobj"
-                # Directory structure: out_dir/mode_label (e.g. out_dir/override or out_dir/override__noobj)
-                mode_out_dir = os.path.join(out_dir, mode_label)
+                # Directory structure: out_dir/json_name/group_name[__noobj]
+                mode_out_dir = os.path.join(group_out_dir, mode_label)
 
                 group_log, summary, returned_label = run_one_group(
                     net,
@@ -202,9 +204,8 @@ def closed_loop_validate(
                 log.update(group_log)
 
                 # Update groups_summary.json with this mode's result
-                summary_out_dir = out_dir if mode == "objects" else os.path.join(out_dir, f"{group_name}__noobj")
                 update_groups_summary(
-                    summary_out_dir,
+                    group_out_dir,
                     returned_label,
                     npz_paths,
                     mode_out_dir,
