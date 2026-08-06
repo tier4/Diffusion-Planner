@@ -167,11 +167,7 @@ def export_close_loop(
             continue
         route_frames[route_of(npz)].append((frame_num, npz))
 
-    npz_dim_value = (
-        store.dim_values_for(matching_frames, dimension)
-        if dimension
-        else None
-    )
+    npz_dim_value = store.dim_values_for(matching_frames, dimension) if dimension else None
 
     output_dir.mkdir(parents=True, exist_ok=True)
     buckets: dict[str, list[str]] = defaultdict(list)
@@ -180,9 +176,7 @@ def export_close_loop(
     for route, frames in sorted(route_frames.items(), key=lambda kv: str(kv[0])):
         frames.sort(key=lambda x: x[0])
         num_to_npz: dict[int, Path] = {f: p for f, p in frames}
-        segments = _merge_segments(
-            [f for f, _ in frames], margin_before, margin_after
-        )
+        segments = _merge_segments([f for f, _ in frames], margin_before, margin_after)
 
         for seg_start, seg_end in segments:
             if dimension:
@@ -206,9 +200,7 @@ def export_close_loop(
             # Try the fast-path lookup first (frame is in matching_frames); fall
             # back to probing the directory for the right filename prefix.
             linked_count = 0
-            for frame_num in range(
-                seg_start - margin_before, seg_end + margin_after + 1
-            ):
+            for frame_num in range(seg_start - margin_before, seg_end + margin_after + 1):
                 if frame_num < 0:
                     continue
                 src = num_to_npz.get(frame_num)
@@ -229,10 +221,7 @@ def export_close_loop(
 
             entry_dimension = dim_value if dimension else "unbucketed"
             buckets[entry_dimension].append(str(seg_dir.resolve()))
-            print(
-                f"  {seg_dir.relative_to(output_dir)}: "
-                f"{linked_count} frames ({entry_dimension})"
-            )
+            print(f"  {seg_dir.relative_to(output_dir)}: {linked_count} frames ({entry_dimension})")
 
     buckets_file = output_dir / "close_loop.json"
     with open(buckets_file, "w") as f:

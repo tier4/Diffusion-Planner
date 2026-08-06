@@ -20,7 +20,7 @@ For more examples, see docs/usage.md and docs/design.md.
 """
 
 from .routes import extract_frame_number, route_of
-from .sidecar import format_tag, normalize_tags, parse_tag, read_tags, write_tags
+from .sidecar import StaleIndexError, format_tag, normalize_tags, parse_tag, read_tags, write_tags
 from .source import expand_source, load_json
 from .store import (
     Bucket,
@@ -30,7 +30,6 @@ from .store import (
     TagStore,
     format_buckets,
 )
-from .sidecar import StaleIndexError
 from .taxonomy import list_known_tags, load_taxonomy
 
 __version__ = "0.1.0"

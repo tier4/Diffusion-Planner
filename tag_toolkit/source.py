@@ -142,9 +142,7 @@ def _expand_path_list_file(path: Path) -> list[Path]:
 
     # Training lists: every entry is an npz path — no stat, no rglob.
     if all(_is_npz_path(entry) for entry in data):
-        return _dedupe_npz_strings(
-            [os.path.abspath(os.path.expanduser(entry)) for entry in data]
-        )
+        return _dedupe_npz_strings([os.path.abspath(os.path.expanduser(entry)) for entry in data])
 
     # Mixed / closed-loop lists may contain route directories — expand those only.
     out: list[Path] = []

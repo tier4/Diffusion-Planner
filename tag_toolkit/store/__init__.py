@@ -43,7 +43,6 @@ from typing import Sequence
 from ..routes import route_of
 from ..sidecar import parse_tag, read_tags, sidecar_path
 from ..source import expand_source
-
 from ._db import _init_db, _is_db_path
 from ._index import _IndexMixin
 from ._mutate import _MutateMixin
@@ -148,8 +147,7 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
         ).fetchall()
         with self._lock:
             self._route_tags_cache = {
-                row[0]: frozenset(json.loads(row[1])) if row[1] else frozenset()
-                for row in rows
+                row[0]: frozenset(json.loads(row[1])) if row[1] else frozenset() for row in rows
             }
 
     def _sync_route_tags_cache(self, route: str, added: set[str], removed: set[str]) -> None:

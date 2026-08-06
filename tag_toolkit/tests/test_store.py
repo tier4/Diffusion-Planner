@@ -100,18 +100,8 @@ def _route_dirs(built_root: Path) -> dict[str, Path]:
     ariake (15-16-36), psim (psim_training_bag_0_0).
     """
     return {
-        "aomi": built_root
-        / "proj_a"
-        / "xxxx_site_a"
-        / "auto"
-        / "2026-06-23"
-        / "10-55-13",
-        "ariake": built_root
-        / "proj_a"
-        / "xxxx_site_a"
-        / "auto"
-        / "2026-07-07"
-        / "15-16-36",
+        "aomi": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13",
+        "ariake": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07" / "15-16-36",
         "psim": built_root
         / "proj_b"
         / "xxxx_site_c"
@@ -515,11 +505,7 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
         # site resolves via the path layout. For psim (non-numeric map_id)
         # the resolved site is "unknown", so psim frames end up with
         # site:unknown. For proj_a the resolved site is the original map_id.
-        assert (
-            "site:xxxx_site_a" in tags
-            or "site:xxxx_site_c" in tags
-            or "site:unknown" in tags
-        )
+        assert "site:xxxx_site_a" in tags or "site:xxxx_site_c" in tags or "site:unknown" in tags
         # After apply_path_tags, split matches the directory token:
         # /manual/ → split:manual, /auto/ → split:auto
         assert "split:manual" in tags or "split:auto" in tags
@@ -532,13 +518,7 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
 
 def test_generate_from_labeled_layout_is_route_standard(tmp_path: Path) -> None:
     route_dir = (
-        tmp_path
-        / "data"
-        / "proj_c"
-        / "xxxx_site_example"
-        / "manual"
-        / "2025-02-04"
-        / "10-34-24"
+        tmp_path / "data" / "proj_c" / "xxxx_site_example" / "manual" / "2025-02-04" / "10-34-24"
     )
     npz = _frame(route_dir / "routes", "frame")
     assert route_of(npz) == route_dir
@@ -548,13 +528,7 @@ def test_generate_from_labeled_layout_is_route_standard(tmp_path: Path) -> None:
 
 def test_split_labels_refine_generate_from_labeled_manual(tmp_path: Path) -> None:
     route_dir = (
-        tmp_path
-        / "data"
-        / "proj_c"
-        / "xxxx_site_example"
-        / "manual"
-        / "2025-02-04"
-        / "10-34-24"
+        tmp_path / "data" / "proj_c" / "xxxx_site_example" / "manual" / "2025-02-04" / "10-34-24"
     )
     npz = _frame(route_dir / "routes", "frame", ["lateral:turn"])
     result = apply_path_tags(
@@ -693,9 +667,7 @@ def test_tags_of_route_uses_index_not_disk(sample_route: Path, tmp_path: Path) -
 def test_group_by_multi_value_total_is_unique(tmp_path: Path) -> None:
     """Multi-value dimensions count each route only once in TOTAL."""
     root = tmp_path / "data"
-    bag = (
-        root / "proj_c" / "xxxx_site_example" / "manual" / "2025-02-04" / "10-34-24" / "routes"
-    )
+    bag = root / "proj_c" / "xxxx_site_example" / "manual" / "2025-02-04" / "10-34-24" / "routes"
     _frame(bag, "a", ["site:alpha", "site:beta", "lateral:turn"])
 
     store = TagStore(root)
@@ -1010,9 +982,7 @@ def test_stale_index_fast_path_skips_when_mtime_unchanged(sample_route: Path) ->
     # raising StaleIndexError.
     npz = store.npz_paths()[0]
     # sanity: the index knows the frame
-    row = conn.execute(
-        "SELECT sidecar_mtime FROM frames WHERE path=?", (str(npz),)
-    ).fetchone()
+    row = conn.execute("SELECT sidecar_mtime FROM frames WHERE path=?", (str(npz),)).fetchone()
     assert row is not None
     mtime = row[0]
     # Confirm the on-disk mtime really is the value the index has cached
@@ -1407,9 +1377,7 @@ def test_resolve_scope_with_list_of_tagstore(sample: Path) -> None:
     """scope=[TagStore, ...] flattens TagStore elements instead of raising."""
     # Build a second store that scans only the ariake route. We give it the
     # parent auto/ directory and rely on TagStore to discover one route.
-    ariake_route = (
-        sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07"
-    )
+    ariake_route = sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07"
     other_store = TagStore(ariake_route)
     assert len(other_store.route_paths()) == 1
     ariake_only = other_store.route_paths()[0]
@@ -1491,15 +1459,7 @@ def test_helper_exports_basic(sample: Path) -> None:
     # produce from a write.
     from tag_toolkit import write_tags
 
-    npz = (
-        sample
-        / "proj_a"
-        / "xxxx_site_a"
-        / "auto"
-        / "2026-06-23"
-        / "10-55-13"
-        / "routes"
-    )
+    npz = sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes"
     sample_npz = next(npz.glob("*.npz"))
     expected = normalize_tags(["split:auto", "lateral:turn"])
     write_tags(sample_npz, expected)
@@ -1726,6 +1686,7 @@ def test_mutation_aborts_on_stale_index(sample_route: Path) -> None:
     ``store.reindex_tags()`` then retry.
     """
     import os
+
     from tag_toolkit import StaleIndexError
 
     store = TagStore(sample_route)
@@ -1778,17 +1739,15 @@ def test_mutation_no_sidecar_raises_filenotfound(tmp_path: Path) -> None:
     npz_a.write_bytes(b"")
     npz_b.write_bytes(b"")
     # Only npz_a has a sidecar; npz_b is "fresh".
-    (npz_dir / "00000000_00000000.json").write_text(
-        json.dumps({"tags": ["split:auto"]}) + "\n"
-    )
+    (npz_dir / "00000000_00000000.json").write_text(json.dumps({"tags": ["split:auto"]}) + "\n")
 
     store = TagStore(tmp_path / "bag")
     assert sorted(store.npz_paths()) == [npz_a, npz_b]
 
     # Missing sidecar -> silently skipped, not failed and not raised.
     result = store.add_tags(["lateral:turn"], scope=[npz_a, npz_b], sync=False)
-    assert result.changed == 1   # npz_a written
-    assert result.skipped == 1   # npz_b skipped (no sidecar)
+    assert result.changed == 1  # npz_a written
+    assert result.skipped == 1  # npz_b skipped (no sidecar)
     assert result.failed == []
     assert result.first_error is None
 
@@ -1865,7 +1824,9 @@ def test_reindex_tags_converges_after_out_of_band_edit(sample_route: Path) -> No
     assert diff_after.is_consistent
 
     conn = store._require_conn()
-    indexed_tags = {r[0] for r in conn.execute("SELECT tag FROM tags WHERE path=?", (str(npz),)).fetchall()}
+    indexed_tags = {
+        r[0] for r in conn.execute("SELECT tag FROM tags WHERE path=?", (str(npz),)).fetchall()
+    }
     assert "site:reindex_me" in indexed_tags
 
     # Reverse index picked up the new tag (it points to this frame).
@@ -1889,7 +1850,7 @@ def test_reindex_tags_reports_orphan_frames(sample_route: Path) -> None:
     victim.with_suffix(".json").unlink()
 
     n_reindexed, orphans = store.reindex_tags()
-    assert n_reindexed == 9          # one less than the 10 frames
+    assert n_reindexed == 9  # one less than the 10 frames
     assert orphans == [victim]
     # Structural fields untouched: the orphan frame is still in the index.
     assert victim in store.npz_paths()

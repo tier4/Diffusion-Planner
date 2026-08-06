@@ -60,10 +60,7 @@ def _check_stale(conn, npz: Path, npz_str: str) -> None:
     if int(side.stat().st_mtime) == expected_mtime[0]:
         return  # mtime unchanged → no reason to re-read tags
     indexed_tags = frozenset(
-        r[0]
-        for r in conn.execute(
-            "SELECT tag FROM tags WHERE path=?", (npz_str,)
-        ).fetchall()
+        r[0] for r in conn.execute("SELECT tag FROM tags WHERE path=?", (npz_str,)).fetchall()
     )
     disk_tags = frozenset(read_tags(npz))
     if disk_tags != indexed_tags:
@@ -276,10 +273,7 @@ class _MutateMixin:
                 try:
                     disk_tags = self._read_tags(npz)
                     _check_stale(conn, npz, npz_str)
-                    remaining = frozenset(
-                        t for t in disk_tags
-                        if t.split(":", 1)[0] != dimension
-                    )
+                    remaining = frozenset(t for t in disk_tags if t.split(":", 1)[0] != dimension)
                     if remaining == disk_tags:
                         skipped += 1
                         continue
@@ -405,9 +399,7 @@ class _MutateMixin:
         self._require_conn()
         route_str = str(Path(route))
         conn = self._require_conn()
-        row = conn.execute(
-            "SELECT 1 FROM frames WHERE route=? LIMIT 1", (route_str,)
-        ).fetchone()
+        row = conn.execute("SELECT 1 FROM frames WHERE route=? LIMIT 1", (route_str,)).fetchone()
         if not row:
             raise ValueError(f"route not in index: {route_str}")
         return self.add_tags(tags, frame_filter=frame_filter, scope=route_str, sync=sync)

@@ -276,8 +276,7 @@ def write_tags(
         raw_tags = []
     if not isinstance(raw_tags, list):
         raise ValueError(
-            f"sidecar {side} has non-list 'tags' field: "
-            f"type={type(raw_tags).__name__}"
+            f"sidecar {side} has non-list 'tags' field: type={type(raw_tags).__name__}"
         )
     on_disk = frozenset(raw_tags)
 

@@ -49,15 +49,16 @@ _TAG_TOOLKIT_PATH = _REPO_ROOT / "Diffusion-Planner" / "tag_toolkit"
 if _TAG_TOOLKIT_PATH.exists():
     sys.path.insert(0, str(_TAG_TOOLKIT_PATH.parent))
 
+from tqdm import tqdm
+
 from tag_toolkit import TagStore
 from tag_toolkit.routes import route_of
 from tag_toolkit.sidecar import format_tag, is_valid_dimension, read_sidecar
-from tqdm import tqdm
-
 
 # =============================================================================
 # match_col dispatch mechanism
 # =============================================================================
+
 
 def _normalize_for_tag(value: str) -> str:
     """Normalize a value for use in tags (dimension or value).
@@ -164,8 +165,7 @@ def _get_match_value(
     getter = MATCH_VALUE_GETTERS.get(match_col)
     if getter is None:
         raise ValueError(
-            f"Unsupported match_col: '{match_col}'. "
-            f"Supported: {sorted(MATCH_VALUE_GETTERS)}"
+            f"Unsupported match_col: '{match_col}'. Supported: {sorted(MATCH_VALUE_GETTERS)}"
         )
     return getter(by_route, route)
 
@@ -302,9 +302,7 @@ def apply_csv_tags_to_routes(
                     # Pass the precomputed NPZ list as scope so add_tags hits
                     # the SQL frames table directly — avoids the os.walk that
                     # add_tags_to_route triggers through scope resolution.
-                    result = store.add_tags(
-                        tags_to_add, scope=by_route[route], sync=False
-                    )
+                    result = store.add_tags(tags_to_add, scope=by_route[route], sync=False)
                     if result.failed:
                         errors += len(result.failed)
                         print(

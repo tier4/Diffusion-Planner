@@ -12,7 +12,7 @@ from ..routes import extract_frame_number
 from ..sidecar import is_valid_dimension
 
 if TYPE_CHECKING:
-    from ._types import Bucket, Clause, Granularity, FrameFilter
+    from ._types import Bucket, Clause, FrameFilter, Granularity
 
 
 _GRANULARITIES = ("route", "frame")
@@ -41,17 +41,13 @@ def format_buckets(buckets: list["Bucket"], dimensions: Sequence[str]) -> str:
         + [str(b.count)]
         for b in buckets
     ]
-    cell_widths = [
-        max([len(headers[i])] + [len(row[i]) for row in rows]) for i in range(n_cols)
-    ]
+    cell_widths = [max([len(headers[i])] + [len(row[i]) for row in rows]) for i in range(n_cols)]
     lines = [
         "  ".join(headers[i].ljust(cell_widths[i]) for i in range(n_cols)),
         "  ".join("-" * cell_widths[i] for i in range(n_cols)),
     ]
     for row in rows:
-        lines.append(
-            "  ".join(row[i].ljust(cell_widths[i]) for i in range(n_cols))
-        )
+        lines.append("  ".join(row[i].ljust(cell_widths[i]) for i in range(n_cols)))
 
     unique_members = {m for b in buckets for m in b.members}
     lines.append("  ".join("-" * cell_widths[i] for i in range(n_cols)))
@@ -169,8 +165,7 @@ class _QueryMixin:
         conn = self._require_conn()
         placeholders = ",".join("?" * len(npz_paths))
         rows = conn.execute(
-            f"SELECT path, val FROM tags "
-            f"WHERE path IN ({placeholders}) AND dim = ?",
+            f"SELECT path, val FROM tags WHERE path IN ({placeholders}) AND dim = ?",
             [str(p) for p in npz_paths] + [dimension],
         ).fetchall()
         return {Path(r[0]): r[1] for r in rows}
@@ -259,7 +254,9 @@ class _QueryMixin:
                 out |= set(self._query_by_path(c, scope_set, route_granularity=route_granularity))
             return sorted(out)
         if op == "not":
-            excluded = set(self._query_by_path(body, scope_set, route_granularity=route_granularity))
+            excluded = set(
+                self._query_by_path(body, scope_set, route_granularity=route_granularity)
+            )
             return sorted(scope_set - excluded)
         raise ValueError(f"bad clause op {op!r}")
 

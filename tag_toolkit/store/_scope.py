@@ -107,9 +107,7 @@ class _ScopeResolver:
 
         if granularity == "route":
             # Direct route lookup.
-            row = conn.execute(
-                "SELECT 1 FROM frames WHERE route=? LIMIT 1", (str(p),)
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM frames WHERE route=? LIMIT 1", (str(p),)).fetchone()
             if row:
                 return {str(p)}
             # Path -> route lookup.
@@ -119,9 +117,7 @@ class _ScopeResolver:
             if row:
                 return {row[0]}
         else:
-            row = conn.execute(
-                "SELECT 1 FROM frames WHERE path=? LIMIT 1", (str(p),)
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM frames WHERE path=? LIMIT 1", (str(p),)).fetchone()
             if row:
                 return {str(p)}
 

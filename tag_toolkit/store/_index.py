@@ -120,9 +120,7 @@ class _IndexMixin:
                 orphan_frames.append(npz)
                 continue
             disk_tags = frozenset(read_tags(npz))
-            index_rows = conn.execute(
-                "SELECT tag FROM tags WHERE path=?", (row[0],)
-            ).fetchall()
+            index_rows = conn.execute("SELECT tag FROM tags WHERE path=?", (row[0],)).fetchall()
             index_tags = frozenset(r[0] for r in index_rows)
             if disk_tags == index_tags:
                 continue
@@ -211,8 +209,6 @@ class _IndexMixin:
                 conn.rollback()
                 raise
 
-            self._route_tags_cache.update(
-                {r: frozenset(t) for r, t in route_tag_sets.items()}
-            )
+            self._route_tags_cache.update({r: frozenset(t) for r, t in route_tag_sets.items()})
 
         return reindexed_count, orphan_frames

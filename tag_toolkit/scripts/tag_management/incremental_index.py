@@ -118,15 +118,11 @@ def build_incremental_index(
         try:
             probe.execute("SELECT 1 FROM frames LIMIT 1")
         except sqlite3.DatabaseError as exc:
-            raise ValueError(
-                f"'{old_index_path}' is not a valid SQLite index: {exc}"
-            ) from exc
+            raise ValueError(f"'{old_index_path}' is not a valid SQLite index: {exc}") from exc
         finally:
             probe.close()
     except sqlite3.Error as exc:
-        raise ValueError(
-            f"'{old_index_path}' is not a valid SQLite index: {exc}"
-        ) from exc
+        raise ValueError(f"'{old_index_path}' is not a valid SQLite index: {exc}") from exc
 
     return _merge(old_index_path, new_source, output_path)
 
@@ -164,8 +160,7 @@ def main() -> int:
     new_source = args.new_source if len(args.new_source) > 1 else args.new_source[0]
     summary = build_incremental_index(args.old_index, new_source, output_path=args.output)
     print(
-        f"new frames added: {summary['new_frames']}, "
-        f"already-in-index skipped: {summary['skipped']}"
+        f"new frames added: {summary['new_frames']}, already-in-index skipped: {summary['skipped']}"
     )
     print(f"wrote {summary['output']}")
     return 0
