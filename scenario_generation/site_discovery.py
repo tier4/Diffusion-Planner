@@ -54,12 +54,14 @@ def discover_sites_with_vehicles_from_json(
     an entry.
 
     Returns ``{site_key: {"npz_roots": [Path, ...], "vehicle_type": str, "project": str}}``.
-    If one site name appears under two vehicle types, both are kept as separate entries
-    (``f"{vehicle_type}__{site}"``) instead of merging their routes.
+    If one site name appears under N different vehicle types, all N are kept as separate
+    entries (``f"{vehicle_type}__{site}"``) instead of merging their routes.
     """
     project_vehicle_map = project_vehicle_map or {}
     entries = json.loads(Path(json_path).read_text())
-    sites: dict[str, dict] = {}
+
+    # Pass 1: resolve (site, project, vehicle_type) per entry.
+    parsed: list[tuple[str, str, str, Path]] = []
     for entry in entries:
         path = Path(entry)
         parts = path.parts
@@ -71,21 +73,29 @@ def discover_sites_with_vehicles_from_json(
                 if vehicle_type is None:
                     vehicle_type = project
                     if project_vehicle_map:
-                        print(f"unrecognized project {project!r}, using it as vehicle_type", file=sys.stderr)
-
-                key = site
-                existing = sites.get(key)
-                if existing is not None and existing["vehicle_type"] != vehicle_type:
-                    print(f"site {site!r} has two vehicle types, splitting", file=sys.stderr)
-                    sites[f"{existing['vehicle_type']}__{site}"] = sites.pop(key)
-                    key = f"{vehicle_type}__{site}"
-                elif f"{vehicle_type}__{site}" in sites:
-                    key = f"{vehicle_type}__{site}"
-
-                info = sites.setdefault(
-                    key,
-                    {"npz_roots": [], "vehicle_type": vehicle_type, "project": project},
-                )
-                info["npz_roots"].append(path)
+                        print(
+                            f"unrecognized project {project!r}, using it as vehicle_type",
+                            file=sys.stderr,
+                        )
+                parsed.append((site, project, vehicle_type, path))
                 break
+
+    # Pass 2: group by site, then by vehicle_type, so a collision between any number of
+    # vehicle types is seen in full before deciding site keys.
+    by_site: dict[str, dict[str, dict]] = {}
+    for site, project, vehicle_type, path in parsed:
+        group = by_site.setdefault(site, {}).setdefault(
+            vehicle_type, {"npz_roots": [], "project": project}
+        )
+        group["npz_roots"].append(path)
+
+    sites: dict[str, dict] = {}
+    for site, groups in by_site.items():
+        if len(groups) == 1:
+            (vehicle_type, group) = next(iter(groups.items()))
+            sites[site] = {**group, "vehicle_type": vehicle_type}
+        else:
+            print(f"site {site!r} spans vehicle types {sorted(groups)}, splitting", file=sys.stderr)
+            for vehicle_type, group in groups.items():
+                sites[f"{vehicle_type}__{site}"] = {**group, "vehicle_type": vehicle_type}
     return sites
