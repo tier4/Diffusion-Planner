@@ -4,12 +4,12 @@ The scalars/media/table this project logs under ``closed_loop_scores/``,
 ``closed_loop_overview/``, ``closed_loop_media/``, and ``closed_loop_episodes/`` (see
 :mod:`scenario_generation.wandb_closed_loop`) are already namespaced into sections, but
 W&B's DEFAULT auto-generated workspace still renders one panel per distinct key — for
-N sites x ~8 score metrics that's still dozens of small single-line panels, one per
-(metric, site) pair, with no overlay.
+N groups x ~8 score metrics that's still dozens of small single-line panels, one per
+(metric, group) pair, with no overlay.
 
 This module uses the ``wandb-workspaces`` SDK to define an explicit, curated workspace
-instead: one LinePlot PER METRIC with every site overlaid as its own colored line (via
-``metric_regex``, so it doesn't need to know site names), one MediaBrowser per site (its
+instead: one LinePlot PER METRIC with every group overlaid as its own colored line (via
+``metric_regex``, so it doesn't need to know group names), one MediaBrowser per group (its
 colormap gallery + video), and one table panel for the combined episode table. Built with
 ``auto_generate_panels=True`` (default) so every other logged key (train/valid loss, lr,
 epdms, replan consistency, ...) still gets its usual auto panel alongside these curated
@@ -26,7 +26,7 @@ Example::
     python -m scenario_generation.wandb_closed_loop_workspace \\
         --entity advanced-technology-department \\
         --project Diffusion-Planner-smoke-test \\
-        --site_names odaiba takanawa
+        --group_names odaiba takanawa
 """
 
 from __future__ import annotations
@@ -44,13 +44,13 @@ from scenario_generation.closed_loop_score_keys import (
 # closed_loop_score_keys (dependency-free, so importing it here doesn't pull in the heavier
 # torch/matplotlib deps scenario_generation.wandb_closed_loop needs):
 # - COMPARISON: meaningful in both objects and empty-world ("__noobj") mode — one panel per
-#   metric, objects and noobj overlaid as separate lines via metric_regex (no site enumeration
-#   needed, so a newly added site is picked up automatically).
+#   metric, objects and noobj overlaid as separate lines via metric_regex (no group enumeration
+#   needed, so a newly added group is picked up automatically).
 # - OBJECTS-ONLY: structurally 0 with no traffic to react to (collision counts) — plotted with
 #   an explicit y=[...] list of ONLY the objects labels, so the noobj line (always 0) doesn't
 #   show up as a flat, meaningless addition to the panel.
 #
-# The overview panel list additionally includes "route_completion" -- build_sites_aggregate_log
+# The overview panel list additionally includes "route_completion" -- build_groups_aggregate_log
 # computes it as its own segment-weighted-average key, not part of the generic sum loop
 # COMPARISON_OVERVIEW_SUM_KEYS drives.
 _COMPARISON_OVERVIEW_KEYS = ("route_completion", *COMPARISON_OVERVIEW_SUM_KEYS)
@@ -61,26 +61,26 @@ def build_closed_loop_workspace(
     entity: str,
     project: str,
     *,
-    site_names: list[str],
+    group_names: list[str],
     name: str = "Closed-Loop Dashboard",
     include_noobj: bool = True,
     include_auto_panels: bool = True,
 ) -> str:
     """Create/save a curated closed-loop workspace view and return its URL.
 
-    ``site_names`` are BASE names (no ``__noobj`` suffix, e.g. ``["odaiba", "takanawa"]``) —
+    ``group_names`` are BASE names (no ``__noobj`` suffix, e.g. ``["odaiba", "takanawa"]``) —
     this builder expands each into its objects label (unchanged) and, when ``include_noobj``,
-    its empty-world-ablation label (``{site}__noobj``). Only the per-site media galleries need
+    its empty-world-ablation label (``{group}__noobj``). Only the per-group media galleries need
     those exact labels (W&B media panels take explicit
-    keys, no regex); the comparison score line plots use ``metric_regex`` and pick up any site
+    keys, no regex); the comparison score line plots use ``metric_regex`` and pick up any group
     automatically, present or added later. Set ``include_noobj=False`` for an objects-only
     dashboard (e.g. before any ablation run exists for this project).
     """
     import wandb_workspaces.reports.v2 as wr
     import wandb_workspaces.workspaces as ws
 
-    objects_labels = list(site_names)
-    noobj_labels = [f"{n}__noobj" for n in site_names] if include_noobj else []
+    objects_labels = list(group_names)
+    noobj_labels = [f"{n}__noobj" for n in group_names] if include_noobj else []
     all_labels = objects_labels + noobj_labels
 
     overview_panels = (
@@ -94,16 +94,16 @@ def build_closed_loop_workspace(
         ]
         + [
             wr.LinePlot(
-                title="n_sites / n_segments",
-                y=["closed_loop_overview/n_sites", "closed_loop_overview/n_segments"],
+                title="n_groups / n_segments",
+                y=["closed_loop_overview/n_groups", "closed_loop_overview/n_segments"],
             ),
         ]
     )
 
-    # Comparison group: one panel PER METRIC, every site+mode overlaid as its own line
+    # Comparison group: one panel PER METRIC, every group+mode overlaid as its own line
     # (metric_regex matches "closed_loop_scores/{metric}/{any_label}" without needing to
     # enumerate labels) — this is the key fix over the default workspace's
-    # one-tiny-panel-per-(metric,site) layout, AND it's what makes objects vs noobj directly
+    # one-tiny-panel-per-(metric,group) layout, AND it's what makes objects vs noobj directly
     # comparable in the same chart.
     comparison_score_panels = [
         wr.LinePlot(title=metric, metric_regex=rf"^closed_loop_scores/{metric}/.*$")
@@ -174,10 +174,10 @@ def build_closed_loop_workspace(
                 panels=objects_only_score_panels,
                 is_open=True,
             ),
-            ws.Section(name="Trajectory Overlay (per site)", panels=overlay_panels, is_open=False),
-            ws.Section(name="Video (per site)", panels=video_panels, is_open=False),
+            ws.Section(name="Trajectory Overlay (per group)", panels=overlay_panels, is_open=False),
+            ws.Section(name="Video (per group)", panels=video_panels, is_open=False),
             ws.Section(
-                name="Episodes (all sites, one table)", panels=episodes_panels, is_open=False
+                name="Episodes (all groups, one table)", panels=episodes_panels, is_open=False
             ),
         ],
     )
@@ -190,10 +190,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--entity", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument(
-        "--site_names",
+        "--group_names",
         nargs="+",
         required=True,
-        help="BASE site names, no '__noobj' suffix (e.g. odaiba takanawa) — the builder expands "
+        help="BASE group names, no '__noobj' suffix (e.g. odaiba takanawa) — the builder expands "
         "each into its objects/no-objects labels itself (see --include_noobj)",
     )
     parser.add_argument("--name", default="Closed-Loop Dashboard")
@@ -216,7 +216,7 @@ def main() -> int:
     url = build_closed_loop_workspace(
         args.entity,
         args.project,
-        site_names=args.site_names,
+        group_names=args.group_names,
         name=args.name,
         include_noobj=not args.no_noobj,
         include_auto_panels=not args.no_auto_panels,

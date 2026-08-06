@@ -321,41 +321,22 @@ def get_args():
     parser.add_argument("--port", default="22323", type=str)
 
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
-    # (save_utd). Disabled unless --closed_loop_npz_root or --closed_loop_sites_npz_root is given.
+    # (save_utd). Disabled unless --closed_loop_npz_root is given.
     parser.add_argument(
         "--closed_loop_npz_root",
         type=str,
         default="",
-        help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
-        "cadence (save_utd). Empty = disabled. One route per trial.",
+        help="folder, flat JSON, or grouped JSON for closed-loop validation, run on the checkpoint-save "
+        "cadence (save_utd). Empty = disabled. Supports: folder (route dir containing .npz files), "
+        "flat JSON (list of paths), or grouped JSON (dict of group_name -> paths).",
     )
     parser.add_argument(
-        "--closed_loop_sites_npz_root",
-        type=str,
-        default="",
-        help="alternative/addition to --closed_loop_npz_root: a curated .json path-list manifest, "
-        "grouped into per-site route pools by site_discovery.discover_sites_from_json and evaluated "
-        "as independent sites (own npz_root each). Both may be set at once (each fires "
-        "independently).",
-    )
-    parser.add_argument(
-        "--closed_loop_npz_object_modes",
+        "--closed_loop_object_modes",
         nargs="+",
         choices=("objects", "noobj"),
         default=["objects"],
-        help="object-mode(s) to run --closed_loop_npz_root under: 'objects'=normal, "
-        "'noobj'=empty-world ablation (no dynamic/static objects, map kept; label gets a "
-        "'__noobj' suffix). Default is objects-only (single arbitrary path, usually a curated "
-        "scene set).",
-    )
-    parser.add_argument(
-        "--closed_loop_sites_object_modes",
-        nargs="+",
-        choices=("objects", "noobj"),
-        default=["objects", "noobj"],
-        help="object-mode(s) to run each --closed_loop_sites_npz_root site under (see "
-        "--closed_loop_npz_object_modes). Default runs both, for the objects-vs-noobj "
-        "comparison in wandb.",
+        help="object-mode(s) to run: 'objects'=normal, 'noobj'=empty-world ablation "
+        "(no dynamic/static objects, map kept; label gets a '__noobj' suffix).",
     )
     parser.add_argument(
         "--closed_loop_seg_len",
@@ -401,7 +382,7 @@ def get_args():
         "--closed_loop_wandb_video_pick",
         choices=("worst", "first", "longest"),
         default="worst",
-        help="which single episode per site gets its video + trajectory colormap uploaded "
+        help="which single episode per group gets its video + trajectory colormap uploaded "
         "to wandb (all episodes still get rendered to out_dir either way)",
     )
     parser.add_argument(

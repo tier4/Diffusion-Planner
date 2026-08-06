@@ -6,7 +6,7 @@ one line per step) and draws a colored polyline (risk metric -> color) with a co
 legend, similar in spirit to a routing app's "road risk" heatmap overlay.
 
 Used by both the local HTML gallery (one PNG per route/segment, all routes) and the
-W&B representative-case image (one PNG per site, ``wandb.Image``, worst-case route
+W&B representative-case image (one PNG per group, ``wandb.Image``, worst-case route
 only) — same renderer, same look, so a human comparing the two is looking at the
 same visualization either way.
 """
@@ -200,7 +200,7 @@ def render_trajectory_colormap(
 
     # Fixed figure size + fixed axes positions (NOT plt.subplots + bbox_inches="tight"): every
     # metric's PNG must come out at IDENTICAL pixel dimensions, else W&B's gallery panel (which
-    # stacks a site's 5 metric images in one panel) warns "Images sizes do not match" and lays
+    # stacks a group's 5 metric images in one panel) warns "Images sizes do not match" and lays
     # them out wrong. The colorbar area on the right is always reserved; binary metrics
     # (collision/near_miss) simply leave it blank instead of shrinking the plot.
     fig = plt.figure(figsize=(6.4, 4.8), dpi=dpi, facecolor="white")

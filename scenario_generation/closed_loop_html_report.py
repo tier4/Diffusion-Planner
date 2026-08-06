@@ -1,8 +1,8 @@
-"""Build the self-contained local HTML gallery for a multi-site closed-loop run.
+"""Build the self-contained local HTML gallery for a multi-group closed-loop run.
 
-One page: a per-site summary table + a searchable/sortable/filterable grid of episode
-cards (video + metrics), reading each site's ``summary.json``/``segments.jsonl`` from
-``<out_root>/<site_name>/`` (the layout ``run_all_sites_closed_loop.py`` produces). No
+One page: a per-group summary table + a searchable/sortable/filterable grid of episode
+cards (video + metrics), reading each group's ``summary.json``/``segments.jsonl`` from
+``<out_root>/<group_name>/`` (the layout ``run_all_groups_closed_loop.py`` produces). No
 external assets — safe to open directly from disk, and this is the "rich" artifact the
 W&B side just links to (see ``scenario_generation.wandb_closed_loop.resolve_report_link``)
 rather than duplicating (videos stay local/on the training server, not uploaded to W&B).
@@ -22,32 +22,32 @@ from scenario_generation.wandb_closed_loop import episode_stem
 # order) — clearance is the most broadly useful default view.
 _DEFAULT_METRIC = "clearance"
 
-# Cycled per site in discovery order — enough distinct hues for a handful of sites before
-# repeating; exact color isn't semantically meaningful, just needs to be stable per-site
+# Cycled per group in discovery order — enough distinct hues for a handful of groups before
+# repeating; exact color isn't semantically meaningful, just needs to be stable per-group
 # within one report so the summary table and card tags visually match.
 _PALETTE = ["#1a73e8", "#d68a1f", "#8a4ad6", "#2a8a6d", "#d63a3a", "#2aa5d6"]
 
 
-def collect_site_data(
+def collect_group_data(
     out_root: str | Path,
-    site_names: list[str],
+    group_names: list[str],
     *,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
 ) -> tuple[list[dict], list[dict]]:
-    """Read each site's ``summary.json`` + ``segments.jsonl`` into (items, summaries) for
+    """Read each group's ``summary.json`` + ``segments.jsonl`` into (items, summaries) for
     :func:`build_html_report`. ``items`` is one dict per episode (with a resolved, relative
     ``video_path`` when the mp4 exists, and a ``colormap_paths`` dict of ``{metric: relative
     path}`` — one rendered image per metric in ``colormap_metrics`` that actually produced
     something, so the report's per-card dropdown can switch between them); ``summaries`` is
-    one aggregate dict per site.
+    one aggregate dict per group.
     """
     out_root = Path(out_root)
     items: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
-    for site_name in site_names:
-        site_dir = out_root / site_name
-        summary_path = site_dir / "summary.json"
-        segments_path = site_dir / "segments.jsonl"
+    for group_name in group_names:
+        group_dir = out_root / group_name
+        summary_path = group_dir / "summary.json"
+        segments_path = group_dir / "segments.jsonl"
         if not summary_path.is_file():
             continue
         s = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -55,7 +55,7 @@ def collect_site_data(
         strong_brake_mps2 = s.get("strong_brake", {}).get("thresh_mps2", -2.5)
         summaries.append(
             {
-                "site": site_name,
+                "group": group_name,
                 "n_segments": s.get("n_segments", 0),
                 "total_steps": s.get("total_steps", 0),
                 "route_completion": s.get("mean_route_completion", 0.0),
@@ -76,42 +76,42 @@ def collect_site_data(
                     continue
                 r = json.loads(line)
                 start, end = r["segment"]
-                stem = episode_stem(site_dir, r)
+                stem = episode_stem(group_dir, r)
                 video_name = f"{stem}.mp4"
-                video_path = site_dir / video_name
+                video_path = group_dir / video_name
 
                 # Skip metrics already rendered on a prior call for this out_root (report
-                # rebuilds are common — e.g. re-running --only_sites) rather than re-drawing
+                # rebuilds are common — e.g. re-running --only_groups) rather than re-drawing
                 # every episode's every metric from scratch each time.
                 missing_metrics = tuple(
                     m
                     for m in colormap_metrics
-                    if not (site_dir / f"{stem}_trajcolormap_{m}.png").is_file()
+                    if not (group_dir / f"{stem}_trajcolormap_{m}.png").is_file()
                 )
                 if missing_metrics:
                     try:
                         render_trajectory_colormaps(
-                            site_dir / stem,
-                            site_dir,
+                            group_dir / stem,
+                            group_dir,
                             stem,
                             metrics=missing_metrics,
                             near_miss_thresh=near_miss_thresh,
                             strong_brake_mps2=strong_brake_mps2,
-                            title=f"{site_name} {stem}",
+                            title=f"{group_name} {stem}",
                         )
                     except (
                         Exception
                     ) as e:  # pragma: no cover - a bad episode must not break the report
                         print(f"closed_loop_html_report: colormap failed for {stem}: {e}")
                 colormap_paths = {
-                    m: f"{site_name}/{stem}_trajcolormap_{m}.png"
+                    m: f"{group_name}/{stem}_trajcolormap_{m}.png"
                     for m in colormap_metrics
-                    if (site_dir / f"{stem}_trajcolormap_{m}.png").is_file()
+                    if (group_dir / f"{stem}_trajcolormap_{m}.png").is_file()
                 }
 
                 items.append(
                     {
-                        "site": site_name,
+                        "group": group_name,
                         "route": r["route"],
                         "segment": f"[{start},{end}]",
                         "n_steps_run": r.get("n_steps_run", 0),
@@ -124,7 +124,7 @@ def collect_site_data(
                         or 0,
                         "n_strong_brakes": extract_score(r, "total_strong_brakes") or 0,
                         "progress_m": round(r.get("progress_m", 0.0), 1),
-                        "video_path": f"{site_name}/{video_name}" if video_path.is_file() else None,
+                        "video_path": f"{group_name}/{video_name}" if video_path.is_file() else None,
                         "colormap_paths": colormap_paths,
                     }
                 )
@@ -136,23 +136,23 @@ _TEMPLATE_PATH = Path(__file__).with_name("closed_loop_report_template.html")
 
 def build_html_report(
     out_root: str | Path,
-    site_names: list[str],
+    group_names: list[str],
     *,
-    title: str = "Per-Site Closed-Loop Evaluation",
+    title: str = "Per-Group Closed-Loop Evaluation",
     subtitle: str = "",
     report_filename: str = "report.html",
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
 ) -> Path | None:
     """Write the self-contained gallery HTML to ``<out_root>/<report_filename>``.
 
-    Returns the written path, or ``None`` if no site had a readable ``summary.json``
+    Returns the written path, or ``None`` if no group had a readable ``summary.json``
     (nothing to report yet). ``colormap_metrics`` picks which per-step metrics get a
     trajectory colormap image rendered (default: all of them) — each episode card shows
     one image at a time with a dropdown to switch between the metrics that rendered for
     it, see :mod:`scenario_generation.trajectory_colormap`.
     """
     out_root = Path(out_root)
-    items, summaries = collect_site_data(out_root, site_names, colormap_metrics=colormap_metrics)
+    items, summaries = collect_group_data(out_root, group_names, colormap_metrics=colormap_metrics)
     if not summaries:
         return None
 

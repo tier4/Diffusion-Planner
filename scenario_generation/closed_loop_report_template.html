@@ -41,15 +41,15 @@
 <h1>__TITLE__</h1>
 <div class="sub">__SUBTITLE__</div>
 
-<h2>Per-Site Summary</h2>
+<h2>Per-Group Summary</h2>
 <table id="summaryTable">
-<tr><th>Site</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
+<tr><th>Group</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
 </table>
 
 <h2>Episodes</h2>
 <div class="controls">
   <input type="text" id="search" placeholder="Search by route">
-  <select id="siteFilter"><option value="">Site: All</option></select>
+  <select id="groupFilter"><option value="">Group: All</option></select>
   <select id="sortSel">
     <option value="default">Sort: Default</option>
     <option value="completion_asc">Route Completion (worst first)</option>
@@ -66,15 +66,15 @@ const ITEMS = __ITEMS_JSON__;
 const SUMMARY = __SUMMARY_JSON__;
 const PALETTE = __PALETTE_JSON__;
 const DEFAULT_METRIC = __DEFAULT_METRIC_JSON__;
-const siteColor = {};
-[...new Set(ITEMS.map(i => i.site))].sort().forEach((s, i) => { siteColor[s] = PALETTE[i % PALETTE.length]; });
+const groupColor = {};
+[...new Set(ITEMS.map(i => i.group))].sort().forEach((g, i) => { groupColor[g] = PALETTE[i % PALETTE.length]; });
 
 const summaryTable = document.getElementById('summaryTable');
 for (const s of SUMMARY) {
   const tr = document.createElement('tr');
-  const c = siteColor[s.site] || '#888';
+  const c = groupColor[s.group] || '#888';
   tr.innerHTML = `
-    <td style="color:${c};font-weight:700">${s.site}</td>
+    <td style="color:${c};font-weight:700">${s.group}</td>
     <td>${s.n_segments}</td>
     <td>${(s.route_completion*100).toFixed(0)}%</td>
     <td>${s.total_collision_events}</td>
@@ -86,9 +86,9 @@ for (const s of SUMMARY) {
   summaryTable.appendChild(tr);
 }
 
-const siteFilter = document.getElementById('siteFilter');
-[...new Set(ITEMS.map(i => i.site))].sort().forEach(s => {
-  const o = document.createElement('option'); o.value = s; o.textContent = s; siteFilter.appendChild(o);
+const groupFilter = document.getElementById('groupFilter');
+[...new Set(ITEMS.map(i => i.group))].sort().forEach(g => {
+  const o = document.createElement('option'); o.value = g; o.textContent = g; groupFilter.appendChild(o);
 });
 
 const grid = document.getElementById('grid');
@@ -104,7 +104,7 @@ function card(item) {
   const coll = item.n_collision_events || 0, curb = item.n_curb_hits || 0, snaps = item.n_snaps || 0;
   const redLight = item.n_red_light_violations || 0, brakes = item.n_strong_brakes || 0;
   const completion = ((item.route_completion || 0)*100).toFixed(0)+'%';
-  const c = siteColor[item.site] || '#888';
+  const c = groupColor[item.group] || '#888';
   const videoTag = item.video_path
     ? `<video controls muted preload="metadata" src="${item.video_path}"></video>`
     : `<div style="padding:40px;text-align:center;color:var(--muted);">video missing</div>`;
@@ -126,7 +126,7 @@ function card(item) {
     ${colormapBlock}
     <div class="meta">
       <div class="title">${item.route}</div>
-      <span class="tag" style="background:${c}">${item.site}</span>
+      <span class="tag" style="background:${c}">${item.group}</span>
       <span class="tag" style="background:#888">${item.segment}</span>
       <div class="metrics">
         <span>Route completion: <b>${completion}</b></span>
@@ -151,10 +151,10 @@ function card(item) {
 
 function render() {
   const q = searchEl.value.trim().toLowerCase();
-  const s = siteFilter.value;
+  const g = groupFilter.value;
   let filtered = ITEMS.filter(i => {
-    const hay = `${i.route} ${i.site}`.toLowerCase();
-    return (!q || hay.includes(q)) && (!s || i.site === s);
+    const hay = `${i.route} ${i.group}`.toLowerCase();
+    return (!q || hay.includes(q)) && (!g || i.group === g);
   });
   const mode = sortEl.value;
   if (mode === 'collision_desc') filtered.sort((a,b) => (b.n_collision_events||0)-(a.n_collision_events||0));
@@ -165,7 +165,7 @@ function render() {
   countEl.textContent = `${filtered.length} / ${ITEMS.length} episodes`;
 }
 
-[searchEl,siteFilter,sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
+[searchEl,groupFilter,sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
 render();
 </script>
 </body>

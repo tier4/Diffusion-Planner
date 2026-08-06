@@ -36,7 +36,7 @@ def route_label(npz_path: Path, key: str) -> str:
     """Human-readable route label ``<location>_<date>_<key>`` for video/PNG names.
 
     Dataset routes are laid out ``.../<location>/<split>/<date>/<time>/routes/<time>_<idx>_<frame>``
-    -- the bag-prefix ``key`` (``<time>_<idx>``) alone drops the depot/site and date, which makes the
+    -- the bag-prefix ``key`` (``<time>_<idx>``) alone drops the depot/group and date, which makes the
     per-segment MP4 names ambiguous. This prepends ``<location>`` (the dir two levels above the
     ``YYYY-MM-DD`` date component) and ``<date>``. Falls back to bare ``key`` for any path that does
     not match that layout (e.g. a flat single-dir npz tree).
@@ -62,7 +62,7 @@ def resolve_npz_roots(npz_root) -> list[Path]:
     The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
     holding a list of such directory paths (one route dir per entry) -- the same "path list"
     form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
-    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-site
+    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-group
     grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
     list is returned verbatim (each entry a ``Path``).
     """
@@ -92,8 +92,8 @@ def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[s
     route_sidecar_dir: dict[str, Path] = {}
     for root in roots:
         for key, paths in enumerate_routes(root).items():
-            # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
-            # dirs and MP4s carry the site + date, not just the ambiguous time-of-day bag prefix.
+    # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
+    # dirs and MP4s carry the location + date, not just the ambiguous time-of-day bag prefix.
             label = route_label(paths[0], key)
             uniq, n = label, 1
             while uniq in routes:

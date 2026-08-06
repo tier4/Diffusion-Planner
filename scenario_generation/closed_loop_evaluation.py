@@ -336,7 +336,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
 
     ``npz_root`` accepts anything ``closed_loop_eval.resolve_npz_roots`` does: a single
     directory tree, a ``.json`` path-list file, or an already-resolved list of root paths
-    (e.g. one site's several curated date/time entries from a JSON-manifest-based site
+    (e.g. one group's several curated date/time entries from a JSON-manifest-based group
     discovery) -- ``discover_jobs`` merges routes across all of them.
     """
 

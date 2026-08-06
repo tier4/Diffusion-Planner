@@ -223,7 +223,7 @@ def _merge_shards(
 
     Also writes a merged, human-readable ``segments.jsonl`` (same tdigest-stripped shape the
     sequential path writes) -- downstream consumers like closed_loop_html_report only look for
-    the unsharded filename, so without this a parallel-run site's videos never show up there.
+    the unsharded filename, so without this a parallel-run group's videos never show up there.
     """
     from scenario_generation.closed_loop_eval import (
         aggregate,

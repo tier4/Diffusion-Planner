@@ -153,23 +153,19 @@ class TrainConfig:
 
     # ---------------------------------------------------------
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
-    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` or ``closed_loop_sites_npz_root`` is set.
+    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set.
     #
-    # ``closed_loop_sites_npz_root`` is an alternative/addition to ``closed_loop_npz_root`` for
-    # multi-site validation: a curated .json path-list manifest, grouped into per-site route pools
-    # by scenario_generation.site_discovery.discover_sites_from_json and evaluated as independent
-    # npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>". Both may be set at
-    # once — each fires independently and contributes its own rows to the combined episode table /
-    # cross-site aggregate.
+    # ``closed_loop_npz_root`` supports multiple input formats:
+    # - Folder path: treated as a route directory (group name is folder basename)
+    # - Flat JSON: `["/path/a", ...]` -> group name is JSON stem
+    # - Grouped JSON: `{"g1": [...], "g2": [...]}` -> keys become group names
+    # - Path-list JSON (legacy): same format as site_discovery.discover_sites_from_json input
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
-    closed_loop_sites_npz_root: str = ""
-    # Object-mode ablation per source: "objects"=normal, "noobj"=empty-world (no dynamic/static
+    # Object-mode ablation: "objects"=normal, "noobj"=empty-world (no dynamic/static
     # objects, map kept — isolates "reacts badly to traffic" from "can't follow the
-    # route/map"). npz_root defaults to objects-only (usually a single curated scene);
-    # sites_root defaults to both (the objects-vs-noobj comparison).
-    closed_loop_npz_object_modes: list[str] = field(default_factory=lambda: ["objects"])
-    closed_loop_sites_object_modes: list[str] = field(default_factory=lambda: ["objects", "noobj"])
+    # route/map").
+    closed_loop_object_modes: list[str] = field(default_factory=lambda: ["objects"])
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
@@ -190,7 +186,7 @@ class TrainConfig:
     closed_loop_abort_after: int = 30
     closed_loop_abort_max_snaps: int = 0
     # wandb payload shaping (see scenario_generation.wandb_closed_loop): only ONE representative
-    # episode's video + trajectory-colormap image is uploaded per site per checkpoint (not all
+    # episode's video + trajectory-colormap image is uploaded per group per checkpoint (not all
     # routes — those stay in the local out_dir), picked by "worst" (default, most collisions) /
     # "first" / "longest".
     closed_loop_wandb_video_pick: str = "worst"
