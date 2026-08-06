@@ -67,6 +67,20 @@ def test_splits_site_name_collision_across_vehicle_types(tmp_path: Path, capsys)
     assert "site_1" in capsys.readouterr().err
 
 
+def test_splits_three_way_vehicle_type_collision(tmp_path: Path, capsys):
+    entries = [
+        f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",
+        f"{ROOT}/proj_b/site_1/manual/2026-01-01/10-00-00",
+        f"{ROOT}/proj_c/site_1/manual/2026-01-01/10-00-00",
+    ]
+    path = _write_list(tmp_path, entries)
+    vehicle_map = {"proj_a": "vehicle_x", "proj_b": "vehicle_y", "proj_c": "vehicle_z"}
+    sites = discover_sites_with_vehicles_from_json(path, vehicle_map)
+    assert set(sites) == {"vehicle_x__site_1", "vehicle_y__site_1", "vehicle_z__site_1"}
+    assert sites["vehicle_z__site_1"]["project"] == "proj_c"
+    assert "site_1" not in sites  # the bare site name must not silently reappear
+
+
 def test_legacy_wrapper_returns_only_npz_roots(tmp_path: Path):
     entries = [
         f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",
