@@ -36,6 +36,18 @@ class StateNormalizer:
         }
 
 
+def _check_last_dim(key, tensor, stats):
+    """Fail with the offending key instead of an opaque broadcast error."""
+    expected = stats["mean"].shape[-1]
+    actual = tensor.shape[-1]
+    if actual != expected:
+        raise ValueError(
+            f"normalization stats for '{key}' have {expected} columns "
+            f"but the data has {actual}; regenerate normalization.json "
+            f"(util_scripts/compute_normalization.py)"
+        )
+
+
 class ObservationNormalizer:
     def __init__(self, normalization_dict):
         # Drop them here so that loading an old config that still contains goal_pose
@@ -66,6 +78,7 @@ class ObservationNormalizer:
         for k, v in self._normalization_dict.items():
             if k not in data:  # Check if key `k` exists in `data`
                 continue
+            _check_last_dim(k, data[k], v)
             mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
             norm_data[k] = (data[k] - v["mean"].to(data[k].device)) / v["std"].to(data[k].device)
             norm_data[k][mask] = 0
@@ -76,6 +89,7 @@ class ObservationNormalizer:
         for k, v in self._normalization_dict.items():
             if k not in data:  # Check if key `k` exists in `data`
                 continue
+            _check_last_dim(k, data[k], v)
             mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
             norm_data[k] = data[k] * v["std"].to(data[k].device) + v["mean"].to(data[k].device)
             norm_data[k][mask] = 0

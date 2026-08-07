@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
+from diffusion_planner.dimensions import LINE_STRING_TYPE_NUM, POLYGON_TYPE_NUM
 
 FAMILIES = (
     "position",
@@ -171,8 +172,15 @@ def build_normalization(scales: dict[str, float]) -> dict[str, dict[str, list[fl
             "mean": [0.0] * 33,
             "std": [pos, pos, 1.0, 1.0, pos, pos, pos, pos] + [1.0] * 25,
         },
-        "polygons": {"mean": [0.0, 0.0], "std": [pos, pos]},
-        "line_strings": {"mean": [0.0, 0.0], "std": [pos, pos]},
+        # x/y are metre-valued, the trailing columns are a type one-hot (left as is).
+        "polygons": {
+            "mean": [0.0] * (2 + POLYGON_TYPE_NUM),
+            "std": [pos, pos] + [1.0] * POLYGON_TYPE_NUM,
+        },
+        "line_strings": {
+            "mean": [0.0] * (2 + LINE_STRING_TYPE_NUM),
+            "std": [pos, pos] + [1.0] * LINE_STRING_TYPE_NUM,
+        },
         "route_lanes_speed_limit": {"mean": [0.0], "std": [speed]},
         # Masked by the model, but convention is kept future-proof.
         "goal_pose": {"mean": [0.0] * 4, "std": [pos, pos, 1.0, 1.0]},
