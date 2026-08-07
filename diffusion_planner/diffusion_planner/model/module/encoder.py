@@ -19,6 +19,11 @@ CLASS_TYPE_EGO_SHAPE = 8
 CLASS_TYPE_TURN_INDICATOR = 9
 CLASS_TYPE_NUM = 10
 
+# goal_pose is not mean/std normalized; it is divided by this distance [m] instead.
+# Goals farther than this drop their coordinates and are replaced by a learnable
+# "the goal is still far away" token.
+GOAL_POSE_NEAR_RANGE = 100.0
+
 
 def add_class_type(x, class_type):
     """
@@ -305,6 +310,7 @@ class Encoder(nn.Module):
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
         encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
+        encoder_outputs = encoder_outputs.masked_fill(encoding_mask.view(B, self.token_num, 1), 0.0)
 
         return encoder_outputs
 
@@ -451,7 +457,32 @@ class NeighborEncoder(nn.Module):
         x = torch.cat([x[..., :4], torch.zeros_like(x[..., 4:6]), x[..., 6:]], dim=-1)
 
         valid_indices = ~mask_p.view(-1)
-        x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
+        neighbor_type = neighbor_type.view(B * P, -1)
+
+        if not self.training:
+            # Static-shape (mask) path used for eval and ONNX export. ONNX cannot
+            # trace the dynamic gather below, so we process all B*P slots and zero
+            # out the invalid ones — numerically identical, just more FLOPs. Export
+            # runs under model.eval() (see onnx_export.py), so keying on
+            # ``self.training`` keeps the exported graph static while letting
+            # training take the fast gather path.
+            x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
+            x = self.channel_pre_project(x)
+            x = x.permute(0, 2, 1)
+            x = self.token_pre_project(x)
+            x = x.permute(0, 2, 1)
+            for block in self.blocks:
+                x = block(x)
+            x = torch.mean(x, dim=1)  # pooling
+            type_embedding = self.type_emb(neighbor_type)
+            x = x + type_embedding
+            x = self.emb_project(self.norm(x))
+            x_result = x * valid_indices.float().unsqueeze(-1)
+            return x_result.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
+
+        # Fast gather path (training): the temporal encoder only runs on the ~few
+        # dozen valid neighbours instead of all 320 padded slots.
+        x = x[valid_indices]
 
         x = self.channel_pre_project(x)
         x = x.permute(0, 2, 1)
@@ -463,12 +494,13 @@ class NeighborEncoder(nn.Module):
         # pooling
         x = torch.mean(x, dim=1)
 
-        neighbor_type = neighbor_type.view(B * P, -1)
-        type_embedding = self.type_emb(neighbor_type)
+        type_embedding = self.type_emb(neighbor_type[valid_indices])
         x = x + type_embedding
 
         x = self.emb_project(self.norm(x))
-        x_result = x * valid_indices.float().unsqueeze(-1)
+
+        x_result = torch.zeros((B * P, x.shape[-1]), dtype=x.dtype, device=x.device)
+        x_result[valid_indices] = x  # Fill in valid parts
 
         return x_result.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
 
@@ -720,23 +752,37 @@ class GoalPoseEncoder(nn.Module):
             drop=drop_path_rate,
         )
 
+        # Token used instead of the coordinates when the goal is at least
+        # GOAL_POSE_NEAR_RANGE away
+        self.far_goal_token = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+
     def forward(self, x):
         """
-        x: B, D=4 (x, y, cos, sin)
+        x: B, D=4 (x, y, cos, sin), raw un-normalized values in the ego frame [m]
         """
         B, D = x.shape
-        pos = x.clone()  # (B, D=4[x, y, cos, sin])
-        pos = pos.unsqueeze(1)  # (B, 1, D=4)
+
+        dist = torch.linalg.vector_norm(x[..., :2], dim=-1, keepdim=True)  # (B, 1)
+        is_far = dist >= GOAL_POSE_NEAR_RANGE  # (B, 1)
+
+        # Near goals are divided by GOAL_POSE_NEAR_RANGE so they roughly fit in [-1, 1].
+        # Far goals do not use their coordinates, so zero them out (the output is
+        # replaced by far_goal_token anyway).
+        near = torch.cat([x[..., :2] / GOAL_POSE_NEAR_RANGE, x[..., 2:4]], dim=-1)  # (B, D=4)
+        near = torch.where(is_far, torch.zeros_like(near), near)
+
+        pos = near.unsqueeze(1)  # (B, 1, D=4)
         pos = add_class_type(pos, CLASS_TYPE_GOAL_POSE)
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
-        x = self.channel_pre_project(x)  # (B, C=channels_mlp_dim)
-        x = x.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
+        h = self.channel_pre_project(near)  # (B, C=channels_mlp_dim)
+        h = h.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
 
-        x = self.emb_project(self.norm(x))  # (B, 1, hidden_dim)
+        h = self.emb_project(self.norm(h))  # (B, 1, hidden_dim)
+        h = torch.where(is_far.unsqueeze(-1), self.far_goal_token.expand(B, -1, -1), h)
 
-        return x, mask, pos
+        return h, mask, pos
 
 
 class FloatsEncoder(nn.Module):
