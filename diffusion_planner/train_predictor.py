@@ -60,6 +60,18 @@ def get_args(args_list=None):
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
+        "--use_traffic_light_dropout",
+        default=_train_config_default("use_traffic_light_dropout"),
+        type=boolean,
+        help="whether to replace known traffic light colors with unknown to simulate misdetection",
+    )
+    parser.add_argument(
+        "--traffic_light_dropout_prob",
+        type=float,
+        default=_train_config_default("traffic_light_dropout_prob"),
+        help="per-lane probability of dropping a known traffic light color to unknown",
+    )
+    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(
