@@ -1,173 +1,277 @@
 #!/usr/bin/env python3
-"""path_list*.json の npz を間引いて読み、normalization.json を計算し直す。
-
-学習時 (train_epoch.py) の前処理を再現してから統計を取る。
-  * ego_agent_past / ego_agent_future は heading -> (cos, sin) に変換
-  * 全要素 0 の行 (padding) は ObservationNormalizer と同じ基準で除外
-    (neighbor_agents_future のみ train_epoch.py と同じく先頭 3 列で判定)
-
-出力キーは Diffusion-Planner/diffusion_planner/normalization.json と同じ構成。
-"""
+from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ProcessPoolExecutor
+import os
+import tempfile
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
-from tqdm import tqdm
 
-# 出力キー -> (npz のキー, heading を cos/sin に変換するか)
-# 並びは既存 normalization.json に合わせている
-KEY_SPEC = {
-    "ego": ("ego_agent_future", True),
-    "neighbor": ("neighbor_agents_future", True),
-    "ego_agent_past": ("ego_agent_past", True),
-    "ego_current_state": ("ego_current_state", False),
-    "neighbor_agents_past": ("neighbor_agents_past", False),
-    "static_objects": ("static_objects", False),
-    "lanes": ("lanes", False),
-    "lanes_speed_limit": ("lanes_speed_limit", False),
-    "route_lanes": ("route_lanes", False),
-    "polygons": ("polygons", False),
-    "line_strings": ("line_strings", False),
-    "route_lanes_speed_limit": ("route_lanes_speed_limit", False),
-    # goal_pose is not normalized (GoalPoseEncoder handles it based on distance),
-    # so no statistics are collected for it
-}
-
-# padding 判定に先頭 3 列だけを使うキー (train_epoch.py の mask と同じ)
-FIRST3_MASK_KEYS = {"neighbor"}
+FAMILIES = (
+    "position",
+    "velocity",
+    "size",
+    "acceleration",
+    "steering",
+    "yaw_rate",
+    "speed_limit",
+)
 
 
-def load_sampled_paths(json_file: Path, stride: int) -> list[str]:
-    """path_list json を読み、stride 個ごとに 1 つパスを取り出す。"""
-    with json_file.open("r", encoding="utf-8") as f:
-        paths = json.load(f)
-    return paths[::stride]
+class Reservoir:
+    """Fixed-memory uniform reservoir for scalar float samples."""
+
+    def __init__(self, capacity: int, rng: np.random.Generator):
+        self.capacity = int(capacity)
+        self.rng = rng
+        self.values = np.empty(self.capacity, dtype=np.float64)
+        self.seen = 0
+
+    def add(self, values: np.ndarray) -> None:
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return
+        start = self.seen
+        first = max(0, min(values.size, self.capacity - start))
+        if first:
+            self.values[start : start + first] = values[:first]
+        tail = values[first:]
+        if tail.size:
+            # Vectorized form of classic reservoir replacement. For an item
+            # with one-based global index j, it replaces a random slot iff a
+            # uniform draw in [0, j) falls below capacity. Repeated slots are
+            # intentional and match sequential reservoir replacement.
+            global_index = np.arange(start + first + 1, start + values.size + 1, dtype=np.float64)
+            draw = np.floor(self.rng.random(tail.size) * global_index).astype(np.int64)
+            keep = draw < self.capacity
+            self.values[draw[keep]] = tail[keep]
+        self.seen += values.size
+
+    def array(self) -> np.ndarray:
+        return self.values[: min(self.seen, self.capacity)].copy()
 
 
-def rows_of(array: np.ndarray, convert_heading: bool) -> np.ndarray:
-    """npz の配列を [N, D] の行列に整形する (heading 変換込み)。"""
-    if array.ndim == 1:
-        array = array.reshape(1, -1)
-    rows = array.reshape(-1, array.shape[-1]).astype(np.float64)
-    if convert_heading and rows.shape[-1] == 3:
-        rows = np.concatenate(
-            [rows[:, :2], np.cos(rows[:, 2:3]), np.sin(rows[:, 2:3])],
-            axis=-1,
-        )
-    return rows
+def valid_rows(array: np.ndarray, dims: int) -> np.ndarray:
+    return np.any(np.abs(array[..., :dims]) > 1e-7, axis=-1)
 
 
-def accumulate_chunk(paths: list[str]) -> tuple[dict[str, tuple[int, list, list]], int]:
-    """npz 群から key ごとの (件数, 総和, 二乗和) を求める。並列実行の単位。"""
-    counts: dict[str, int] = {}
-    sums: dict[str, np.ndarray] = {}
-    sq_sums: dict[str, np.ndarray] = {}
-    num_failed = 0
+def scene_sample(values: np.ndarray, limit: int, rng: np.random.Generator) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size <= limit:
+        return values
+    return values[rng.choice(values.size, size=limit, replace=False)]
 
-    for path in paths:
-        try:
-            data = np.load(path, allow_pickle=True)
-            arrays = {key: data[key] for key in data.files}
-        except Exception:
-            num_failed += 1
+
+def add_scene(
+    store: dict[str, Reservoir], name: str, values: np.ndarray, limit: int, rng: np.random.Generator
+) -> None:
+    store[name].add(scene_sample(values, limit, rng))
+
+
+def collect_npz(
+    path: Path,
+    store: dict[str, Reservoir],
+    per_scene: int,
+    rng: np.random.Generator,
+    speed_counts: Counter[float] | None = None,
+) -> None:
+    with np.load(path, allow_pickle=False) as data:
+        ego_past = data["ego_agent_past"]
+        add_scene(store, "position", ego_past[..., :2], per_scene, rng)
+
+        neighbors = data["neighbor_agents_past"]
+        neighbor_valid = valid_rows(neighbors, 8)
+        add_scene(store, "position", neighbors[..., :2][neighbor_valid], per_scene, rng)
+        add_scene(store, "velocity", neighbors[..., 4:6][neighbor_valid], per_scene, rng)
+        add_scene(store, "size", neighbors[..., 6:8][neighbor_valid], per_scene, rng)
+
+        for key in ("lanes", "route_lanes"):
+            lanes = data[key]
+            lane_valid = valid_rows(lanes, 8)
+            # x/y, dX/dY, left-bound and right-bound offsets are metre-valued.
+            add_scene(store, "position", lanes[..., :8][lane_valid], per_scene, rng)
+
+        for key in ("polygons", "line_strings"):
+            lines = data[key]
+            line_valid = valid_rows(lines, 2)
+            add_scene(store, "position", lines[..., :2][line_valid], per_scene, rng)
+
+        current = data["ego_current_state"]
+        add_scene(store, "velocity", current[4:6], per_scene, rng)
+        add_scene(store, "acceleration", current[6:8], per_scene, rng)
+        add_scene(store, "steering", current[8], per_scene, rng)
+        add_scene(store, "yaw_rate", current[9], per_scene, rng)
+        # ego_shape is retained for diagnostics; it shares the metric scale.
+        add_scene(store, "size", data["ego_shape"], per_scene, rng)
+
+        speed = data["lanes_speed_limit"].reshape(-1)
+        add_scene(store, "speed_limit", speed[speed > 0], per_scene, rng)
+        if speed_counts is not None:
+            values, counts = np.unique(speed[speed > 0], return_counts=True)
+            for value, count in zip(values, counts):
+                speed_counts[round(float(value), 9)] += int(count)
+
+
+def quantile(values: np.ndarray, q: float) -> float:
+    return float(np.quantile(values, q)) if values.size else float("nan")
+
+
+def describe(name: str, values: np.ndarray) -> dict[str, float | int | str]:
+    q25, q50, q75 = (quantile(values, q) for q in (0.25, 0.50, 0.75))
+    iqr = q75 - q25
+    return {
+        "family": name,
+        "n": int(values.size),
+        "mean": float(np.mean(values)),
+        "std": float(np.std(values)),
+        "median": q50,
+        "iqr": iqr,
+        "robust_scale_iqr_1.349": iqr / 1.349,
+        "p01": quantile(values, 0.01),
+        "p99": quantile(values, 0.99),
+        "p95_abs": quantile(np.abs(values), 0.95),
+        "zero_fraction": float(np.mean(np.isclose(values, 0.0))),
+    }
+
+
+def build_normalization(scales: dict[str, float]) -> dict[str, dict[str, list[float]]]:
+    pos = scales["position"]
+    vel = scales["velocity"]
+    acc = scales["acceleration"]
+    steer = scales["steering"]
+    yaw = scales["yaw_rate"]
+    speed = scales["speed_limit"]
+    # All metre-valued quantities intentionally share pos, including size.
+    size = pos
+    zero4 = [0.0, 0.0, 0.0, 0.0]
+    return {
+        "ego": {"mean": zero4, "std": [pos, pos, 1.0, 1.0]},
+        "neighbor": {"mean": zero4, "std": [pos, pos, 1.0, 1.0]},
+        "ego_agent_past": {"mean": zero4, "std": [pos, pos, 1.0, 1.0]},
+        "ego_current_state": {
+            "mean": [0.0] * 10,
+            "std": [pos, pos, 1.0, 1.0, vel, vel, acc, acc, steer, yaw],
+        },
+        "neighbor_agents_past": {
+            "mean": [0.0] * 11,
+            "std": [pos, pos, 1.0, 1.0, vel, vel, size, size, 1.0, 1.0, 1.0],
+        },
+        "static_objects": {
+            "mean": [0.0] * 10,
+            "std": [pos, pos, 1.0, 1.0, size, size, size, size, 1.0, 1.0],
+        },
+        "lanes": {"mean": [0.0] * 33, "std": [pos, pos, 1.0, 1.0, pos, pos, pos, pos] + [1.0] * 25},
+        "lanes_speed_limit": {"mean": [0.0], "std": [speed]},
+        "route_lanes": {
+            "mean": [0.0] * 33,
+            "std": [pos, pos, 1.0, 1.0, pos, pos, pos, pos] + [1.0] * 25,
+        },
+        "polygons": {"mean": [0.0, 0.0], "std": [pos, pos]},
+        "line_strings": {"mean": [0.0, 0.0], "std": [pos, pos]},
+        "route_lanes_speed_limit": {"mean": [0.0], "std": [speed]},
+        # Masked by the model, but convention is kept future-proof.
+        "goal_pose": {"mean": [0.0] * 4, "std": [pos, pos, 1.0, 1.0]},
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="大規模NPZから物理単位ベースのnormalization.jsonを生成します。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "実行例:\n"
+            "  python notebooks/compute_scratch_normalization.py \\\n"
+            "      --train-list combined_train.json \\\n"
+            "      --output normalization_candidates/normalization_scratch_grouped.json\n\n"
+            "再現性を保つには --seed を固定してください。\n"
+            "本番の最終計算では、欠損確認のため --skip-missing は付けないでください。"
+        ),
+    )
+    parser.add_argument("--train-list", type=Path, required=True, help="JSON list of NPZ paths")
+    parser.add_argument("--output", type=Path, required=True, help="Output normalization JSON")
+    parser.add_argument(
+        "--per-scene", type=int, default=256, help="Maximum values per family/source/scene"
+    )
+    parser.add_argument(
+        "--reservoir", type=int, default=300_000, help="Maximum values retained per family"
+    )
+    parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument("--progress-every", type=int, default=1000)
+    parser.add_argument("--skip-missing", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.per_scene <= 0 or args.reservoir <= 0:
+        raise ValueError("--per-scene and --reservoir must be positive")
+    paths = json.loads(args.train_list.read_text())
+    if not isinstance(paths, list):
+        raise ValueError("train list must contain a JSON array")
+    rng = np.random.default_rng(args.seed)
+    store = {name: Reservoir(args.reservoir, rng) for name in FAMILIES}
+    speed_counts: Counter[float] = Counter()
+    missing = []
+    for index, raw_path in enumerate(paths, 1):
+        path = Path(raw_path)
+        if not path.exists():
+            missing.append(str(path))
+            if not args.skip_missing:
+                raise FileNotFoundError(path)
             continue
+        collect_npz(path, store, args.per_scene, rng, speed_counts)
+        if index % args.progress_every == 0 or index == len(paths):
+            print(
+                f"[{index:,}/{len(paths):,}] "
+                + " ".join(f"{k}={store[k].seen:,}" for k in FAMILIES),
+                flush=True,
+            )
 
-        for out_key, (npz_key, convert_heading) in KEY_SPEC.items():
-            if npz_key not in arrays:
-                continue
-            rows = rows_of(arrays[npz_key], convert_heading)
-            if out_key in FIRST3_MASK_KEYS:
-                valid = np.any(rows[:, :3] != 0, axis=-1)
-            else:
-                valid = np.any(rows != 0, axis=-1)
-            rows = rows[valid]
-            if rows.shape[0] == 0:
-                continue
-            if out_key not in counts:
-                counts[out_key] = 0
-                sums[out_key] = np.zeros(rows.shape[-1], dtype=np.float64)
-                sq_sums[out_key] = np.zeros(rows.shape[-1], dtype=np.float64)
-            counts[out_key] += rows.shape[0]
-            sums[out_key] += rows.sum(axis=0)
-            sq_sums[out_key] += (rows**2).sum(axis=0)
+    if missing:
+        print(f"warning: skipped {len(missing):,} missing files", flush=True)
+    arrays = {name: reservoir.array() for name, reservoir in store.items()}
+    summaries = {name: describe(name, values) for name, values in arrays.items()}
+    for name, row in summaries.items():
+        print(
+            f"{name:>14}: n={row['n']:>8,} std={row['std']:.6g} robust={row['robust_scale_iqr_1.349']:.6g} p95_abs={row['p95_abs']:.6g}"
+        )
+    print("speed_limit unique values (m/s -> km/h, count):")
+    for value, count in sorted(speed_counts.items()):
+        print(f"  {value:.9f} -> {value * 3.6:.6f}, {count:,}")
 
-    packed = {key: (counts[key], sums[key].tolist(), sq_sums[key].tolist()) for key in counts}
-    return packed, num_failed
-
-
-def chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
-    """リストを chunk_size ごとに分割する。"""
-    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+    # Robust metric scale; dynamics use std because their zero-heavy IQR can degenerate.
+    scales = {
+        "position": max(summaries["position"]["robust_scale_iqr_1.349"], 1e-3),
+        "velocity": max(summaries["velocity"]["std"], 1e-3),
+        "acceleration": max(summaries["acceleration"]["std"], 1e-3),
+        "steering": max(summaries["steering"]["std"], 1e-3),
+        "yaw_rate": max(summaries["yaw_rate"]["std"], 1e-3),
+        "size": max(summaries["position"]["robust_scale_iqr_1.349"], 1e-3),
+        # Speed limits are stored in m/s; preserve current_speed/speed_limit
+        # ratios by sharing the velocity scale.
+        "speed_limit": max(summaries["velocity"]["std"], 1e-3),
+    }
+    result = build_normalization(scales)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{args.output.name}.", dir=args.output.parent, text=True
+    )
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(result, handle, indent=2)
+            handle.write("\n")
+        Path(temp_name).replace(args.output)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    print(f"wrote {args.output}")
+    print("scales:", json.dumps(scales, sort_keys=True))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("path_list_json", type=Path)
-    parser.add_argument("output_json", type=Path)
-    parser.add_argument("--stride", type=int, required=True, help="何件ごとに 1 件使うか")
-    parser.add_argument("--num_workers", type=int, required=True)
-    parser.add_argument(
-        "--min_std",
-        type=float,
-        required=True,
-        help="この値未満の std は 1.0 に置き換える (定数次元の 0 除算対策)",
-    )
-    args = parser.parse_args()
-
-    print(f"Loading path list: {args.path_list_json}")
-    sampled_paths = load_sampled_paths(args.path_list_json, args.stride)
-    print(f"Sampled {len(sampled_paths):,} npz files (stride={args.stride})")
-
-    chunks = chunk_list(sampled_paths, 64)
-    total_counts: dict[str, int] = {}
-    total_sums: dict[str, np.ndarray] = {}
-    total_sq_sums: dict[str, np.ndarray] = {}
-    total_failed = 0
-
-    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-        results = executor.map(accumulate_chunk, chunks)
-        for packed, num_failed in tqdm(results, total=len(chunks), unit="chunk"):
-            total_failed += num_failed
-            for key, (count, sum_list, sq_sum_list) in packed.items():
-                if key not in total_counts:
-                    total_counts[key] = 0
-                    total_sums[key] = np.zeros(len(sum_list), dtype=np.float64)
-                    total_sq_sums[key] = np.zeros(len(sq_sum_list), dtype=np.float64)
-                total_counts[key] += count
-                total_sums[key] += np.asarray(sum_list, dtype=np.float64)
-                total_sq_sums[key] += np.asarray(sq_sum_list, dtype=np.float64)
-
-    if total_failed > 0:
-        print(f"読み込みに失敗した npz: {total_failed:,} 件 (スキップ)")
-
-    result = {}
-    for out_key in KEY_SPEC:
-        if out_key not in total_counts:
-            print(f"警告: {out_key} のデータが 1 件も無かったので出力から除外します")
-            continue
-        count = total_counts[out_key]
-        mean = total_sums[out_key] / count
-        variance = np.maximum(0.0, total_sq_sums[out_key] / count - mean**2)
-        std = np.sqrt(variance)
-        degenerate = std < args.min_std
-        if np.any(degenerate):
-            dims = np.flatnonzero(degenerate).tolist()
-            print(f"警告: {out_key} の次元 {dims} は std < {args.min_std} なので 1.0 にします")
-            std[degenerate] = 1.0
-        result[out_key] = {
-            "mean": np.round(mean, 4).tolist(),
-            "std": np.round(std, 4).tolist(),
-        }
-        print(f"{out_key:26s} rows={count:12,}")
-        print(f"  mean={np.round(mean, 3).tolist()}")
-        print(f"  std ={np.round(std, 3).tolist()}")
-
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    with args.output_json.open("w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
-        f.write("\n")
-    print()
-    print(f"Saved to {args.output_json}")
+    main()
