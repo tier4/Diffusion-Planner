@@ -140,6 +140,26 @@ a `TagStore` backed by that file. Equivalent to
 store = TagStore.build_index("/data/routes/", "/data/index.db")
 ```
 
+The CLI wrapper at `scripts/tag_management/build_index.py` exposes the same
+flow without writing Python. It is the fast-path entry point for large
+datasets whose downstream tools (`scripts/tag_usage/export_dataset.py`,
+etc.) accept a pre-built `.db`:
+
+```bash
+python scripts/tag_management/build_index.py /data/routes/ -o /data/index.db
+python scripts/tag_management/build_index.py /data/routes/ -o /data/index.db --force
+```
+
+| Flag | Meaning |
+|---|---|
+| `source` (positional) | Same shape as `TagStore`: directory, path-list `.json` / `.json.zst`, single `.npz`, or a sequence of those. |
+| `--output` / `-o` (required) | Destination `.db` / `.sqlite` / `.tags.db` path. Parent dirs are auto-created. |
+| `--force` | Overwrite `--output` if it already exists. Default is fail-fast. |
+
+Exit codes: `0` on success; `1` if the source is missing, the output suffix is
+wrong, or the output already exists without `--force`. On success the script
+prints the route / frame counts and the resolved output path.
+
 ### `npz_paths() -> list[Path]`
 
 All NPZ paths in the index (unsorted; route order from the `frames` table).

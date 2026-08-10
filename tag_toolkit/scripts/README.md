@@ -9,6 +9,7 @@ docstring. This README is a one-line index.
 | Script | Purpose |
 |---|---|
 | [`incremental_index.py`](tag_management/incremental_index.py) | Append new frames to an existing `.db` index without rescanning old frames; pre-filters duplicates via the `frames` PK. |
+| [`build_index.py`](tag_management/build_index.py) | CLI wrapper around `TagStore.build_index`: build a `.db` index from a directory / path-list / single `.npz` and write it to `--output` (fails fast if it already exists; pass `--force` to overwrite). |
 | [`write_route_tags_from_csv.py`](tag_management/write_route_tags_from_csv.py) | Apply route-level tags from a CSV column-to-dimension mapping (e.g. `devops_site`, `devops_override_label`) to one dataset tree, batched `sync=False`. |
 | [`write_site_split_tags.py`](tag_management/write_site_split_tags.py) | Walk one dataset tree, infer `site:*` and `split:{manual\|auto\|train\|valid}` tags from the directory layout and an optional `split_labels.json`. |
 
