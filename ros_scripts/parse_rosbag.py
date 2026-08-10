@@ -361,9 +361,10 @@ def build_neighbor_past(data_list, i, map2bl_matrix_4x4, max_num_objects, time_l
 def build_neighbor_future(data_list, i, map2bl_matrix_4x4, agent_ids, max_num_objects, out_t):
     """Port of process_neighbor_agents_and_future's future half.
 
-    For each past agent (same order), seed an OUTPUT_T-length history with the current-frame
-    state, then walk future frames appending the same id until it disappears. Returns
-    (max_num_objects, out_t, 3) of [x, y, heading] in ego frame.
+    For each past agent (same order), walk future frames appending the same id
+    until it disappears. Returns (max_num_objects, out_t, 3) of
+    [x, y, heading] in ego frame. The first output row is frame i + 1; the
+    current-frame state belongs only to neighbor_agents_past.
     """
     current_objs = {bytes(o.object_id.uuid): o for o in data_list[i].tracked_objects.objects}
     # Pre-index future frames by object id.
@@ -383,7 +384,6 @@ def build_neighbor_future(data_list, i, map2bl_matrix_4x4, agent_ids, max_num_ob
         if seed_obj is None:
             continue
         dq = deque(maxlen=out_t)
-        dq.append(_agent_state_from_object(seed_obj))
         for fmap in future_maps:
             if fmap is None:
                 break
