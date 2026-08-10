@@ -9,8 +9,13 @@ The backends are only forced (and restored) inside :func:`onnx_export_backends`,
 the export itself, so importing this module from a training process never slows training down.
 """
 
+import argparse
 import contextlib
+import os
 import random
+import shutil
+import subprocess
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -638,3 +643,139 @@ def export_checkpoint_onnx_guarded(
         )
     except Exception as exc:
         print(f"WARNING: ONNX export failed for {ckpt_path}: {exc}")
+
+
+def copy_exported_artifacts(src_dir: Path, dst_dirs: list[Path], output_prefix: str) -> None:
+    """Copy every exported ONNX artifact (including external-data files) to ``dst_dirs``."""
+    artifacts = sorted(Path(src_dir).glob(f"{output_prefix}*.onnx*"))
+    for dst in dst_dirs:
+        dst = Path(dst)
+        dst.mkdir(parents=True, exist_ok=True)
+        for artifact in artifacts:
+            shutil.copy2(artifact, dst / artifact.name)
+
+
+def build_export_command(
+    config_json_path: str,
+    ckpt_path: str,
+    output_dirs: list[Path],
+    output_prefix: str,
+    use_ema: bool,
+    use_simplify: bool,
+    opset_version: int,
+    external_data: bool,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "diffusion_planner.utils.onnx_export",
+        "--config-json",
+        str(config_json_path),
+        "--ckpt",
+        str(ckpt_path),
+        "--output-prefix",
+        output_prefix,
+        "--opset-version",
+        str(opset_version),
+    ]
+    for output_dir in output_dirs:
+        cmd += ["--output-dir", str(output_dir)]
+    if use_ema:
+        cmd.append("--use-ema")
+    if use_simplify:
+        cmd.append("--use-simplify")
+    if external_data:
+        cmd.append("--external-data")
+    return cmd
+
+
+def launch_checkpoint_onnx_export(
+    config_json_path: str,
+    ckpt_path: str,
+    output_dirs: list[Path],
+    output_prefix: str,
+    use_ema: bool,
+    use_simplify: bool,
+    opset_version: int,
+    external_data: bool,
+) -> subprocess.Popen | None:
+    """Launch :func:`export_checkpoint_onnx` in a detached CPU-only subprocess.
+
+    The export re-builds the model from the on-disk checkpoint, so it needs nothing from the
+    training process: running it in a child process keeps the (multi-rank) training loop from
+    stalling behind the CPU trace, and keeps the export's global RNG seeding out of the
+    training process. The child exports once into ``output_dirs[0]`` and copies the artifacts
+    to the remaining dirs, so a checkpoint that is both a ``save_utd`` snapshot and the new
+    best model is only traced once.
+
+    Never raises; returns the ``Popen`` handle (poll/wait it to reap the child), or ``None``
+    when the launch itself failed. Child output goes to ``<output_dirs[0]>/onnx_export.log``.
+    """
+    cmd = build_export_command(
+        config_json_path,
+        ckpt_path,
+        output_dirs,
+        output_prefix,
+        use_ema,
+        use_simplify,
+        opset_version,
+        external_data,
+    )
+    # The export runs on CPU; hide the GPUs so the child never allocates CUDA memory
+    # next to the training process.
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+    log_path = Path(output_dirs[0]) / "onnx_export.log"
+    try:
+        with open(log_path, "w") as log_file:
+            return subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+    except Exception as exc:
+        print(f"WARNING: failed to launch ONNX export subprocess for {ckpt_path}: {exc}")
+        return None
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Export the ONNX graphs for a Diffusion-Planner checkpoint."
+    )
+    parser.add_argument("--config-json", required=True)
+    parser.add_argument("--ckpt", required=True)
+    parser.add_argument(
+        "--output-dir",
+        action="append",
+        required=True,
+        dest="output_dirs",
+        help="Repeatable. The export runs into the first dir; artifacts are copied to the rest.",
+    )
+    parser.add_argument("--output-prefix", default="diffusion_planner")
+    parser.add_argument("--opset-version", type=int, default=20)
+    parser.add_argument("--use-ema", action="store_true")
+    parser.add_argument("--use-simplify", action="store_true")
+    parser.add_argument("--external-data", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _build_arg_parser().parse_args(argv)
+    output_dirs = [Path(d) for d in args.output_dirs]
+    export_checkpoint_onnx(
+        config_json_path=args.config_json,
+        ckpt_path=args.ckpt,
+        output_dir=output_dirs[0],
+        output_prefix=args.output_prefix,
+        use_ema=args.use_ema,
+        use_simplify=args.use_simplify,
+        opset_version=args.opset_version,
+        external_data=args.external_data,
+    )
+    if len(output_dirs) > 1:
+        copy_exported_artifacts(output_dirs[0], output_dirs[1:], args.output_prefix)
+
+
+if __name__ == "__main__":
+    main()

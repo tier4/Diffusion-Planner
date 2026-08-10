@@ -22,7 +22,7 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
-from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
+from diffusion_planner.utils.onnx_export import launch_checkpoint_onnx_export
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
@@ -385,6 +385,7 @@ def model_training(args: TrainConfig):
 
     data_list = []
     best_loss = float("inf")
+    onnx_export_procs = []
 
     valid_dict = validate_model(diffusion_planner, valid_loader, args)
     agg = aggregate_valid_metrics(valid_dict, args.device)
@@ -534,6 +535,8 @@ def model_training(args: TrainConfig):
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
+            onnx_export_dirs = []
+
             if (epoch + 1 - init_epoch) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
@@ -542,17 +545,7 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
-                export_checkpoint_onnx_guarded(
-                    config_json_path=os.path.join(curr_dir, "args.json"),
-                    ckpt_path=f"{curr_dir}/best_model.pth",
-                    output_dir=Path(curr_dir),
-                    output_prefix="diffusion_planner",
-                    use_ema=False,
-                    use_simplify=False,
-                    opset_version=20,
-                    external_data=False,
-                )
+                onnx_export_dirs.append(curr_dir)
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
                 closed_loop_validate(
@@ -569,20 +562,37 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                onnx_export_dirs.append(curr_dir)
+
+            if onnx_export_dirs:
                 # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
-                export_checkpoint_onnx_guarded(
-                    config_json_path=os.path.join(curr_dir, "args.json"),
-                    ckpt_path=f"{curr_dir}/best_model.pth",
-                    output_dir=Path(curr_dir),
+                # The export runs in a detached CPU-only subprocess so the (multi-rank) training
+                # loop never stalls behind the trace; when the epoch is both a save_utd snapshot
+                # and the new best model, the checkpoint is traced once and copied.
+                proc = launch_checkpoint_onnx_export(
+                    config_json_path=os.path.join(onnx_export_dirs[0], "args.json"),
+                    ckpt_path=os.path.join(onnx_export_dirs[0], "best_model.pth"),
+                    output_dirs=[Path(d) for d in onnx_export_dirs],
                     output_prefix="diffusion_planner",
                     use_ema=False,
                     use_simplify=False,
                     opset_version=20,
                     external_data=False,
                 )
+                # Reap finished exports and keep handles so the artifacts are complete
+                # before the run exits.
+                onnx_export_procs = [p for p in onnx_export_procs if p.poll() is None]
+                if proc is not None:
+                    onnx_export_procs.append(proc)
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
+
+    if global_rank == 0:
+        for proc in onnx_export_procs:
+            if proc.poll() is None:
+                print("Waiting for a background ONNX export to finish...")
+            proc.wait()
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
