@@ -60,6 +60,18 @@ def get_args(args_list=None):
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
+        "--use_turn_indicator_dropout",
+        default=_train_config_default("use_turn_indicator_dropout"),
+        type=boolean,
+        help="whether to zero out the turn indicator input per sample while keeping its GT label",
+    )
+    parser.add_argument(
+        "--turn_indicator_dropout_prob",
+        type=float,
+        default=_train_config_default("turn_indicator_dropout_prob"),
+        help="per-sample probability of zeroing the turn indicator input sequence",
+    )
+    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(

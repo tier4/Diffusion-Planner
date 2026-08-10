@@ -611,3 +611,39 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class TurnIndicatorDropoutAugmentation:
+    """
+    Data augmentation that zeroes out the turn indicator input sequence for a
+    whole sample with probability dropout_prob, so the model cannot rely
+    exclusively on the indicator and learns to infer the intent from the scene
+    context as well. Zeroing matches the `use_turn_indicators=False` encoder
+    semantics.
+
+    The turn-indicator classification GT is derived from `turn_indicators` in
+    the loss, so the ORIGINAL sequence is stashed under
+    `turn_indicators_gt_source` before zeroing and the loss prefers that key
+    when present. Dropped samples therefore keep their true label and become
+    "predict the indicator from context" training signal instead of getting a
+    corrupted label.
+    """
+
+    def __init__(self, dropout_prob: float, device: torch.device | str) -> None:
+        self._dropout_prob = dropout_prob
+        self._device = torch.device(device)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        turn_indicators = inputs["turn_indicators"]  # (B, T)
+        B = turn_indicators.shape[0]
+
+        # Preserve the original sequence for the loss GT before zeroing the
+        # encoder input.
+        inputs["turn_indicators_gt_source"] = turn_indicators.clone()
+
+        drop = torch.rand(B, device=turn_indicators.device) < self._dropout_prob
+        inputs["turn_indicators"] = torch.where(
+            drop.view(B, 1), torch.zeros_like(turn_indicators), turn_indicators
+        )
+
+        return inputs, ego_future, neighbors_future

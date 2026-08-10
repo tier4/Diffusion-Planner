@@ -4,7 +4,10 @@ from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation import (
+    StatePerturbation,
+    TurnIndicatorDropoutAugmentation,
+)
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
 
@@ -32,7 +35,15 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+def train_epoch(
+    data_loader,
+    model,
+    optimizer,
+    args,
+    ema,
+    aug: StatePerturbation = None,
+    turn_indicator_dropout: TurnIndicatorDropoutAugmentation = None,
+):
     epoch_loss = []
 
     model.train()
@@ -52,6 +63,11 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]
+        if turn_indicator_dropout is not None:
+            inputs, ego_future, neighbors_future = turn_indicator_dropout(
+                inputs, ego_future, neighbors_future
+            )
+
         # Normalize to ego-centric
         if aug is not None:
             inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
