@@ -56,6 +56,10 @@ struct FrameFilterParams
   float green_stop_ahead_m;
   float green_stop_lead_fwd_m;
   float green_stop_lead_lat_m;
+
+  // When true, decide_frame_skip() short-circuits and returns SkippingInfo::accepted()
+  // for every frame regardless of the filters above. Off in production.
+  bool disable_skip = false;
 };
 
 // Pure skip-reason computation — no I/O, no ROS time, no file system.

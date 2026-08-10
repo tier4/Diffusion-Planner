@@ -40,6 +40,14 @@ SkippingInfo decide_frame_skip(
   const std::vector<float> & lanes, const std::vector<float> & route_lanes,
   const FrameFilterParams & filter_params)
 {
+  // FOR EVALUATION/TEST DATA ONLY: bypass every frame-level skip filter so that
+  // collisions, off-lane, stale data, large covariance, stuck >=3 s, red/yellow-light
+  // runs, and green-stop frames are all written. Bag-level skips (existing save_dir,
+  // min_frames, min_distance) still apply upstream in the directory driver.
+  if (filter_params.disable_skip) {
+    return SkippingInfo::accepted();
+  }
+
   using autoware::diffusion_planner::INPUT_T;
 
   if (inputs.max_msg_age_ns > kStaleThresholdNs) {

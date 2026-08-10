@@ -94,6 +94,12 @@ struct ConverterOptions
   // Mutually exclusive with sidecar_only (which writes no npz at all).
   bool pack_sequence;
 
+  // When true, every frame-level skip filter (collision, off-lane, stale data, large
+  // covariance, stuck >=3 s, red/yellow-light runs, green-stop) is bypassed in
+  // decide_frame_skip(). Bag-level skips (existing save_dir, min_frames, min_distance)
+  // remain in effect. Intended for evaluation/test data only; off in production.
+  bool disable_skip;
+
   // Build converter defaults shared by all converter entry points.
   static ConverterOptions default_converter_options();
 

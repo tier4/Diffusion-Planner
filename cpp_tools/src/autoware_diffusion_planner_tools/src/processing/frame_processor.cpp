@@ -302,13 +302,21 @@ void process_sequence(
       no_future_progress_count * options.step};
 
     const frame_processor::FrameFilterParams filter_params{
-      options.static_object_margin,       options.neighbor_margin,
-      options.road_border_margin,         options.collision_time_stride,
-      options.offlane_max_score,          options.offlane_time_stride,
-      options.red_light_run_radius_m,     options.red_light_run_heading_tol_deg,
-      options.green_stop_heading_tol_deg, options.green_stop_stay_radius_m,
-      options.green_stop_speed_max_mps,   options.green_stop_ahead_m,
-      options.green_stop_lead_fwd_m,      options.green_stop_lead_lat_m};
+      options.disable_skip,
+      options.static_object_margin,
+      options.neighbor_margin,
+      options.road_border_margin,
+      options.collision_time_stride,
+      options.offlane_max_score,
+      options.offlane_time_stride,
+      options.red_light_run_radius_m,
+      options.red_light_run_heading_tol_deg,
+      options.green_stop_heading_tol_deg,
+      options.green_stop_stay_radius_m,
+      options.green_stop_speed_max_mps,
+      options.green_stop_ahead_m,
+      options.green_stop_lead_fwd_m,
+      options.green_stop_lead_lat_m};
 
     const std::vector<float> ego_shape = {
       options.ego_wheel_base, options.ego_length, options.ego_width};
