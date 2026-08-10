@@ -20,8 +20,12 @@ def heading_to_cos_sin(x):
     unchanged. This guards against double-conversion (cos(cos)) now that scene-gen
     emits 4-col futures — callers can hand it either layout safely.
     """
+    if x.shape[-1] not in (3, 4):
+        raise ValueError(f"Expected pose features with last dimension 3 or 4, got {x.shape}")
     if x.shape[-1] == 4:
-        return x
+        # Callers mask padded neighbor futures in place after conversion. Do
+        # not let that mutate a batch-owned tensor when it is already 4-column.
+        return x.clone()
     return torch.cat(
         [
             x[..., :2],
