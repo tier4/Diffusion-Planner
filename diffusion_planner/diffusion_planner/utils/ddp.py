@@ -1,3 +1,4 @@
+import hashlib
 import os
 import subprocess
 from datetime import timedelta
@@ -15,20 +16,22 @@ def ddp_setup_universal(verbose=False, args=None):
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
-        gpu = int(os.environ["LOCAL_RANK"])
-        os.environ["MASTER_PORT"] = str(getattr(args, "port", "29529"))
-        os.environ["MASTER_ADDR"] = "localhost"
+        gpu = int(os.environ.get("LOCAL_RANK", 0))
+        os.environ.setdefault("MASTER_PORT", str(getattr(args, "port", "29529")))
+        os.environ.setdefault("MASTER_ADDR", "localhost")
     elif "SLURM_PROCID" in os.environ:
         rank = int(os.environ["SLURM_PROCID"])
         gpu = rank % torch.cuda.device_count()
         world_size = int(os.environ["SLURM_NTASKS"])
         node_list = os.environ["SLURM_NODELIST"]
-        num_gpus = torch.cuda.device_count()
         addr = subprocess.getoutput(f"scontrol show hostname {node_list} | head -n1")
         os.environ["MASTER_PORT"] = str(args.port)
         os.environ["MASTER_ADDR"] = addr
     else:
         print("Not using DDP mode")
+        # A direct invocation may retain the default --ddp=True. Keep the
+        # caller's later DDP wrapping and collective calls consistent.
+        args.ddp = False
         return 0, 0, 1
 
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -37,12 +40,10 @@ def ddp_setup_universal(verbose=False, args=None):
 
     torch.cuda.set_device(gpu)
     dist_backend = "nccl"
-    # I don't know why but this is needed for DDP to work instead of 'env://'
-    dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
+    dist_url = "env://"
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
-        init_method=f"{dist_url}{file_path}",
+        init_method=dist_url,
         backend=dist_backend,
         world_size=world_size,
         rank=rank,
@@ -125,10 +126,39 @@ def all_reduce_min(value, device):
 
 
 def reduce_and_average_losses(loss_dict, device):
-    torch.distributed.barrier()
+    if not is_dist_avail_and_initialized():
+        return loss_dict
+
     world_size = dist.get_world_size()
-    for key in loss_dict.keys():
-        loss_tensor = torch.tensor([loss_dict[key].item()]).to(device)
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        loss_dict[key] = loss_tensor.item() / world_size
+    keys = list(loss_dict)
+    # Validate the dictionary contract collectively before reducing values.
+    # This prevents a rank-divergent diagnostic from silently pairing metrics
+    # by different insertion orders.
+    key_digest = int.from_bytes(
+        hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
+        byteorder="little",
+        signed=True,
+    )
+    key_meta = torch.tensor([len(keys), key_digest], dtype=torch.int64, device=device)
+    key_min = key_meta.clone()
+    key_max = key_meta.clone()
+    dist.all_reduce(key_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(key_max, op=dist.ReduceOp.MAX)
+    if not torch.equal(key_min, key_max):
+        raise RuntimeError("Distributed loss dictionaries have different keys or ordering")
+    if not keys:
+        return loss_dict
+
+    values = []
+    for key in keys:
+        value = loss_dict[key]
+        if torch.is_tensor(value):
+            if value.numel() != 1:
+                raise ValueError(f"Distributed metric {key!r} must be scalar, got {value.shape}")
+            values.append(value.detach().to(device=device, dtype=torch.float64).reshape(()))
+        else:
+            values.append(torch.tensor(float(value), dtype=torch.float64, device=device))
+    packed = torch.stack(values)
+    dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+    loss_dict.update(zip(keys, (packed / world_size).cpu().tolist(), strict=True))
     return loss_dict

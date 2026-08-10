@@ -428,6 +428,8 @@ def model_training(args: TrainConfig):
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
+        # Set the shuffle seed before the first iterator, including after resume.
+        train_sampler.set_epoch(epoch)
         # Synchronize all processes before training
         if args.ddp:
             torch.distributed.barrier()
@@ -582,7 +584,5 @@ def model_training(args: TrainConfig):
                 )
 
         scheduler.step()
-        train_sampler.set_epoch(epoch + 1)
-
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
