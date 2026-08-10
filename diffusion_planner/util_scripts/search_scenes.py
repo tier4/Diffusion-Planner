@@ -72,7 +72,7 @@ def _quat_to_heading_deg(qz: float, qw: float) -> float:
 
 
 def read_sidecar(npz_path: str) -> Optional[dict]:
-    """Read JSON sidecar for an NPZ file. Returns dict with x, y, heading_deg, timestamp or None."""
+    """Read JSON sidecar for an NPZ file. Returns dict with x, y, heading_deg, timestamp, map_version_id or None."""
     json_path = npz_path[:-4] + ".json"  # .npz -> .json
     try:
         with open(json_path, "r") as f:
@@ -83,6 +83,7 @@ def read_sidecar(npz_path: str) -> Optional[dict]:
             "y": j["y"],
             "heading_deg": _quat_to_heading_deg(j["qz"], j["qw"]),
             "timestamp": j.get("timestamp"),
+            "map_version_id": j.get("map_version_id"),
         }
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
         return None
@@ -121,15 +122,16 @@ def save_index_parquet(index: list[dict], path: str) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    table = pa.table(
-        {
-            "npz_path": [r["npz_path"] for r in index],
-            "x": [r["x"] for r in index],
-            "y": [r["y"] for r in index],
-            "heading_deg": [r["heading_deg"] for r in index],
-            "timestamp": [r["timestamp"] for r in index],
-        }
-    )
+    columns = {
+        "npz_path": [r["npz_path"] for r in index],
+        "x": [r["x"] for r in index],
+        "y": [r["y"] for r in index],
+        "heading_deg": [r["heading_deg"] for r in index],
+        "timestamp": [r["timestamp"] for r in index],
+    }
+    if index and "map_version_id" in index[0]:
+        columns["map_version_id"] = [r.get("map_version_id") for r in index]
+    table = pa.table(columns)
     pq.write_table(table, path)
 
 
@@ -139,6 +141,7 @@ def load_index_parquet(path: str) -> list[dict]:
 
     table = pq.read_table(path)
     df = table.to_pydict()
+    has_map_version = "map_version_id" in df
     return [
         {
             "npz_path": df["npz_path"][i],
@@ -146,6 +149,7 @@ def load_index_parquet(path: str) -> list[dict]:
             "y": df["y"][i],
             "heading_deg": df["heading_deg"][i],
             "timestamp": df["timestamp"][i],
+            **({"map_version_id": df["map_version_id"][i]} if has_map_version else {}),
         }
         for i in range(len(df["npz_path"]))
     ]
