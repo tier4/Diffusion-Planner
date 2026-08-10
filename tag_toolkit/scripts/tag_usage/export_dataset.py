@@ -7,24 +7,20 @@ then organized and symlinked into an output directory.
 Usage::
 
     # Export close-loop segments from a directory, grouped by devops_override_label value
-    python export_dataset.py --base /path/to/dataset --output /data/out \\
+    python export_dataset.py /path/to/dataset --output /data/out \\
         --mode close_loop --dimension devops_override_label
 
     # Export only frames where devops_override_label equals "a"
-    python export_dataset.py --base /path/to/dataset --output /data/out \\
+    python export_dataset.py /path/to/dataset --output /data/out \\
         --query "devops_override_label:a" --mode close_loop --dimension devops_override_label
 
     # Export only frames where devops_override_label equals "b"
-    python export_dataset.py --base /path/to/dataset --output /data/out \\
+    python export_dataset.py /path/to/dataset --output /data/out \\
         --query "devops_override_label:b" --mode close_loop --dimension devops_override_label
 
     # Use a pre-built SQLite index for faster startup on large datasets
-    python export_dataset.py --db /data/tags.db --output /data/out \\
+    python export_dataset.py /data/tags.db --output /data/out \\
         --mode close_loop --dimension devops_override_label
-
-The script accepts either a dataset source (directory, path-list JSON,
-.npz) or a pre-built SQLite index. The database mode is the fast path
-for large datasets.
 
 Modes
 -----
@@ -34,6 +30,43 @@ Modes
 
 ``--dimension`` adds a sub-directory layer (``<dim>/<value>/<route>/...``)
 so multiple dimension values can be exported side-by-side.
+
+Outputs
+-------
+The manifest filename follows ``<mode>[_<dim>].json``: the ``_<dim>``
+suffix is only added when ``--dimension`` is set. With ``--dimension``
+(which is the common case) the manifest and the on-disk layout look
+like::
+
+    /data/out/                              /data/out/
+    └── open_loop_<dim>.json                ├── tag_a/
+    # {"tag_a": ["/data/in/0001.npz", ...], │   └── <site>/<mode>/<date>/<time>/route_00000000/<seg_start>/
+    #  ...}                                 │       ├── route1_frame_*.npz
+                                            │       └── route1_frame_*.json
+                                            ├── tag_b/
+                                            │   └── ...
+                                            └── close_loop_<dim>.json
+                                            # {"tag_a": ["/data/out/tag_a/<site>/<mode>/<date>/<time>/route_00000000/<seg_start>",
+                                            #   ...], ...}
+
+The route's on-disk identifier is the path from the npz upward by
+``--route-depth`` segments (default 5), so routes that share the name
+``route_00000000`` across sites still end up in disjoint directories.
+
+Without ``--dimension``, the suffix is dropped — the manifests are
+``open_loop.json`` / ``close_loop.json``, ``close_loop.json`` uses
+``"unbucketed"`` as the only key, and ``open_loop.json`` is a flat list
+of frame paths rather than a per-dimension dict.
+
+Frames inside a segment span ``margin_before`` frames before the first
+tagged frame up to ``margin_after`` frames after the last tagged frame;
+consecutive tagged frames within ``margin_before + margin_after`` of each
+other are folded into the same segment by ``_merge_segments``.
+
+``close_loop_<dim>.json`` (or ``close_loop.json`` without
+``--dimension``) is the manifest: keys are dimension values (or
+``"unbucketed"``), values are absolute paths to every segment directory,
+so a downstream loader can iterate them without re-walking the tree.
 """
 
 from __future__ import annotations
@@ -84,6 +117,26 @@ def _resolve_source_npz(src: Path) -> Path:
     (flat). Prefer the closed-loop ``routes/`` form when both exist."""
     routes_form = src.parent / "routes" / src.name
     return routes_form if routes_form.exists() else src
+
+
+def _relative_route_id(route: Path, depth: int) -> Path:
+    """Build the on-disk identifier for a route, going up from the npz.
+
+    The dataset layout sits the route directory at a depth below a site
+    folder (e.g. ``<site>/auto/<date>/<time>/route_00000000/``). Site
+    folders share names like ``route_00000000`` across scenarios, so the
+    safe name is the path that ends at the route directory and includes
+    the site folders above it.
+
+    *route* is the route directory path. *depth* is the number of path
+    segments to keep from the *route* level upward (1 means just the
+    route dir name; 5 includes the typical
+    ``<site>/<mode>/<date>/<time>/route_00000000`` chain). If the path
+    has fewer than *depth* levels, the full path is returned.
+    """
+    parts = route.parts
+    depth = max(1, min(depth, len(parts)))
+    return Path(*parts[-depth:])
     """Map a frame path to its on-disk NPZ. The dataset has two layouts:
     ``<route>/routes/<file>.npz`` (closed-loop) and ``<route>/<file>.npz``
     (flat). Prefer the closed-loop ``routes/`` form when both exist."""
@@ -148,6 +201,7 @@ def export_close_loop(
     dimension: str | None,
     margin_before: int,
     margin_after: int,
+    route_depth: int = 5,
 ) -> None:
     """Export segments for closed-loop evaluation."""
     matching_frames = store.query(query, granularity="frame")
@@ -190,9 +244,14 @@ def export_close_loop(
                     if v is not None:
                         dim_value = v
                         break
-                seg_dir = output_dir / dim_value / route.name / str(seg_start)
+                route_id = _relative_route_id(route, route_depth)
+                seg_dir = output_dir / dim_value / route_id / str(seg_start)
             else:
-                seg_dir = output_dir / route.name / str(seg_start)
+                # No --dimension: the only "key" the manifest can have is
+                # the bucket; use the same route_id path so layout stays
+                # uniform.
+                route_id = _relative_route_id(route, route_depth)
+                seg_dir = output_dir / route_id / str(seg_start)
 
             seg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -223,7 +282,8 @@ def export_close_loop(
             buckets[entry_dimension].append(str(seg_dir.resolve()))
             print(f"  {seg_dir.relative_to(output_dir)}: {linked_count} frames ({entry_dimension})")
 
-    buckets_file = output_dir / "close_loop.json"
+    buckets_filename = f"close_loop_{dimension}.json" if dimension else "close_loop.json"
+    buckets_file = output_dir / buckets_filename
     with open(buckets_file, "w") as f:
         json.dump(dict(sorted(buckets.items())), f, indent=2)
     total = sum(len(v) for v in buckets.values())
@@ -235,21 +295,15 @@ def main():
         description="Export dataset segments based on tag queries.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument(
-        "--base",
+    parser.add_argument(
+        "source",
         type=Path,
         help=(
-            "Dataset source: directory, path-list JSON, or single .npz. "
-            "An in-memory TagStore is built at startup."
-        ),
-    )
-    source_group.add_argument(
-        "--db",
-        type=Path,
-        help=(
-            "Path to a pre-built TagStore SQLite database "
-            "(.db / .sqlite / .tags.db). Recommended for large datasets."
+            "TagToolkit source (see tag_toolkit.source): a directory, a "
+            "path-list .json / .json.zst, a single .npz, a sequence of "
+            "those, or a pre-built TagStore SQLite index (*.db / *.sqlite "
+            "/ *.tags.db). The form is auto-detected; a database index is "
+            "the fast path for large datasets."
         ),
     )
     parser.add_argument("--output", type=Path, required=True, help="Output directory.")
@@ -279,6 +333,19 @@ def main():
         default=50,
         help="Frames after each frame (close_loop only, default: 50).",
     )
+    parser.add_argument(
+        "--route-depth",
+        type=int,
+        default=5,
+        help=(
+            "Number of path segments (from the route directory up) used as "
+            "a route's on-disk identifier. The dataset puts the route "
+            "directory under a site-specific chain (e.g. "
+            "<site>/auto/<date>/<time>/route_00000000); 5 covers that "
+            "typical layout. Lower to keep less context, raise if routes "
+            "still collide. close_loop only, default: 5."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -292,15 +359,11 @@ def main():
     if args.query is None:
         args.query = f"{args.dimension}:*"
 
-    if args.db is not None:
-        if not args.db.exists():
-            print(f"Error: TagStore database not found: {args.db}", file=sys.stderr)
-            return 1
-        print(f"Loading TagStore from {args.db}...")
-        store = TagStore(args.db)
-    else:
-        print(f"Building in-memory index from {args.base}...")
-        store = TagStore(args.base)
+    if not args.source.exists():
+        print(f"Error: source not found: {args.source}", file=sys.stderr)
+        return 1
+    print(f"Loading TagStore from {args.source}...")
+    store = TagStore(args.source)
     print(f"  {len(store.route_paths())} routes, {len(store.npz_paths())} frames")
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -315,6 +378,7 @@ def main():
             args.dimension,
             args.margin_before,
             args.margin_after,
+            args.route_depth,
         )
 
     return 0

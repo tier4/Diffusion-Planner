@@ -334,7 +334,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "source",
         type=Path,
-        help="Data source: directory, .db index, NPZ file, or path-list JSON",
+        help=(
+            "TagToolkit source (see tag_toolkit.source): a directory, a "
+            "path-list .json / .json.zst, a single .npz, a sequence of "
+            "those, or a pre-built TagStore SQLite index (*.db / *.sqlite "
+            "/ *.tags.db). The form is auto-detected; a database index is "
+            "the fast path for large datasets."
+        ),
     )
     parser.add_argument(
         "csv_path",
