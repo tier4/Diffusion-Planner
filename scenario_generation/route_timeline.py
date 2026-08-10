@@ -234,10 +234,17 @@ class RouteTimeline:
     def neighbor_last(self, idx: int) -> np.ndarray:
         """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, 11)) for a frame.
 
-        The sim-mode track-build scans EVERY frame of the route and needs only this slice — not
-        the lanes/routes/polygons/etc. that ``npz()`` decompresses. ``np.load`` is lazy per-key,
-        so reading just this one key is ~10x cheaper per frame (it dominated timeline_load_npz).
-        Not cached: the track-build touches each frame once."""
+        The track-build scans EVERY frame of the route and needs only this slice — not the
+        lanes/routes/polygons/etc. that ``npz()`` decompresses. ``np.load`` is lazy per-key, so
+        reading just this one key is ~10x cheaper per frame. An uncached frame is not inserted
+        into the cache: a route is far longer than the cache, so caching the scan would evict
+        exactly the frames the step loop is about to ask for."""
+        with self._cache_lock:
+            cached = self._npz_cache.get(idx)
+            if cached is not None:
+                self._npz_cache.move_to_end(idx)  # LRU touch
+        if cached is not None:
+            return cached["neighbor_agents_past"][:, -1]
         with self.timers("timeline_load_npz"):
             with np.load(self.npz_paths[idx], allow_pickle=True) as z:
                 return z["neighbor_agents_past"][:, -1]
@@ -259,6 +266,10 @@ class RouteTimeline:
     def pose(self, idx: int) -> np.ndarray:
         """World ego pose [x, y, yaw] at recorded frame ``idx``."""
         return self.poses[idx]
+
+    def sidecar_path(self, idx: int) -> Path:
+        """The pose/track JSON this timeline resolved for recorded frame ``idx``."""
+        return self._sidecar_paths[idx]
 
     def neighbor_ids(self, idx: int) -> list[str]:
         """Per-neighbor track UUIDs (hex) for frame ``idx``, aligned to the

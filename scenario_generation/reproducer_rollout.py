@@ -991,7 +991,7 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) ego frame
+        nb = tl.neighbor_last(idx)  # (320, 11) ego frame — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
@@ -1016,6 +1016,42 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             np.unwrap(np.array([k[3] for k in kept])),
         )
     return interp
+
+
+# Track anchors depend only on the recorded data, not on the model or the epoch, yet
+# render_segment rebuilds them on every call that builds them -- one NPZ read per frame of the
+# whole route -- and closed_loop_validate re-evaluates the same routes in the same process.
+#
+# Unbounded on purpose, the same argument the per-map caches use: a process sees as many
+# (route, span) pairs as the suite has routes, not as many as it runs evaluations.
+#
+# No lock needed: the anchors are read-only downstream and the single call site runs before
+# render_segment starts its thread pool.
+_INTERP_ANCHOR_CACHE: dict[tuple, dict] = {}
+
+
+def _neighbor_interp_cached(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1) -> dict:
+    """``_build_neighbor_interp`` memoised per (route, span, sidecar, eps) for the process.
+
+    The sidecar path is part of the key because the same NPZ files paired with a different
+    sidecar directory report different track ids, and so yield different anchors.
+    """
+    key = (
+        str(tl.npz_paths[lo]),
+        str(tl.npz_paths[hi - 1]),
+        str(tl.sidecar_path(lo)),
+        hi - lo,  # the endpoints plus the count pin the file set: npz_paths is sorted
+        eps,
+    )
+    hit = _INTERP_ANCHOR_CACHE.get(key)
+    if hit is not None:
+        # counted so a profile shows the scan was skipped rather than silently missing
+        tl.timers.add("interp_build_cached", 0.0)
+        return hit
+    with tl.timers("interp_build"):
+        anchors = _build_neighbor_interp(tl, lo, hi, eps)
+    _INTERP_ANCHOR_CACHE[key] = anchors
+    return anchors
 
 
 def _interp_pose(anchors: tuple, idx: int) -> tuple[float, float, float]:
@@ -1474,10 +1510,12 @@ def render_segment(
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
-    # margin covers any overrun without scanning the whole route.
+    # margin covers any overrun without scanning the whole route. Skipped under drop_objects:
+    # every neighbor row is zeroed before _apply_neighbor_interp runs and that function skips
+    # all-zero rows, so the anchors cannot be read.
     interp = (
-        _build_neighbor_interp(tl, start, min(end + 100, len(tl)))
-        if interpolate and neighbor_history_mode != "sim"
+        _neighbor_interp_cached(tl, start, min(end + 100, len(tl)))
+        if interpolate and neighbor_history_mode != "sim" and not drop_objects
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
