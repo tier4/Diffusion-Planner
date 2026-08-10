@@ -38,6 +38,15 @@ def add_class_type(x, class_type):
     return torch.cat([x, class_type_tensor], dim=-1)
 
 
+def _keep_recent_history(history, history_frames):
+    """Keep the newest temporal samples and preserve the input width."""
+    total_frames = history.shape[-2]
+    if history_frames < 1 or history_frames > total_frames:
+        raise ValueError(f"history_frames must be in [1, {total_frames}], got {history_frames}")
+    recent = history[..., -history_frames:, :]
+    return F.pad(recent, (0, 0, total_frames - history_frames, 0))
+
+
 class Encoder(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -169,18 +178,11 @@ class Encoder(nn.Module):
         ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
-        ego = torch.cat(
-            # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
-            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
-            dim=1,
-        )  # Only keep the current + first 5 steps of ego history
+        ego = _keep_recent_history(ego, 6)  # Keep current + five preceding frames
 
         # agents
         neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
-        neighbors = torch.cat(
-            [torch.zeros_like(neighbors[:, :, :-6]), neighbors[:, :, -6:]],
-            dim=2,
-        )  # Only keep the current + first 5 steps of history
+        neighbors = _keep_recent_history(neighbors, 6)
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)
