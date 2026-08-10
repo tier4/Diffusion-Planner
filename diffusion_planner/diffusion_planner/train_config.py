@@ -58,6 +58,8 @@ class TrainConfig:
     use_data_augment: bool = True
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge"] = "quintic"
+    use_flip_augment: bool = False
+    flip_prob: float = 0.5
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True

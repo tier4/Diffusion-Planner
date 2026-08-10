@@ -60,6 +60,18 @@ def get_args(args_list=None):
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
+        "--use_flip_augment",
+        default=_train_config_default("use_flip_augment"),
+        type=boolean,
+        help="whether to mirror scenes across the ego longitudinal axis",
+    )
+    parser.add_argument(
+        "--flip_prob",
+        type=float,
+        default=_train_config_default("flip_prob"),
+        help="per-sample probability of applying the flip augmentation",
+    )
+    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(

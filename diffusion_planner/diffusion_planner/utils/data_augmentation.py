@@ -1,6 +1,19 @@
 import numpy as np
 import torch
 
+from diffusion_planner.dimensions import (
+    LB_X,
+    LB_Y,
+    LINE_TYPE_LEFT_START,
+    LINE_TYPE_NUM,
+    LINE_TYPE_RIGHT_START,
+    RB_X,
+    RB_Y,
+    TURN_INDICATOR_OUTPUT_ENABLE_LEFT,
+    TURN_INDICATOR_OUTPUT_ENABLE_RIGHT,
+    Y,
+    dY,
+)
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 TIME_INTERVAL = 0.1
@@ -611,3 +624,113 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class FlipAugmentation:
+    """
+    Data augmentation that mirrors the whole scene across the ego longitudinal
+    axis (y -> -y) with probability flip_prob per sample.
+
+    Expects ego-centric inputs with `ego_agent_past` / `goal_pose` already in
+    (x, y, cos, sin) form and futures in (x, y, heading) form, i.e. the state
+    they are in right before StatePerturbation in train_epoch. Padding rows are
+    all-zero and stay all-zero under negation and left/right swaps, so no
+    validity masks are needed.
+    """
+
+    def __init__(self, flip_prob: float, device: torch.device | str) -> None:
+        if not 0.0 <= flip_prob <= 1.0:
+            raise ValueError(f"flip_prob must be in [0, 1], got {flip_prob}")
+        self._flip_prob = flip_prob
+        self._device = torch.device(device)
+
+    @staticmethod
+    def _negate_(x, channels, flip):
+        """Negate channels in-place for flipped samples without cloning ``x``."""
+        signs = torch.ones((x.shape[0], x.shape[-1]), dtype=x.dtype, device=x.device)
+        sample_sign = 1 - 2 * flip.to(dtype=x.dtype)
+        signs[:, channels] = sample_sign[:, None]
+        x.mul_(signs.reshape(x.shape[0], *([1] * (x.ndim - 2)), x.shape[-1]))
+        return x
+
+    @staticmethod
+    def _swap_slices_(x, left, right, flip):
+        """Conditionally swap equal-width feature slices using bounded temporaries."""
+        left_values = x[..., left]
+        right_values = x[..., right]
+        saved_left = left_values.clone()
+        cond = flip.reshape(-1, *([1] * (x.ndim - 1)))
+        left_values.copy_(torch.where(cond, right_values, left_values))
+        right_values.copy_(torch.where(cond, saved_left, right_values))
+
+    def _flip_lanes(self, lanes, flip):
+        """
+        Mirror lane segments: negate y components and swap the left/right
+        boundaries and line types. Traffic light one-hot is side-agnostic.
+        """
+        self._negate_(lanes, [Y, dY, LB_Y, RB_Y], flip)
+        self._swap_slices_(lanes, slice(LB_X, LB_Y + 1), slice(RB_X, RB_Y + 1), flip)
+        left = slice(LINE_TYPE_LEFT_START, LINE_TYPE_LEFT_START + LINE_TYPE_NUM)
+        right = slice(LINE_TYPE_RIGHT_START, LINE_TYPE_RIGHT_START + LINE_TYPE_NUM)
+        self._swap_slices_(lanes, left, right, flip)
+        return lanes
+
+    def _flip_turn_indicators(self, turn_indicators, flip):
+        left = TURN_INDICATOR_OUTPUT_ENABLE_LEFT
+        right = TURN_INDICATOR_OUTPUT_ENABLE_RIGHT
+        swapped = torch.where(
+            turn_indicators == left,
+            torch.full_like(turn_indicators, right),
+            torch.where(
+                turn_indicators == right,
+                torch.full_like(turn_indicators, left),
+                turn_indicators,
+            ),
+        )
+        turn_indicators.copy_(torch.where(flip.reshape(-1, 1), swapped, turn_indicators))
+        return turn_indicators
+
+    @staticmethod
+    def _future_flip_channels(future):
+        if future.shape[-1] == 3:  # x, y, heading
+            return [1, 2]
+        if future.shape[-1] == 4:  # x, y, cos, sin
+            return [1, 3]
+        raise ValueError(
+            "future trajectory must end in (x, y, heading) or (x, y, cos, sin), "
+            f"got shape {tuple(future.shape)}"
+        )
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        if self._flip_prob == 0.0:
+            return inputs, ego_future, neighbors_future
+
+        B = ego_future.shape[0]
+        flip = torch.rand(B, device=ego_future.device) < self._flip_prob
+
+        # ego_current_state: x, y, cos, sin, vx, vy, ax, ay, steering, yaw_rate
+        self._negate_(inputs["ego_current_state"], [1, 3, 5, 7, 8, 9], flip)
+        # ego_agent_past: x, y, cos, sin
+        self._negate_(inputs["ego_agent_past"], [1, 3], flip)
+        # goal_pose: x, y, cos, sin
+        self._negate_(inputs["goal_pose"], [1, 3], flip)
+        # neighbor_agents_past: x, y, cos, sin, vx, vy, w, l, type(3)
+        self._negate_(inputs["neighbor_agents_past"], [1, 3, 5], flip)
+        # static_objects: x, y, cos, sin, w, l, type(4)
+        self._negate_(inputs["static_objects"], [1, 3], flip)
+        # polygons / line_strings: x, y, type one-hot...
+        self._negate_(inputs["polygons"], [1], flip)
+        self._negate_(inputs["line_strings"], [1], flip)
+        # lanes / route_lanes: swap left/right boundaries and line types too
+        inputs["lanes"] = self._flip_lanes(inputs["lanes"], flip)
+        inputs["route_lanes"] = self._flip_lanes(inputs["route_lanes"], flip)
+        # turn indicators: swap ENABLE_LEFT <-> ENABLE_RIGHT
+        inputs["turn_indicators"] = self._flip_turn_indicators(inputs["turn_indicators"], flip)
+
+        # futures may use either heading or cos/sin representation.
+        self._negate_(ego_future, self._future_flip_channels(ego_future), flip)
+        self._negate_(neighbors_future, self._future_flip_channels(neighbors_future), flip)
+        inputs["ego_agent_future"] = ego_future
+        inputs["neighbor_agents_future"] = neighbors_future
+
+        return inputs, ego_future, neighbors_future
