@@ -61,6 +61,15 @@ class TrainConfig:
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True
+    # Route / speed-limit dropout augmentation (docs/route_augmentation_proposals.md)
+    use_route_augment: bool = False
+    route_truncation_prob: float = 0.5
+    route_truncation_min_m: float = 60.0
+    route_truncation_max_m: float = 200.0
+    speed_limit_unknown_prob: float = 0.1
+    route_geometry_noise_prob: float = 0.5
+    route_geometry_noise_std_m: float = 0.15
+    route_head_trim_prob: float = 0.1
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True

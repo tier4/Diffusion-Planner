@@ -5,6 +5,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.route_augmentation import RouteAugmentation
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
 
@@ -32,7 +33,15 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+def train_epoch(
+    data_loader,
+    model,
+    optimizer,
+    args,
+    ema,
+    aug: StatePerturbation = None,
+    route_aug: RouteAugmentation = None,
+):
     epoch_loss = []
 
     model.train()
@@ -52,6 +61,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]
+        # Route / speed-limit dropout runs before the state perturbation so the
+        # perturbation's collision checks see the augmented map.
+        if route_aug is not None:
+            inputs = route_aug(inputs)
         # Normalize to ego-centric
         if aug is not None:
             inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
