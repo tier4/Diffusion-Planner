@@ -1,20 +1,17 @@
 """Map NPZ paths to route directories.
 
-`dataset/generate_from_labeled.sh` is the golden standard for dataset layout.
-Its converter writes each bag under:
+The dataset has two layouts:
 
-- ``…/<project>/<map_id>/{manual|auto}/<date>/<bag_time>/routes/<file>.npz``
+- Closed-loop: ``…/<bag_time>/routes/<file>.npz``
+- Flat: ``…/<bag_time>/<file>.npz``
 
-So a *route* is the bag directory that owns the frames:
+A *route* is the parent directory of the NPZ file:
 
-- ``…/<bag_time>/routes/<file>.npz`` → ``…/<bag_time>``
+- ``…/<bag_time>/routes/<file>.npz`` → ``…/<bag_time>/routes``
 - ``…/<bag_time>/<file>.npz`` (flat layout) → ``…/<bag_time>``
 
-Closed-loop path lists already use these route directories as entries.
-
-Also exposes a small helper for extracting the frame number from a filename
-matching the convention ``<bag_time>_<prefix>_<8 digits>.npz``. NPZs that
-don't match the convention return ``None``.
+Also exposes a helper for extracting the frame number from a filename
+matching the convention ``<prefix>_<8 digits>.npz``.
 """
 
 from __future__ import annotations
@@ -22,28 +19,28 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-ROUTES_DIR_NAME = "routes"
 _FRAME_NUMBER_RE = re.compile(r"_(\d{8})\.npz$")
 
 
 def route_of(path: str | Path) -> Path:
-    """Return the bag/route directory for an NPZ path or route directory itself."""
+    """Return the directory containing the given path.
+
+    - If input is an NPZ file, returns its parent directory.
+    - If input is a directory, returns the directory itself.
+    - If input is neither, raises ValueError.
+    """
     p = Path(path)
-    if p.suffix == ".npz":
-        parent = p.parent
-        if parent.name == ROUTES_DIR_NAME:
-            return parent.parent
-        return parent
-    # Already a directory (typical closed-loop / bag path).
-    if p.name == ROUTES_DIR_NAME:
+    if p.suffix.lower() == ".npz":
         return p.parent
-    return p
+    if p.is_dir():
+        return p
+    raise ValueError(f"Expected an NPZ file or directory, got: {path}")
 
 
 def extract_frame_number(path: str | Path) -> int | None:
     """Extract frame number from an NPZ filename.
 
-    Filenames follow the pattern: ``<bag_time>_<prefix>_<frame_number>.npz``
+    Filenames follow the pattern: ``<prefix>_<frame_number>.npz``
     where ``frame_number`` is an 8-digit zero-padded integer.
 
     Returns the frame number as ``int``, or ``None`` if the filename does

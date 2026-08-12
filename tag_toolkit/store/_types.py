@@ -5,13 +5,28 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Literal, Sequence
+
+from ..routes import extract_frame_number
 
 Clause = str | dict[str, Any]
 Granularity = Literal["route", "frame"]
 FrameFilter = tuple[int, int] | str | None
 Scope = "None | TagStore | Path | Sequence[None | TagStore | Path | Sequence]"
+
+
+def match_frame_filter(path: Path, frame_filter: FrameFilter) -> bool:
+    """Check if a path matches the given frame filter."""
+    if frame_filter is None:
+        return True
+    if isinstance(frame_filter, str):
+        return fnmatch(path.name, frame_filter)
+    frame_num = extract_frame_number(path)
+    if frame_num is None:
+        return False
+    return frame_filter[0] <= frame_num <= frame_filter[1]
 
 
 @dataclass

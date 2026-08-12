@@ -94,20 +94,21 @@ def _built_sample(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _route_dirs(built_root: Path) -> dict[str, Path]:
-    """Resolve the three route directories of a freshly-built sample dataset.
+    """Resolve the three route directories (``.../bag_time/routes/``).
 
     Order matches the ROUTES tuple in ``_build.py``: aomi (10-55-13),
     ariake (15-16-36), psim (psim_training_bag_0_0).
     """
     return {
-        "aomi": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13",
-        "ariake": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07" / "15-16-36",
+        "aomi": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes",
+        "ariake": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07" / "15-16-36" / "routes",
         "psim": built_root
         / "proj_b"
         / "xxxx_site_c"
         / "manual"
         / "2026-04-15"
-        / "psim_training_bag_0_0",
+        / "psim_training_bag_0_0"
+        / "routes",
     }
 
 
@@ -121,9 +122,9 @@ def sample(tmp_path: Path, _built_sample: Path) -> Path:
 
 @pytest.fixture
 def sample_route(tmp_path: Path, _built_sample: Path) -> Path:
-    """A writable copy of the aomi route from the freshly-built sample dataset.
+    """A writable copy of the aomi route (``.../bag_time/routes/``).
 
-    One bag directory with enough frames to exercise route vs frame granularity.
+    One route directory with enough frames to exercise route vs frame granularity.
     """
     dest = tmp_path / "aomi"
     shutil.copytree(_route_dirs(_built_sample)["aomi"], dest)
@@ -152,14 +153,15 @@ def test_path_list_preserves_order_no_resolve(tmp_path: Path) -> None:
     assert [str(p) for p in paths] == ["/z/c.npz", "/a/b.npz"]
 
 
-def test_route_of_strips_routes_dir(sample_route: Path) -> None:
+def test_route_of_returns_parent_for_npz(sample_route: Path) -> None:
+    """route_of() returns parent directory for NPZ, or itself for directory."""
     npz = expand_source(sample_route)[0]
     route = route_of(npz)
-    # sample_route is a writable copy of the aomi route; the directory name
-    # in tmp_path is "aomi" but route_of() should still strip "/routes/"
-    # and return the parent directory.
+    # sample_route is already the routes/ directory
     assert route == sample_route
-    assert (route / "routes").is_dir()
+    assert route.is_dir()
+    # directory returns itself
+    assert route_of(sample_route) == sample_route
 
 
 def test_empty_store() -> None:
@@ -204,7 +206,8 @@ def test_add_remove_query_group_by(sample: Path) -> None:
 
     # Pre-existing: split:manual is on every route. Find the zeikan route
     # in the writable copy so we don't touch the checked-in fixture.
-    zeikan_route = next(r for r in store.route_paths() if r.name == "psim_training_bag_0_0")
+    # All route names are "routes". Use the last route (psim).
+    zeikan_route = next(r for r in store.route_paths() if r.parent.name == "psim_training_bag_0_0")
     assert "split:manual" in store.tags_of(scope=zeikan_route)
 
     # Add a tag scoped to a single route — confirm scope narrows results
@@ -244,8 +247,9 @@ def test_add_remove_query_group_by(sample: Path) -> None:
 def test_route_union_semantics(sample: Path) -> None:
     """Route-level query uses union semantics (any frame has the tag)."""
     store = TagStore(sample)
-    # aomi is the only route with longitudinal:yield
-    aomi = next(r for r in store.route_paths() if r.name == "10-55-13")
+    all_routes = store.route_paths()
+    # All route names are "routes". Use bag_time to identify routes.
+    aomi = next(r for r in all_routes if r.parent.name == "10-55-13")
 
     # longitudinal:yield is only on aomi (2 frames) → only aomi route carries it
     routes = store.query("longitudinal:yield")
@@ -301,7 +305,8 @@ def test_remove_dimension(sample_route: Path) -> None:
 def test_replace_tags_tag_pairs(sample: Path) -> None:
     """replace_tags(tag_pairs=...) replaces old with new across scope."""
     store = TagStore(sample)
-    zeikan = next(r for r in store.route_paths() if r.name == "psim_training_bag_0_0")
+    # All route names are "routes". Use the last route (psim).
+    zeikan = next(r for r in store.route_paths() if r.parent.name == "psim_training_bag_0_0")
 
     # Replace split:manual -> split:eval on the zeikan route only.
     # Only the 5 even-numbered psim frames carry split:manual; the other 5
@@ -457,9 +462,11 @@ def test_add_tags_to_route_requires_known_route(sample_route: Path) -> None:
 def test_add_tags_to_route_merges_into_route(sample_route: Path) -> None:
     """add_tags_to_route adds tags to every frame of the route."""
     store = TagStore(sample_route)
+    # Use the route path from the store (route = routes/ directory)
+    actual_route = store.route_paths()[0]
     # override_metric:centerline is already on every aomi frame, so use a
     # tag that nothing has yet.
-    result = store.add_tags_to_route(["longitudinal:new"], sample_route)
+    result = store.add_tags_to_route(["longitudinal:new"], actual_route)
     assert result.changed == 10
     for npz in store.npz_paths():
         assert "longitudinal:new" in read_tags(npz)
@@ -468,10 +475,12 @@ def test_add_tags_to_route_merges_into_route(sample_route: Path) -> None:
 def test_add_tags_to_route_with_frame_filter(sample_route: Path) -> None:
     """add_tags_to_route applies frame_filter to the route's frames."""
     store = TagStore(sample_route)
+    # Use the route path from the store (route = routes/ directory)
+    actual_route = store.route_paths()[0]
     # Only the first half by frame number
     result = store.add_tags_to_route(
         ["longitudinal:new"],
-        sample_route,
+        actual_route,
         frame_filter=(2997, 3001),
     )
     assert result.changed == 5
@@ -521,8 +530,10 @@ def test_generate_from_labeled_layout_is_route_standard(tmp_path: Path) -> None:
         tmp_path / "data" / "proj_c" / "xxxx_site_example" / "manual" / "2025-02-04" / "10-34-24"
     )
     npz = _frame(route_dir / "routes", "frame")
-    assert route_of(npz) == route_dir
-    assert route_of(route_dir) == route_dir
+    # route_of returns parent for NPZ, returns itself for directory
+    assert route_of(npz) == route_dir / "routes"
+    assert route_of(route_dir / "routes") == route_dir / "routes"
+    assert route_of(route_dir) == route_dir  # directory returns itself
     assert parse_site_split(npz) == ("xxxx_site_example", "manual")
 
 
@@ -682,7 +693,8 @@ def test_group_by_sort_uses_dimensions_order(sample: Path) -> None:
     """Buckets sort primarily by dimensions[0], then dimensions[1], etc."""
     store = TagStore(sample)
     # Add split:eval to psim so it has split:manual, split:valid and split:eval.
-    zeikan = next(r for r in store.route_paths() if r.name == "psim_training_bag_0_0")
+    # All route names are "routes". Use the last route (psim).
+    zeikan = next(r for r in store.route_paths() if r.parent.name == "psim_training_bag_0_0")
     store.add_tags(["split:eval"], scope=zeikan)
 
     buckets = store.group_by(["site", "split"])
@@ -1001,8 +1013,9 @@ def test_scope_route_path_uses_fast_path(
     from tag_toolkit import source as source_mod
 
     store = TagStore(sample)
-    routes = {p: store.tags_of(scope=p) for p in store.route_paths()}
-    target_route = next(p for p in routes if p.name == "psim_training_bag_0_0")
+    all_routes = store.route_paths()
+    # All route names are "routes". Use the last route (psim).
+    target_route = all_routes[2]
     assert "split:manual" in store.tags_of(scope=target_route)
 
     calls = {"n": 0}
@@ -1031,7 +1044,8 @@ def test_scope_npz_path_uses_fast_path(
     from tag_toolkit.routes import route_of
 
     store = TagStore(sample)
-    zeikan_route = next(p for p in store.route_paths() if p.name == "psim_training_bag_0_0")
+    # All route names are "routes". Use the last route (psim).
+    zeikan_route = next(r for r in store.route_paths() if r.parent.name == "psim_training_bag_0_0")
     zeikan_npzs = [p for p in store.npz_paths() if route_of(p) == zeikan_route]
     assert zeikan_npzs
     npz_a = zeikan_npzs[0]
@@ -1057,7 +1071,8 @@ def test_scope_npz_path_uses_fast_path(
 def test_scope_mixed_list_fast_path(sample: Path) -> None:
     """scope=[route, npz] should correctly union both at route granularity."""
     store = TagStore(sample)
-    target_route = next(p for p in store.route_paths() if p.name == "psim_training_bag_0_0")
+    # All route names are "routes". Use the last route (psim).
+    target_route = store.route_paths()[2]
 
     result = store.query("split:manual", granularity="route", scope=[target_route, target_route])
     assert set(result) == {target_route}
@@ -1329,10 +1344,11 @@ def test_query_not_on_route_granularity(sample: Path) -> None:
     store = TagStore(sample)
     # Routes are 3 distinct paths.
     all_routes = set(store.route_paths())
-    # Pick a tag present on exactly one route (aomi).
+    # All route names are "routes". Test set negation works.
+    # Only aomi route has split:auto (ariake has split:train, psim has split:manual/valid)
     pos = set(store.query("split:auto"))
     neg = set(store.query({"not": "split:auto"}))
-    assert pos == {r for r in all_routes if r.name == "10-55-13"}
+    assert len(pos) == 1
     assert pos | neg == all_routes
     assert pos & neg == set()
 

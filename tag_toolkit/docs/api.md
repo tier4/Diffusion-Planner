@@ -28,7 +28,7 @@ from tag_toolkit import (
 | `Bucket`, `FrameTagDiff`, `IndexDiff`, `MutationResult` | `store/_types.py` | Result dataclasses for `group_by`, `diff_index_against_disk`, and mutations. |
 | `StaleIndexError` | `sidecar.py` | Raised when a sidecar has drifted from the index; re-call `reindex_tags` and retry. |
 | `expand_source` | `source.py` | Resolve a source spec (path, directory, path-list JSON, list) into NPZ paths. |
-| `route_of` | `routes.py` | Map an NPZ path (or already-route directory) to its route directory. |
+| `route_of` | `routes.py` | Map an NPZ path (or directory) to its route directory (parent of the NPZ). |
 | `extract_frame_number` | `routes.py` | Parse `<bag>_<prefix>_<8 digits>.npz` → `int`, or `None`. |
 | `parse_tag`, `format_tag`, `normalize_tags` | `sidecar.py` | Validate / format / sort-dedupe `dim:val` strings. |
 | `read_tags`, `write_tags` | `sidecar.py` | Direct read/write of sidecar JSON. Bypasses the index; use `TagStore` when you have a DB. |

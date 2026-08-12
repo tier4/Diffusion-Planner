@@ -120,28 +120,22 @@ def _resolve_source_npz(src: Path) -> Path:
 
 
 def _relative_route_id(route: Path, depth: int) -> Path:
-    """Build the on-disk identifier for a route, going up from the npz.
+    """Build the on-disk identifier for a route, going up from the route.
 
-    The dataset layout sits the route directory at a depth below a site
-    folder (e.g. ``<site>/auto/<date>/<time>/route_00000000/``). Site
-    folders share names like ``route_00000000`` across scenarios, so the
-    safe name is the path that ends at the route directory and includes
-    the site folders above it.
+    The route directory is typically nested below a site folder
+    (e.g. ``<site>/auto/<date>/<time>/routes/``). Site folders share names
+    like ``routes`` across scenarios, so the safe name is the path that ends
+    at the route directory and includes the site folders above it.
 
     *route* is the route directory path. *depth* is the number of path
     segments to keep from the *route* level upward (1 means just the
     route dir name; 5 includes the typical
-    ``<site>/<mode>/<date>/<time>/route_00000000`` chain). If the path
+    ``<site>/<mode>/<date>/<time>/routes`` chain). If the path
     has fewer than *depth* levels, the full path is returned.
     """
     parts = route.parts
     depth = max(1, min(depth, len(parts)))
     return Path(*parts[-depth:])
-    """Map a frame path to its on-disk NPZ. The dataset has two layouts:
-    ``<route>/routes/<file>.npz`` (closed-loop) and ``<route>/<file>.npz``
-    (flat). Prefer the closed-loop ``routes/`` form when both exist."""
-    routes_form = src.parent / "routes" / src.name
-    return routes_form if routes_form.exists() else src
 
 
 def _find_neighbor_npz(
@@ -149,9 +143,7 @@ def _find_neighbor_npz(
     frame_num: int,
     cache: dict[Path, dict[int, Path]],
 ) -> Path | None:
-    """Locate a file in *route* with the given frame number. Filenames
-    match ``<route>_<prefix>_<8 digits>.npz``; the prefix is opaque so we
-    pre-scan the route once per call."""
+    """Locate a file in *route* with the given frame number."""
     if route not in cache:
         cache[route] = {
             n: p

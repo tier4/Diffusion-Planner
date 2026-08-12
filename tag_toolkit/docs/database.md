@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS tags_dim_val_path ON tags(dim, val, path);
 ### `frames`
 
 One row per indexed NPZ. The primary key is the absolute path string; `route`
-is the bag directory (`route_of(npz)`); `sidecar_mtime` is the `int`
+is the parent directory of the NPZ file (`route_of(npz)`); `sidecar_mtime` is the `int`
 `stat().st_mtime` of the sidecar at the time the row was last touched
 (initial build, `append_frames`, `reindex_tags`).
 

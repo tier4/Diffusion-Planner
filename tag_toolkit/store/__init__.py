@@ -153,8 +153,25 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
     def _sync_route_tags_cache(self, route: str, added: set[str], removed: set[str]) -> None:
         """Update route_tags cache after a mutation. route must be a string key."""
         with self._lock:
+            # Check which removed tags still exist in sibling frames before dropping
+            if removed:
+                conn = self._require_conn()
+                placeholders = ",".join("?" * len(removed))
+                still_exists = set(conn.execute(
+                    f"""
+                    SELECT DISTINCT t.tag
+                    FROM frames f
+                    JOIN tags t ON f.path = t.path
+                    WHERE f.route = ? AND t.tag IN ({placeholders})
+                    """,
+                    [route, *removed]
+                ).fetchall())
+                actually_removed = removed - still_exists
+            else:
+                actually_removed = set()
+
             current = self._route_tags_cache.get(route, frozenset())
-            self._route_tags_cache[route] = frozenset((current | added) - removed)
+            self._route_tags_cache[route] = frozenset((current | added) - actually_removed)
 
     def _resolve_scope(
         self,

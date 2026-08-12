@@ -42,8 +42,9 @@ The converted layout (`dataset/generate_from_labeled.sh`):
 …/<project>/<map_id>/{manual|auto}/<date>/<bag_time>/routes/*.npz
 ```
 
-A **route** is the bag directory `…/<bag_time>/` (parent of `routes/` when
-present). `route_of(path)` maps an NPZ or a route dir to this root.
+A **route** is the parent directory of the NPZ files. For closed-loop layout,
+this is `…/<bag_time>/routes/` (parent of the `.npz` files). `route_of(path)`
+maps an NPZ or a route directory to this path.
 
 ---
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
@@ -19,22 +18,10 @@ from ..sidecar import (
     sidecar_path,
     write_tags,
 )
-from ._types import MutationResult
+from ._types import MutationResult, match_frame_filter
 
 if TYPE_CHECKING:
     from ._types import Scope
-
-
-def _match_frame_filter(path: Path, frame_filter) -> bool:
-    """Check if a path matches the given frame filter."""
-    if frame_filter is None:
-        return True
-    if isinstance(frame_filter, str):
-        return fnmatch.fnmatch(path.name, frame_filter)
-    frame_num = extract_frame_number(path)
-    if frame_num is None:
-        return False
-    return frame_filter[0] <= frame_num <= frame_filter[1]
 
 
 def _resolved_sync(sync: bool | None) -> bool:
@@ -149,7 +136,7 @@ class _MutateMixin:
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
-                if not _match_frame_filter(npz, frame_filter):
+                if not match_frame_filter(npz, frame_filter):
                     skipped += 1
                     continue
                 try:
@@ -219,7 +206,7 @@ class _MutateMixin:
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
-                if not _match_frame_filter(npz, frame_filter):
+                if not match_frame_filter(npz, frame_filter):
                     skipped += 1
                     continue
                 try:
@@ -267,7 +254,7 @@ class _MutateMixin:
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
-                if not _match_frame_filter(npz, frame_filter):
+                if not match_frame_filter(npz, frame_filter):
                     skipped += 1
                     continue
                 try:
@@ -340,7 +327,7 @@ class _MutateMixin:
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
-                if not _match_frame_filter(npz, frame_filter):
+                if not match_frame_filter(npz, frame_filter):
                     skipped += 1
                     continue
                 try:
@@ -358,11 +345,17 @@ class _MutateMixin:
                             if repl not in seen:
                                 new_list.append(repl)
                                 seen.add(repl)
-                            if repl not in disk_tags:
-                                made_change = True
+                            # Flag as changed if the tag value is actually different
+                            made_change = True
                         elif t not in seen:
                             new_list.append(t)
                             seen.add(t)
+                    # Also add new tags from validated that weren't already present
+                    for t in validated.values():
+                        if t not in seen:
+                            new_list.append(t)
+                            seen.add(t)
+                            made_change = True
                     if made_change:
                         write_tags(npz, new_list, sync=sync, expected_tags=disk_tags)
                         self._db_mutate(npz, disk_tags, frozenset(new_list))

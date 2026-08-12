@@ -2,34 +2,19 @@
 
 from __future__ import annotations
 
-import fnmatch
 from collections import defaultdict
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
-from ..routes import extract_frame_number
 from ..sidecar import is_valid_dimension
+from ._types import match_frame_filter
 
 if TYPE_CHECKING:
     from ._types import Bucket, Clause, FrameFilter, Granularity
 
 
 _GRANULARITIES = ("route", "frame")
-
-
-def _match_frame_filter(path: Path, frame_filter: "FrameFilter") -> bool:
-    """Check if a path matches the given frame filter."""
-    if frame_filter is None:
-        return True
-
-    if isinstance(frame_filter, str):
-        return fnmatch.fnmatch(path.name, frame_filter)
-
-    frame_num = extract_frame_number(path)
-    if frame_num is None:
-        return False
-    return frame_filter[0] <= frame_num <= frame_filter[1]
 
 
 def format_buckets(buckets: list["Bucket"], dimensions: Sequence[str]) -> str:
