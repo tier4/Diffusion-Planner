@@ -264,6 +264,11 @@ store.remove_dimension("override_metric")
 Apply `{old_tag: new_tag}` substitutions on matching frames. Frames where the
 substitution would be a no-op (or where neither tag is present) are skipped.
 
+> **Warning:** `tag_pairs` must not contain chains or cycles. Chaining (e.g.
+> `{"A": "B", "B": "C"}`) and cycling (e.g. `{"A": "B", "B": "A"}`) both produce
+> undefined results and may silently resurrect tags that were already replaced.
+> Supply only flat, non-overlapping mappings.
+
 ```python
 store.replace_tags(tag_pairs={"split:auto": "split:manual"}, scope="/data/old/")
 ```

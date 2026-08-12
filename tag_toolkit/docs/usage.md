@@ -42,7 +42,7 @@ The converted layout (`dataset/generate_from_labeled.sh`):
 …/<project>/<map_id>/{manual|auto}/<date>/<bag_time>/routes/*.npz
 ```
 
-A **route** is the parent directory of the NPZ files. For closed-loop layout,
+A **route** is the parent directory of the NPZ files. For a old layout,
 this is `…/<bag_time>/routes/` (parent of the `.npz` files). `route_of(path)`
 maps an NPZ or a route directory to this path.
 
@@ -205,6 +205,11 @@ every tag whose dimension matches. Returns a `MutationResult`.
 
 `tag_pairs` maps `old_tag → new_tag`. Frames without the old tag are
 skipped. Entries where key == value are no-ops. Returns a `MutationResult`.
+
+> **Warning:** `tag_pairs` must not contain chains or cycles. Chaining (e.g.
+> `{"A": "B", "B": "C"}`) and cycling (e.g. `{"A": "B", "B": "A"}`) both produce
+> undefined results and may silently resurrect tags that were already replaced.
+> Use only flat, non-overlapping mappings.
 
 ```python
 result = store.replace_tags(tag_pairs={"split:eval": "split:train"})
