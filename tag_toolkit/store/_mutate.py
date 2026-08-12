@@ -192,7 +192,7 @@ class _MutateMixin:
             for path_str, route_str in route_rows:
                 routes_to_skip[route_str].add(path_str)
             for route_str, frame_set in routes_to_skip.items():
-                cached_tags = self._route_tags_cache.get(route_str, frozenset())
+                cached_tags = self._route_tags_cache.get(route_str, {}).keys()
                 if not (cached_tags & to_remove):
                     skipped += len(frame_set)
                     scope_set = scope_set - frame_set
@@ -313,7 +313,7 @@ class _MutateMixin:
                 routes_to_skip[route_str].add(path_str)
             affected_old_tags = frozenset(validated.keys())
             for route_str, frame_set in routes_to_skip.items():
-                cached_tags = self._route_tags_cache.get(route_str, frozenset())
+                cached_tags = self._route_tags_cache.get(route_str, {}).keys()
                 if not (cached_tags & affected_old_tags):
                     skipped += len(frame_set)
                     scope_set = scope_set - frame_set

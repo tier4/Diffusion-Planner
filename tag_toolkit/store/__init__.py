@@ -88,7 +88,7 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
         source: str | Path | Sequence[str | Path] | None = None,
     ) -> None:
         self._source = source
-        self._route_tags_cache: dict[str, frozenset[str]] = {}
+        self._route_tags_cache: dict[str, dict[str, int]] = {}  # route -> {tag: count}
         self._lock = threading.RLock()
         self._conn_per_thread: dict[int, sqlite3.Connection] = {}
 
@@ -139,39 +139,41 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
         conn = self._require_conn()
         rows = conn.execute(
             """
-            SELECT f.route, json_group_array(t.tag) AS tags
+            SELECT f.route, t.tag, COUNT(*) AS cnt
             FROM frames f
             JOIN tags t ON f.path = t.path
-            GROUP BY f.route
+            GROUP BY f.route, t.tag
             """
         ).fetchall()
         with self._lock:
-            self._route_tags_cache = {
-                row[0]: frozenset(json.loads(row[1])) if row[1] else frozenset() for row in rows
-            }
+            self._route_tags_cache.clear()
+            for route, tag, cnt in rows:
+                if route not in self._route_tags_cache:
+                    self._route_tags_cache[route] = {}
+                self._route_tags_cache[route][tag] = cnt
 
     def _sync_route_tags_cache(self, route: str, added: set[str], removed: set[str]) -> None:
         """Update route_tags cache after a mutation. route must be a string key."""
         with self._lock:
-            # Check which removed tags still exist in sibling frames before dropping
-            if removed:
-                conn = self._require_conn()
-                placeholders = ",".join("?" * len(removed))
-                still_exists = set(conn.execute(
-                    f"""
-                    SELECT DISTINCT t.tag
-                    FROM frames f
-                    JOIN tags t ON f.path = t.path
-                    WHERE f.route = ? AND t.tag IN ({placeholders})
-                    """,
-                    [route, *removed]
-                ).fetchall())
-                actually_removed = removed - still_exists
-            else:
-                actually_removed = set()
+            if route not in self._route_tags_cache:
+                self._route_tags_cache[route] = {}
 
-            current = self._route_tags_cache.get(route, frozenset())
-            self._route_tags_cache[route] = frozenset((current | added) - actually_removed)
+            cache = self._route_tags_cache[route]
+
+            # Add tags
+            for tag in added:
+                cache[tag] = cache.get(tag, 0) + 1
+
+            # Remove tags (decrement count, delete if zero)
+            for tag in removed:
+                if tag in cache:
+                    cache[tag] -= 1
+                    if cache[tag] <= 0:
+                        del cache[tag]
+
+            # Clean up empty route entry
+            if not cache:
+                del self._route_tags_cache[route]
 
     def _resolve_scope(
         self,
@@ -271,19 +273,19 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
                     tags_rows,
                 )
 
-            # Update _route_tags_cache: single query for all new frames, group by route.
-            route_tag_sets: dict[str, set[str]] = defaultdict(set)
-            placeholders = ",".join("?" * len(npz_strs))
-            rows = conn.execute(
-                f"SELECT f.route, t.tag FROM tags t "
-                f"JOIN frames f ON t.path = f.path "
-                f"WHERE t.path IN ({placeholders})",
-                sorted(npz_strs),
-            ).fetchall()
-            for route, tag in rows:
-                route_tag_sets[route].add(tag)
-            for route, tags in route_tag_sets.items():
-                current = self._route_tags_cache.get(route, frozenset())
-                self._route_tags_cache[route] = frozenset(current | tags)
+            # Update _route_tags_cache: increment counts for new tags.
+            with self._lock:
+                if npz_strs:
+                    placeholders = ",".join("?" * len(npz_strs))
+                    rows = conn.execute(
+                        f"SELECT f.route, t.tag FROM tags t "
+                        f"JOIN frames f ON t.path = f.path "
+                        f"WHERE t.path IN ({placeholders})",
+                        sorted(npz_strs),
+                    ).fetchall()
+                    for route, tag in rows:
+                        if route not in self._route_tags_cache:
+                            self._route_tags_cache[route] = {}
+                        self._route_tags_cache[route][tag] = self._route_tags_cache[route].get(tag, 0) + 1
 
         return len(npz_paths)

@@ -95,7 +95,7 @@ class _QueryMixin:
         if dimensions is None:
             out: set[str] = set()
             for route in scope_set:
-                out.update(self._route_tags_cache.get(route, frozenset()))
+                out.update(self._route_tags_cache.get(route, {}).keys())
             return sorted(out)
 
         # Route granularity + dimensions filter: single batched query, not
@@ -309,7 +309,8 @@ class _QueryMixin:
 
         buckets: dict[tuple[str | None, ...], list[str]] = defaultdict(list)
         for item in items:
-            item_tag_set = tags_by_path.get(item, frozenset())
+            tag_map = tags_by_path.get(item, {})
+            item_tag_set = tag_map.keys() if isinstance(tag_map, dict) else tag_map
             per_dim: list[list[str | None]] = []
             item_skipped = False
             for dim in dims:

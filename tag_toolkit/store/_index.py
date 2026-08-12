@@ -209,6 +209,6 @@ class _IndexMixin:
                 conn.rollback()
                 raise
 
-            self._route_tags_cache.update({r: frozenset(t) for r, t in route_tag_sets.items()})
+            self._route_tags_cache.update({r: dict.fromkeys(t, 1) for r, t in route_tag_sets.items()})
 
         return reindexed_count, orphan_frames
