@@ -273,19 +273,20 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
                     tags_rows,
                 )
 
-            # Update _route_tags_cache: increment counts for new tags.
+            # Update _route_tags_cache: use actual COUNT from DB, not row-by-row +1.
             with self._lock:
                 if npz_strs:
                     placeholders = ",".join("?" * len(npz_strs))
                     rows = conn.execute(
-                        f"SELECT f.route, t.tag FROM tags t "
+                        f"SELECT f.route, t.tag, COUNT(*) FROM tags t "
                         f"JOIN frames f ON t.path = f.path "
-                        f"WHERE t.path IN ({placeholders})",
+                        f"WHERE t.path IN ({placeholders}) "
+                        f"GROUP BY f.route, t.tag",
                         sorted(npz_strs),
                     ).fetchall()
-                    for route, tag in rows:
+                    for route, tag, cnt in rows:
                         if route not in self._route_tags_cache:
                             self._route_tags_cache[route] = {}
-                        self._route_tags_cache[route][tag] = self._route_tags_cache[route].get(tag, 0) + 1
+                        self._route_tags_cache[route][tag] = cnt
 
         return len(npz_paths)

@@ -305,7 +305,6 @@ def test_remove_dimension(sample_route: Path) -> None:
 def test_replace_tags_tag_pairs(sample: Path) -> None:
     """replace_tags(tag_pairs=...) replaces old with new across scope."""
     store = TagStore(sample)
-    # All route names are "routes". Use the last route (psim).
     zeikan = next(r for r in store.route_paths() if r.parent.name == "psim_training_bag_0_0")
 
     # Replace split:manual -> split:eval on the zeikan route only.
@@ -1000,7 +999,7 @@ def test_stale_index_fast_path_skips_when_mtime_unchanged(sample_route: Path) ->
     # Confirm the on-disk mtime really is the value the index has cached
     # (writes during the test would have changed it). The fixture is
     # read-only from the store's perspective, so they match.
-    assert int(npz.with_suffix(".json").stat().st_mtime) == mtime
+    assert int(npz.with_suffix(".json").stat().st_mtime * 1000) == mtime
     result = store.remove_tags(["split:does_not_exist"])
     assert result.failed == []
 

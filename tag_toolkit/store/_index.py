@@ -44,7 +44,7 @@ class _IndexMixin:
                 tags_list = read_tags(npz)
                 route = str(route_of(npz))
                 side = sidecar_path(npz)
-                mtime = int(side.stat().st_mtime) if side.is_file() else 0
+                mtime = int(side.stat().st_mtime * 1000) if side.is_file() else 0
                 npz_s = str(npz)
                 frames_batch.append((npz_s, route, mtime))
                 for tag in tags_list:
@@ -160,7 +160,7 @@ class _IndexMixin:
             try:
                 conn.execute("DELETE FROM tags")
                 self._route_tags_cache.clear()
-                route_tag_sets: dict[str, set[str]] = defaultdict(set)
+                route_tag_sets: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
                 batch_tags: list[tuple[str, str, str, str]] = []
 
                 for row in rows:
@@ -182,7 +182,7 @@ class _IndexMixin:
                         orphan_frames.append(npz)
                         continue
 
-                    mtime = int(side.stat().st_mtime)
+                    mtime = int(side.stat().st_mtime * 1000)
                     conn.execute(
                         "UPDATE frames SET sidecar_mtime=? WHERE path=?",
                         (mtime, row[0]),
@@ -190,7 +190,7 @@ class _IndexMixin:
                     for tag in tags_list:
                         dim, val = parse_tag(tag)
                         batch_tags.append((row[0], tag, dim, val))
-                        route_tag_sets[route].add(tag)
+                        route_tag_sets[route][tag] += 1
                     reindexed_count += 1
                     if len(batch_tags) >= _BATCH_SIZE:
                         conn.executemany(
@@ -209,6 +209,6 @@ class _IndexMixin:
                 conn.rollback()
                 raise
 
-            self._route_tags_cache.update({r: dict.fromkeys(t, 1) for r, t in route_tag_sets.items()})
+            self._route_tags_cache.update(route_tag_sets)
 
         return reindexed_count, orphan_frames

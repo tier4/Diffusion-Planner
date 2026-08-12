@@ -295,7 +295,7 @@ class _QueryMixin:
                 tags_by_path[r[0]].add(r[1])
         else:
             all_tags_in_scope = {r[0]: (r[1], r[2]) for r in rows}
-            tags_by_path = dict(self._route_tags_cache)
+            tags_by_path = self._route_tags_cache
 
         if clause is not None:
             if granularity == "frame":

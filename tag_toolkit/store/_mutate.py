@@ -44,7 +44,7 @@ def _check_stale(conn, npz: Path, npz_str: str) -> None:
     ).fetchone()
     if expected_mtime is None:
         return  # frame not in index (shouldn't happen during a mutation)
-    if int(side.stat().st_mtime) == expected_mtime[0]:
+    if int(side.stat().st_mtime * 1000) == expected_mtime[0]:
         return  # mtime unchanged → no reason to re-read tags
     indexed_tags = frozenset(
         r[0] for r in conn.execute("SELECT tag FROM tags WHERE path=?", (npz_str,)).fetchall()
