@@ -35,8 +35,9 @@ def discover_sites_from_json(json_path: str | Path) -> dict[str, list[Path]]:
 
     Site name is the path component immediately before the first recognized split
     dir (see ``_SPLIT_DIR_NAMES``) in each entry. Entries with no recognized split dir are
-    skipped. Merged only within the same project; a site name shared across two projects
-    stays split (see :func:`discover_sites_with_vehicles_from_json`).
+    skipped. Grouping is keyed on ``(project, site)`` -- never on vehicle type -- so entries
+    merge only within one project and a site name shared across two projects stays split
+    (see :func:`discover_sites_with_vehicles_from_json`).
 
     Thin wrapper around :func:`discover_sites_with_vehicles_from_json` that drops the
     vehicle_type/project info.
@@ -55,8 +56,12 @@ def discover_sites_with_vehicles_from_json(
     an entry.
 
     Returns ``{site_key: {"npz_roots": [Path, ...], "vehicle_type": str, "project": str}}``.
-    If one site name appears under N different vehicle types, all N are kept as separate
-    entries (``f"{vehicle_type}__{site}"``) instead of merging their routes.
+
+    Grouping is keyed on ``(project, site)``; ``vehicle_type`` is a label only and never
+    merges roots. Several projects can share one vehicle, so keying on the vehicle would pool
+    two projects' routes under one site key and leave ``project`` describing only whichever
+    was seen first. If one site name appears under N projects, all N are kept as separate
+    entries (``f"{project}__{site}"``) instead of merging their routes.
     """
     project_vehicle_map = project_vehicle_map or {}
     entries = json.loads(Path(json_path).read_text())
@@ -81,22 +86,23 @@ def discover_sites_with_vehicles_from_json(
                 parsed.append((site, project, vehicle_type, path))
                 break
 
-    # Pass 2: group by site, then by vehicle_type, so a collision between any number of
-    # vehicle types is seen in full before deciding site keys.
+    # Pass 2: group by site, then by project -- never by vehicle_type, since several projects
+    # can map to one vehicle and pooling their roots would put both projects' routes under a
+    # single ``project``. Grouping in two steps (rather than straight on the pair) means a
+    # collision between any number of projects is seen in full before deciding site keys.
     by_site: dict[str, dict[str, dict]] = {}
     for site, project, vehicle_type, path in parsed:
         group = by_site.setdefault(site, {}).setdefault(
-            vehicle_type, {"npz_roots": [], "project": project}
+            project, {"npz_roots": [], "project": project, "vehicle_type": vehicle_type}
         )
         group["npz_roots"].append(path)
 
     sites: dict[str, dict] = {}
     for site, groups in by_site.items():
         if len(groups) == 1:
-            (vehicle_type, group) = next(iter(groups.items()))
-            sites[site] = {**group, "vehicle_type": vehicle_type}
+            sites[site] = next(iter(groups.values()))
         else:
-            print(f"site {site!r} spans vehicle types {sorted(groups)}, splitting", file=sys.stderr)
-            for vehicle_type, group in groups.items():
-                sites[f"{vehicle_type}__{site}"] = {**group, "vehicle_type": vehicle_type}
+            print(f"site {site!r} spans projects {sorted(groups)}, splitting", file=sys.stderr)
+            for project, group in groups.items():
+                sites[f"{project}__{site}"] = group
     return sites

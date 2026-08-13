@@ -58,7 +58,7 @@ def test_falls_back_to_project_name_when_missing_from_map(tmp_path: Path, capsys
     assert "proj_unknown" in capsys.readouterr().err
 
 
-def test_splits_site_name_collision_across_vehicle_types(tmp_path: Path, capsys):
+def test_splits_site_name_collision_across_projects(tmp_path: Path, capsys):
     entries = [
         f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",
         f"{ROOT}/proj_b/site_1/manual/2026-01-01/10-00-00",
@@ -66,13 +66,15 @@ def test_splits_site_name_collision_across_vehicle_types(tmp_path: Path, capsys)
     path = _write_list(tmp_path, entries)
     vehicle_map = {"proj_a": "vehicle_x", "proj_b": "vehicle_y"}
     sites = discover_sites_with_vehicles_from_json(path, vehicle_map)
-    assert set(sites) == {"vehicle_x__site_1", "vehicle_y__site_1"}
-    assert sites["vehicle_x__site_1"]["project"] == "proj_a"
-    assert sites["vehicle_y__site_1"]["project"] == "proj_b"
+    assert set(sites) == {"proj_a__site_1", "proj_b__site_1"}
+    assert sites["proj_a__site_1"]["project"] == "proj_a"
+    assert sites["proj_b__site_1"]["project"] == "proj_b"
+    assert sites["proj_a__site_1"]["vehicle_type"] == "vehicle_x"
+    assert sites["proj_b__site_1"]["vehicle_type"] == "vehicle_y"
     assert "site_1" in capsys.readouterr().err
 
 
-def test_splits_three_way_vehicle_type_collision(tmp_path: Path, capsys):
+def test_splits_three_way_project_collision(tmp_path: Path, capsys):
     entries = [
         f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",
         f"{ROOT}/proj_b/site_1/manual/2026-01-01/10-00-00",
@@ -81,9 +83,47 @@ def test_splits_three_way_vehicle_type_collision(tmp_path: Path, capsys):
     path = _write_list(tmp_path, entries)
     vehicle_map = {"proj_a": "vehicle_x", "proj_b": "vehicle_y", "proj_c": "vehicle_z"}
     sites = discover_sites_with_vehicles_from_json(path, vehicle_map)
-    assert set(sites) == {"vehicle_x__site_1", "vehicle_y__site_1", "vehicle_z__site_1"}
-    assert sites["vehicle_z__site_1"]["project"] == "proj_c"
+    assert set(sites) == {"proj_a__site_1", "proj_b__site_1", "proj_c__site_1"}
+    assert sites["proj_c__site_1"]["project"] == "proj_c"
     assert "site_1" not in sites  # the bare site name must not silently reappear
+
+
+def test_splits_site_name_collision_even_when_projects_share_a_vehicle(tmp_path: Path, capsys):
+    """Grouping is keyed on ``(project, site)``, so one vehicle over two projects still splits.
+
+    Keying on the vehicle would pool both projects' roots under a single site key, which is
+    what the module docstring warns about: route grouping is filename-only, and the reported
+    ``project`` could then describe only whichever project happened to be seen first.
+    """
+    entries = [
+        f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",
+        f"{ROOT}/proj_b/site_1/manual/2026-01-01/10-00-00",
+    ]
+    path = _write_list(tmp_path, entries)
+    vehicle_map = {"proj_a": "vehicle_x", "proj_b": "vehicle_x"}  # one vehicle, two projects
+    sites = discover_sites_with_vehicles_from_json(path, vehicle_map)
+    assert set(sites) == {"proj_a__site_1", "proj_b__site_1"}
+    assert all(info["vehicle_type"] == "vehicle_x" for info in sites.values())
+    assert "site_1" in capsys.readouterr().err
+
+
+def test_project_describes_every_npz_root_of_its_site(tmp_path: Path):
+    """A site's ``project`` must hold for all of its roots; it is recorded in sites_summary.json."""
+    entries = [
+        f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",
+        f"{ROOT}/proj_a/site_1/manual/2026-01-02/11-00-00",
+        f"{ROOT}/proj_b/site_1/manual/2026-01-01/10-00-00",
+    ]
+    path = _write_list(tmp_path, entries)
+    sites = discover_sites_with_vehicles_from_json(
+        path, {"proj_a": "vehicle_x", "proj_b": "vehicle_x"}
+    )
+    for site_key, info in sites.items():
+        # <root>/<project>/<site>/<split>/<date>/<time> -- project is 5 components up
+        roots_from = {root.parts[-5] for root in info["npz_roots"]}
+        assert roots_from == {info["project"]}, (
+            f"{site_key}: project={info['project']!r} but roots come from {sorted(roots_from)}"
+        )
 
 
 def test_legacy_wrapper_returns_only_npz_roots(tmp_path: Path):
