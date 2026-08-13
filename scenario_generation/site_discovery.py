@@ -2,9 +2,8 @@
 
 A "site" is inferred from the path component immediately before the first recognized split
 dir (``_SPLIT_DIR_NAMES``) in each JSON entry, following the existing
-``{project}/{area_map_id}_{area_map_name}/{split}/...`` layout convention (e.g.
-``x2_dev/2231_odaiba_shinagawa_copied_from_xx1``). Each site's routes are evaluated
-independently — callers must never merge multiple sites' npz under one
+``{project}/{area_map_id}_{area_map_name}/{split}/...`` layout convention. Each site's routes
+are evaluated independently — callers must never merge multiple sites' npz under one
 ``--npz_root``/``rglob``, since route grouping is filename-only and ignores directory
 structure (see route_timeline.route_prefix); mixing sites risks silently merging unrelated
 routes that happen to share a bag-name prefix.
@@ -16,7 +15,9 @@ coexist across existing datasets, so all three are checked.
 The path component one level above the site is the ``project`` -- a data-collection
 campaign name, not a vehicle model (several projects can share one vehicle). This module
 has no built-in project->vehicle mapping; pass one via ``project_vehicle_map`` in
-:func:`discover_sites_with_vehicles_from_json` if needed.
+:func:`discover_sites_with_vehicles_from_json` if needed. The JSON file it is loaded from is
+supplied at runtime and is not tracked in this repository (``*project_vehicle_map*.json`` is
+gitignored).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ _SPLIT_DIR_NAMES = ("valid", "manual", "auto")
 
 def discover_sites_from_json(json_path: str | Path) -> dict[str, list[Path]]:
     """Group a curated flat JSON path list (the ``--closed_loop_npz_root`` JSON-list
-    convention, e.g. ``path_list_closed_loop_x2.json``) into per-site npz roots.
+    convention, e.g. ``path_list_closed_loop.json``) into per-site npz roots.
 
     Site name is the path component immediately before the first recognized split
     dir (see ``_SPLIT_DIR_NAMES``) in each entry. Entries with no recognized split dir are

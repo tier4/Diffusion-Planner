@@ -1,7 +1,7 @@
 """Run ``valid_predictor_closed_loop.py`` once per site in a curated JSON manifest.
 
 ``--sites_npz_root`` is a curated ``.json`` path-list file (the same format as
-``--npz_root``'s JSON-list convention, e.g. ``path_list_closed_loop_x2.json``) --
+``--npz_root``'s JSON-list convention, e.g. ``path_list_closed_loop.json``) --
 entries are grouped into per-site route pools by
 ``site_discovery.discover_sites_with_vehicles_from_json``. A "site" is the path
 component immediately before the first recognized split dir
@@ -23,7 +23,7 @@ vehicle_type were used for which site name, for downstream reporting.
 Example::
 
     python diffusion_planner/run_all_sites_closed_loop.py \\
-        --sites_npz_root /media/.../path_list_closed_loop_x2.json \\
+        --sites_npz_root /media/.../path_list_closed_loop.json \\
         --model_path /media/.../best_model.pth \\
         --out_root /media/.../cl_results/all_sites \\
         --near_miss_thresh 0.3 --replan_interval 10 --draw_every 8

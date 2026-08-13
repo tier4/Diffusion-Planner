@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from scenario_generation.site_discovery import (
     discover_sites_from_json,
@@ -12,6 +15,8 @@ from scenario_generation.site_discovery import (
 
 # Layout: <root>/<project>/<area_map>/<split>/<date>/<time>
 ROOT = "/data"
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_list(tmp_path: Path, entries: list[str]) -> Path:
@@ -91,3 +96,29 @@ def test_legacy_wrapper_returns_only_npz_roots(tmp_path: Path):
     full = discover_sites_with_vehicles_from_json(path)
     assert set(legacy) == set(full)
     assert all(legacy[name] == full[name]["npz_roots"] for name in legacy)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "project_vehicle_map.json",
+        "closed_loop_project_vehicle_map.json",
+    ],
+)
+def test_project_vehicle_map_file_is_gitignored(filename: str):
+    """The ``project_vehicle_map`` JSON is supplied at runtime, so it must stay untracked.
+
+    Covers both ways the ``*project_vehicle_map*.json`` glob is reached: the bare name and a
+    prefixed one.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", filename],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:  # pragma: no cover - git is expected in dev/CI
+        pytest.skip("git not available")
+    assert result.returncode == 0, f"{filename} is not ignored (rc={result.returncode})"
