@@ -35,7 +35,7 @@ def test_groups_multiple_roots_under_one_site(tmp_path: Path):
     assert set(sites) == {"site_1"}
     assert len(sites["site_1"]["npz_roots"]) == 2
     assert sites["site_1"]["project"] == "proj_a"
-    assert sites["site_1"]["vehicle_type"] == "proj_a"  # no map -> falls back to project name
+    assert sites["site_1"]["vehicle_type"] == ""  # no map -> unlabelled
 
 
 def test_resolves_vehicle_type_from_map(tmp_path: Path):

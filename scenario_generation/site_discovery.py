@@ -52,8 +52,13 @@ def discover_sites_with_vehicles_from_json(
 ) -> dict[str, dict]:
     """Like :func:`discover_sites_from_json`, but also resolves each site's ``project`` and,
     via ``project_vehicle_map`` (``{project_code_name: vehicle_type_label}``), its
-    ``vehicle_type``. Falls back to the raw project name if the map is omitted or missing
-    an entry.
+    ``vehicle_type``.
+
+    With no map at all, ``vehicle_type`` is left ``""`` -- a project is a data-collection
+    campaign name and not a vehicle model, so labelling sites with it would report something
+    the caller never asked for. Only a project missing from a map that *was* supplied falls
+    back to the raw project name, with a warning. Downstream consumers already treat ``""``
+    as "unlabelled" (the report hides the column, the W&B rollup omits the per-vehicle keys).
 
     Returns ``{site_key: {"npz_roots": [Path, ...], "vehicle_type": str, "project": str}}``.
 
@@ -63,6 +68,7 @@ def discover_sites_with_vehicles_from_json(
     was seen first. If one site name appears under N projects, all N are kept as separate
     entries (``f"{project}__{site}"``) instead of merging their routes.
     """
+    labelling = project_vehicle_map is not None
     project_vehicle_map = project_vehicle_map or {}
     entries = json.loads(Path(json_path).read_text())
 
@@ -80,8 +86,10 @@ def discover_sites_with_vehicles_from_json(
                 project = parts[i - 2] if i >= 2 else "unknown"
                 vehicle_type = project_vehicle_map.get(project)
                 if vehicle_type is None:
-                    vehicle_type = project
-                    if project_vehicle_map:
+                    # No map -> unlabelled. Map supplied but this project is not in it ->
+                    # fall back to the project name so the site is still distinguishable.
+                    vehicle_type = project if labelling else ""
+                    if labelling:
                         unmapped_projects.add(project)
                 parsed.append((site, project, vehicle_type, path))
                 break

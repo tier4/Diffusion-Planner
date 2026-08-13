@@ -13,7 +13,8 @@ together.
 
 If ``--project_vehicle_map`` is given (a JSON file of ``{project_code_name:
 vehicle_type_label}``), each site also gets a ``vehicle_type`` label for
-reporting/filtering -- it doesn't change what gets simulated.
+reporting/filtering -- it doesn't change what gets simulated. Without it sites are
+left unlabelled, and ``--only_vehicle_types`` has nothing to filter on.
 
 Per-site outputs land in ``<out_root>/<site_name>/`` (summary.json,
 segments.jsonl, videos), exactly as a standalone single-site run would
@@ -64,8 +65,8 @@ def parse_args() -> argparse.Namespace:
         "--only_vehicle_types",
         nargs="*",
         default=None,
-        help="run only sites whose resolved vehicle type (see --project_vehicle_map) is in "
-        "this list",
+        help="run only sites whose resolved vehicle type is in this list. Requires "
+        "--project_vehicle_map: without it sites carry no vehicle label at all",
     )
     parser.add_argument(
         "--object_modes",
@@ -164,6 +165,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.only_vehicle_types and not args.project_vehicle_map:
+        # Without a map no site carries a vehicle label, so the filter would drop everything
+        # and report it as "no sites found" -- say what actually went wrong instead.
+        print(
+            "--only_vehicle_types requires --project_vehicle_map (sites are unlabelled without it)",
+            file=sys.stderr,
+        )
+        return 2
     project_vehicle_map = None
     if args.project_vehicle_map:
         project_vehicle_map = json.loads(args.project_vehicle_map.read_text())
