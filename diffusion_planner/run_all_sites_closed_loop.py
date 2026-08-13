@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
         type=Path,
         help="curated .json path-list manifest, grouped into per-site route pools by "
-        "site_discovery.discover_sites_from_json",
+        "site_discovery.discover_sites_with_vehicles_from_json",
     )
     parser.add_argument("--model_path", required=True, type=Path)
     parser.add_argument("--out_root", required=True, type=Path)

@@ -62,7 +62,8 @@ def resolve_npz_roots(npz_root) -> list[Path]:
     The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
     holding a list of such directory paths (one route dir per entry) -- the same "path list"
     form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
-    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-site
+    (e.g. one site's ``npz_roots`` from
+    ``site_discovery.discover_sites_with_vehicles_from_json``, which does its own per-site
     grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
     list is returned verbatim (each entry a ``Path``).
     """

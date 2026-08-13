@@ -247,9 +247,9 @@ def get_args(args_list=None):
         type=str,
         default="",
         help="alternative/addition to --closed_loop_npz_root: a curated .json path-list manifest, "
-        "grouped into per-site route pools by site_discovery.discover_sites_from_json and evaluated "
-        "as independent sites (own npz_root each). Both may be set at once (each fires "
-        "independently).",
+        "grouped into per-site route pools by "
+        "site_discovery.discover_sites_with_vehicles_from_json and evaluated as independent "
+        "sites (own npz_root each). Both may be set at once (each fires independently).",
     )
     parser.add_argument(
         "--closed_loop_project_vehicle_map",

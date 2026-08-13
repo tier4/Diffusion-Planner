@@ -157,10 +157,10 @@ class TrainConfig:
     #
     # ``closed_loop_sites_npz_root`` is an alternative/addition to ``closed_loop_npz_root`` for
     # multi-site validation: a curated .json path-list manifest, grouped into per-site route pools
-    # by scenario_generation.site_discovery.discover_sites_from_json and evaluated as independent
-    # npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>". Both may be set at
-    # once — each fires independently and contributes its own rows to the combined episode table /
-    # cross-site aggregate.
+    # by scenario_generation.site_discovery.discover_sites_with_vehicles_from_json and evaluated
+    # as independent npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>".
+    # Both may be set at once — each fires independently and contributes its own rows to the
+    # combined episode table / cross-site aggregate.
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
     closed_loop_sites_npz_root: str = ""

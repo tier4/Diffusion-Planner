@@ -147,7 +147,8 @@ def closed_loop_validate(
     per (site, object-mode) pair: ``closed_loop_npz_root`` (single arbitrary path) and
     ``closed_loop_sites_npz_root`` (a curated ``.json`` path-list manifest grouped into
     per-site route pools by
-    :func:`~scenario_generation.site_discovery.discover_sites_from_json`) are independent — both
+    :func:`~scenario_generation.site_discovery.discover_sites_with_vehicles_from_json`)
+    are independent — both
     fire in the same call when both are set, each contributing its own rows to the combined
     episode table / cross-site aggregate. Called on the checkpoint-save cadence, rank-0 only:
     pass the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler

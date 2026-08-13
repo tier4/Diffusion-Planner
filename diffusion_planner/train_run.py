@@ -60,9 +60,9 @@ def parse_args() -> argparse.Namespace:
         "--closed_loop_sites_npz_root",
         default="",
         help="optional: a curated .json path-list manifest, grouped into per-site route pools by "
-        "site_discovery.discover_sites_from_json and evaluated as independent sites (objects + "
-        "no-objects ablation by default). May be set together with --closed_loop_npz_root (each "
-        "fires independently). Empty = disabled.",
+        "site_discovery.discover_sites_with_vehicles_from_json and evaluated as independent "
+        "sites (objects + no-objects ablation by default). May be set together with "
+        "--closed_loop_npz_root (each fires independently). Empty = disabled.",
     )
     p.add_argument(
         "--closed_loop_project_vehicle_map",
