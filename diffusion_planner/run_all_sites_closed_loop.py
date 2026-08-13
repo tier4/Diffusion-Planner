@@ -5,7 +5,7 @@
 entries are grouped into per-site route pools by
 ``site_discovery.discover_sites_with_vehicles_from_json``. A "site" is the path
 component immediately before the first recognized split dir
- in each entry, matching the existing
+(``valid``/``manual``/``auto``) in each entry, matching the existing
 ``{project}/{area_map_id}_{area_map_name}/{split}/...``. Each site's routes are never
 grouped across sites — this avoids the cross-directory filename-collision failure
 mode of pointing --npz_root at a shared parent that mixes multiple sites' npz
