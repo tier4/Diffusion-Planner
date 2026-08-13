@@ -58,6 +58,31 @@ def test_falls_back_to_project_name_when_missing_from_map(tmp_path: Path, capsys
     assert "proj_unknown" in capsys.readouterr().err
 
 
+def test_unmapped_projects_are_warned_about_once_not_once_per_entry(tmp_path: Path, capsys):
+    """One line per run naming every unmapped project, not one line per manifest entry.
+
+    A curated manifest holds one entry per route dir, so warning inline would bury the rest
+    of the training log. Mirrors the site-collision warning, which is already per-site.
+    """
+    entries = [
+        f"{ROOT}/{project}/{site}/manual/2026-01-{day:02d}/10-00-00"
+        for project, site in (("proj_unmapped_a", "site_a"), ("proj_unmapped_b", "site_b"))
+        for day in range(1, 26)
+    ]
+    path = _write_list(tmp_path, entries)
+    discover_sites_with_vehicles_from_json(path, {"proj_a": "vehicle_x"})
+    err = capsys.readouterr().err
+    assert err.count("unrecognized project") == 1, f"{len(entries)} entries produced: {err}"
+    assert "proj_unmapped_a" in err and "proj_unmapped_b" in err
+
+
+def test_no_warning_when_no_map_is_given(tmp_path: Path, capsys):
+    """Without a map there is nothing to be unrecognized against, so stay quiet."""
+    path = _write_list(tmp_path, [f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00"])
+    discover_sites_with_vehicles_from_json(path)
+    assert "unrecognized project" not in capsys.readouterr().err
+
+
 def test_splits_site_name_collision_across_projects(tmp_path: Path, capsys):
     entries = [
         f"{ROOT}/proj_a/site_1/manual/2026-01-01/10-00-00",

@@ -66,8 +66,11 @@ def discover_sites_with_vehicles_from_json(
     project_vehicle_map = project_vehicle_map or {}
     entries = json.loads(Path(json_path).read_text())
 
-    # Pass 1: resolve (site, project, vehicle_type) per entry.
+    # Pass 1: resolve (site, project, vehicle_type) per entry. Projects missing from the map
+    # are collected rather than warned about here -- a curated manifest holds one entry per
+    # route dir, so warning inline would repeat the same line thousands of times.
     parsed: list[tuple[str, str, str, Path]] = []
+    unmapped_projects: set[str] = set()
     for entry in entries:
         path = Path(entry)
         parts = path.parts
@@ -79,12 +82,14 @@ def discover_sites_with_vehicles_from_json(
                 if vehicle_type is None:
                     vehicle_type = project
                     if project_vehicle_map:
-                        print(
-                            f"unrecognized project {project!r}, using it as vehicle_type",
-                            file=sys.stderr,
-                        )
+                        unmapped_projects.add(project)
                 parsed.append((site, project, vehicle_type, path))
                 break
+    if unmapped_projects:
+        print(
+            f"unrecognized project(s) {sorted(unmapped_projects)}, using them as vehicle_type",
+            file=sys.stderr,
+        )
 
     # Pass 2: group by site, then by project -- never by vehicle_type, since several projects
     # can map to one vehicle and pooling their roots would put both projects' routes under a
