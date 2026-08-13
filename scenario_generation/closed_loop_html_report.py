@@ -2,8 +2,11 @@
 
 One page: a per-group summary table + a searchable/sortable/filterable grid of episode
 cards (video + metrics), reading each group's ``summary.json``/``segments.jsonl`` from
-``<out_root>/<group_name>/`` (the layout ``run_all_groups_closed_loop.py`` produces). No
-external assets — safe to open directly from disk, and this is the "rich" artifact the
+either:
+- Flat structure (legacy):  <out_root>/<json_name>/summary.json
+- Hierarchical structure:    <out_root>/<json_name>/<group_name>/summary.json
+
+No external assets — safe to open directly from disk, and this is the "rich" artifact the
 W&B side just links to (see ``scenario_generation.wandb_closed_loop.resolve_report_link``)
 rather than duplicating (videos stay local/on the training server, not uploaded to W&B).
 """
@@ -28,9 +31,36 @@ _DEFAULT_METRIC = "clearance"
 _PALETTE = ["#1a73e8", "#d68a1f", "#8a4ad6", "#2a8a6d", "#d63a3a", "#2aa5d6"]
 
 
+def _scan_out_root(out_root: Path) -> list[tuple[str, Path]]:
+    """Scan out_root for groups, auto-detecting flat vs hierarchical structure.
+
+    Returns list of (group_name, group_dir) where group_name is the full display name
+    (e.g. "override/departure" for hierarchical, "<json_name>" for flat legacy).
+    """
+    groups: list[tuple[str, Path]] = []
+    for json_entry in sorted(out_root.iterdir()):
+        if not json_entry.is_dir():
+            continue
+        json_name = json_entry.name
+
+        # Hierarchical: <json_name>/<group_name>/summary.json
+        # (but skip subdirs that are actually other JSON roots with __noobj)
+        # Heuristic: if the dir directly contains summary.json, it's flat structure
+        if (json_entry / "summary.json").is_file():
+            groups.append((json_name, json_entry))
+        else:
+            # Try hierarchical: scan subdirs for summary.json
+            for group_entry in sorted(json_entry.iterdir()):
+                if not group_entry.is_dir():
+                    continue
+                if (group_entry / "summary.json").is_file():
+                    full_name = f"{json_name}/{group_entry.name}"
+                    groups.append((full_name, group_entry))
+    return groups
+
+
 def collect_group_data(
     out_root: str | Path,
-    group_names: list[str],
     *,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
 ) -> tuple[list[dict], list[dict]]:
@@ -40,12 +70,14 @@ def collect_group_data(
     path}`` — one rendered image per metric in ``colormap_metrics`` that actually produced
     something, so the report's per-card dropdown can switch between them); ``summaries`` is
     one aggregate dict per group.
+
+    Auto-detects flat (legacy: <out_root>/<json_name>/summary.json) and hierarchical
+    (<out_root>/<json_name>/<group_name>/summary.json) structures.
     """
     out_root = Path(out_root)
     items: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
-    for group_name in group_names:
-        group_dir = out_root / group_name
+    for group_name, group_dir in _scan_out_root(out_root):
         summary_path = group_dir / "summary.json"
         segments_path = group_dir / "segments.jsonl"
         if not summary_path.is_file():
@@ -138,7 +170,6 @@ _TEMPLATE_PATH = Path(__file__).with_name("closed_loop_report_template.html")
 
 def build_html_report(
     out_root: str | Path,
-    group_names: list[str],
     *,
     title: str = "Per-Group Closed-Loop Evaluation",
     subtitle: str = "",
@@ -154,7 +185,7 @@ def build_html_report(
     it, see :mod:`scenario_generation.trajectory_colormap`.
     """
     out_root = Path(out_root)
-    items, summaries = collect_group_data(out_root, group_names, colormap_metrics=colormap_metrics)
+    items, summaries = collect_group_data(out_root, colormap_metrics=colormap_metrics)
     if not summaries:
         return None
 

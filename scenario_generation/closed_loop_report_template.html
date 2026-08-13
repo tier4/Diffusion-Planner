@@ -4,27 +4,53 @@
 <meta charset="UTF-8">
 <title>__TITLE__</title>
 <style>
-  :root { --bg:#fff; --fg:#1a1a1a; --card:#f5f5f7; --border:#ddd; --danger:#d33; --muted:#888; }
+  :root { --bg:#fff; --fg:#1a1a1a; --card:#f5f5f7; --border:#ddd; --danger:#d33; --muted:#888; --accent:#1a73e8; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#1a1a1a; --fg:#eee; --card:#2a2a2c; --border:#444; --danger:#ff6b6b; --muted:#999; }
+    :root { --bg:#1a1a1a; --fg:#eee; --card:#2a2a2c; --border:#444; --danger:#ff6b6b; --muted:#999; --accent:#6aa6ff; }
   }
   * { box-sizing: border-box; }
   body { background: var(--bg); color: var(--fg); font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; margin:0; padding:16px 20px 60px; }
   h1 { font-size:1.3rem; margin:0 0 4px; }
-  h2 { font-size:1.05rem; margin:28px 0 8px; }
+  h2 { font-size:1.05rem; margin:0; display:inline; }
+  h2.block { display:block; margin:22px 0 8px; }
+  h3 { font-size:0.95rem; margin:8px 0 6px; color:var(--muted); }
   .sub { color:var(--muted); font-size:0.85rem; margin-bottom:14px; }
   .sub code { background:var(--card); padding:1px 5px; border-radius:4px; }
+
+  .overview-bar { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 22px; padding:10px; background:var(--card); border:1px solid var(--border); border-radius:10px; }
+  .overview-bar .ov-cell { flex:1 1 90px; min-width:90px; text-align:center; padding:4px 6px; }
+  .overview-bar .ov-value { font-size:1.15rem; font-weight:700; color:var(--accent); }
+  .overview-bar .ov-label { font-size:0.72rem; color:var(--muted); margin-top:2px; }
+
+  .sum-block { margin:14px 0 8px; }
+  .sum-block > summary { list-style:none; cursor:pointer; user-select:none; padding:4px 0; display:flex; align-items:center; gap:8px; }
+  .sum-block > summary::-webkit-details-marker { display:none; }
+  .sum-block > summary::before { content:"▶"; font-size:0.65rem; color:var(--muted); transition:transform 0.15s; display:inline-block; }
+  .sum-block[open] > summary::before { transform:rotate(90deg); }
+  .sum-block > summary .sum-title { font-size:1.05rem; font-weight:600; }
+  .sum-block > summary .hint { color:var(--muted); font-size:0.8rem; font-weight:400; margin-left:4px; }
+  .sum-search { margin:8px 0; }
+  .sum-search input { padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); font-size:0.85rem; width:100%; max-width:340px; }
+
   table { border-collapse:collapse; width:100%; margin:8px 0 20px; font-size:0.85rem; }
   th,td { border:1px solid var(--border); padding:6px 10px; text-align:right; }
   th:first-child, td:first-child { text-align:left; }
   th { background: var(--card); }
+  tbody tr:hover { background: rgba(26,115,232,0.06); }
+
   .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px; position:sticky; top:0; background:var(--bg); padding:8px 0; z-index:5; }
   input[type=text] { flex:1; min-width:200px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); font-size:0.9rem; }
   select { padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); font-size:0.9rem; }
+  .controls button { padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--fg); font-size:0.85rem; cursor:pointer; }
+  .controls button:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
   .count { font-size:0.85rem; color:var(--muted); white-space:nowrap; }
   .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
   .card { background: var(--card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
   .card video { width:100%; display:block; background:#000; }
+  .video-placeholder { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; width:100%; aspect-ratio:16/9; background:linear-gradient(135deg,#1a1a1a,#2a2a2a); color:#ccc; cursor:pointer; user-select:none; font-size:0.78rem; padding:8px; }
+  .video-placeholder:hover { background:linear-gradient(135deg,#222,#333); color:#fff; }
+  .video-placeholder .play-icon { font-size:1.6rem; opacity:0.85; }
+  .video-placeholder .file-hint { font-size:0.65rem; opacity:0.5; word-break:break-all; text-align:center; }
   .card .colormap { width:100%; height:320px; object-fit:contain; display:block; background:#fff; cursor:zoom-in; }
   .card .colormap-controls { display:flex; justify-content:flex-end; align-items:center; gap:6px; padding:4px 10px 0; }
   .card .colormap-controls select { font-size:0.68rem; padding:1px 4px; border-radius:4px; border:1px solid var(--border); background:var(--card); color:var(--fg); }
@@ -41,14 +67,25 @@
 <h1>__TITLE__</h1>
 <div class="sub">__SUBTITLE__</div>
 
-<h2>Per-Group Summary</h2>
-<table id="summaryTable">
-<tr><th>Group</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
-</table>
+<div id="overviewBar" class="overview-bar"></div>
 
-<h2>Episodes</h2>
+<details class="sum-block" open>
+  <summary><span class="sum-title">Per-JSON Summary</span></summary>
+  <div id="jsonSummaryContainer"></div>
+</details>
+
+<details class="sum-block">
+  <summary><span class="sum-title">Per-Group Summary</span> <span class="hint" id="groupCountHint"></span></summary>
+  <div class="sum-search">
+    <input type="text" id="groupSearch" placeholder="Filter groups by name...">
+  </div>
+  <div id="groupSummaryContainer"></div>
+</details>
+
+<h2 class="block">Episodes</h2>
 <div class="controls">
   <input type="text" id="search" placeholder="Search by route">
+  <select id="jsonFilter"><option value="">JSON: All</option></select>
   <select id="groupFilter"><option value="">Group: All</option></select>
   <select id="sortSel">
     <option value="default">Sort: Default</option>
@@ -56,6 +93,7 @@
     <option value="collision_desc">Collisions (desc)</option>
     <option value="curb_desc">Curb Hits (desc)</option>
   </select>
+  <button id="showAllBtn" type="button">Show all episodes</button>
   <span class="count" id="count"></span>
 </div>
 
@@ -66,27 +104,133 @@ const ITEMS = __ITEMS_JSON__;
 const SUMMARY = __SUMMARY_JSON__;
 const PALETTE = __PALETTE_JSON__;
 const DEFAULT_METRIC = __DEFAULT_METRIC_JSON__;
+const GROUPS_OVERVIEW = __GROUPS_OVERVIEW_JSON__;
 const groupColor = {};
 [...new Set(ITEMS.map(i => i.group))].sort().forEach((g, i) => { groupColor[g] = PALETTE[i % PALETTE.length]; });
 
-const summaryTable = document.getElementById('summaryTable');
-for (const s of SUMMARY) {
-  const tr = document.createElement('tr');
-  const c = groupColor[s.group] || '#888';
-  tr.innerHTML = `
-    <td style="color:${c};font-weight:700">${s.group}</td>
-    <td>${s.n_segments}</td>
-    <td>${(s.route_completion*100).toFixed(0)}%</td>
-    <td>${s.total_collision_events}</td>
-    <td>${s.total_curb_hits}</td>
-    <td>${s.total_snaps}</td>
-    <td>${s.total_red_light_violations}</td>
-    <td>${s.total_strong_brakes}</td>
-    <td>${s.n_segments_diverged}</td>`;
-  summaryTable.appendChild(tr);
+function num(v) { return (v === null || v === undefined) ? 0 : v; }
+function pct(v) { return (v === null || v === undefined || isNaN(v)) ? '-' : (v*100).toFixed(0)+'%'; }
+function fmt(n) { return (n === null || n === undefined) ? '-' : n; }
+
+const HEADERS = ['Group', 'segments', 'Route Completion', 'Collisions', 'Curb Hits', 'Stuck (snaps)', 'Red Light', 'Strong Brake', 'Diverged'];
+
+function makeSummaryTable(headers) {
+  const tbl = document.createElement('table');
+  tbl.innerHTML = `<tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>`;
+  return tbl;
 }
 
+function renderSummaryRow(cells, color, hl) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = cells.map((v, i) => {
+    const style = i === 0 ? `color:${color};font-weight:700` : '';
+    return `<td style="${style}">${v}</td>`;
+  }).join('');
+  if (hl) tr.style.background = hl;
+  return tr;
+}
+
+// Aggregate JSON-level summaries from per-group rows
+const aggByJson = new Map();
+for (const s of SUMMARY) {
+  const a = aggByJson.get(s.json_name) || {
+    n_segments: 0, total_collision_events: 0, total_curb_hits: 0,
+    total_snaps: 0, total_red_light_violations: 0, total_strong_brakes: 0,
+    n_segments_diverged: 0, _rc_sum: 0, _rc_count: 0,
+  };
+  a.n_segments += num(s.n_segments);
+  a.total_collision_events += num(s.total_collision_events);
+  a.total_curb_hits += num(s.total_curb_hits);
+  a.total_snaps += num(s.total_snaps);
+  a.total_red_light_violations += num(s.total_red_light_violations);
+  a.total_strong_brakes += num(s.total_strong_brakes);
+  a.n_segments_diverged += num(s.n_segments_diverged);
+  if (s.route_completion) { a._rc_sum += s.route_completion; a._rc_count += 1; }
+  aggByJson.set(s.json_name, a);
+}
+const rcOf = a => a._rc_count ? a._rc_sum / a._rc_count : 0;
+
+// --- Overview bar (top of page) ---
+const _totalSeg = [...aggByJson.values()].reduce((x, a) => x + a.n_segments, 0);
+const _rcSum = [...aggByJson.values()].reduce((x, a) => x + a._rc_sum, 0);
+const _rcCount = [...aggByJson.values()].reduce((x, a) => x + a._rc_count, 0);
+const ov = GROUPS_OVERVIEW || {};
+const ovRows = [
+  ['JSON dirs', [...aggByJson.keys()].length],
+  ['Groups', new Set(SUMMARY.map(s => s.group)).size],
+  ['Episodes', ITEMS.length],
+  ['Segments', _totalSeg],
+  ['Route Completion', pct(_rcCount ? _rcSum / _rcCount : null)],
+  ['Collisions', [...aggByJson.values()].reduce((x, a) => x + a.total_collision_events, 0)],
+  ['Curb Hits', [...aggByJson.values()].reduce((x, a) => x + a.total_curb_hits, 0)],
+  ['Stuck (snaps)', [...aggByJson.values()].reduce((x, a) => x + a.total_snaps, 0)],
+  ['Red Light', [...aggByJson.values()].reduce((x, a) => x + a.total_red_light_violations, 0)],
+  ['Strong Brake', [...aggByJson.values()].reduce((x, a) => x + a.total_strong_brakes, 0)],
+  ['Diverged', [...aggByJson.values()].reduce((x, a) => x + a.n_segments_diverged, 0)],
+];
+const overviewBar = document.getElementById('overviewBar');
+overviewBar.innerHTML = ovRows.map(([label, value]) =>
+  `<div class="ov-cell"><div class="ov-value">${value}</div><div class="ov-label">${label}</div></div>`
+).join('');
+
+// --- Per-JSON summary (one row per JSON) ---
+const jsonSummaryContainer = document.getElementById('jsonSummaryContainer');
+const jsonTbl = makeSummaryTable(HEADERS);
+for (const [jsonName, a] of [...aggByJson.entries()].sort()) {
+  jsonTbl.appendChild(renderSummaryRow([
+    jsonName, a.n_segments, pct(rcOf(a)),
+    a.total_collision_events, a.total_curb_hits, a.total_snaps,
+    a.total_red_light_violations, a.total_strong_brakes, a.n_segments_diverged,
+  ], '#1a73e8'));
+}
+jsonSummaryContainer.appendChild(jsonTbl);
+
+// --- Per-Group summary (flat; group name already includes json_name/) ---
+const groupSummaryContainer = document.getElementById('groupSummaryContainer');
+const sortedGroups = [...SUMMARY].sort((a, b) => a.group.localeCompare(b.group));
+const groupCountHint = document.getElementById('groupCountHint');
+groupCountHint.textContent = `(${sortedGroups.length} groups)`;
+const groupTbl = makeSummaryTable(HEADERS);
+sortedGroups.forEach(s => {
+  const c = groupColor[s.group] || '#888';
+  groupTbl.appendChild(renderSummaryRow([
+    s.group, s.n_segments, pct(s.route_completion),
+    s.total_collision_events, s.total_curb_hits, s.total_snaps,
+    s.total_red_light_violations, s.total_strong_brakes, s.n_segments_diverged,
+  ], c));
+});
+groupSummaryContainer.appendChild(groupTbl);
+document.getElementById('groupSearch').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  const rows = groupTbl.querySelectorAll('tr');
+  for (let i = 1; i < rows.length; i++) {
+    rows[i].style.display = !q || rows[i].textContent.toLowerCase().includes(q) ? '' : 'none';
+  }
+});
+
+const jsonFilter = document.getElementById('jsonFilter');
 const groupFilter = document.getElementById('groupFilter');
+[...new Set(ITEMS.map(i => i.json_name))].sort().forEach(j => {
+  const og = document.createElement('optgroup');
+  og.label = j;
+  jsonFilter.appendChild(og);
+});
+
+// Rebuild group options whenever jsonFilter changes
+function rebuildGroupFilter() {
+  groupFilter.innerHTML = '';
+  const opt = document.createElement('option');
+  opt.value = ''; opt.textContent = 'Group: All';
+  groupFilter.appendChild(opt);
+
+  const j = jsonFilter.value;
+  const filtered = j ? ITEMS.filter(i => i.json_name === j) : ITEMS;
+  [...new Set(filtered.map(i => i.group))].sort().forEach(g => {
+    const o = document.createElement('option'); o.value = g; o.textContent = g; groupFilter.appendChild(o);
+  });
+}
+
+jsonFilter.addEventListener('change', rebuildGroupFilter);
 [...new Set(ITEMS.map(i => i.group))].sort().forEach(g => {
   const o = document.createElement('option'); o.value = g; o.textContent = g; groupFilter.appendChild(o);
 });
@@ -106,7 +250,7 @@ function card(item) {
   const completion = ((item.route_completion || 0)*100).toFixed(0)+'%';
   const c = groupColor[item.group] || '#888';
   const videoTag = item.video_path
-    ? `<video controls muted preload="metadata" src="${item.video_path}"></video>`
+    ? `<div class="video-placeholder" data-src="${item.video_path}" title="Click to load video"><span class="play-icon">▶</span><span class="load-text">Click to load video</span><span class="file-hint">${item.video_path.split('/').pop()}</span></div>`
     : `<div style="padding:40px;text-align:center;color:var(--muted);">video missing</div>`;
 
   const metrics = Object.keys(item.colormap_paths || {});
@@ -151,10 +295,20 @@ function card(item) {
 
 function render() {
   const q = searchEl.value.trim().toLowerCase();
+  const j = jsonFilter.value;
   const g = groupFilter.value;
+  // Empty by default: only render once a filter (JSON / group / search) is set.
+  // Set `showEmpty=true` (e.g. via URL `?all=1`) to bypass.
+  const showEmpty = new URLSearchParams(location.search).get('all') === '1';
+  const hasFilter = !!(j || g || q) || showEmpty;
+  if (!hasFilter) {
+    grid.innerHTML = '';
+    countEl.textContent = `${ITEMS.length} episodes hidden — pick a JSON / Group or search above to load.`;
+    return;
+  }
   let filtered = ITEMS.filter(i => {
     const hay = `${i.route} ${i.group}`.toLowerCase();
-    return (!q || hay.includes(q)) && (!g || i.group === g);
+    return (!q || hay.includes(q)) && (!j || i.json_name === j) && (!g || i.group === g);
   });
   const mode = sortEl.value;
   if (mode === 'collision_desc') filtered.sort((a,b) => (b.n_collision_events||0)-(a.n_collision_events||0));
@@ -165,7 +319,33 @@ function render() {
   countEl.textContent = `${filtered.length} / ${ITEMS.length} episodes`;
 }
 
-[searchEl,groupFilter,sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
+// Lazy-load video on click
+document.getElementById('showAllBtn').addEventListener('click', () => {
+  searchEl.value = '';
+  jsonFilter.value = '';
+  groupFilter.value = '';
+  rebuildGroupFilter();
+  render();
+});
+
+grid.addEventListener('click', (e) => {
+  const ph = e.target.closest('.video-placeholder');
+  if (!ph) return;
+  const src = ph.dataset.src;
+  if (!src) return;
+  const v = document.createElement('video');
+  v.src = src;
+  v.controls = true;
+  v.muted = true;
+  v.preload = 'metadata';
+  v.style.width = '100%';
+  v.style.display = 'block';
+  v.style.background = '#000';
+  ph.replaceWith(v);
+  v.play().catch(() => {});
+});
+
+[searchEl, jsonFilter, groupFilter, sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
 render();
 </script>
 </body>

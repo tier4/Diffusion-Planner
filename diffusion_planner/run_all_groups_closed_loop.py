@@ -273,8 +273,6 @@ def run_closed_loop_main(
 
     modes = object_modes or ["objects", "noobj"]
 
-    all_summary_keys: list[str] = []
-
     # Triple loop: json_name -> group_name -> mode
     for json_name, groups in resolved.items():
         json_out_dir = out_root / json_name
@@ -314,36 +312,76 @@ def run_closed_loop_main(
                     mode_out_dir,
                     summary,
                 )
-                all_summary_keys.append(summary_key)
 
-    # Merge all per-json groups_summary.json into root groups_summary.json
-    root_manifest: dict[str, dict] = {}
+    # ------------------------------------------------------------------ helpers ----
+    def _manifest_path(json_name: str, mode: str) -> Path:
+        return out_root / (json_name if mode == "objects" else f"{json_name}__noobj") / "groups_summary.json"
+
+    def _read_manifest(path: Path) -> dict | None:
+        """Read a groups_summary.json, supporting both new nested and legacy flat formats."""
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    def _collect_groups(manifest: dict | None) -> tuple[dict, dict, list[str]]:
+        """From a groups_summary.json (new or legacy), return:
+        - sub_groups: {key: entry} or {}
+        - overview: {}
+        - group_names: [individual group keys]
+        """
+        if manifest is None:
+            return {}, {}, []
+        if "sub_groups" in manifest:
+            # New nested format
+            group_names = list(manifest["sub_groups"].keys())
+            return manifest["sub_groups"], manifest.get("overview", {}), group_names
+        else:
+            # Legacy flat: top-level keys are group keys, __overview__ for overview
+            legacy_sub = {k: v for k, v in manifest.items() if not k.startswith("__")}
+            legacy_overview = manifest.get("__overview__", {})
+            legacy_names = list(legacy_sub.keys())
+            return legacy_sub, legacy_overview, legacy_names
+
+    # ------------------------------------------------------------------ merge ----
+    root_manifest: dict = {"overview": {}, "sub_groups": {}}
+    per_json_manifest_paths: list[str] = []
+    all_group_names: list[str] = []
+    all_summaries: dict[str, dict] = {}
+
     for json_name in resolved:
         for mode in modes:
-            if mode == "objects":
-                manifest_path = out_root / json_name / "groups_summary.json"
-            else:
-                manifest_path = out_root / f"{json_name}__noobj" / "groups_summary.json"
+            path = _manifest_path(json_name, mode)
+            manifest = _read_manifest(path)
+            if manifest is None:
+                continue
 
-            if manifest_path.is_file():
-                partial = json.loads(manifest_path.read_text())
-                # Drop the per-json overview sentinel before merging into root_manifest — it's a
-                # per-file aggregate, not a group entry, and _log_to_wandb would otherwise try to
-                # log it as a group (and crash on its non-summary value).
-                partial.pop("__overview__", None)
-                root_manifest.update(partial)
+            sub_groups, overview, group_names = _collect_groups(manifest)
+            per_json_manifest_paths.append(str(path))
+
+            json_key = json_name if mode == "objects" else f"{json_name}__noobj"
+            root_manifest["sub_groups"][json_key] = {"overview": overview}
+
+            for gname in group_names:
+                if gname not in all_group_names:
+                    all_group_names.append(gname)
+                if sub_groups and sub_groups.get(gname, {}).get("summary"):
+                    all_summaries[gname] = sub_groups[gname]["summary"]
+
+    all_group_names = sorted(set(all_group_names))
+    root_manifest["overview"] = build_groups_aggregate_log(all_summaries, prefix="closed_loop_overview")
+    args._per_json_manifest_paths = per_json_manifest_paths  # type: ignore[attr-defined]
 
     root_manifest_path = out_root / "groups_summary.json"
     root_manifest_path.write_text(json.dumps(root_manifest, indent=2, ensure_ascii=False))
 
-    all_group_names = sorted(k for k, v in root_manifest.items() if v.get("summary") is not None)
-
     # Build HTML report (only if not using existing wandb session)
     report_path = None
-    if wandb_run is None and all_group_names:
+    if wandb_run is None and root_manifest["sub_groups"]:
         report_path = build_html_report(
             out_root,
-            all_group_names,
             title="Per-Group Closed-Loop Evaluation",
             subtitle=f"groups_npz_root={groups_npz_root}",
             colormap_metrics=tuple(
@@ -383,32 +421,39 @@ def update_groups_summary(
 
     summary_key is e.g. 'override/departure' or 'site/all'.
 
-    Also writes an ``__overview__`` entry at the top of the same file with the segment-weighted
-    per-json aggregate from ``build_groups_aggregate_log``, so the at-a-glance rollup is visible
-    on disk alongside the per-group summaries without needing a wandb session.
+    Writes a nested structure:
+        {
+          "overview": { segment-weighted aggregate from build_groups_aggregate_log },
+          "sub_groups": {
+            "<summary_key>": { npz_root, out_dir, summary },
+            ...
+          }
+        }
     """
     out_dir = Path(out_dir)
     manifest_path = out_dir / "groups_summary.json"
 
-    merged: dict[str, dict] = {}
+    merged: dict = {"overview": {}, "sub_groups": {}}
     if manifest_path.is_file():
-        merged = json.loads(manifest_path.read_text())
+        try:
+            loaded = json.loads(manifest_path.read_text())
+            if "overview" in loaded and "sub_groups" in loaded:
+                merged = loaded
+            else:
+                # Legacy flat structure — migrate
+                merged["sub_groups"] = {k: v for k, v in loaded.items() if not k.startswith("__")}
+        except Exception:
+            pass
 
-    merged[summary_key] = {
+    merged["sub_groups"][summary_key] = {
         "npz_root": npz_root,
         "out_dir": str(mode_out_dir),
         "summary": summary,
     }
 
-    # Refresh the per-json overview every time a group is written, so it's always in sync with
-    # the on-disk state. The aggregate function returns {} for an empty summaries dict, which is
-    # the same shape we'd write anyway in the degenerate single/in-progress case.
-    summaries = {
-        k: v["summary"] for k, v in merged.items() if not k.startswith("__") and v.get("summary")
-    }
-    merged["__overview__"] = build_groups_aggregate_log(
-        summaries, prefix="closed_loop_overview"
-    )
+    # Refresh overview every time a group is written
+    summaries = {k: v["summary"] for k, v in merged["sub_groups"].items() if v.get("summary")}
+    merged["overview"] = build_groups_aggregate_log(summaries, prefix="closed_loop_overview")
 
     manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
 
@@ -526,13 +571,17 @@ def main() -> int:
 def _log_to_wandb(
     args: argparse.Namespace,
     group_names: list[str],
-    merged: dict,
+    root_manifest: dict,
     report_path: Path | None,
     run: "wandb.sdk.wandb_run.Run | None" = None,  # type: ignore[name-defined]
 ) -> None:
     """One wandb run: closed_loop/<metric>/<json_name>/<group_name> + per-json aggregates.
 
     If run is provided (passed from train.py), uses it. Otherwise creates own session.
+
+    root_manifest is the root groups_summary.json with structure:
+        { overview: {...}, sub_groups: { json_name: { overview: {...} } } }
+    Individual group summaries are looked up from <json>/groups_summary.json sub_groups.
     """
     import wandb
 
@@ -549,13 +598,45 @@ def _log_to_wandb(
     else:
         own_run = False
 
+    # Build lookup: group_name -> {out_dir, summary} from per-json sub_groups
+    group_manifest: dict[str, dict] = {}
+    per_json_paths: list[str] = getattr(args, "_per_json_manifest_paths", [])  # type: ignore[attr-defined]
+    for json_path in per_json_paths:
+        if Path(json_path).is_file():
+            try:
+                partial = json.loads(Path(json_path).read_text())
+                if "sub_groups" in partial:
+                    group_manifest.update(partial["sub_groups"])
+                else:
+                    for k, v in partial.items():
+                        if not k.startswith("__") and isinstance(v, dict) and v.get("summary"):
+                            group_manifest[k] = v
+            except Exception:
+                pass
+    # Fallback: scan out_root for per-json groups_summary.json files
+    out_root = Path(args.out_root)  # type: ignore[attr-defined]
+    if not group_manifest:
+        for gpath in sorted(out_root.rglob("groups_summary.json")):
+            if gpath.parent == out_root:
+                continue  # skip root groups_summary.json
+            try:
+                partial = json.loads(gpath.read_text())
+                if "sub_groups" in partial:
+                    group_manifest.update(partial["sub_groups"])
+                else:
+                    for k, v in partial.items():
+                        if not k.startswith("__") and isinstance(v, dict) and v.get("summary"):
+                            group_manifest[k] = v
+            except Exception:
+                pass
+
     try:
         log: dict = {}
         group_summaries: dict[str, dict] = {}
         episode_data: list = []
 
         for group_name in group_names:
-            r = merged.get(group_name) or {}
+            r = group_manifest.get(group_name) or {}
             summary = r.get("summary")
             if not summary:
                 continue
