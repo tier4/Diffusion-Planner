@@ -108,10 +108,6 @@ class _MutateMixin:
                 rows,
             )
 
-        # Update sidecar_mtime so _check_stale's fast path (mtime comparison)
-        # remains valid after this mutation.  Without this, the mtime in the
-        # DB would be stale and _check_stale would always fall through to the
-        # expensive SELECT + read_tags path on the next call.
         side = sidecar_path(npz)
         new_mtime = int(side.stat().st_mtime * 1000) if side.is_file() else 0
         conn.execute(
