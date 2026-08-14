@@ -100,8 +100,20 @@ def _route_dirs(built_root: Path) -> dict[str, Path]:
     ariake (15-16-36), psim (psim_training_bag_0_0).
     """
     return {
-        "aomi": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes",
-        "ariake": built_root / "proj_a" / "xxxx_site_a" / "auto" / "2026-07-07" / "15-16-36" / "routes",
+        "aomi": built_root
+        / "proj_a"
+        / "xxxx_site_a"
+        / "auto"
+        / "2026-06-23"
+        / "10-55-13"
+        / "routes",
+        "ariake": built_root
+        / "proj_a"
+        / "xxxx_site_a"
+        / "auto"
+        / "2026-07-07"
+        / "15-16-36"
+        / "routes",
         "psim": built_root
         / "proj_b"
         / "xxxx_site_c"
@@ -1873,3 +1885,103 @@ def test_reindex_tags_reports_orphan_frames(sample_route: Path) -> None:
     conn = store._require_conn()
     orphan_rows = conn.execute("SELECT tag FROM tags WHERE path=?", (str(victim),)).fetchall()
     assert len(orphan_rows) == 0  # orphan's tags were removed
+
+
+def test_replace_tags_multi_pair_only_applies_existing_source_tags(tmp_path: Path) -> None:
+    """replace_tags with multiple pairs must not add tags whose source was absent.
+
+    Regression: the old implementation had a second loop that appended every
+    replacement target not already in `seen`, regardless of whether the frame
+    actually carried the corresponding source tag.  E.g. frame with only ["a:1"]
+    and pairs {a:1: a:2, b:1: b:2} ended up as ["a:2", "b:2"] — b:2 was
+    erroneously added because the frame never had b:1.
+    """
+    bag = tmp_path / "bag" / "routes"
+    _frame(bag, "x", ["a:1"])
+    store = TagStore(tmp_path / "bag")
+
+    result = store.replace_tags(tag_pairs={"a:1": "a:2", "b:1": "b:2"})
+    assert result.changed == 1
+
+    tags = read_tags(bag / "x.npz")
+    assert tags == ["a:2"], f"expected ['a:2'], got {tags}"
+    assert "b:2" not in tags
+
+
+def test_replace_tags_key_eq_value_is_noop_even_with_multi_pair(tmp_path: Path) -> None:
+    """replace_tags with key==value pairs is a no-op; unchanged frames skip properly."""
+    bag = tmp_path / "bag" / "routes"
+    _frame(bag, "x", ["a:1", "b:1"])
+    store = TagStore(tmp_path / "bag")
+
+    result = store.replace_tags(tag_pairs={"a:1": "a:1", "b:2": "b:2"})
+    # Neither pair applies (a:1==a:1 is same-value, b:2 is absent), so no frame changes.
+    assert result.changed == 0
+    assert result.skipped == 1  # the one frame: nothing to replace
+    assert read_tags(bag / "x.npz") == ["a:1", "b:1"]
+
+
+def test_append_frames_accumulates_tag_counts(sample: Path, tmp_path: Path) -> None:
+    """append_frames must accumulate tag counts, not overwrite them.
+
+    Regression: the old implementation assigned (overwrote) the per-route count
+    with only the new frames' counts, so appending frames could make a tag's
+    count go *down* even though frames were added.  remove_tags then silently
+    skipped the operation because the fast-skip concluded the route had no such tag.
+    """
+    # Build an index over the aomi route (10 frames, some have lateral:turn).
+    from tag_toolkit import TagStore
+
+    aomi_route = sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes"
+    db_path = tmp_path / "index.db"
+    store = TagStore.build_index(aomi_route, db_path)
+
+    route_path = str(store.route_paths()[0])
+
+    # Snapshot the lateral:turn count before appending.
+    cache_before = store._route_tags_cache.get(route_path, {}).copy()
+    count_before = cache_before.get("lateral:turn", 0)
+
+    # Build a second frame IN THE SAME route directory and add it to the index.
+    # Use the same split tag so it is a valid addition to this route.
+    extra_frame = _frame(aomi_route, "x_extra", ["lateral:turn", "split:auto"])
+
+    store.append_frames([extra_frame])
+
+    # The count must have gone up by 1, not down.
+    cache_after = store._route_tags_cache.get(route_path, {})
+    count_after = cache_after.get("lateral:turn", 0)
+    assert count_after == count_before + 1, (
+        f"lateral:turn count should increase after append: was {count_before}, now {count_after}"
+    )
+
+
+def test_append_frames_then_remove_tags_still_works(sample: Path, tmp_path: Path) -> None:
+    """After append_frames, remove_tags must not silently skip due to stale cache.
+
+    This is the end-to-end consequence of the append_frames cache bug: a remove_tags
+    call should actually remove tags from disk, not report skipped.
+    """
+    from tag_toolkit import TagStore
+
+    aomi_route = sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes"
+    db_path = tmp_path / "index.db"
+    store = TagStore.build_index(aomi_route, db_path)
+    route_path = str(store.route_paths()[0])
+
+    # Build a second frame IN THE SAME route directory.
+    extra_frame = _frame(aomi_route, "x_extra", ["lateral:turn", "split:auto"])
+    store.append_frames([extra_frame])
+
+    # Remove lateral:turn from the route. Every frame that carries it (original + new)
+    # must be updated on disk, not silently skipped.
+    result = store.remove_tags(["lateral:turn"], scope=route_path)
+    assert result.changed > 0, "remove_tags should have changed at least the new frame"
+    assert result.skipped >= 0
+
+    # Verify disk reality: no frame under this route carries lateral:turn.
+    for npz in store.npz_paths():
+        tags = read_tags(npz)
+        assert "lateral:turn" not in tags, (
+            f"{npz} still carries lateral:turn on disk after remove_tags"
+        )

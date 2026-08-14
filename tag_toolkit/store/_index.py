@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -63,7 +63,7 @@ class _IndexMixin:
                     tags_batch,
                 )
 
-        self._warm_route_tags_cache()
+        self._recompute_route_tags_cache()
 
     def export_index(self, path: str | Path) -> None:
         """Export the in-memory index to a SQLite file at *path* using VACUUM INTO."""
@@ -159,13 +159,10 @@ class _IndexMixin:
             conn.execute("BEGIN")
             try:
                 conn.execute("DELETE FROM tags")
-                self._route_tags_cache.clear()
-                route_tag_sets: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
                 batch_tags: list[tuple[str, str, str, str]] = []
 
                 for row in rows:
                     npz = Path(row[0])
-                    route = row[1]
                     side = sidecar_path(npz)
                     if not side.is_file():
                         orphan_frames.append(npz)
@@ -174,11 +171,6 @@ class _IndexMixin:
                     try:
                         tags_list = read_tags(npz)
                     except (OSError, ValueError):
-                        # I/O error or structural sidecar corruption (bad
-                        # JSON, non-list ``tags``). Either way, treat the
-                        # frame as unindexable for this pass; other
-                        # exceptions (e.g. KeyboardInterrupt) keep
-                        # propagating.
                         orphan_frames.append(npz)
                         continue
 
@@ -190,7 +182,6 @@ class _IndexMixin:
                     for tag in tags_list:
                         dim, val = parse_tag(tag)
                         batch_tags.append((row[0], tag, dim, val))
-                        route_tag_sets[route][tag] += 1
                     reindexed_count += 1
                     if len(batch_tags) >= _BATCH_SIZE:
                         conn.executemany(
@@ -209,6 +200,7 @@ class _IndexMixin:
                 conn.rollback()
                 raise
 
-            self._route_tags_cache.update(route_tag_sets)
+        # Rebuild cache from DB so it is always authoritative.
+        self._recompute_route_tags_cache()
 
         return reindexed_count, orphan_frames

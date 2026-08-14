@@ -104,7 +104,7 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
             self._db_uri = None
             self._conn = self._open_thread_conn()
             self._conn_per_thread[threading.current_thread().ident] = self._conn
-            self._warm_route_tags_cache()
+            self._recompute_route_tags_cache()
             return
 
         self._init_in_memory()
@@ -134,8 +134,14 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
                 self._conn_per_thread[thread_id] = self._open_thread_conn()
             return self._conn_per_thread[thread_id]
 
-    def _warm_route_tags_cache(self) -> None:
-        """Populate route_tags cache from DB on startup."""
+    def _recompute_route_tags_cache(self) -> None:
+        """Rebuild the entire route-tags cache from the DB.
+
+        This is the canonical way to refresh _route_tags_cache after any structural
+        change (append_frames, reindex_tags, rebuild_index). It is simple, correct,
+        and avoids all the subtle bugs that come from trying to update the cache
+        incrementally.
+        """
         conn = self._require_conn()
         rows = conn.execute(
             """
@@ -152,28 +158,36 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
                     self._route_tags_cache[route] = {}
                 self._route_tags_cache[route][tag] = cnt
 
-    def _sync_route_tags_cache(self, route: str, added: set[str], removed: set[str]) -> None:
-        """Update route_tags cache after a mutation. route must be a string key."""
+    def _recompute_route_tags_cache_for_routes(self, routes: list[str]) -> None:
+        """Recompute cache entries only for the given route list, merging into existing cache.
+
+        After a structural change that only affects known routes (append_frames adds
+        frames to existing routes, or a mutation changes tags on specific routes),
+        we recompute only those routes rather than the full cache.  This is O(routes
+        touched) rather than O(all routes) and is always correct because it replaces
+        (not patches) the entries for the affected routes.
+        """
+        if not routes:
+            return
+        conn = self._require_conn()
+        placeholders = ",".join("?" * len(routes))
+        rows = conn.execute(
+            f"""
+            SELECT f.route, t.tag, COUNT(*) AS cnt
+            FROM frames f
+            JOIN tags t ON f.path = t.path
+            WHERE f.route IN ({placeholders})
+            GROUP BY f.route, t.tag
+            """,
+            sorted(routes),
+        ).fetchall()
         with self._lock:
-            if route not in self._route_tags_cache:
-                self._route_tags_cache[route] = {}
-
-            cache = self._route_tags_cache[route]
-
-            # Add tags
-            for tag in added:
-                cache[tag] = cache.get(tag, 0) + 1
-
-            # Remove tags (decrement count, delete if zero)
-            for tag in removed:
-                if tag in cache:
-                    cache[tag] -= 1
-                    if cache[tag] <= 0:
-                        del cache[tag]
-
-            # Clean up empty route entry
-            if not cache:
-                del self._route_tags_cache[route]
+            for route in routes:
+                self._route_tags_cache.pop(route, None)
+            for route, tag, cnt in rows:
+                if route not in self._route_tags_cache:
+                    self._route_tags_cache[route] = {}
+                self._route_tags_cache[route][tag] = cnt
 
     def _resolve_scope(
         self,
@@ -273,20 +287,12 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
                     tags_rows,
                 )
 
-            # Update _route_tags_cache: use actual COUNT from DB, not row-by-row +1.
-            with self._lock:
-                if npz_strs:
-                    placeholders = ",".join("?" * len(npz_strs))
-                    rows = conn.execute(
-                        f"SELECT f.route, t.tag, COUNT(*) FROM tags t "
-                        f"JOIN frames f ON t.path = f.path "
-                        f"WHERE t.path IN ({placeholders}) "
-                        f"GROUP BY f.route, t.tag",
-                        sorted(npz_strs),
-                    ).fetchall()
-                    for route, tag, cnt in rows:
-                        if route not in self._route_tags_cache:
-                            self._route_tags_cache[route] = {}
-                        self._route_tags_cache[route][tag] = cnt
+        # Recompute cache for routes that received new frames — done AFTER
+        # the transaction commits so we don't self-deadlock on _lock.
+        # This replaces (not patches) those route entries with fresh DB counts,
+        # so the cache is always authoritative.
+        new_routes = list({row[1] for row in frames_rows})
+        if new_routes:
+            self._recompute_route_tags_cache_for_routes(new_routes)
 
         return len(npz_paths)

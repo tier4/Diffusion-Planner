@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
-from ..routes import extract_frame_number, route_of
+from ..routes import route_of
 from ..sidecar import (
     StaleIndexError,
     is_valid_dimension,
@@ -85,7 +85,7 @@ class _MutateMixin:
         old_tags: frozenset[str],
         new_tags: frozenset[str],
     ) -> None:
-        """Sync SQLite + cache after a sidecar write. Caller manages transaction."""
+        """Sync SQLite index after a sidecar write. Caller manages transaction."""
         conn = self._require_conn()
         npz_s = str(npz)
 
@@ -108,11 +108,6 @@ class _MutateMixin:
                 rows,
             )
 
-        added = new_tags - old_tags
-        removed = old_tags - new_tags
-        if added or removed:
-            self._sync_route_tags_cache(str(route_of(npz)), added, removed)
-
     def add_tags(
         self,
         tags: Sequence[str],
@@ -130,9 +125,12 @@ class _MutateMixin:
 
         scope_set = self._resolve_scope(scope, granularity="frame")
         sync = _resolved_sync(sync)
+
         changed = skipped = 0
         failed: list[str] = []
         first_error: BaseException | None = None
+        affected_routes: set[str] = set()
+
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
@@ -150,9 +148,8 @@ class _MutateMixin:
                     write_tags(npz, merged, sync=sync, expected_tags=disk_tags)
                     self._db_mutate(npz, disk_tags, frozenset(merged))
                     changed += 1
+                    affected_routes.add(str(route_of(npz)))
                 except FileNotFoundError:
-                    # Frame was indexed but its sidecar is now missing — skip
-                    # it. Reindex is the right tool to clear the index row.
                     skipped += 1
                 except Exception as exc:
                     if isinstance(exc, StaleIndexError):
@@ -160,6 +157,9 @@ class _MutateMixin:
                     failed.append(npz_str)
                     if first_error is None:
                         first_error = exc
+
+        if affected_routes:
+            self._recompute_route_tags_cache_for_routes(list(affected_routes))
 
         return MutationResult(
             changed=changed, skipped=skipped, failed=failed, first_error=first_error
@@ -180,29 +180,13 @@ class _MutateMixin:
             return MutationResult(changed=0, skipped=0)
 
         scope_set = self._resolve_scope(scope, granularity="frame")
-        skipped = 0
-        if frame_filter is None and scope_set:
-            conn = self._require_conn()
-            placeholders = ",".join("?" * len(scope_set))
-            route_rows = conn.execute(
-                f"SELECT path, route FROM frames WHERE path IN ({placeholders})",
-                sorted(scope_set),
-            ).fetchall()
-            routes_to_skip: dict[str, set[str]] = defaultdict(set)
-            for path_str, route_str in route_rows:
-                routes_to_skip[route_str].add(path_str)
-            for route_str, frame_set in routes_to_skip.items():
-                cached_tags = self._route_tags_cache.get(route_str, {}).keys()
-                if not (cached_tags & to_remove):
-                    skipped += len(frame_set)
-                    scope_set = scope_set - frame_set
-            if not scope_set:
-                return MutationResult(changed=0, skipped=skipped, failed=[], first_error=None)
-
         sync = _resolved_sync(sync)
-        changed = 0
+
+        changed = skipped = 0
         failed: list[str] = []
         first_error: BaseException | None = None
+        affected_routes: set[str] = set()
+
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
@@ -220,6 +204,7 @@ class _MutateMixin:
                     write_tags(npz, remaining, sync=sync, expected_tags=disk_tags)
                     self._db_mutate(npz, disk_tags, remaining_set)
                     changed += 1
+                    affected_routes.add(str(route_of(npz)))
                 except FileNotFoundError:
                     skipped += 1
                 except Exception as exc:
@@ -228,6 +213,9 @@ class _MutateMixin:
                     failed.append(npz_str)
                     if first_error is None:
                         first_error = exc
+
+        if affected_routes:
+            self._recompute_route_tags_cache_for_routes(list(affected_routes))
 
         return MutationResult(
             changed=changed, skipped=skipped, failed=failed, first_error=first_error
@@ -248,9 +236,12 @@ class _MutateMixin:
 
         scope_set = self._resolve_scope(scope, granularity="frame")
         sync = _resolved_sync(sync)
+
         changed = skipped = 0
         failed: list[str] = []
         first_error: BaseException | None = None
+        affected_routes: set[str] = set()
+
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
@@ -268,6 +259,7 @@ class _MutateMixin:
                     write_tags(npz, remaining_list, sync=sync, expected_tags=disk_tags)
                     self._db_mutate(npz, disk_tags, remaining)
                     changed += 1
+                    affected_routes.add(str(route_of(npz)))
                 except FileNotFoundError:
                     skipped += 1
                 except Exception as exc:
@@ -276,6 +268,9 @@ class _MutateMixin:
                     failed.append(npz_str)
                     if first_error is None:
                         first_error = exc
+
+        if affected_routes:
+            self._recompute_route_tags_cache_for_routes(list(affected_routes))
 
         return MutationResult(
             changed=changed, skipped=skipped, failed=failed, first_error=first_error
@@ -289,7 +284,16 @@ class _MutateMixin:
         frame_filter=None,
         sync: bool | None = None,
     ) -> "MutationResult":
-        """Replace ``old_tag → new_tag`` on matching frames."""
+        """Replace ``old_tag → new_tag`` on matching frames.
+
+        Only tags that the frame actually carries are considered. For each frame:
+        - If it carries a source tag (key in tag_pairs), the source tag is replaced
+          with the corresponding replacement tag (value in tag_pairs).
+        - If the replacement tag is the same as the source (``a:1 → a:1``), the tag
+          is kept as-is.
+        - Tags not in tag_pairs are preserved.
+        - Replacement tags whose source tag the frame never carried are NOT added.
+        """
         self._require_conn()
         validated: dict[str, str] = {}
         for old, new in tag_pairs.items():
@@ -300,30 +304,13 @@ class _MutateMixin:
             return MutationResult(changed=0, skipped=0)
 
         scope_set = self._resolve_scope(scope, granularity="frame")
-        skipped = 0
-        if frame_filter is None and scope_set:
-            conn = self._require_conn()
-            placeholders = ",".join("?" * len(scope_set))
-            route_rows = conn.execute(
-                f"SELECT path, route FROM frames WHERE path IN ({placeholders})",
-                sorted(scope_set),
-            ).fetchall()
-            routes_to_skip: dict[str, set[str]] = defaultdict(set)
-            for path_str, route_str in route_rows:
-                routes_to_skip[route_str].add(path_str)
-            affected_old_tags = frozenset(validated.keys())
-            for route_str, frame_set in routes_to_skip.items():
-                cached_tags = self._route_tags_cache.get(route_str, {}).keys()
-                if not (cached_tags & affected_old_tags):
-                    skipped += len(frame_set)
-                    scope_set = scope_set - frame_set
-            if not scope_set:
-                return MutationResult(changed=0, skipped=skipped, failed=[], first_error=None)
-
         sync = _resolved_sync(sync)
-        changed = 0
+
+        changed = skipped = 0
         failed: list[str] = []
         first_error: BaseException | None = None
+        affected_routes: set[str] = set()
+
         with self._write_transaction() as conn:
             for npz_str in scope_set:
                 npz = Path(npz_str)
@@ -333,33 +320,39 @@ class _MutateMixin:
                 try:
                     disk_tags = self._read_tags(npz)
                     _check_stale(conn, npz, npz_str)
-                    if not any(t in disk_tags for t in validated):
+
+                    # Find which source tags this frame actually carries.
+                    source_tags_present = [t for t in disk_tags if t in validated]
+                    if not source_tags_present:
                         skipped += 1
                         continue
+
+                    # Build the new tag list: replace source→replacement, keep others.
                     new_list: list[str] = []
                     seen: set[str] = set()
-                    made_change = False
                     for t in sorted(disk_tags):
-                        if t in validated and validated[t] != t:
+                        if t in validated:
                             repl = validated[t]
-                            if repl not in seen:
-                                new_list.append(repl)
-                                seen.add(repl)
-                            # Flag as changed if the tag value is actually different
-                            made_change = True
+                            if repl != t:
+                                # Actual replacement: add the new tag.
+                                if repl not in seen:
+                                    new_list.append(repl)
+                                    seen.add(repl)
+                            elif t not in seen:
+                                # Same-value pair (a:1→a:1): tag is unchanged on disk,
+                                # so include it so the final comparison is correct.
+                                new_list.append(t)
+                                seen.add(t)
                         elif t not in seen:
                             new_list.append(t)
                             seen.add(t)
-                    # Also add new tags from validated that weren't already present
-                    for t in validated.values():
-                        if t not in seen:
-                            new_list.append(t)
-                            seen.add(t)
-                            made_change = True
-                    if made_change:
+
+                    # Only write if the result actually differs from what's on disk.
+                    if frozenset(new_list) != disk_tags:
                         write_tags(npz, new_list, sync=sync, expected_tags=disk_tags)
                         self._db_mutate(npz, disk_tags, frozenset(new_list))
                         changed += 1
+                        affected_routes.add(str(route_of(npz)))
                     else:
                         skipped += 1
                 except FileNotFoundError:
@@ -370,6 +363,9 @@ class _MutateMixin:
                     failed.append(npz_str)
                     if first_error is None:
                         first_error = exc
+
+        if affected_routes:
+            self._recompute_route_tags_cache_for_routes(list(affected_routes))
 
         return MutationResult(
             changed=changed, skipped=skipped, failed=failed, first_error=first_error

@@ -115,8 +115,8 @@ follows this loop per frame:
    `.json.tmp + rename + fsync`. The `expected_tags` argument runs the
    read-vs-write half of the drift check (catches concurrent drift between
    our own read and our own write).
-6. `_db_mutate(npz, old, new)` — `DELETE` the old tags, `INSERT OR REPLACE`
-   the new ones, then `_sync_route_tags_cache` to update the in-memory cache.
+6. `_db_mutate(npz, old, new)` — `DELETE` the old tags and `INSERT OR REPLACE`
+   the new ones into SQLite. After the transaction commits, `_recompute_route_tags_cache_for_routes(...)` rebuilds the cache entries for affected routes from the DB so the cache is always authoritative.
 
 All frames in the call share one outer transaction (`_write_transaction`)
 which commits on success and rolls back on `StaleIndexError`. Other
@@ -127,8 +127,8 @@ the loop continues with the next frame.
 
 | Method | What it touches | Use case |
 |---|---|---|
-| `rebuild_index(source)` | `DELETE FROM frames`, `DELETE FROM tags`, then full re-scan of *source*. `_warm_route_tags_cache()` at the end. | First-time build, or after a wholesale source move. |
-| `append_frames(paths)` | `INSERT OR IGNORE` into `frames` and `tags` after a PK pre-check (`SELECT path FROM frames WHERE path IN (...)`) that raises `ValueError` on duplicates. Single `SELECT f.route, t.tag ... WHERE t.path IN (...)` for cache update. | Adding new NPZs to an existing index. Caller pre-filters duplicates for performance. |
+| `rebuild_index(source)` | `DELETE FROM frames`, `DELETE FROM tags`, then full re-scan of *source*. `_recompute_route_tags_cache()` at the end. | First-time build, or after a wholesale source move. |
+| `append_frames(paths)` | `INSERT OR IGNORE` into `frames` and `tags` after a PK pre-check (`SELECT path FROM frames WHERE path IN (...)`) that raises `ValueError` on duplicates. Calls `_recompute_route_tags_cache_for_routes(...)` after commit to refresh affected routes. | Adding new NPZs to an existing index. Caller pre-filters duplicates for performance. |
 | `reindex_tags()` | `DELETE FROM tags`, then re-read each sidecar already in `frames`, `INSERT` tags and `UPDATE frames.sidecar_mtime` in batches of 100 000. Cache rebuilt from scratch. | External tools edited sidecars; refresh the index to match. |
 | `diff_index_against_disk()` | Read-only. `SELECT path, sidecar_mtime FROM frames`, compare each sidecar. | Inspection; returns an `IndexDiff`. |
 | `export_index(path)` | `VACUUM INTO '<path>'` on the in-memory DB. | Persist an in-memory store to a file. |
