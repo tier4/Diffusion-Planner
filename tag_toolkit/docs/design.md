@@ -35,8 +35,8 @@ a small in-memory `_route_tags_cache` holding the union of tags per
 route for fast route-granularity queries.
 
 The cache is rebuilt from the DB on startup and on `reindex_tags()`,
-and synchronised incrementally on every mutation. The cache is purely a
-performance optimization — every query can be recomputed from the SQL
+and invalidated and rebuilt per affected route on every mutation. The cache is
+purely a performance optimization — every query can be recomputed from the SQL
 tables.
 
 ---

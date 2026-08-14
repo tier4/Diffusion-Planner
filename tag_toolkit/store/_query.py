@@ -294,6 +294,9 @@ class _QueryMixin:
             for r in rows:
                 tags_by_path[r[0]].add(r[1])
         else:
+            # route granularity: the cache already contains {route: {tag: count}}
+            # per route.  Alias it directly for the bucketing loop below;
+            # only reads are performed so the shared dict is safe.
             all_tags_in_scope = {r[0]: (r[1], r[2]) for r in rows}
             tags_by_path = self._route_tags_cache
 

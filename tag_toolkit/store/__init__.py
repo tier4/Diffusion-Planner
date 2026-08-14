@@ -182,6 +182,11 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
             sorted(routes),
         ).fetchall()
         with self._lock:
+            # Clear stale entries for these routes before inserting fresh data,
+            # so that tags which have disappeared from all frames in a route
+            # are not left behind as phantom entries.
+            for route in routes:
+                self._route_tags_cache.pop(route, None)
             for route, tag, cnt in rows:
                 if route not in self._route_tags_cache:
                     self._route_tags_cache[route] = {}
@@ -264,7 +269,7 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
             for npz in npz_paths:
                 side = sidecar_path(npz)
                 tags_list = read_tags(npz)
-                mtime = int(side.stat().st_mtime) if side.is_file() else 0
+                mtime = int(side.stat().st_mtime * 1000) if side.is_file() else 0
                 npz_s = str(npz)
                 frames_rows.append((npz_s, str(route_of(npz)), mtime))
                 for tag in tags_list:

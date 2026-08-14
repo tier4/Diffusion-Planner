@@ -1,11 +1,10 @@
 # `tag_toolkit` persistence layer
 
 `tag_toolkit` builds a small SQLite database that mirrors the `tags` field on
-every NPZ sidecar. The DB is the authoritative view of tag state; mutations
-verify that the sidecar on disk still matches the index before writing, so a
-half-applied external edit can't quietly slip through. The conceptual model
-("why a separate index?") is in [`design.md`](design.md); this document is
-about the actual schema and SQLite config.
+every NPZ sidecar. The DB is a **performance index** — the sidecar on disk
+is always the source of truth. Mutations write to disk first and update the
+index afterward, so if the DB gets out of sync (e.g. from an external edit
+or a failed transaction), `reindex_tags()` restores it from disk.
 
 The schema and PRAGMA setup live in [`store/_db.py`](../store/_db.py) and run
 unconditionally on every fresh connection (`_init_db`).
@@ -36,9 +35,9 @@ CREATE INDEX IF NOT EXISTS tags_dim_val_path ON tags(dim, val, path);
 ### `frames`
 
 One row per indexed NPZ. The primary key is the absolute path string; `route`
-is the parent directory of the NPZ file (`route_of(npz)`); `sidecar_mtime` is the `int`
-`stat().st_mtime` of the sidecar at the time the row was last touched
-(initial build, `append_frames`, `reindex_tags`).
+is the parent directory of the NPZ file (`route_of(npz)`); `sidecar_mtime` is the
+`int` of `stat().st_mtime * 1000` (millisecond precision) of the sidecar at the
+time the row was last touched (initial build, `append_frames`, `reindex_tags`).
 
 The stale-detection protocol compares the on-disk mtime against
 `frames.sidecar_mtime` for the path. If the file's mtime has moved, the
@@ -101,11 +100,8 @@ This lets the `RLock` semantics work identically across both backends.
 A mutation (`add_tags`, `remove_tags`, `remove_dimension`, `replace_tags`)
 follows this loop per frame:
 
-1. `sidecar_path(npz).is_file()` — missing sidecar triggers
-   `FileNotFoundError` (raised by `write_tags`); the mutation counts it as
-   `skipped`.
-2. `read_tags(npz)` from disk (raises `ValueError` on structural corruption;
-   `skipped` for per-tag malformation with a warning).
+1. `read_tags(npz)` from disk (raises `FileNotFoundError` for a missing sidecar,
+   `ValueError` on structural corruption; both count as `skipped`).
 3. `_check_stale(conn, npz, …)` — compare `disk_tags` against the index's
    stored tags for this path. Skipped as a fast path when the sidecar
    mtime is unchanged; otherwise re-reads the index and raises
@@ -116,7 +112,7 @@ follows this loop per frame:
    read-vs-write half of the drift check (catches concurrent drift between
    our own read and our own write).
 6. `_db_mutate(npz, old, new)` — `DELETE` the old tags and `INSERT OR REPLACE`
-   the new ones into SQLite. After the transaction commits, `_recompute_route_tags_cache_for_routes(...)` rebuilds the cache entries for affected routes from the DB so the cache is always authoritative.
+   the new ones into SQLite. After the transaction commits, `_recompute_route_tags_cache_for_routes(...)` invalidates and rebuilds the cache entries for affected routes from the DB.
 
 All frames in the call share one outer transaction (`_write_transaction`)
 which commits on success and rolls back on `StaleIndexError`. Other
