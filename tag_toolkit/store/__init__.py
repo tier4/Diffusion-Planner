@@ -13,13 +13,11 @@ internal ``RLock``. The SQLite WAL ensures crash-safe writes without
 requiring per-file ``fsync`` on the data directory.
 
 Index ownership contract:
-    The SQLite database is the **authoritative** view of tag state.
-    Every mutation verifies that the sidecar on disk matches what the
-    index thinks is there — if it doesn't, the mutation aborts with
-    :class:`StaleIndexError` and tells the caller to reconcile via
-    :meth:`TagStore.reindex_tags`. The store never silently overwrites
-    a sidecar it doesn't recognise and never creates a sidecar that
-    didn't exist before.
+    The sidecar on disk is always the **source of truth**. The SQLite
+    database is a performance index. Every mutation verifies that the
+    sidecar on disk matches what the index thinks is there — if it
+    doesn't, the mutation aborts with :class:`StaleIndexError` and
+    tells the caller to reconcile via :meth:`TagStore.reindex_tags`.
 
     The atomic-write / fsync / verify-then-write protocol lives in
     :mod:`sidecar`; ``TagStore`` is responsible only for resolving scope,
