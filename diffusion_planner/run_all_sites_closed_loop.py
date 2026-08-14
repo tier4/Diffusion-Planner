@@ -1,26 +1,30 @@
 """Run ``valid_predictor_closed_loop.py`` once per site in a curated JSON manifest.
 
 ``--sites_npz_root`` is a curated ``.json`` path-list file (the same format as
-``--npz_root``'s JSON-list convention, e.g. ``path_list_closed_loop_x2.json``) --
+``--npz_root``'s JSON-list convention, e.g. ``path_list_closed_loop.json``) --
 entries are grouped into per-site route pools by
-``site_discovery.discover_sites_from_json``. A "site" is the path component
-immediately before the first recognized split dir (``valid``/``manual``/``auto``)
-in each entry, matching the existing
-``{project}/{area_map_id}_{area_map_name}/{split}/...`` layout convention (e.g.
-``x2_dev/2231_odaiba_shinagawa_copied_from_xx1``). Each site's routes are never
+``site_discovery.discover_sites_with_vehicles_from_json``. A "site" is the path
+component immediately before the first recognized split dir
+(``valid``/``manual``/``auto``) in each entry, matching the existing
+``{project}/{area_map_id}_{area_map_name}/{split}/...``. Each site's routes are never
 grouped across sites — this avoids the cross-directory filename-collision failure
 mode of pointing --npz_root at a shared parent that mixes multiple sites' npz
 together.
 
+If ``--project_vehicle_map`` is given (a JSON file of ``{project_code_name:
+vehicle_type_label}``), each site also gets a ``vehicle_type`` label for
+reporting/filtering -- it doesn't change what gets simulated. Without it sites are
+left unlabelled, and ``--only_vehicle_types`` has nothing to filter on.
+
 Per-site outputs land in ``<out_root>/<site_name>/`` (summary.json,
 segments.jsonl, videos), exactly as a standalone single-site run would
-produce. A ``sites_summary.json`` at ``<out_root>`` records which npz_root was
-used for which site name, for downstream reporting.
+produce. A ``sites_summary.json`` at ``<out_root>`` records which npz_root and
+vehicle_type were used for which site name, for downstream reporting.
 
 Example::
 
     python diffusion_planner/run_all_sites_closed_loop.py \\
-        --sites_npz_root /media/.../path_list_closed_loop_x2.json \\
+        --sites_npz_root /media/.../path_list_closed_loop.json \\
         --model_path /media/.../best_model.pth \\
         --out_root /media/.../cl_results/all_sites \\
         --near_miss_thresh 0.3 --replan_interval 10 --draw_every 8
@@ -35,7 +39,7 @@ import sys
 from pathlib import Path
 
 from scenario_generation.closed_loop_html_report import build_html_report
-from scenario_generation.site_discovery import discover_sites_from_json
+from scenario_generation.site_discovery import discover_sites_with_vehicles_from_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,11 +49,25 @@ def parse_args() -> argparse.Namespace:
         required=True,
         type=Path,
         help="curated .json path-list manifest, grouped into per-site route pools by "
-        "site_discovery.discover_sites_from_json",
+        "site_discovery.discover_sites_with_vehicles_from_json",
     )
     parser.add_argument("--model_path", required=True, type=Path)
     parser.add_argument("--out_root", required=True, type=Path)
     parser.add_argument("--only_sites", nargs="*", default=None, help="run only these site names")
+    parser.add_argument(
+        "--project_vehicle_map",
+        type=Path,
+        default=None,
+        help="optional JSON file of {project_code_name: vehicle_type_label} for "
+        "labeling/filtering sites by vehicle type",
+    )
+    parser.add_argument(
+        "--only_vehicle_types",
+        nargs="*",
+        default=None,
+        help="run only sites whose resolved vehicle type is in this list. Requires "
+        "--project_vehicle_map: without it sites carry no vehicle label at all",
+    )
     parser.add_argument(
         "--object_modes",
         nargs="+",
@@ -147,9 +165,26 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    sites = discover_sites_from_json(args.sites_npz_root)
+    if args.only_vehicle_types and not args.project_vehicle_map:
+        # Without a map no site carries a vehicle label, so the filter would drop everything
+        # and report it as "no sites found" -- say what actually went wrong instead.
+        print(
+            "--only_vehicle_types requires --project_vehicle_map (sites are unlabelled without it)",
+            file=sys.stderr,
+        )
+        return 2
+    project_vehicle_map = None
+    if args.project_vehicle_map:
+        project_vehicle_map = json.loads(args.project_vehicle_map.read_text())
+    sites = discover_sites_with_vehicles_from_json(args.sites_npz_root, project_vehicle_map)
     if args.only_sites:
-        sites = {name: root for name, root in sites.items() if name in args.only_sites}
+        sites = {name: info for name, info in sites.items() if name in args.only_sites}
+    if args.only_vehicle_types:
+        sites = {
+            name: info
+            for name, info in sites.items()
+            if info["vehicle_type"] in args.only_vehicle_types
+        }
     if not sites:
         print(f"No sites with npz found under {args.sites_npz_root}", file=sys.stderr)
         return 1
@@ -157,7 +192,9 @@ def main() -> int:
     cli_path = Path(__file__).resolve().parent / "valid_predictor_closed_loop.py"
     args.out_root.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict] = {}
-    for site_name, npz_root in sites.items():
+    for site_name, info in sites.items():
+        npz_root = info["npz_roots"]
+        vehicle_type = info["vehicle_type"]
         for mode in args.object_modes:
             # "noobj" gets a distinct site label (suffix) rather than a separate axis — this
             # lets it ride the existing per-site machinery (HTML rows/cards, W&B per-site keys,
@@ -171,7 +208,10 @@ def main() -> int:
             # resolve_npz_roots already reads for a single --npz_root).
             npz_root_arg = site_out_dir / "npz_roots.json"
             npz_root_arg.write_text(json.dumps([str(p) for p in npz_root]))
-            print(f"=== [{label}] npz_root={npz_root} -> out_dir={site_out_dir} ===")
+            print(
+                f"=== [{label}] vehicle_type={vehicle_type} npz_root={npz_root} "
+                f"-> out_dir={site_out_dir} ==="
+            )
             cmd = [
                 sys.executable,
                 str(cli_path),
@@ -199,6 +239,7 @@ def main() -> int:
             summary_path = site_out_dir / "summary.json"
             results[label] = {
                 "npz_root": [str(p) for p in npz_root],
+                "vehicle_type": vehicle_type,
                 "out_dir": str(site_out_dir),
                 "error": str(error) if error else None,
                 "summary": json.loads(summary_path.read_text()) if summary_path.is_file() else None,
@@ -217,7 +258,7 @@ def main() -> int:
         s = r["summary"] or {}
         obj = s.get("object") or {}
         print(
-            f"  {site_name}: n_routes={s.get('n_routes')} "
+            f"  {site_name} [{r.get('vehicle_type')}]: n_routes={s.get('n_routes')} "
             f"collision_segment_rate={obj.get('collision_segment_rate')} "
             f"near_miss_segment_rate={obj.get('miss_segment_rate')}"
         )
@@ -225,6 +266,7 @@ def main() -> int:
     # All site names with a summary (from THIS run's `merged`, so a targeted --only_sites
     # re-run's report still covers every previously-completed site, not just the ones just run).
     all_site_names = sorted(name for name, r in merged.items() if r.get("summary") is not None)
+    site_vehicle_types = {name: r.get("vehicle_type") for name, r in merged.items()}
     report_path = None
     if not args.no_report and all_site_names:
         report_path = build_html_report(
@@ -233,6 +275,7 @@ def main() -> int:
             title="Per-Site Closed-Loop Evaluation",
             subtitle=f"sites_npz_root={args.sites_npz_root}",
             colormap_metrics=tuple(args.report_colormap_metrics),
+            site_vehicle_types=site_vehicle_types,
         )
         if report_path:
             print(f"Wrote {report_path}")
@@ -267,12 +310,14 @@ def _log_to_wandb(
     try:
         log: dict = {}
         site_summaries: dict[str, dict] = {}
-        episode_data: list = []  # (site, rows, out_dir) for the ONE combined table
+        site_vehicle_types: dict[str, str] = {}
+        episode_data: list = []  # (site, rows, out_dir, vehicle_type) for the ONE combined table
         for site_name in site_names:
             r = merged.get(site_name) or {}
             summary = r.get("summary")
             if not summary:
                 continue
+            vehicle_type = r.get("vehicle_type")
             site_out_dir = r.get("out_dir") or str(args.out_root / site_name)
             segments_path = Path(site_out_dir) / "segments.jsonl"
             rows = []
@@ -293,11 +338,13 @@ def _log_to_wandb(
                 )
             )
             site_summaries[site_name] = summary_with_rows
-            episode_data.append((site_name, rows, site_out_dir))
+            if vehicle_type:
+                site_vehicle_types[site_name] = vehicle_type
+            episode_data.append((site_name, rows, site_out_dir, vehicle_type))
         if episode_data:
             log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
         if len(site_summaries) > 1:
-            log.update(build_sites_aggregate_log(site_summaries))
+            log.update(build_sites_aggregate_log(site_summaries, site_vehicle_types))
         if report_path is not None:
             log["closed_loop_links/report"] = resolve_report_link(
                 args.out_root, args.report_base_url

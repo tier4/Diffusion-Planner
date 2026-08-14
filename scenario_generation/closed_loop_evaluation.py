@@ -30,7 +30,9 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
+from scenario_generation.inference_compile import compiled_for_inference
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
 
@@ -53,6 +55,8 @@ class RolloutParams:
     # train.py, most epochs) skip the dominant per-epoch cost and only pay it on the one call
     # that actually needs media (e.g. the final epoch).
     draw_every: int | None = 8
+    # Not a render_kwarg: the runner opens the pool and passes it down.
+    draw_workers: int = 1
     replan_interval: int = 10
     tracker_mode: str = "mpc"
     neighbor_history_mode: str = "recorded"
@@ -167,7 +171,8 @@ class ClosedLoopEvaluation(ABC):
                 f"{len(jobs)} job(s) -> {[j.job_id for j in jobs]}"
             )
 
-        result = self.execute_jobs(jobs)
+        with compiled_for_inference(self.model):
+            result = self.execute_jobs(jobs)
         elapsed_sec = time.perf_counter() - t0
 
         if self.ddp_world_size > 1:
@@ -412,10 +417,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         with (
             segments_path.open("w", encoding="utf-8") as fout,
             digests_path.open("w", encoding="utf-8") as fdigest,
+            # One pool for every segment: a spawned worker re-imports torch and matplotlib.
+            render_pool(self.config.params.draw_workers) as draw_pool,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
-                partial = self.run_job(job, segments_file=fout, digest_file=fdigest)
+                partial = self.run_job(
+                    job, segments_file=fout, digest_file=fdigest, draw_pool=draw_pool
+                )
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
                 merged.extras["route_keys"].append(job.route_key)
@@ -428,6 +437,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         *,
         segments_file=None,
         digest_file=None,
+        draw_pool=None,
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
@@ -446,6 +456,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 end,
                 png_dir,
                 **params.render_kwargs(),
+                draw_pool=draw_pool,
             )
             row = {"route": job.route_key, **metrics}
             if segments_file is not None:

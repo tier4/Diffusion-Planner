@@ -147,18 +147,18 @@ def closed_loop_validate(
     per (site, object-mode) pair: ``closed_loop_npz_root`` (single arbitrary path) and
     ``closed_loop_sites_npz_root`` (a curated ``.json`` path-list manifest grouped into
     per-site route pools by
-    :func:`~scenario_generation.site_discovery.discover_sites_from_json`) are independent — both
-    fire in the same call when both are set, each contributing its own rows to the combined
-    episode table / cross-site aggregate. Called on the checkpoint-save cadence, rank-0 only:
-    pass the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler
-    runs and produces ``prediction``) and restored afterwards.
+    :func:`~scenario_generation.site_discovery.discover_sites_with_vehicles_from_json`) fire
+    independently. Called on the checkpoint-save cadence, rank-0 only: pass the unwrapped model;
+    it is switched to eval for the rollout (so the diffusion sampler runs and produces
+    ``prediction``) and restored afterwards.
 
-    Per-step matplotlib rendering (PNGs/video/colormap images) is the dominant per-call cost, so
-    it's deferred to the last call only (``is_final_save=True``, computed by the caller as "is
-    this the last time the checkpoint-save cadence fires in this run" -- NOT simply
-    ``epoch == train_epochs - 1``, since train_epochs may not land on a save_utd-multiple)
-    -- every other call still runs the full rollout and logs metrics/wandb scalars, just without
-    that cost.
+    ``is_final_save=True`` marks the last cadence call of the run (computed by the caller, since
+    train_epochs may not land on a save_utd-multiple).
+
+    * ``closed_loop_npz_root`` runs every cadence call; only its video/colormap rendering is
+      deferred to ``is_final_save``.
+    * ``closed_loop_sites_npz_root`` only runs at all on ``is_final_save`` -- it covers many more
+      sites/routes and is too expensive to run every cadence call.
     """
     if not args.closed_loop_npz_root and not args.closed_loop_sites_npz_root:
         return
@@ -169,18 +169,25 @@ def closed_loop_validate(
         RolloutParams,
     )
     from scenario_generation.closed_loop_html_report import build_html_report
-    from scenario_generation.site_discovery import discover_sites_from_json
+    from scenario_generation.site_discovery import discover_sites_with_vehicles_from_json
     from scenario_generation.wandb_closed_loop import (
         build_combined_episode_table,
         build_full_closed_loop_wandb_log,
         build_sites_aggregate_log,
+        build_sites_score_bar_charts,
     )
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
 
-    def run_one(npz_root, site_out_dir: str, site_name: str | None, drop_objects: bool = False):
+    def run_one(
+        npz_root,
+        site_out_dir: str,
+        site_name: str | None,
+        drop_objects: bool = False,
+        is_site: bool = False,
+    ):
         site_label = f" [{site_name}]" if site_name else ""
         evaluator = FullRouteClosedLoopEvaluation(
             net,
@@ -197,6 +204,7 @@ def closed_loop_validate(
                     unstick_radius_mult=args.closed_loop_unstick_radius_mult,
                     unstick_teleport_after=args.closed_loop_unstick_teleport_after,
                     draw_every=args.closed_loop_draw_every if is_final_save else None,
+                    draw_workers=args.closed_loop_draw_workers,
                     replan_interval=args.closed_loop_replan_interval,
                     abort_deviation_m=args.closed_loop_abort_deviation_m,
                     abort_after=args.closed_loop_abort_after,
@@ -221,6 +229,8 @@ def closed_loop_validate(
             near_miss_thresh=args.closed_loop_near_miss_thresh,
             report_base_url=args.closed_loop_report_base_url or None,
             render_media=is_final_save,
+            # Sites only run once per run now; the bar chart covers them instead.
+            include_score_scalars=not is_site,
         )
         print(
             f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
@@ -234,8 +244,9 @@ def closed_loop_validate(
 
     log: dict = {}
     site_summaries: dict[str, dict] = {}
-    episode_data: list = []  # (label, rows, out_dir) for the ONE combined table, across BOTH sources
+    episode_data: list = []  # (label, rows, out_dir, vehicle_type) for the ONE combined table
     site_report_labels: list[str] = []
+    site_vehicle_types: dict[str, str] = {}
 
     def run_labeled(
         base_name: str | None,
@@ -243,6 +254,8 @@ def closed_loop_validate(
         mode_pairs: tuple[tuple[str, bool], ...],
         *,
         track_for_report: bool = False,
+        is_site: bool = False,
+        vehicle_type: str | None = None,
     ) -> None:
         """Run ``npz_root`` once per requested object-mode, merging into log/site_summaries/episode_data.
 
@@ -260,39 +273,62 @@ def closed_loop_validate(
             else:
                 label = base_name
             site_out_dir = os.path.join(out_dir, label) if label else out_dir
-            site_log, summary = run_one(npz_root, site_out_dir, label, drop_objects=drop_objects)
+            site_log, summary = run_one(
+                npz_root, site_out_dir, label, drop_objects=drop_objects, is_site=is_site
+            )
             if not summary:
                 continue
             episode_label = label or "main"
             log.update(site_log)
             site_summaries[episode_label] = summary
-            episode_data.append((episode_label, summary.get("segments") or [], site_out_dir))
+            episode_data.append(
+                (episode_label, summary.get("segments") or [], site_out_dir, vehicle_type)
+            )
             if track_for_report:
                 site_report_labels.append(episode_label)
+            if vehicle_type:
+                site_vehicle_types[episode_label] = vehicle_type
 
     try:
         if args.closed_loop_npz_root:
             npz_modes = _object_mode_pairs(args.closed_loop_npz_object_modes)
             run_labeled(None, args.closed_loop_npz_root, npz_modes)
 
-        if args.closed_loop_sites_npz_root:
-            sites = discover_sites_from_json(args.closed_loop_sites_npz_root)
+        if args.closed_loop_sites_npz_root and is_final_save:
+            project_vehicle_map = None
+            if args.closed_loop_project_vehicle_map:
+                project_vehicle_map = json.loads(
+                    Path(args.closed_loop_project_vehicle_map).read_text()
+                )
+            sites = discover_sites_with_vehicles_from_json(
+                args.closed_loop_sites_npz_root, project_vehicle_map
+            )
             if not sites:
                 print(f"closed-loop: no sites found under {args.closed_loop_sites_npz_root}")
             sites_modes = _object_mode_pairs(args.closed_loop_sites_object_modes)
-            for site_name, npz_root in sites.items():
-                run_labeled(site_name, npz_root, sites_modes, track_for_report=True)
+            for site_name, info in sites.items():
+                run_labeled(
+                    site_name,
+                    info["npz_roots"],
+                    sites_modes,
+                    track_for_report=True,
+                    is_site=True,
+                    vehicle_type=info["vehicle_type"],
+                )
 
         # One combined, filterable/groupable episode table across every source/site/mode.
         if episode_data:
             log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
         # Cross-source/site pooled rollup under closed_loop_overview/*.
         if len(site_summaries) > 1:
-            log.update(build_sites_aggregate_log(site_summaries))
-        # Local HTML gallery, sites only (see site_report_labels above) -- only built on
-        # is_final_save, same as the media (videos/colormap images) it links to.
+            log.update(build_sites_aggregate_log(site_summaries, site_vehicle_types))
+        # Sites only (see site_report_labels above), only non-empty on is_final_save.
         if is_final_save and site_report_labels:
-            report_path = build_html_report(out_dir, site_report_labels)
+            site_summaries_only = {label: site_summaries[label] for label in site_report_labels}
+            log.update(build_sites_score_bar_charts(site_summaries_only))
+            report_path = build_html_report(
+                out_dir, site_report_labels, site_vehicle_types=site_vehicle_types
+            )
             if report_path:
                 print(f"closed-loop: wrote {report_path}")
     finally:

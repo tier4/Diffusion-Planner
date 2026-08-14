@@ -142,6 +142,13 @@ def parse_args() -> argparse.Namespace:
         "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
     )
     p.add_argument(
+        "--draw_workers",
+        type=int,
+        default=4,
+        help="render the PNGs on this many worker processes (minimum 1). Output is "
+        "byte-identical whatever the count; costs ~780 MB of RSS per worker, per GPU shard",
+    )
+    p.add_argument(
         "--abort_deviation_m",
         type=float,
         default=0.0,
@@ -188,6 +195,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         fps=args.fps,
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,
+        draw_workers=args.draw_workers,
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
         strong_brake_mps2=args.strong_brake_mps2,

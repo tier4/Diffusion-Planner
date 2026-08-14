@@ -43,13 +43,14 @@
 
 <h2>Per-Site Summary</h2>
 <table id="summaryTable">
-<tr><th>Site</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
+<tr><th>Site</th><th>Vehicle</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
 </table>
 
 <h2>Episodes</h2>
 <div class="controls">
   <input type="text" id="search" placeholder="Search by route">
   <select id="siteFilter"><option value="">Site: All</option></select>
+  <select id="vehicleFilter"><option value="">Vehicle: All</option></select>
   <select id="sortSel">
     <option value="default">Sort: Default</option>
     <option value="completion_asc">Route Completion (worst first)</option>
@@ -68,13 +69,17 @@ const PALETTE = __PALETTE_JSON__;
 const DEFAULT_METRIC = __DEFAULT_METRIC_JSON__;
 const siteColor = {};
 [...new Set(ITEMS.map(i => i.site))].sort().forEach((s, i) => { siteColor[s] = PALETTE[i % PALETTE.length]; });
+const vehicleColor = {};
+[...new Set(ITEMS.map(i => i.vehicle_type).filter(Boolean))].sort().forEach((v, i) => { vehicleColor[v] = PALETTE[(i+2) % PALETTE.length]; });
 
 const summaryTable = document.getElementById('summaryTable');
 for (const s of SUMMARY) {
   const tr = document.createElement('tr');
   const c = siteColor[s.site] || '#888';
+  const vc = vehicleColor[s.vehicle_type] || 'var(--muted)';
   tr.innerHTML = `
     <td style="color:${c};font-weight:700">${s.site}</td>
+    <td style="color:${vc}">${s.vehicle_type || ''}</td>
     <td>${s.n_segments}</td>
     <td>${(s.route_completion*100).toFixed(0)}%</td>
     <td>${s.total_collision_events}</td>
@@ -91,6 +96,11 @@ const siteFilter = document.getElementById('siteFilter');
   const o = document.createElement('option'); o.value = s; o.textContent = s; siteFilter.appendChild(o);
 });
 
+const vehicleFilter = document.getElementById('vehicleFilter');
+[...new Set(ITEMS.map(i => i.vehicle_type).filter(Boolean))].sort().forEach(v => {
+  const o = document.createElement('option'); o.value = v; o.textContent = v; vehicleFilter.appendChild(o);
+});
+
 const grid = document.getElementById('grid');
 const searchEl = document.getElementById('search');
 const sortEl = document.getElementById('sortSel');
@@ -105,6 +115,7 @@ function card(item) {
   const redLight = item.n_red_light_violations || 0, brakes = item.n_strong_brakes || 0;
   const completion = ((item.route_completion || 0)*100).toFixed(0)+'%';
   const c = siteColor[item.site] || '#888';
+  const vc = vehicleColor[item.vehicle_type] || '#888';
   const videoTag = item.video_path
     ? `<video controls muted preload="metadata" src="${item.video_path}"></video>`
     : `<div style="padding:40px;text-align:center;color:var(--muted);">video missing</div>`;
@@ -127,6 +138,7 @@ function card(item) {
     <div class="meta">
       <div class="title">${item.route}</div>
       <span class="tag" style="background:${c}">${item.site}</span>
+      ${item.vehicle_type ? `<span class="tag" style="background:${vc}">${item.vehicle_type}</span>` : ''}
       <span class="tag" style="background:#888">${item.segment}</span>
       <div class="metrics">
         <span>Route completion: <b>${completion}</b></span>
@@ -152,9 +164,10 @@ function card(item) {
 function render() {
   const q = searchEl.value.trim().toLowerCase();
   const s = siteFilter.value;
+  const v = vehicleFilter.value;
   let filtered = ITEMS.filter(i => {
-    const hay = `${i.route} ${i.site}`.toLowerCase();
-    return (!q || hay.includes(q)) && (!s || i.site === s);
+    const hay = `${i.route} ${i.site} ${i.vehicle_type || ''}`.toLowerCase();
+    return (!q || hay.includes(q)) && (!s || i.site === s) && (!v || i.vehicle_type === v);
   });
   const mode = sortEl.value;
   if (mode === 'collision_desc') filtered.sort((a,b) => (b.n_collision_events||0)-(a.n_collision_events||0));
@@ -165,7 +178,7 @@ function render() {
   countEl.textContent = `${filtered.length} / ${ITEMS.length} episodes`;
 }
 
-[searchEl,siteFilter,sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
+[searchEl,siteFilter,vehicleFilter,sortEl].forEach(el => el.addEventListener(el===searchEl?'input':'change', render));
 render();
 </script>
 </body>

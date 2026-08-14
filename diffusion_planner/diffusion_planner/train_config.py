@@ -212,10 +212,10 @@ class TrainConfig:
     #
     # ``closed_loop_sites_npz_root`` is an alternative/addition to ``closed_loop_npz_root`` for
     # multi-site validation: a curated .json path-list manifest, grouped into per-site route pools
-    # by scenario_generation.site_discovery.discover_sites_from_json and evaluated as independent
-    # npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>". Both may be set at
-    # once — each fires independently and contributes its own rows to the combined episode table /
-    # cross-site aggregate.
+    # by scenario_generation.site_discovery.discover_sites_with_vehicles_from_json and evaluated
+    # as independent npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>".
+    # Both may be set at once — each fires independently and contributes its own rows to the
+    # combined episode table / cross-site aggregate.
     # ---------------------------------------------------------
     closed_loop_npz_root: str = cli(
         "dir tree of route NPZ frames for closed-loop validation, OR a .json path list of "
@@ -240,6 +240,8 @@ class TrainConfig:
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
     closed_loop_replan_interval: int = 4
     closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
+    # draw on this many worker processes (minimum 1)
+    closed_loop_draw_workers: int = 4
     closed_loop_fps: int = 10
     closed_loop_near_miss_thresh: float = 0.5
     closed_loop_search_radius: float = 1.5
