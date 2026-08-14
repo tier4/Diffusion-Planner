@@ -182,8 +182,6 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
             sorted(routes),
         ).fetchall()
         with self._lock:
-            for route in routes:
-                self._route_tags_cache.pop(route, None)
             for route, tag, cnt in rows:
                 if route not in self._route_tags_cache:
                     self._route_tags_cache[route] = {}
