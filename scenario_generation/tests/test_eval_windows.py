@@ -391,6 +391,7 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
         return _epdms(0.75)
 
     monkeypatch.setattr(ew, "score_window_epdms", fake_epdms)
+    monkeypatch.setattr(ew, "recorded_scene_tags", lambda tl, lo, hi: {"speed_band": "high"})
     monkeypatch.setattr(ew, "RouteTimeline", _TL)
     monkeypatch.setattr(
         ew, "enumerate_multi_root_routes", lambda _root: ({"routeA": ["p"]}, {"routeA": "d"})
@@ -415,6 +416,7 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
     assert len(rows) == 3 and "_tdigest" not in rows[0]["object"]
     assert rows[0]["v2"]["score"] == pytest.approx(1.0 - 0.25 * 0.2 / 3.0)
     assert rows[0]["epdms"]["score"] == 0.75
+    assert rows[0]["scene"] == {"speed_band": "high"}
     assert [(lo, hi, n) for lo, hi, n, _, _ in seen] == [(0, 50, 50), (50, 100, 50), (100, 130, 30)]
     assert seen[0][4].min_valid_s == cfg.min_valid_s
     assert summary["n_windows"] == 3 and summary["score_micro"] == pytest.approx(0.75)

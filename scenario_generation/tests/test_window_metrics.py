@@ -335,3 +335,15 @@ def test_world_transform_with_rotated_recorded_frame():
     tl = RotatedTL(agents={LO: [(6.0, 0.0, 3.0)]})
     geom = wm.frame_geometry(tl.npz(LO), tl.poses[LO])
     np.testing.assert_allclose(geom["agent_boxes"][0, 7:9], [0.0, 3.0], atol=1e-6)
+
+
+def test_recorded_scene_tags_describe_the_log_only():
+    tl = FakeTL(agents={idx: [(15.0, 0.0, 0.0), (30.0, 3.0, 5.0)] for idx in range(LO, HI)})
+    tags = wm.recorded_scene_tags(tl, LO, HI)
+    assert tags["speed_band"] == "high" and tags["turn"] == "straight"
+    assert tags["intersection"] is False and tags["signal"] == "none_or_unresolved"
+    assert tags["obstacle_on_route"] is True
+    assert tags["moving_agents_mean"] == 1.0 and tags["stopped_agents_mean"] == 1.0
+    stop = range(LO, HI)
+    tl = FakeTL(stop_frames=stop)
+    assert wm.recorded_scene_tags(tl, LO, HI)["speed_band"] == "stop"

@@ -48,7 +48,12 @@ from scenario_generation.closed_loop_eval import (
 from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.tools._heatmap_common import project_points_to_polyline
-from scenario_generation.window_metrics import ScoreConfig, read_rollout, score_window_epdms
+from scenario_generation.window_metrics import (
+    ScoreConfig,
+    read_rollout,
+    recorded_scene_tags,
+    score_window_epdms,
+)
 
 WINDOW_SCHEMA = "closed_loop_windows/1.0"
 
@@ -468,6 +473,7 @@ def run_windowed_eval(
                         "end_frame_id": int(tl.frame_indices[hi - 1]),
                         "v2": v2,
                         "epdms": epdms,
+                        "scene": recorded_scene_tags(tl, lo, hi),
                     }
                 )
                 fout.write(json.dumps(row, default=float) + "\n")

@@ -530,3 +530,72 @@ def score_window_epdms(
         }
     )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# recorded-scene tags (model independent; the fixed test-case description of a window)
+# --------------------------------------------------------------------------- #
+def recorded_scene_tags(tl, lo: int, hi: int, *, sample_every: int = 15) -> dict:
+    """Describe the RECORDED drive over ``[lo, hi)`` so windows can be grouped by scene type.
+
+    Derived from the log only (ego speed / heading, route-lane signal states, intersections,
+    stopped agents on the route ahead), so every model evaluated on the same window carries
+    the same tags.  Continuous features are kept next to the categorical labels.
+    """
+    sp = np.asarray(tl.speeds[lo:hi], dtype=np.float64)
+    yaw = np.unwrap(np.asarray(tl.poses[lo:hi, 2], dtype=np.float64))
+    turn_deg = float(np.degrees(abs(yaw[-1] - yaw[0]))) if len(yaw) else 0.0
+    n_moving, n_stopped, inter, tl_resolved, red, obstacle = [], [], [], [], [], []
+    for i in range(lo, hi, max(1, sample_every)):
+        npz = tl.npz(i)
+        nb = np.asarray(npz["neighbor_agents_past"], dtype=np.float64)[:, -1, :]
+        alive = np.abs(nb[:, :6]).sum(axis=1) > 0
+        speed = np.hypot(nb[alive, 4], nb[alive, 5])
+        n_moving.append(int((speed > 0.5).sum()))
+        n_stopped.append(int((speed <= 0.5).sum()))
+        states = [
+            int(np.argmax(lane[0, 8:13]))
+            for lane in np.asarray(npz["route_lanes"], dtype=np.float64)
+            if np.abs(lane[0, :8]).sum() > 0
+        ]
+        tl_resolved.append(any(st in TL_MEASURED_STATES for st in states))
+        red.append(any(st == 2 for st in states))
+        rings = []
+        for poly in np.asarray(npz.get("polygons", np.zeros((0, 1, 3))), dtype=np.float64):
+            pts = poly[_valid_xy(poly), :2]
+            if len(pts) >= 3:
+                rings.append(pts)
+        inter.append(_contains(rings, np.zeros(2)) >= 0)
+        route_rings = []
+        for lane in np.asarray(npz["route_lanes"], dtype=np.float64):
+            valid = _valid_xy(lane) & (np.abs(lane[:, :8]).sum(axis=-1) > 1e-6)
+            if valid.sum() >= 2:
+                c = lane[valid, :2]
+                route_rings.append(
+                    np.concatenate([c + lane[valid, 4:6], (c + lane[valid, 6:8])[::-1]])
+                )
+        ahead = nb[alive][(speed <= 0.5) & (nb[alive, 0] > 0) & (nb[alive, 0] <= 30.0)]
+        obstacle.append(any(_contains(route_rings, xy) >= 0 for xy in ahead[:, :2]))
+    v_mean, v_max, stop_frac = float(sp.mean()), float(sp.max()), float((sp < 0.5).mean())
+    speed_band = (
+        "stop" if stop_frac > 0.3 else ("low" if v_mean < 3 else ("mid" if v_mean < 7 else "high"))
+    )
+    turn = "turn" if turn_deg >= 45 else ("curve" if turn_deg >= 15 else "straight")
+    inter_frac = float(np.mean(inter))
+    signal = "red" if any(red) else ("resolved" if any(tl_resolved) else "none_or_unresolved")
+    return {
+        "speed_band": speed_band,
+        "turn": turn,
+        "intersection": bool(inter_frac > 0.2),
+        "signal": signal,
+        "obstacle_on_route": bool(any(obstacle)),
+        "v_mean_mps": v_mean,
+        "v_max_mps": v_max,
+        "stop_frac": stop_frac,
+        "turn_deg": turn_deg,
+        "intersection_frac": inter_frac,
+        "tl_resolved_frac": float(np.mean(tl_resolved)),
+        "red_frac": float(np.mean(red)),
+        "moving_agents_mean": float(np.mean(n_moving)),
+        "stopped_agents_mean": float(np.mean(n_stopped)),
+    }
