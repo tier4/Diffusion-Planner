@@ -49,9 +49,16 @@ def test_none_world_mode_rejects_hidden_lag():
 
 
 def test_delay_step_is_limited_to_training_range():
-    _valid(delay_step=5)
+    _valid(delay_step=5, tracker_mode="mpc")
     with pytest.raises(ValueError, match="delay_step must be <= 5"):
-        _valid(delay_step=6)
+        _valid(delay_step=6, tracker_mode="mpc")
+
+
+def test_plan_delay_rejects_discontinuous_perfect_tracking():
+    for tracker_mode in ("mpc", "mpc_batched", "delayed"):
+        _valid(delay_step=2, tracker_mode=tracker_mode)
+    with pytest.raises(ValueError, match="instantaneous pose jumps"):
+        _valid(delay_step=2, tracker_mode="perfect")
 
 
 def test_controller_compensation_is_delayed_tracker_only():

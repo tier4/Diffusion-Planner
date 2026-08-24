@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-
 WORLD_DELAY_MODES = ("none", "lag_extrapolated", "lag_raw")
 PLANT_PARAMETER_SETS = ("official", "measured", "custom")
 DELAY_TRAINING_MAX_STEPS = 5
@@ -125,5 +124,10 @@ def validate_delay_options(
         raise ValueError(f"replan_interval must be >= 1, got {replan_interval}")
     if tracker_mode not in ("perfect", "mpc", "mpc_batched", "delayed"):
         raise ValueError(f"unknown tracker_mode={tracker_mode!r}")
+    if delay_step > 0 and tracker_mode == "perfect":
+        raise ValueError(
+            "delay_step > 0 requires tracker_mode='mpc', 'mpc_batched', or 'delayed'; "
+            "perfect tracking turns prefix/tail discontinuities into instantaneous pose jumps"
+        )
     if controller_compensation and tracker_mode != "delayed":
         raise ValueError("controller_compensation requires tracker_mode='delayed'")
