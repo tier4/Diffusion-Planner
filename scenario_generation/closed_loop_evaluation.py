@@ -96,6 +96,8 @@ class RolloutParams:
     accel_dead_time_s: float | None = None
     accel_time_constant_s: float | None = None
     controller_compensation: bool = False
+    plan_dead_time_step: int | None = None
+    prefix_step: int | None = None
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -138,6 +140,8 @@ class RolloutParams:
             "accel_dead_time_s": self.accel_dead_time_s,
             "accel_time_constant_s": self.accel_time_constant_s,
             "controller_compensation": self.controller_compensation,
+            "plan_dead_time_step": self.plan_dead_time_step,
+            "prefix_step": self.prefix_step,
         }
 
 

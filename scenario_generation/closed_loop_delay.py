@@ -81,19 +81,44 @@ def resolve_plant_parameters(
     return replace(NAMED_PLANT_PARAMETERS[parameter_set]).validate()
 
 
+def resolve_plan_delay(
+    delay_step: int | None = None,
+    plan_dead_time_step: int | None = None,
+    prefix_step: int | None = None,
+) -> tuple[int, int]:
+    """Resolve ``(plan_dead_time_step, prefix_step)`` from the legacy bundled knob.
+
+    ``plan_dead_time_step`` is a simulator setting: the number of 0.1 s ticks between the
+    ego state a plan was inferred from and the tick that plan starts being executed
+    (inference + publish + controller intake dead time).  ``prefix_step`` is a model-input
+    setting: how many committed rows are handed to the decoder as a fixed prefix through
+    the ``delay`` tensor.  The legacy ``delay_step`` sets both to the same value; either
+    explicit knob overrides its half.
+    """
+
+    legacy = 0 if delay_step is None else int(delay_step)
+    dead = legacy if plan_dead_time_step is None else int(plan_dead_time_step)
+    prefix = legacy if prefix_step is None else int(prefix_step)
+    return dead, prefix
+
+
 def validate_delay_options(
     *,
     timeline_progress_mode: str,
     world_delay_mode: str,
     k_lag: int,
-    delay_step: int,
+    delay_step: int | None = None,
     tracker_mode: str,
     neighbor_history_mode: str,
     replan_interval: int,
     controller_compensation: bool,
     future_len: int = 80,
+    plan_dead_time_step: int | None = None,
+    prefix_step: int | None = None,
 ) -> None:
     """Fail loudly for combinations whose physical meaning is undefined."""
+
+    delay_step, prefix_step = resolve_plan_delay(delay_step, plan_dead_time_step, prefix_step)
 
     if timeline_progress_mode not in ("pose", "clock"):
         raise ValueError(
@@ -115,10 +140,18 @@ def validate_delay_options(
         if neighbor_history_mode != "recorded":
             raise ValueError("world delay requires neighbor_history_mode='recorded'")
     if delay_step < 0:
-        raise ValueError(f"delay_step must be >= 0, got {delay_step}")
+        raise ValueError(f"plan_dead_time_step must be >= 0, got {delay_step}")
     if delay_step > min(DELAY_TRAINING_MAX_STEPS, future_len):
         raise ValueError(
-            f"delay_step must be <= {min(DELAY_TRAINING_MAX_STEPS, future_len)}, got {delay_step}"
+            "plan_dead_time_step must be <= "
+            f"{min(DELAY_TRAINING_MAX_STEPS, future_len)}, got {delay_step}"
+        )
+    if prefix_step < 0:
+        raise ValueError(f"prefix_step must be >= 0, got {prefix_step}")
+    if prefix_step > delay_step:
+        raise ValueError(
+            "prefix_step must be <= plan_dead_time_step: only rows already committed to "
+            f"execution can be a fixed prefix (got prefix {prefix_step}, dead time {delay_step})"
         )
     if replan_interval < 1:
         raise ValueError(f"replan_interval must be >= 1, got {replan_interval}")
@@ -126,7 +159,7 @@ def validate_delay_options(
         raise ValueError(f"unknown tracker_mode={tracker_mode!r}")
     if delay_step > 0 and tracker_mode == "perfect":
         raise ValueError(
-            "delay_step > 0 requires tracker_mode='mpc', 'mpc_batched', or 'delayed'; "
+            "plan_dead_time_step > 0 requires tracker_mode='mpc', 'mpc_batched', or 'delayed'; "
             "perfect tracking turns prefix/tail discontinuities into instantaneous pose jumps"
         )
     if controller_compensation and tracker_mode != "delayed":

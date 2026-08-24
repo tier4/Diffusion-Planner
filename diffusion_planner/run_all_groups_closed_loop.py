@@ -189,6 +189,8 @@ def run_one_group(
                 world_delay_mode=cfg.closed_loop_world_delay_mode,
                 k_lag=cfg.closed_loop_k_lag,
                 delay_step=cfg.closed_loop_delay_step,
+                plan_dead_time_step=cfg.closed_loop_plan_dead_time_step,
+                prefix_step=cfg.closed_loop_prefix_step,
                 plant_parameter_set=cfg.closed_loop_plant_parameter_set,
                 steer_dead_time_s=cfg.closed_loop_steer_dead_time_s,
                 steer_time_constant_s=cfg.closed_loop_steer_time_constant_s,

@@ -149,7 +149,23 @@ def parse_args() -> argparse.Namespace:
         "--delay_step",
         type=int,
         default=0,
-        help="committed ego-plan prefix and plan-activation delay in 0.1 s steps (0..5)",
+        help="legacy bundled knob: sets both --plan_dead_time_step and --prefix_step (0..5)",
+    )
+    p.add_argument(
+        "--plan_dead_time_step",
+        type=int,
+        default=None,
+        help="simulator dead time in 0.1 s ticks between the inferred ego state and the tick "
+        "the plan starts executing (inference + publish + controller intake); the previous "
+        "plan keeps executing meanwhile. Overrides --delay_step for this half",
+    )
+    p.add_argument(
+        "--prefix_step",
+        type=int,
+        default=None,
+        help="model-input setting: committed rows handed to the decoder as a fixed prefix via "
+        "the delay tensor (0 = prefix conditioning off, as on the deployed ONNX). Must be "
+        "<= plan dead time. Overrides --delay_step for this half",
     )
     p.add_argument(
         "--tracker_mode",
@@ -234,6 +250,8 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         world_delay_mode=args.world_delay_mode,
         k_lag=args.k_lag,
         delay_step=args.delay_step,
+        plan_dead_time_step=args.plan_dead_time_step,
+        prefix_step=args.prefix_step,
         tracker_mode=args.tracker_mode,
         neighbor_history_mode="recorded",
         replan_interval=args.replan_interval,
@@ -261,6 +279,8 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         world_delay_mode=args.world_delay_mode,
         k_lag=args.k_lag,
         delay_step=args.delay_step,
+        plan_dead_time_step=args.plan_dead_time_step,
+        prefix_step=args.prefix_step,
         plant_parameter_set=args.plant_parameter_set,
         steer_dead_time_s=args.steer_dead_time_s,
         steer_time_constant_s=args.steer_time_constant_s,

@@ -54,6 +54,7 @@ def _model_args(*, velocity=False):
 def _state(schedule, *, k=0, velocity=False):
     return SimpleNamespace(
         delay_step=2,
+        prefix_step=2,
         plan_schedule=schedule,
         k=k,
         live_pose=np.array([0.0, 0.0, 0.0]),
@@ -109,3 +110,17 @@ def test_velocity_representation_uses_per_tick_displacements_before_normalizatio
         scene["sampled_trajectories"][0, 0, 1:3, :2],
         [[1.0, 0.0], [2.0, 0.0]],
     )
+
+
+def test_prefix_off_leaves_model_input_untouched_while_plan_is_still_delayed():
+    schedule = _PlanSchedule()
+    xy0, h0 = _plan(0.0)
+    schedule.enqueue(born_step=0, world_xy=xy0, world_heading=h0, delay_step=2, immediate=True)
+    state = _state(schedule, k=2)
+    state.prefix_step = 0
+    np_dict = {}
+    assert _attach_committed_prefix(np_dict, state, _model_args()) == 0
+    assert np_dict == {}
+    # The simulator schedule is untouched by the model-input setting: the plan born at
+    # tick 0 is still the one executing at tick 2.
+    np.testing.assert_array_equal(schedule.reference(2, 1, strict_horizon=True)[0][:, 0], [2.0])

@@ -3,6 +3,7 @@ import pytest
 from scenario_generation.closed_loop_delay import (
     NAMED_PLANT_PARAMETERS,
     PlantParameters,
+    resolve_plan_delay,
     resolve_plant_parameters,
     validate_delay_options,
 )
@@ -50,8 +51,27 @@ def test_none_world_mode_rejects_hidden_lag():
 
 def test_delay_step_is_limited_to_training_range():
     _valid(delay_step=5, tracker_mode="mpc")
-    with pytest.raises(ValueError, match="delay_step must be <= 5"):
+    with pytest.raises(ValueError, match="plan_dead_time_step must be <= 5"):
         _valid(delay_step=6, tracker_mode="mpc")
+
+
+def test_plan_dead_time_and_prefix_resolve_from_legacy_knob():
+    assert resolve_plan_delay(None, None, None) == (0, 0)
+    assert resolve_plan_delay(2, None, None) == (2, 2)
+    assert resolve_plan_delay(2, None, 0) == (2, 0)
+    assert resolve_plan_delay(None, 3, 1) == (3, 1)
+    assert resolve_plan_delay(2, 4, None) == (4, 2)
+
+
+def test_prefix_cannot_exceed_plan_dead_time():
+    _valid(plan_dead_time_step=2, prefix_step=0, tracker_mode="delayed")
+    _valid(plan_dead_time_step=2, prefix_step=2, tracker_mode="delayed")
+    with pytest.raises(ValueError, match="prefix_step must be <= plan_dead_time_step"):
+        _valid(plan_dead_time_step=1, prefix_step=2, tracker_mode="delayed")
+    with pytest.raises(ValueError, match="prefix_step must be <= plan_dead_time_step"):
+        _valid(prefix_step=1, tracker_mode="delayed")
+    with pytest.raises(ValueError, match="prefix_step must be >= 0"):
+        _valid(plan_dead_time_step=2, prefix_step=-1, tracker_mode="delayed")
 
 
 def test_plan_delay_rejects_discontinuous_perfect_tracking():

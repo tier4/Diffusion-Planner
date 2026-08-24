@@ -192,8 +192,16 @@ class ClosedLoopConfig:
     )
     closed_loop_k_lag: int = cli("world-input delay in 0.1 s ticks", default=0)
     closed_loop_delay_step: int = cli(
-        "ego committed-prefix and plan-activation delay in 0.1 s ticks",
+        "legacy bundled knob: sets both plan dead time and prefix rows in 0.1 s ticks",
         default=0,
+    )
+    closed_loop_plan_dead_time_step: int | None = cli(
+        "simulator dead time (ticks) between inferred ego state and plan execution",
+        default=None,
+    )
+    closed_loop_prefix_step: int | None = cli(
+        "committed rows handed to the decoder as a fixed prefix (0 = off)",
+        default=None,
     )
     closed_loop_plant_parameter_set: Literal["official", "measured", "custom"] = cli(
         "vehicle-plant parameter set",

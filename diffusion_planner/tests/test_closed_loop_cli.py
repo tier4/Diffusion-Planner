@@ -101,6 +101,8 @@ def test_validation_cli_forwards_delay_options(monkeypatch):
     assert knobs["world_delay_mode"] == "lag_raw"
     assert knobs["k_lag"] == 2
     assert knobs["delay_step"] == 2
+    assert knobs["plan_dead_time_step"] is None
+    assert knobs["prefix_step"] is None
     assert knobs["tracker_mode"] == "delayed"
     assert knobs["plant_parameter_set"] == "measured"
     assert knobs["controller_compensation"] is True
@@ -357,3 +359,46 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         "objects": str(tmp_path / "sites" / "alpha"),
         "noobj": str(tmp_path / "sites__noobj" / "alpha"),
     }
+
+
+def test_validation_cli_splits_plan_dead_time_from_prefix(monkeypatch):
+    mod = _load_valid_predictor_closed_loop()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/model.pth",
+            "--npz_root",
+            "/tmp/route",
+            "--plan_dead_time_step",
+            "2",
+            "--prefix_step",
+            "0",
+            "--tracker_mode",
+            "delayed",
+        ],
+    )
+    knobs = mod._eval_knobs(mod.parse_args())
+    assert knobs["delay_step"] == 0
+    assert knobs["plan_dead_time_step"] == 2
+    assert knobs["prefix_step"] == 0
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/model.pth",
+            "--npz_root",
+            "/tmp/route",
+            "--prefix_step",
+            "1",
+            "--tracker_mode",
+            "delayed",
+        ],
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="prefix_step must be <= plan_dead_time_step"):
+        mod._eval_knobs(mod.parse_args())

@@ -533,6 +533,8 @@ def run_closed_loop_eval(
     accel_dead_time_s: float | None = None,
     accel_time_constant_s: float | None = None,
     controller_compensation: bool = False,
+    plan_dead_time_step: int | None = None,
+    prefix_step: int | None = None,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -560,15 +562,18 @@ def run_closed_loop_eval(
     ``segments`` (list[row]), and ``elapsed_sec``.
     """
     from scenario_generation.closed_loop_delay import (
+        resolve_plan_delay,
         resolve_plant_parameters,
         validate_delay_options,
     )
 
+    delay_step, prefix_step = resolve_plan_delay(delay_step, plan_dead_time_step, prefix_step)
     validate_delay_options(
         timeline_progress_mode=timeline_progress_mode,
         world_delay_mode=world_delay_mode,
         k_lag=k_lag,
         delay_step=delay_step,
+        prefix_step=prefix_step,
         tracker_mode=tracker_mode,
         neighbor_history_mode=neighbor_history_mode,
         replan_interval=replan_interval,
@@ -652,6 +657,7 @@ def run_closed_loop_eval(
                 world_delay_mode=world_delay_mode,
                 k_lag=k_lag,
                 delay_step=delay_step,
+                prefix_step=prefix_step,
                 plant_parameters=plant_parameters,
                 controller_compensation=controller_compensation,
             )

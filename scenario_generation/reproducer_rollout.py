@@ -250,7 +250,7 @@ def _attach_committed_prefix(np_dict: dict, s: "_SegState", model_args) -> int:
     attached and the caller falls back to the existing delay-zero input.
     """
 
-    delay = int(s.delay_step)
+    delay = int(getattr(s, "prefix_step", s.delay_step))
     if delay <= 0:
         return 0
     n_agents = 1 + int(model_args.predicted_neighbor_num)
@@ -769,7 +769,10 @@ class _SegState:
     gt_dev_count: int = 0
     world_delay_mode: str = "none"
     k_lag: int = 0
+    # Simulator dead time between the inferred ego state and plan execution (ticks).
     delay_step: int = 0
+    # Model-input setting: committed rows handed to the decoder as a fixed prefix.
+    prefix_step: int = 0
     plant_parameters: object = None
     controller_compensation: bool = False
     clock_idx: int | None = None
@@ -838,6 +841,7 @@ def _seed_state(
     delay_step: int = 0,
     plant_parameters=None,
     controller_compensation: bool = False,
+    prefix_step: int | None = None,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import DelayedPlantTracker, MPCTracker, PerfectTracker
 
@@ -921,6 +925,7 @@ def _seed_state(
         world_delay_mode=world_delay_mode,
         k_lag=int(k_lag),
         delay_step=int(delay_step),
+        prefix_step=int(delay_step if prefix_step is None else prefix_step),
         plant_parameters=plant_parameters,
         controller_compensation=bool(controller_compensation),
         plan_schedule=_PlanSchedule() if int(delay_step) > 0 else None,
@@ -1867,6 +1872,8 @@ def render_segment(
     accel_time_constant_s: float | None = None,
     plant_parameters=None,
     controller_compensation: bool = False,
+    plan_dead_time_step: int | None = None,
+    prefix_step: int | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1943,15 +1950,18 @@ def render_segment(
     from pathlib import Path
 
     from scenario_generation.closed_loop_delay import (
+        resolve_plan_delay,
         resolve_plant_parameters,
         validate_delay_options,
     )
 
+    delay_step, prefix_step = resolve_plan_delay(delay_step, plan_dead_time_step, prefix_step)
     validate_delay_options(
         timeline_progress_mode=timeline_progress_mode,
         world_delay_mode=world_delay_mode,
         k_lag=k_lag,
         delay_step=delay_step,
+        prefix_step=prefix_step,
         tracker_mode=tracker_mode,
         neighbor_history_mode=neighbor_history_mode,
         replan_interval=replan_interval,
@@ -1994,6 +2004,7 @@ def render_segment(
         world_delay_mode=world_delay_mode,
         k_lag=k_lag,
         delay_step=delay_step,
+        prefix_step=prefix_step,
         plant_parameters=plant_parameters,
         controller_compensation=controller_compensation,
     )
@@ -2330,6 +2341,8 @@ def run_segments_batched(
     danger_decluster_steps: int = 10,
     danger_manifest_callback=None,
     goal_mode: str = "segment",
+    plan_dead_time_step: int | None = None,
+    prefix_step: int | None = None,
 ) -> list[dict]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -2367,16 +2380,19 @@ def run_segments_batched(
     from concurrent.futures import ThreadPoolExecutor
 
     from scenario_generation.closed_loop_delay import (
+        resolve_plan_delay,
         resolve_plant_parameters,
         validate_delay_options,
     )
 
     timers = timers or Timers()
+    delay_step, prefix_step = resolve_plan_delay(delay_step, plan_dead_time_step, prefix_step)
     validate_delay_options(
         timeline_progress_mode=timeline_progress_mode,
         world_delay_mode=world_delay_mode,
         k_lag=k_lag,
         delay_step=delay_step,
+        prefix_step=prefix_step,
         tracker_mode=tracker_mode,
         neighbor_history_mode=neighbor_history_mode,
         replan_interval=1,
@@ -2428,6 +2444,7 @@ def run_segments_batched(
                     world_delay_mode=world_delay_mode,
                     k_lag=k_lag,
                     delay_step=delay_step,
+                    prefix_step=prefix_step,
                     plant_parameters=plant_parameters,
                     controller_compensation=controller_compensation,
                 )
