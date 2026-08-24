@@ -254,6 +254,20 @@ def parse_args() -> argparse.Namespace:
     w.add_argument("--window_w_lon", type=float, default=0.25)
     w.add_argument("--window_w_lat", type=float, default=0.25)
     w.add_argument(
+        "--window_indices",
+        type=int,
+        nargs="*",
+        default=None,
+        help="evaluate only these window indices of each route (videos / spot checks)",
+    )
+    w.add_argument(
+        "--window_draw_every",
+        type=int,
+        default=None,
+        help="render a PNG every N ticks per window and encode <window>.mp4 (default: no video)",
+    )
+    w.add_argument("--window_video_fps", type=float, default=5.0)
+    w.add_argument(
         "--max_windows_per_route",
         type=int,
         default=None,
@@ -290,6 +304,9 @@ def _window_config(args: argparse.Namespace):
         w_lon=args.window_w_lon,
         w_lat=args.window_w_lat,
         max_windows_per_route=args.max_windows_per_route,
+        window_indices=tuple(args.window_indices) if args.window_indices else None,
+        draw_every=args.window_draw_every,
+        video_fps=args.window_video_fps,
     )
 
 

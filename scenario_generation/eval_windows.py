@@ -41,6 +41,7 @@ from pathlib import Path
 import numpy as np
 
 from scenario_generation.closed_loop_eval import (
+    build_mp4,
     enumerate_multi_root_routes,
     segment_row_for_json,
 )
@@ -73,6 +74,9 @@ class WindowConfig:
     w_lat: float = 0.25
     polyline_margin_frames: int = 300
     max_windows_per_route: int | None = None  # smoke tests: evaluate only the first N windows
+    window_indices: tuple[int, ...] | None = None  # evaluate only these window indices per route
+    draw_every: int | None = None  # render a PNG every N ticks and encode <window>.mp4
+    video_fps: float = 5.0
 
     def validate(self) -> "WindowConfig":
         if self.mode not in ("fixed", "anchor"):
@@ -359,6 +363,8 @@ def run_windowed_eval(
         route_keys = [k for k in route_keys if route_filter(k)]
     kwargs = dict(render_kwargs)
     kwargs.update(_WINDOW_RENDER_OVERRIDES)
+    if cfg.draw_every is not None:
+        kwargs["draw_every"] = int(cfg.draw_every)
     kwargs["abort_deviation_m"] = float(cfg.coverage_abort_m)
     kwargs["abort_after"] = int(cfg.coverage_abort_after)
 
@@ -373,10 +379,14 @@ def run_windowed_eval(
                 windows = windows[: int(cfg.max_windows_per_route)]
             plan[key] = windows
             for wi, (lo, hi) in enumerate(windows):
+                if cfg.window_indices is not None and wi not in cfg.window_indices:
+                    continue
                 wdir = out_dir / key / f"w{wi:03d}_{lo:05d}_{hi:05d}"
                 metrics = render_segment(
                     model, model_args, tl, lo, hi, wdir, max_steps=hi - lo, **kwargs
                 )
+                if cfg.draw_every is not None and any(wdir.glob("*.png")):
+                    build_mp4(wdir, out_dir / key / f"{wdir.name}.mp4", cfg.video_fps)
                 live_xy = _read_live_xy(wdir / "rollout.jsonl")
                 div = window_divergence(
                     tl.poses, lo, hi, live_xy, margin_frames=cfg.polyline_margin_frames
