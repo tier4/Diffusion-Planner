@@ -34,12 +34,81 @@ def test_closed_loop_config_fields_cli_marked():
 
     expected_cli_fields = [
         "closed_loop_npz_root",
+        "closed_loop_replan_interval",
+        "closed_loop_tracker_mode",
+        "closed_loop_neighbor_history_mode",
+        "closed_loop_timeline_progress_mode",
+        "closed_loop_world_delay_mode",
+        "closed_loop_k_lag",
+        "closed_loop_delay_step",
+        "closed_loop_plant_parameter_set",
+        "closed_loop_steer_dead_time_s",
+        "closed_loop_steer_time_constant_s",
+        "closed_loop_accel_dead_time_s",
+        "closed_loop_accel_time_constant_s",
+        "closed_loop_controller_compensation",
     ]
 
     for field_name in expected_cli_fields:
         assert field_name in cli_field_names, (
             f"{field_name} should be marked with cli() in TrainConfig"
         )
+
+
+def test_closed_loop_delay_config_cli_defaults_and_explicit_values():
+    from diffusion_planner.config import TrainConfig, build_parser
+
+    parser = build_parser(TrainConfig, "test")
+    defaults = parser.parse_args([])
+    assert defaults.closed_loop_timeline_progress_mode == "pose"
+    assert defaults.closed_loop_world_delay_mode == "none"
+    assert defaults.closed_loop_k_lag == 0
+    assert defaults.closed_loop_delay_step == 0
+    assert defaults.closed_loop_tracker_mode == "mpc"
+    assert defaults.closed_loop_controller_compensation is False
+
+    args = parser.parse_args(
+        [
+            "--closed_loop_timeline_progress_mode",
+            "clock",
+            "--closed_loop_world_delay_mode",
+            "lag_extrapolated",
+            "--closed_loop_k_lag",
+            "3",
+            "--closed_loop_delay_step",
+            "2",
+            "--closed_loop_tracker_mode",
+            "delayed",
+            "--closed_loop_plant_parameter_set",
+            "custom",
+            "--closed_loop_steer_dead_time_s",
+            "0.2",
+            "--closed_loop_steer_time_constant_s",
+            "0.3",
+            "--closed_loop_accel_dead_time_s",
+            "0.4",
+            "--closed_loop_accel_time_constant_s",
+            "0.5",
+            "--closed_loop_controller_compensation",
+            "true",
+        ]
+    )
+    assert args.closed_loop_timeline_progress_mode == "clock"
+    assert args.closed_loop_world_delay_mode == "lag_extrapolated"
+    assert args.closed_loop_k_lag == 3
+    assert args.closed_loop_delay_step == 2
+    assert args.closed_loop_tracker_mode == "delayed"
+    assert args.closed_loop_steer_dead_time_s == 0.2
+    assert args.closed_loop_accel_time_constant_s == 0.5
+    assert args.closed_loop_controller_compensation is True
+
+
+def test_closed_loop_delay_config_cli_rejects_unknown_modes():
+    from diffusion_planner.config import TrainConfig, build_parser
+
+    parser = build_parser(TrainConfig, "test")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--closed_loop_world_delay_mode", "mystery"])
 
 
 def test_train_predictor_uses_config_build_parser():

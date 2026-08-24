@@ -968,10 +968,14 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         return None
     s.clock_idx = int(idx)
     s.world_idx = int(world_idx)
-    model_base = _world_input_base(
-        s.tl, s.world_idx, s.clock_idx, s.world_delay_mode, s.k_lag
-    )
+    # Preserve the established no-delay input-build branch exactly. Apart from
+    # avoiding a redundant load, this keeps default-off callers and test hooks
+    # on build_input_np/build_input_raw rather than the opt-in lag adapter.
+    model_base = None
     if s.world_delay_mode != "none":
+        model_base = _world_input_base(
+            s.tl, s.world_idx, s.clock_idx, s.world_delay_mode, s.k_lag
+        )
         s.metric_np_dict, s.metric_neighbors_live = build_input_np(
             s.tl, s.clock_idx, s.live_pose, s.ego_hist, s.dyn
         )
@@ -989,14 +993,24 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if gpu_transform:
         # 8-tuple (..., sim_nb, slot_uuids, world_by_uuid); sim_nb overrides the recorded
         # neighbor block AFTER the batched world_to_ego transform (None = recorded mode).
-        base, dxyz, live_past, live_cur, _ridx = build_input_raw(
-            s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
-        )
+        if model_base is None:
+            base, dxyz, live_past, live_cur, _ridx = build_input_raw(
+                s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn
+            )
+        else:
+            base, dxyz, live_past, live_cur, _ridx = build_input_raw(
+                s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
+            )
         base["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
         return (base, dxyz, live_past, live_cur, s.clock_idx, sim_nb, slot_uuids, world_by_uuid)
-    np_dict, neighbors_live = build_input_np(
-        s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
-    )
+    if model_base is None:
+        np_dict, neighbors_live = build_input_np(
+            s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn
+        )
+    else:
+        np_dict, neighbors_live = build_input_np(
+            s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
+        )
     if sim_nb is not None:
         np_dict["neighbor_agents_past"] = sim_nb
         neighbors_live = sim_nb[0, :, -1, :].copy()
@@ -2367,6 +2381,7 @@ def run_segments_batched(
     way — prefetch only warms the cache).
     """
     from concurrent.futures import ThreadPoolExecutor
+
     from scenario_generation.closed_loop_delay import (
         resolve_plant_parameters,
         validate_delay_options,

@@ -523,6 +523,16 @@ def run_closed_loop_eval(
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
     draw_workers: int = 1,
+    timeline_progress_mode: str = "pose",
+    world_delay_mode: str = "none",
+    k_lag: int = 0,
+    delay_step: int = 0,
+    plant_parameter_set: str = "official",
+    steer_dead_time_s: float | None = None,
+    steer_time_constant_s: float | None = None,
+    accel_dead_time_s: float | None = None,
+    accel_time_constant_s: float | None = None,
+    controller_compensation: bool = False,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -549,6 +559,29 @@ def run_closed_loop_eval(
     Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
     """
+    from scenario_generation.closed_loop_delay import (
+        resolve_plant_parameters,
+        validate_delay_options,
+    )
+
+    validate_delay_options(
+        timeline_progress_mode=timeline_progress_mode,
+        world_delay_mode=world_delay_mode,
+        k_lag=k_lag,
+        delay_step=delay_step,
+        tracker_mode=tracker_mode,
+        neighbor_history_mode=neighbor_history_mode,
+        replan_interval=replan_interval,
+        controller_compensation=controller_compensation,
+        future_len=model_args.future_len,
+    )
+    plant_parameters = resolve_plant_parameters(
+        plant_parameter_set,
+        steer_dead_time_s=steer_dead_time_s,
+        steer_time_constant_s=steer_time_constant_s,
+        accel_dead_time_s=accel_dead_time_s,
+        accel_time_constant_s=accel_time_constant_s,
+    )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -615,7 +648,12 @@ def run_closed_loop_eval(
                 color_by_uuid=True,
                 window=None,
                 max_steps=None,
-                timeline_progress_mode="pose",
+                timeline_progress_mode=timeline_progress_mode,
+                world_delay_mode=world_delay_mode,
+                k_lag=k_lag,
+                delay_step=delay_step,
+                plant_parameters=plant_parameters,
+                controller_compensation=controller_compensation,
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so

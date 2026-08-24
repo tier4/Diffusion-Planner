@@ -1,6 +1,7 @@
 """CLI utilities for dataclass-based config. Works with any config class that marks fields with ``cli()``."""
 
 import argparse
+import types
 from dataclasses import MISSING, Field, field, fields
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
@@ -48,7 +49,7 @@ def cli_fields(cls: type) -> list[Field]:
 
 
 def _unwrap_optional(annotation: Any) -> Any:
-    if get_origin(annotation) is Union:
+    if get_origin(annotation) in (Union, types.UnionType):
         args = [a for a in get_args(annotation) if a is not type(None)]
         if len(args) == 1:
             return args[0]

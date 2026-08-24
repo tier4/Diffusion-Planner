@@ -28,6 +28,19 @@ def _load_run_all_groups():
     return mod
 
 
+def _load_valid_predictor_closed_loop():
+    """Lazy-load the standalone validation CLI without executing ``main``."""
+    import importlib.util
+    import sys
+
+    path = _REPO_ROOT / "diffusion_planner" / "valid_predictor_closed_loop.py"
+    spec = importlib.util.spec_from_file_location("valid_predictor_closed_loop_for_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_build_parser_required_and_defaults(tmp_path: Path):
     parser = build_parser(TrainConfig, "test parser")
     train_list = str(tmp_path / "train.json")
@@ -54,6 +67,118 @@ def test_build_parser_required_and_defaults(tmp_path: Path):
     assert args.batch_size == 512
     assert args.train_epochs == 80
     assert args.save_utd == 10
+
+
+def test_validation_cli_forwards_delay_options(monkeypatch):
+    mod = _load_valid_predictor_closed_loop()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/model.pth",
+            "--npz_root",
+            "/tmp/route",
+            "--timeline_progress_mode",
+            "clock",
+            "--world_delay_mode",
+            "lag_raw",
+            "--k_lag",
+            "2",
+            "--delay_step",
+            "2",
+            "--tracker_mode",
+            "delayed",
+            "--plant_parameter_set",
+            "measured",
+            "--controller_compensation",
+        ],
+    )
+
+    knobs = mod._eval_knobs(mod.parse_args())
+
+    assert knobs["timeline_progress_mode"] == "clock"
+    assert knobs["world_delay_mode"] == "lag_raw"
+    assert knobs["k_lag"] == 2
+    assert knobs["delay_step"] == 2
+    assert knobs["tracker_mode"] == "delayed"
+    assert knobs["plant_parameter_set"] == "measured"
+    assert knobs["controller_compensation"] is True
+
+
+def test_validation_cli_rejects_invalid_delay_combination(monkeypatch):
+    mod = _load_valid_predictor_closed_loop()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/model.pth",
+            "--npz_root",
+            "/tmp/route",
+            "--world_delay_mode",
+            "lag_extrapolated",
+            "--k_lag",
+            "3",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="timeline_progress_mode='clock'"):
+        mod._eval_knobs(mod.parse_args())
+
+
+def test_run_one_group_forwards_delay_config(tmp_path: Path, monkeypatch):
+    from diffusion_planner.config import ClosedLoopConfig
+
+    from scenario_generation import closed_loop_evaluation
+
+    mod = _load_run_all_groups()
+    captured = {}
+
+    class FakeEvaluation:
+        def __init__(self, model, model_args, config, npz_root, **kwargs):
+            captured["params"] = config.params
+            captured["npz_root"] = npz_root
+
+        def run_distributed(self):
+            captured["ran"] = True
+
+    monkeypatch.setattr(
+        closed_loop_evaluation,
+        "FullRouteClosedLoopEvaluation",
+        FakeEvaluation,
+    )
+    cfg = ClosedLoopConfig(
+        device="cpu",
+        closed_loop_replan_interval=1,
+        closed_loop_tracker_mode="delayed",
+        closed_loop_timeline_progress_mode="clock",
+        closed_loop_world_delay_mode="lag_extrapolated",
+        closed_loop_k_lag=3,
+        closed_loop_delay_step=2,
+        closed_loop_plant_parameter_set="measured",
+        closed_loop_controller_compensation=True,
+    )
+
+    mod.run_one_group(
+        model=None,
+        model_args=None,
+        npz_root_list=["/known/route"],
+        out_dir=tmp_path,
+        cfg=cfg,
+        render_media=False,
+    )
+
+    params = captured["params"]
+    assert captured["npz_root"] == "/known/route"
+    assert captured["ran"] is True
+    assert params.timeline_progress_mode == "clock"
+    assert params.world_delay_mode == "lag_extrapolated"
+    assert params.k_lag == 3
+    assert params.delay_step == 2
+    assert params.tracker_mode == "delayed"
+    assert params.plant_parameter_set == "measured"
+    assert params.controller_compensation is True
 
 
 def test_resolve_paths(tmp_path: Path, monkeypatch):

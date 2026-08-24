@@ -133,6 +133,46 @@ def parse_args() -> argparse.Namespace:
         "is executed, re-expressed in the current ego frame each step; the ego still steps at 10Hz",
     )
     p.add_argument(
+        "--timeline_progress_mode",
+        choices=("pose", "clock"),
+        default="pose",
+        help="recorded-world progress source; world delay is defined only for clock mode",
+    )
+    p.add_argument(
+        "--world_delay_mode",
+        choices=("none", "lag_extrapolated", "lag_raw"),
+        default="none",
+        help="delay only the model's recorded-world input; metrics retain the true clock",
+    )
+    p.add_argument("--k_lag", type=int, default=0, help="world-input delay in 0.1 s ticks")
+    p.add_argument(
+        "--delay_step",
+        type=int,
+        default=0,
+        help="committed ego-plan prefix and plan-activation delay in 0.1 s steps (0..5)",
+    )
+    p.add_argument(
+        "--tracker_mode",
+        choices=("perfect", "mpc", "delayed"),
+        default="perfect",
+        help="ego execution model; delayed wraps MPC with a dead-time/first-order plant",
+    )
+    p.add_argument(
+        "--plant_parameter_set",
+        choices=("official", "measured", "custom"),
+        default="official",
+    )
+    p.add_argument("--steer_dead_time_s", type=float, default=None)
+    p.add_argument("--steer_time_constant_s", type=float, default=None)
+    p.add_argument("--accel_dead_time_s", type=float, default=None)
+    p.add_argument("--accel_time_constant_s", type=float, default=None)
+    p.add_argument(
+        "--controller_compensation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="predict through pending plant commands before MPC; valid only with delayed tracker",
+    )
+    p.add_argument(
         "--draw_every",
         type=int,
         default=8,
@@ -182,6 +222,30 @@ def _load_model(model_path: Path, device: str):
 def _eval_knobs(args: argparse.Namespace) -> dict:
     """The rollout tunables forwarded to run_closed_loop_eval (everything except model/npz/out/
     device/shard), gathered once so the sequential and per-worker calls stay in lockstep."""
+    from scenario_generation.closed_loop_delay import (
+        resolve_plant_parameters,
+        validate_delay_options,
+    )
+
+    # Fail at the CLI boundary, before DDP setup or checkpoint loading. The
+    # evaluation entry point validates again because it is also a public API.
+    validate_delay_options(
+        timeline_progress_mode=args.timeline_progress_mode,
+        world_delay_mode=args.world_delay_mode,
+        k_lag=args.k_lag,
+        delay_step=args.delay_step,
+        tracker_mode=args.tracker_mode,
+        neighbor_history_mode="recorded",
+        replan_interval=args.replan_interval,
+        controller_compensation=args.controller_compensation,
+    )
+    resolve_plant_parameters(
+        args.plant_parameter_set,
+        steer_dead_time_s=args.steer_dead_time_s,
+        steer_time_constant_s=args.steer_time_constant_s,
+        accel_dead_time_s=args.accel_dead_time_s,
+        accel_time_constant_s=args.accel_time_constant_s,
+    )
     return dict(
         near_miss_thresh=args.near_miss_thresh,
         search_radius=args.search_radius,
@@ -193,10 +257,20 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         unstick_teleport_after=args.unstick_teleport_after,
         fps=args.fps,
         replan_interval=args.replan_interval,
+        timeline_progress_mode=args.timeline_progress_mode,
+        world_delay_mode=args.world_delay_mode,
+        k_lag=args.k_lag,
+        delay_step=args.delay_step,
+        plant_parameter_set=args.plant_parameter_set,
+        steer_dead_time_s=args.steer_dead_time_s,
+        steer_time_constant_s=args.steer_time_constant_s,
+        accel_dead_time_s=args.accel_dead_time_s,
+        accel_time_constant_s=args.accel_time_constant_s,
+        controller_compensation=args.controller_compensation,
         draw_every=args.draw_every,
         draw_workers=args.draw_workers,
         neighbor_history_mode="recorded",
-        tracker_mode="perfect",
+        tracker_mode=args.tracker_mode,
         strong_brake_mps2=args.strong_brake_mps2,
         abort_deviation_m=args.abort_deviation_m,
         abort_after=args.abort_after,

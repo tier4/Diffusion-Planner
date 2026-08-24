@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -155,9 +155,18 @@ class ClosedLoopConfig:
     closed_loop_unstick_teleport_after: int = 50
     closed_loop_draw_every: int = 2
     closed_loop_draw_workers: int = cli("render on this many worker processes", default=4)
-    closed_loop_replan_interval: int = 1
-    closed_loop_tracker_mode: str = "mpc"
-    closed_loop_neighbor_history_mode: str = "recorded"
+    closed_loop_replan_interval: int = cli(
+        "run closed-loop inference every N simulation ticks",
+        default=1,
+    )
+    closed_loop_tracker_mode: Literal["perfect", "mpc", "mpc_batched", "delayed"] = cli(
+        "ego execution model; delayed adds separate steer/acc dead-time plants",
+        default="mpc",
+    )
+    closed_loop_neighbor_history_mode: Literal["recorded", "sim"] = cli(
+        "neighbor-history source; world delay requires recorded",
+        default="recorded",
+    )
     closed_loop_yaw_gate: bool = True
     closed_loop_strong_brake_mps2: float = -2.5
     closed_loop_abort_deviation_m: float = 50.0
@@ -173,7 +182,43 @@ class ClosedLoopConfig:
     closed_loop_color_by_uuid: bool = True
     closed_loop_window: tuple[int, int] | None = None
     closed_loop_max_steps: int | None = None
-    closed_loop_timeline_progress_mode: str = "pose"
+    closed_loop_timeline_progress_mode: Literal["pose", "clock"] = cli(
+        "recorded-world progress source; world delay requires clock",
+        default="pose",
+    )
+    closed_loop_world_delay_mode: Literal["none", "lag_extrapolated", "lag_raw"] = cli(
+        "model-input-only recorded-world delay mode",
+        default="none",
+    )
+    closed_loop_k_lag: int = cli("world-input delay in 0.1 s ticks", default=0)
+    closed_loop_delay_step: int = cli(
+        "ego committed-prefix and plan-activation delay in 0.1 s ticks",
+        default=0,
+    )
+    closed_loop_plant_parameter_set: Literal["official", "measured", "custom"] = cli(
+        "vehicle-plant parameter set",
+        default="official",
+    )
+    closed_loop_steer_dead_time_s: float | None = cli(
+        "custom steering dead time in seconds",
+        default=None,
+    )
+    closed_loop_steer_time_constant_s: float | None = cli(
+        "custom steering first-order time constant in seconds",
+        default=None,
+    )
+    closed_loop_accel_dead_time_s: float | None = cli(
+        "custom acceleration dead time in seconds",
+        default=None,
+    )
+    closed_loop_accel_time_constant_s: float | None = cli(
+        "custom acceleration first-order time constant in seconds",
+        default=None,
+    )
+    closed_loop_controller_compensation: bool = cli(
+        "predict through pending delayed-plant commands before MPC",
+        default=False,
+    )
 
     # validation in training part
     closed_loop_wandb_video_pick: str = cli(

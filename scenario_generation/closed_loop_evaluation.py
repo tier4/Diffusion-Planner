@@ -87,6 +87,15 @@ class RolloutParams:
     window: tuple[int, int] | None
     max_steps: int | None
     timeline_progress_mode: str
+    world_delay_mode: str = "none"
+    k_lag: int = 0
+    delay_step: int = 0
+    plant_parameter_set: str = "official"
+    steer_dead_time_s: float | None = None
+    steer_time_constant_s: float | None = None
+    accel_dead_time_s: float | None = None
+    accel_time_constant_s: float | None = None
+    controller_compensation: bool = False
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -120,6 +129,15 @@ class RolloutParams:
             "window": self.window,
             "max_steps": self.max_steps,
             "timeline_progress_mode": self.timeline_progress_mode,
+            "world_delay_mode": self.world_delay_mode,
+            "k_lag": self.k_lag,
+            "delay_step": self.delay_step,
+            "plant_parameter_set": self.plant_parameter_set,
+            "steer_dead_time_s": self.steer_dead_time_s,
+            "steer_time_constant_s": self.steer_time_constant_s,
+            "accel_dead_time_s": self.accel_dead_time_s,
+            "accel_time_constant_s": self.accel_time_constant_s,
+            "controller_compensation": self.controller_compensation,
         }
 
 
