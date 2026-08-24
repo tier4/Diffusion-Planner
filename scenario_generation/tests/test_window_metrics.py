@@ -159,6 +159,12 @@ def test_ddc_penalises_driving_outside_route_lanes_unless_human_did():
     assert out["detail"]["ddc_exempt_recorded_off_route_frac"] == 1.0
 
 
+def _shift(route, lat):
+    route = route.copy()
+    route[0] = _route_lane(lat_shift=lat)
+    return route
+
+
 def _shifted_far(tl):
     base = tl.npz
 
@@ -176,7 +182,17 @@ def test_recorded_operational_stop_is_tagged():
     tl = FakeTL(lane_shift_frames=stop, stop_frames=stop)
     tl.npz = _shifted_far(tl)
     out = wm.score_window_epdms(tl, LO, HI, _rows(LO, HI), EGO_SHAPE, wm.ScoreConfig())
-    assert out["recorded_stop"] is True
+    assert out["recorded_stop"] is True and out["bucket"] == "recorded_stop"
+    # A queue stop slightly off-centre (0.8 m) is NOT an operational stop.
+    tl = FakeTL(lane_shift_frames=stop, stop_frames=stop)
+    base = tl.npz
+    tl.npz = lambda idx, base=base: (
+        dict(base(idx), route_lanes=_shift(base(idx)["route_lanes"], -0.8))
+        if idx in stop
+        else base(idx)
+    )
+    out = wm.score_window_epdms(tl, LO, HI, _rows(LO, HI), EGO_SHAPE, wm.ScoreConfig())
+    assert out["recorded_stop"] is False
     tl = FakeTL()
     out = wm.score_window_epdms(tl, LO, HI, _rows(LO, HI), EGO_SHAPE, wm.ScoreConfig())
     assert out["recorded_stop"] is False
@@ -261,3 +277,10 @@ def test_map_terms_follow_a_lagging_ego():
         or out["terms"]["ep"] < 1.0
     )
     assert math.isclose(out["detail"]["lon_max_behind_m"], 60.0, abs_tol=1e-6)
+
+
+def test_recorded_off_route_window_is_bucketed():
+    tl = FakeTL(lane_shift_frames=range(LO, HI))
+    tl.npz = _shifted_far(tl)  # human 5 m off the lane for the whole window (parked)
+    out = wm.score_window_epdms(tl, LO, HI, _rows(LO, HI), EGO_SHAPE, wm.ScoreConfig())
+    assert out["recorded_off_route"] is True and out["bucket"] == "recorded_off_route"

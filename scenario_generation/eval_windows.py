@@ -316,8 +316,11 @@ def summarize_windows(rows: list[dict], *, include_recorded_stop: bool = False) 
     scored = [
         r for r in rows if not r["epdms"].get("invalid") and r["epdms"].get("score") is not None
     ]
-    stop_rows = [r for r in scored if r["epdms"].get("recorded_stop")]
-    valid = scored if include_recorded_stop else [r for r in scored if r not in stop_rows]
+    buckets: dict[str, list[dict]] = {}
+    for r in scored:
+        buckets.setdefault(r["epdms"].get("bucket", "main"), []).append(r)
+    stop_rows = buckets.get("recorded_stop", [])
+    valid = scored if include_recorded_stop else buckets.get("main", [])
     by_route: dict[str, list[float]] = {}
     for r in valid:
         by_route.setdefault(r["route"], []).append(float(r["epdms"]["score"]))
@@ -344,11 +347,15 @@ def summarize_windows(rows: list[dict], *, include_recorded_stop: bool = False) 
         "n_routes": int(len({r["route"] for r in rows})),
         "n_valid": int(len(valid)),
         "invalid_windows": int(len(rows) - len(scored)),
+        "buckets": {
+            k: {
+                "n_windows": len(v),
+                "score_micro": float(np.mean([r["epdms"]["score"] for r in v])),
+            }
+            for k, v in buckets.items()
+        },
         "recorded_stop_windows": int(len(stop_rows)),
         "recorded_stop_included": bool(include_recorded_stop),
-        "recorded_stop_score_micro": float(np.mean([r["epdms"]["score"] for r in stop_rows]))
-        if stop_rows
-        else None,
         "valid_span_reasons": cut_reasons,
         "score_macro": float(np.mean([np.mean(v) for v in by_route.values()]))
         if by_route

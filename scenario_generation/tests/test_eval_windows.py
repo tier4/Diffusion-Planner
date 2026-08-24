@@ -165,10 +165,11 @@ def test_score_requires_at_fault_block():
         ew.score_window({"terminated": "max_steps", "road_border": {}}, _div(), ew.WindowConfig())
 
 
-def _epdms(score, *, invalid=False, reason="window_end", nc=1.0):
+def _epdms(score, *, invalid=False, reason="window_end", nc=1.0, bucket="main"):
     return {
         "score": score,
         "invalid": invalid,
+        "bucket": bucket,
         "valid_ticks": 150,
         "valid_span": {"reason": reason, "tick": 150},
         "multiplicative": 1.0 if score else 0.0,
@@ -222,6 +223,11 @@ def test_summary_macro_vs_micro_and_invalid_windows():
     assert s["score_macro"] == pytest.approx((0.5 + 1.0) / 2)
     assert s["zero_windows"]["nc"] == 1
     assert s["term_means"]["nc"] == pytest.approx(2 / 3)
+    rows.append(_row("a", 0.2, bucket="recorded_stop"))
+    s = ew.summarize_windows(rows)
+    assert s["n_valid"] == 3 and s["buckets"]["recorded_stop"]["n_windows"] == 1
+    s = ew.summarize_windows(rows, include_recorded_stop=True)
+    assert s["n_valid"] == 4
 
 
 # --------------------------------------------------------------------------- #

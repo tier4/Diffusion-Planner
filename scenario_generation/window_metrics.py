@@ -92,6 +92,10 @@ class ScoreConfig:
     # off the route lanes and not at a red signal.  Tagged, and DDC/LK are exempt in the zone.
     recorded_stop_min_s: float = 3.0
     recorded_stop_speed_mps: float = 0.5
+    recorded_stop_offset_m: float = 1.5  # off-centre this much (~lane half width) counts as a bay
+    # Recorded ego outside its route lanes for more than this share of the window (parked at
+    # the route start / end, depot): bucketed as ``recorded_off_route``.
+    recorded_off_route_max_frac: float = 0.5
 
 
 # --------------------------------------------------------------------------- #
@@ -364,10 +368,15 @@ def score_window_epdms(
     )
     zones, route_zones = [], []
     rec_stop_run, rec_stop = 0, False
+    rec_off_route_ticks = 0
     for i in range(zone_lo, zone_hi):
         frame = tl.npz(i)
-        off_centre = _recorded_lat_offset(frame) > LK_D_MAX
+        rec_offset = _recorded_lat_offset(frame)
+        off_centre = rec_offset > LK_D_MAX
         off_route = not _recorded_on_route(frame, center_offset)
+        in_bay = off_route or rec_offset > cfg.recorded_stop_offset_m
+        if lo <= i < hi and off_route:
+            rec_off_route_ticks += 1
         arc_i = float(s[i - a]) if a <= i < b else None
         if arc_i is not None and (off_centre or off_route):
             zones.append((arc_i - cfg.lk_zone_back_m, arc_i + cfg.lk_zone_fwd_m))
@@ -376,7 +385,7 @@ def score_window_epdms(
         # Operational stop of the recorded ego inside the window itself.
         if lo <= i < hi:
             stopped = float(tl.speeds[i]) <= cfg.recorded_stop_speed_mps
-            if stopped and (off_centre or off_route) and not _recorded_red_on_route(frame):
+            if stopped and in_bay and not _recorded_red_on_route(frame):
                 rec_stop_run += 1
                 if rec_stop_run * DT >= cfg.recorded_stop_min_s:
                     rec_stop = True
@@ -459,6 +468,13 @@ def score_window_epdms(
     weighted = sum(w * values[k] for k, w in weights.items()) / sum(weights.values())
     multiplicative = nc * dac * ddc * tlc * mp
     out["recorded_stop"] = bool(rec_stop)
+    rec_off_route_frac = rec_off_route_ticks / max(1, hi - lo)
+    out["recorded_off_route"] = bool(rec_off_route_frac > cfg.recorded_off_route_max_frac)
+    out["bucket"] = (
+        "recorded_off_route"
+        if out["recorded_off_route"]
+        else ("recorded_stop" if rec_stop else "main")
+    )
     out.update(
         {
             "score": float(multiplicative * weighted),
@@ -502,6 +518,7 @@ def score_window_epdms(
                 "lk_exempt_recorded_off_frac": float(rec_off.mean()),
                 "lk_exempt_obstacle_frac": float(obstacle_ahead.mean()),
                 "ddc_exempt_recorded_off_route_frac": float(rec_off_route.mean()),
+                "recorded_off_route_frac": float(rec_off_route_frac),
                 "clearance_min_moving_m": clr_min,
                 "lk_exempt_intersection_frac": float(in_inter.mean()),
                 "map_frame_follows_ego_frac": float(
