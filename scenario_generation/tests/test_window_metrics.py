@@ -284,3 +284,54 @@ def test_recorded_off_route_window_is_bucketed():
     tl.npz = _shifted_far(tl)  # human 5 m off the lane for the whole window (parked)
     out = wm.score_window_epdms(tl, LO, HI, _rows(LO, HI), EGO_SHAPE, wm.ScoreConfig())
     assert out["recorded_off_route"] is True and out["bucket"] == "recorded_off_route"
+
+
+class RotatedTL(FakeTL):
+    """Recorded ego drives +y (heading pi/2); frames are still expressed in its own frame."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.poses = np.column_stack(
+            [np.full(N, 500.0), np.arange(N, dtype=float), np.full(N, math.pi / 2)]
+        )
+
+    def nearest(self, xy):
+        return int(np.clip(round(float(xy[1])), 0, N - 1))
+
+
+def _rows_rotated(lo, hi, *, lat=0.0, speed=10.0):
+    # lat > 0 is to the LEFT of a +y heading, i.e. towards -x.
+    rows = _rows(lo, hi, speed=speed)
+    for k, r in enumerate(rows):
+        r["ego"] = [500.0 - lat, float(lo + k)]
+        r["yaw"] = math.pi / 2
+    return rows
+
+
+def test_world_transform_with_rotated_recorded_frame():
+    # Perfect tracking along +y: every map term must transform with the frame yaw.
+    tl = RotatedTL()
+    out = wm.score_window_epdms(tl, LO, HI, _rows_rotated(LO, HI), EGO_SHAPE, wm.ScoreConfig())
+    assert out["detail"]["route_adherence_frac"] == 1.0
+    assert out["terms"]["lk"] == 1.0 and out["terms"]["ddc"] == 1.0
+    assert out["detail"]["lk_offset_p95_m"] == pytest.approx(0.0, abs=1e-6)
+    assert out["terms"]["ep"] == pytest.approx(1.0)
+    # 1 m to the left (towards -x) is off-centre in world coordinates too.
+    out = wm.score_window_epdms(
+        tl, LO, HI, _rows_rotated(LO, HI, lat=1.0), EGO_SHAPE, wm.ScoreConfig()
+    )
+    assert out["terms"]["lk"] == 0.0
+    assert out["detail"]["lk_offset_p95_m"] == pytest.approx(1.0, abs=1e-6)
+    # A stopped agent 6 m ahead in the recorded frame (+x of the frame) sits at +y in the
+    # world; TTC must see it ahead of an ego heading +y.
+    agents = {idx: [(6.0, 0.0, 0.0)] for idx in range(LO, HI)}
+    tl = RotatedTL(agents=agents)
+    geom = wm.frame_geometry(tl.npz(LO), tl.poses[LO])
+    np.testing.assert_allclose(geom["agent_boxes"][0, :2], [500.0, LO + 6.0], atol=1e-6)
+    assert geom["agent_boxes"][0, 6] == pytest.approx(math.pi / 2)
+    out = wm.score_window_epdms(tl, LO, HI, _rows_rotated(LO, HI), EGO_SHAPE, wm.ScoreConfig())
+    assert out["terms"]["ttc"] == 0.0
+    # Agent velocity rotates with the frame: +x in the frame -> +y in the world.
+    tl = RotatedTL(agents={LO: [(6.0, 0.0, 3.0)]})
+    geom = wm.frame_geometry(tl.npz(LO), tl.poses[LO])
+    np.testing.assert_allclose(geom["agent_boxes"][0, 7:9], [0.0, 3.0], atol=1e-6)

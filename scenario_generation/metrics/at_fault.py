@@ -61,9 +61,9 @@ def classify_collision_step(
     for j in np.flatnonzero(hit):
         row = nb[j]
         heading = float(np.arctan2(row[3], row[2]))
-        # navsim box layout: [x, y, z, l, w, h, heading, vx, vy]
+        # navsim box layout: [x, y, z, w, l, h, heading, vx, vy] (col3 = width, col4 = length)
         box = np.array(
-            [row[0], row[1], 0.0, row[7], row[6], 0.0, heading, row[4], row[5]],
+            [row[0], row[1], 0.0, row[6], row[7], 0.0, heading, row[4], row[5]],
             dtype=np.float64,
         )
         kind = get_collision_type(ego_xyh, float(ego_speed), ego_poly, box, Polygon(npc_np[j]))
