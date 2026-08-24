@@ -42,6 +42,7 @@ from scenario_generation.metrics import (
     score_road_border_step,
     strong_brake_mask,
 )
+from scenario_generation.metrics.at_fault import at_fault_block
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
@@ -416,7 +417,11 @@ def _clock_world_indices(
     """Return ``(truth_clock_idx, model_world_idx)`` for one clock-mode step."""
 
     truth_idx = min(int(start + step), int(end - 1))
-    world_idx = truth_idx if world_delay_mode == "none" else max(int(start), int(truth_idx - k_lag))
+    world_idx = (
+        truth_idx
+        if world_delay_mode == "none"
+        else max(int(start), int(truth_idx - k_lag))
+    )
     return truth_idx, world_idx
 
 
@@ -429,7 +434,9 @@ def _realign_neighbor_lag(
 
     source = np.asarray(neighbor_agents_past)
     if source.ndim != 4 or source.shape[0] != 1:
-        raise ValueError(f"neighbor_agents_past must have shape (1, N, T, D), got {source.shape}")
+        raise ValueError(
+            "neighbor_agents_past must have shape (1, N, T, D), got " f"{source.shape}"
+        )
     out = np.zeros_like(source)
     by_uuid: dict[str, int] = {}
     for slot, raw_uuid in enumerate(lag_ids[: source.shape[1]]):
@@ -775,6 +782,10 @@ class _SegState:
     prefix_step: int = 0
     plant_parameters: object = None
     controller_compensation: bool = False
+    # Opt-in per-step at-fault classification of OBB collisions (windowed eval gates).
+    at_fault_scoring: bool = False
+    at_fault: np.ndarray | None = None
+    collision_types: list | None = None
     clock_idx: int | None = None
     world_idx: int | None = None
     metric_np_dict: dict | None = None
@@ -842,6 +853,7 @@ def _seed_state(
     plant_parameters=None,
     controller_compensation: bool = False,
     prefix_step: int | None = None,
+    at_fault_scoring: bool = False,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import DelayedPlantTracker, MPCTracker, PerfectTracker
 
@@ -928,6 +940,9 @@ def _seed_state(
         prefix_step=int(delay_step if prefix_step is None else prefix_step),
         plant_parameters=plant_parameters,
         controller_compensation=bool(controller_compensation),
+        at_fault_scoring=bool(at_fault_scoring),
+        at_fault=np.zeros(cap, dtype=bool) if at_fault_scoring else None,
+        collision_types=[[] for _ in range(cap)] if at_fault_scoring else None,
         plan_schedule=_PlanSchedule() if int(delay_step) > 0 else None,
     )
 
@@ -948,7 +963,9 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         s.terminated, s.done = "goal", True
         return None
     if s.replay_mode == "clock":
-        idx, world_idx = _clock_world_indices(s.start, s.k, s.end, s.world_delay_mode, s.k_lag)
+        idx, world_idx = _clock_world_indices(
+            s.start, s.k, s.end, s.world_delay_mode, s.k_lag
+        )
         s.cursor.max_idx_reached = idx
         s.prev_max_idx = idx
         s.stuck = 0
@@ -970,7 +987,9 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     # on build_input_np/build_input_raw rather than the opt-in lag adapter.
     model_base = None
     if s.world_delay_mode != "none":
-        model_base = _world_input_base(s.tl, s.world_idx, s.clock_idx, s.world_delay_mode, s.k_lag)
+        model_base = _world_input_base(
+            s.tl, s.world_idx, s.clock_idx, s.world_delay_mode, s.k_lag
+        )
         s.metric_np_dict, s.metric_neighbors_live = build_input_np(
             s.tl, s.clock_idx, s.live_pose, s.ego_hist, s.dyn
         )
@@ -999,7 +1018,9 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         base["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
         return (base, dxyz, live_past, live_cur, s.clock_idx, sim_nb, slot_uuids, world_by_uuid)
     if model_base is None:
-        np_dict, neighbors_live = build_input_np(s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn)
+        np_dict, neighbors_live = build_input_np(
+            s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn
+        )
     else:
         np_dict, neighbors_live = build_input_np(
             s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
@@ -1116,6 +1137,14 @@ def _score_into(
             cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
             s.clearances[s.k] = cl
             s.collisions[s.k] = col
+        if s.at_fault_scoring and bool(s.collisions[s.k]):
+            from scenario_generation.metrics.at_fault import classify_collision_step
+
+            fault, types = classify_collision_step(
+                neighbors_live, s.ego_shape, float(s.dyn.speed), device
+            )
+            s.at_fault[s.k] = fault
+            s.collision_types[s.k] = types
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
@@ -1408,6 +1437,11 @@ def _finalize(s: _SegState) -> dict:
             "normal_steps": int(s.cursor.normal_steps),
             "repeat_steps": int(s.cursor.repeat_steps),
         },
+        **(
+            {"at_fault": at_fault_block(s.at_fault[: s.k], s.collision_types[: s.k], _event_count)}
+            if s.at_fault_scoring
+            else {}
+        ),
     }
 
 
@@ -1874,6 +1908,7 @@ def render_segment(
     controller_compensation: bool = False,
     plan_dead_time_step: int | None = None,
     prefix_step: int | None = None,
+    at_fault_scoring: bool = False,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -2007,6 +2042,7 @@ def render_segment(
         prefix_step=prefix_step,
         plant_parameters=plant_parameters,
         controller_compensation=controller_compensation,
+        at_fault_scoring=at_fault_scoring,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -2126,7 +2162,9 @@ def render_segment(
             nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
             if interpolate and nids and interp:
                 interp_idx = s.world_idx if s.world_idx is not None else idx
-                extrapolate_s = s.k_lag * DT if s.world_delay_mode == "lag_extrapolated" else 0.0
+                extrapolate_s = (
+                    s.k_lag * DT if s.world_delay_mode == "lag_extrapolated" else 0.0
+                )
                 _apply_neighbor_interp(
                     np_dict,
                     nids,
@@ -2141,7 +2179,9 @@ def render_segment(
             # trajectory_colormap.py to color the rendered path by risk.
             _score_into(
                 s,
-                s.metric_neighbors_live if s.metric_neighbors_live is not None else neighbors_live,
+                s.metric_neighbors_live
+                if s.metric_neighbors_live is not None
+                else neighbors_live,
                 device,
                 timers,
                 s.metric_np_dict if s.metric_np_dict is not None else np_dict,
@@ -2177,6 +2217,14 @@ def render_segment(
                         else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        **(
+                            {
+                                "at_fault": bool(s.at_fault[k]),
+                                "collision_types": list(s.collision_types[k]),
+                            }
+                            if s.at_fault_scoring
+                            else {}
+                        ),
                     }
                 )
                 + "\n"
@@ -2612,7 +2660,9 @@ def run_segments_batched(
                             danger_inputs = [
                                 (
                                     s,
-                                    s.metric_np_dict if s.metric_np_dict is not None else np_dict,
+                                    s.metric_np_dict
+                                    if s.metric_np_dict is not None
+                                    else np_dict,
                                     s.metric_neighbors_live
                                     if s.metric_neighbors_live is not None
                                     else neighbors,
@@ -2698,7 +2748,11 @@ def run_segments_batched(
                             realized_event_scorer(
                                 _s.metric_np_dict
                                 if _s.metric_np_dict is not None
-                                else (gpu_scenes[_row_i] if gpu_scenes is not None else np_dict),
+                                else (
+                                    gpu_scenes[_row_i]
+                                    if gpu_scenes is not None
+                                    else np_dict
+                                ),
                                 collided=bool(col),
                                 step=_s.k,
                                 model_pred_world=model_pred_world,
@@ -3023,7 +3077,9 @@ def run_segments_batched(
                         prev_snaps = s.snap_count
                         override = None
                         if delay_step > 0 and tracker_mode == "perfect":
-                            scheduled = s.plan_schedule.reference(s.k, 1, strict_horizon=False)
+                            scheduled = s.plan_schedule.reference(
+                                s.k, 1, strict_horizon=False
+                            )
                             tx, ty = (float(v) for v in scheduled[0][0])
                             th = float(scheduled[1][0])
                             spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)

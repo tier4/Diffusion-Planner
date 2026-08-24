@@ -222,7 +222,83 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="empty-world ablation: zero out dynamic/static objects each step (map kept)",
     )
+    # Windowed evaluation (scenario_generation.eval_windows): GT warm-started windows scored
+    # with gates + a graded composite instead of one whole-route rollout.
+    w = p.add_argument_group("windowed evaluation")
+    w.add_argument(
+        "--eval_windows",
+        choices=("none", "fixed", "anchor"),
+        default="none",
+        help="none = whole-route rollout (default); fixed = fixed-length clock windows; "
+        "anchor = windows around anchors from --anchors_json",
+    )
+    w.add_argument("--window_len_s", type=float, default=30.0)
+    w.add_argument("--window_stride_s", type=float, default=None)
+    w.add_argument("--window_min_tail_s", type=float, default=5.0)
+    w.add_argument("--anchor_pre_s", type=float, default=10.0)
+    w.add_argument("--anchor_post_s", type=float, default=10.0)
+    w.add_argument("--anchor_unit", choices=("frame", "sec"), default="frame")
+    w.add_argument(
+        "--anchors_json",
+        type=Path,
+        default=None,
+        help="JSON {route key or unique substring: [anchor, ...]} for --eval_windows anchor",
+    )
+    w.add_argument("--coverage_abort_m", type=float, default=100.0)
+    w.add_argument("--coverage_abort_after", type=int, default=30)
+    w.add_argument("--progress_gate_min", type=float, default=0.2)
+    w.add_argument("--min_recorded_progress_m", type=float, default=5.0)
+    w.add_argument("--window_lon_tol_m", type=float, default=30.0)
+    w.add_argument("--window_lat_tol_m", type=float, default=3.0)
+    w.add_argument("--window_w_progress", type=float, default=0.5)
+    w.add_argument("--window_w_lon", type=float, default=0.25)
+    w.add_argument("--window_w_lat", type=float, default=0.25)
+    w.add_argument(
+        "--max_windows_per_route",
+        type=int,
+        default=None,
+        help="smoke tests only: evaluate just the first N windows of each route",
+    )
     return p.parse_args()
+
+
+def _window_config(args: argparse.Namespace):
+    """Build the ``WindowConfig`` for ``--eval_windows`` (validated by the driver)."""
+    from scenario_generation.eval_windows import WindowConfig
+
+    anchors = {}
+    if args.eval_windows == "anchor":
+        if args.anchors_json is None:
+            raise ValueError("--eval_windows anchor requires --anchors_json")
+        anchors = json.loads(Path(args.anchors_json).read_text())
+    return WindowConfig(
+        mode=args.eval_windows,
+        window_len_s=args.window_len_s,
+        window_stride_s=args.window_stride_s,
+        min_tail_s=args.window_min_tail_s,
+        anchor_pre_s=args.anchor_pre_s,
+        anchor_post_s=args.anchor_post_s,
+        anchor_unit=args.anchor_unit,
+        anchors=anchors,
+        coverage_abort_m=args.coverage_abort_m,
+        coverage_abort_after=args.coverage_abort_after,
+        progress_gate_min=args.progress_gate_min,
+        min_recorded_progress_m=args.min_recorded_progress_m,
+        lon_tol_m=args.window_lon_tol_m,
+        lat_tol_m=args.window_lat_tol_m,
+        w_progress=args.window_w_progress,
+        w_lon=args.window_w_lon,
+        w_lat=args.window_w_lat,
+        max_windows_per_route=args.max_windows_per_route,
+    )
+
+
+# ``_eval_knobs`` keys that belong to the whole-route driver, not to ``render_segment``.
+_DRIVER_ONLY_KNOBS = ("fps", "draw_workers")
+
+
+def _window_render_kwargs(knobs: dict) -> dict:
+    return {k: v for k, v in knobs.items() if k not in _DRIVER_ONLY_KNOBS}
 
 
 def _load_model(model_path: Path, device: str):
@@ -360,6 +436,44 @@ def main() -> None:
         f"device: {device} | model: {args.model_path} | out: {out_dir}"
         + (f" | shard: {shard}" if shard else "")
     )
+
+    if args.eval_windows != "none":
+        from scenario_generation.eval_windows import run_windowed_eval
+
+        if shard is not None:
+            raise RuntimeError("--eval_windows runs single-process; launch without DDP")
+        cfg = _window_config(args)
+        t0 = time.perf_counter()
+        summary = run_windowed_eval(
+            model,
+            model_args,
+            args.npz_root,
+            out_dir,
+            cfg=cfg,
+            render_kwargs={"device": device, **_window_render_kwargs(knobs)},
+            verbose=True,
+        )
+        summary["model_path"] = str(args.model_path)
+        with open(out_dir / "windows_summary.json", "w") as f:
+            json.dump(summary, f, indent=2, default=float)
+        print(
+            f"\n=== windowed closed-loop eval: {summary['n_windows']} windows / "
+            f"{summary['n_routes']} routes in {summary['elapsed_sec']:.1f}s ==="
+        )
+        for key in (
+            "score_macro",
+            "score_micro",
+            "graded_mean",
+            "gate_pass_rate",
+            "progress_ratio_mean",
+            "ade_lon_m_mean",
+            "ade_lat_m_mean",
+            "at_fault_windows",
+            "road_border_windows",
+            "diverged_windows",
+        ):
+            print(f"{key}: {summary.get(key)}")
+        return
 
     t0 = time.perf_counter()
     summary = run_closed_loop_eval(

@@ -402,3 +402,58 @@ def test_validation_cli_splits_plan_dead_time_from_prefix(monkeypatch):
 
     with pytest.raises(ValueError, match="prefix_step must be <= plan_dead_time_step"):
         mod._eval_knobs(mod.parse_args())
+
+
+def test_validation_cli_builds_window_config_and_strips_driver_knobs(monkeypatch, tmp_path):
+    mod = _load_valid_predictor_closed_loop()
+    anchors = tmp_path / "anchors.json"
+    anchors.write_text('{"2026-06-16_10-27-57": [120, 480]}')
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/model.pth",
+            "--npz_root",
+            "/tmp/route",
+            "--eval_windows",
+            "anchor",
+            "--anchors_json",
+            str(anchors),
+            "--anchor_pre_s",
+            "5",
+            "--tracker_mode",
+            "delayed",
+            "--plan_dead_time_step",
+            "2",
+            "--prefix_step",
+            "0",
+        ],
+    )
+    args = mod.parse_args()
+    cfg = mod._window_config(args).validate()
+    assert cfg.mode == "anchor"
+    assert cfg.anchors == {"2026-06-16_10-27-57": [120, 480]}
+    assert cfg.anchor_pre_s == 5.0 and cfg.anchor_post_s == 10.0
+    assert cfg.coverage_abort_m == 100.0
+    kwargs = mod._window_render_kwargs(mod._eval_knobs(args))
+    assert "fps" not in kwargs and "draw_workers" not in kwargs
+    assert kwargs["plan_dead_time_step"] == 2 and kwargs["prefix_step"] == 0
+    assert kwargs["tracker_mode"] == "delayed"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/m.pth",
+            "--npz_root",
+            "/tmp/r",
+            "--eval_windows",
+            "anchor",
+        ],
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="requires --anchors_json"):
+        mod._window_config(mod.parse_args())
