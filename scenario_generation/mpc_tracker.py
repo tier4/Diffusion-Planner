@@ -21,9 +21,12 @@ Velocity smoothing and force-stop logic ported from
 from __future__ import annotations
 
 import math
+from collections import deque
 
 import numpy as np
 from scipy.optimize import minimize
+
+from scenario_generation.closed_loop_delay import PlantParameters
 
 
 class MPCTracker:
@@ -466,6 +469,194 @@ class MPCTracker:
     def reset(self):
         """Clear warm-start state (call on agent respawn)."""
         self._prev_knots = None
+
+
+class DelayedPlantTracker:
+    """MPC command source followed by separate steer/acc FOPDT plants.
+
+    The inner :class:`MPCTracker` still computes the ideal acceleration and
+    steering commands.  This wrapper ignores the inner tracker's immediate
+    pose update, delays each command by its own integer number of 0.1 s ticks,
+    applies the documented first-order response, and advances the actual
+    vehicle with the resulting controls.
+
+    ``controller_compensation`` is opt-in.  It predicts the vehicle through
+    the commands already waiting in the dead-time buffers, shifts the
+    reference by the same number of ticks, and asks MPC to control from that
+    predicted state.  The real plant is still updated exactly once per call.
+    """
+
+    def __init__(
+        self,
+        wheelbase: float,
+        plant_parameters: PlantParameters,
+        *,
+        dt: float = 0.1,
+        controller_compensation: bool = False,
+        inner_tracker=None,
+    ):
+        self.wheelbase = max(float(wheelbase), 0.5)
+        self.dt = float(dt)
+        if self.dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt}")
+        self.plant_parameters = plant_parameters.validate()
+        self.controller_compensation = bool(controller_compensation)
+        self.inner = inner_tracker or MPCTracker(wheelbase=self.wheelbase, dt=self.dt)
+        inner_dt = float(getattr(self.inner, "dt", self.dt))
+        if not math.isclose(inner_dt, self.dt, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(f"inner tracker dt={inner_dt} does not match plant dt={self.dt}")
+
+        # Match the established 10 Hz simulator contract: physical dead time
+        # is represented on the discrete grid with Python's round-to-nearest.
+        self.steer_delay_steps = int(
+            round(self.plant_parameters.steer_dead_time_s / self.dt)
+        )
+        self.accel_delay_steps = int(
+            round(self.plant_parameters.accel_dead_time_s / self.dt)
+        )
+        self.max_speed = float(getattr(self.inner, "max_speed", 20.0))
+        self.max_steer = float(getattr(self.inner, "max_steer", 0.6))
+
+        self.last_accel = 0.0
+        self.last_yaw_rate = 0.0
+        self.last_steering = 0.0
+        self.last_commanded_accel = 0.0
+        self.last_commanded_steering = 0.0
+        self._reset_plant()
+
+    @staticmethod
+    def _delayed_command(queue: deque, command: float) -> float:
+        if not queue:
+            return float(command)
+        delayed = float(queue.popleft())
+        queue.append(float(command))
+        return delayed
+
+    @staticmethod
+    def _first_order(previous: float, target: float, tau: float, dt: float) -> float:
+        if tau <= 0.0:
+            return float(target)
+        return float(previous + dt / (tau + dt) * (target - previous))
+
+    def _reset_plant(self) -> None:
+        self._steer_queue = deque([0.0] * self.steer_delay_steps)
+        self._accel_queue = deque([0.0] * self.accel_delay_steps)
+        self._effective_steer = 0.0
+        self._effective_accel = 0.0
+
+    def _plant_controls(
+        self,
+        accel_command: float,
+        steer_command: float,
+        *,
+        steer_queue: deque | None = None,
+        accel_queue: deque | None = None,
+        effective_steer: float | None = None,
+        effective_accel: float | None = None,
+    ) -> tuple[float, float, deque, deque]:
+        """Advance copied or live plant controls by one tick.
+
+        Returns ``(effective_accel, effective_steer, steer_queue, accel_queue)``.
+        Supplying copied queues/states makes the same transition usable by the
+        controller-compensation preview without mutating the real plant.
+        """
+
+        sq = self._steer_queue if steer_queue is None else steer_queue
+        aq = self._accel_queue if accel_queue is None else accel_queue
+        prev_steer = self._effective_steer if effective_steer is None else effective_steer
+        prev_accel = self._effective_accel if effective_accel is None else effective_accel
+
+        delayed_steer = self._delayed_command(sq, steer_command)
+        delayed_accel = self._delayed_command(aq, accel_command)
+        steer = self._first_order(
+            prev_steer,
+            delayed_steer,
+            self.plant_parameters.steer_time_constant_s,
+            self.dt,
+        )
+        accel = self._first_order(
+            prev_accel,
+            delayed_accel,
+            self.plant_parameters.accel_time_constant_s,
+            self.dt,
+        )
+        steer = float(np.clip(steer, -self.max_steer, self.max_steer))
+        return accel, steer, sq, aq
+
+    def _integrate(self, x0: np.ndarray, accel: float, steer: float) -> np.ndarray:
+        x, y, yaw, speed = (float(x0[i]) for i in range(4))
+        return np.array(
+            [
+                x + speed * math.cos(yaw) * self.dt,
+                y + speed * math.sin(yaw) * self.dt,
+                yaw + speed * math.tan(steer) / self.wheelbase * self.dt,
+                max(0.0, min(speed + accel * self.dt, self.max_speed)),
+            ],
+            dtype=np.float64,
+        )
+
+    def _compensated_inputs(
+        self, x0: np.ndarray, ref_world: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        preview_steps = max(self.steer_delay_steps, self.accel_delay_steps)
+        if not self.controller_compensation or preview_steps == 0:
+            return np.asarray(x0, dtype=np.float64), np.asarray(ref_world)
+
+        state = np.asarray(x0, dtype=np.float64).copy()
+        sq, aq = deque(self._steer_queue), deque(self._accel_queue)
+        eff_steer, eff_accel = self._effective_steer, self._effective_accel
+        for _ in range(preview_steps):
+            eff_accel, eff_steer, sq, aq = self._plant_controls(
+                self.last_commanded_accel,
+                self.last_commanded_steering,
+                steer_queue=sq,
+                accel_queue=aq,
+                effective_steer=eff_steer,
+                effective_accel=eff_accel,
+            )
+            state = self._integrate(state, eff_accel, eff_steer)
+
+        ref = np.asarray(ref_world)
+        if len(ref) > preview_steps:
+            ref = ref[preview_steps:]
+        elif len(ref):
+            ref = ref[-1:]
+        return state, ref
+
+    def track(
+        self,
+        x0: np.ndarray,
+        ref_world: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        controller_x0, controller_ref = self._compensated_inputs(x0, ref_world)
+        # The inner pose is deliberately ignored: only its ideal controls are
+        # the input to the delayed physical plant.
+        self.inner.track(controller_x0, controller_ref)
+        accel_command = float(getattr(self.inner, "last_accel", 0.0))
+        steer_command = float(getattr(self.inner, "last_steering", 0.0))
+        self.last_commanded_accel = accel_command
+        self.last_commanded_steering = steer_command
+
+        accel, steer, _sq, _aq = self._plant_controls(accel_command, steer_command)
+        self._effective_accel = accel
+        self._effective_steer = steer
+        state = self._integrate(np.asarray(x0, dtype=np.float64), accel, steer)
+
+        speed = float(x0[3])
+        self.last_accel = accel
+        self.last_steering = steer
+        self.last_yaw_rate = speed * math.tan(steer) / self.wheelbase
+        return state[:3].astype(np.float32), float(state[3])
+
+    def reset(self) -> None:
+        if hasattr(self.inner, "reset"):
+            self.inner.reset()
+        self.last_accel = 0.0
+        self.last_yaw_rate = 0.0
+        self.last_steering = 0.0
+        self.last_commanded_accel = 0.0
+        self.last_commanded_steering = 0.0
+        self._reset_plant()
 
 
 # ----------------------------------------------------------------------

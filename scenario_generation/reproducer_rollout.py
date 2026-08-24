@@ -135,6 +135,198 @@ def _world_plan_to_ego(world_xy, world_h, ex, ey, eyaw):
     return np.stack([px, py, np.cos(he), np.sin(he)], axis=-1).astype(np.float32)
 
 
+@dataclass(frozen=True)
+class _ScheduledPlan:
+    born_step: int
+    activation_step: int
+    world_xy: np.ndarray
+    world_heading: np.ndarray
+
+
+class _PlanSchedule:
+    """FIFO plan activation on the absolute 10 Hz simulation clock.
+
+    A plan born at tick ``k`` normally activates at ``k + delay_step``.
+    Its output row ``j`` targets the advance performed at tick ``k + j``.
+    Consequently activation at ``k + d`` starts at output row ``d``: rows
+    ``0..d-1`` are the committed prefix that the previous schedule executes.
+    """
+
+    def __init__(self):
+        self._plans: list[_ScheduledPlan] = []
+
+    def clear(self) -> None:
+        self._plans.clear()
+
+    def _plan_at(self, tick: int) -> _ScheduledPlan | None:
+        eligible = [plan for plan in self._plans if plan.activation_step <= int(tick)]
+        if not eligible:
+            return None
+        return max(eligible, key=lambda plan: (plan.activation_step, plan.born_step))
+
+    def has_target(self, tick: int) -> bool:
+        return self._plan_at(tick) is not None
+
+    def enqueue(
+        self,
+        *,
+        born_step: int,
+        world_xy: np.ndarray,
+        world_heading: np.ndarray,
+        delay_step: int,
+        immediate: bool = False,
+    ) -> None:
+        xy = np.asarray(world_xy, dtype=np.float32).copy()
+        heading = np.asarray(world_heading, dtype=np.float32).copy()
+        if xy.ndim != 2 or xy.shape[1] != 2 or heading.shape != (xy.shape[0],):
+            raise ValueError(
+                "scheduled plan must have world_xy (T,2) and world_heading (T,), got "
+                f"{xy.shape} and {heading.shape}"
+            )
+        if len(xy) == 0:
+            raise ValueError("scheduled plan must contain at least one future point")
+        born = int(born_step)
+        activation = born if immediate else born + int(delay_step)
+        self._plans.append(_ScheduledPlan(born, activation, xy, heading))
+        self._prune(born)
+
+    def _prune(self, current_step: int) -> None:
+        active = self._plan_at(current_step)
+        future = [plan for plan in self._plans if plan.activation_step > int(current_step)]
+        self._plans = ([active] if active is not None else []) + future
+
+    def reference(
+        self,
+        start_tick: int,
+        length: int,
+        *,
+        strict_horizon: bool,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        if length < 1:
+            raise ValueError(f"reference length must be >= 1, got {length}")
+        xy_rows: list[np.ndarray] = []
+        heading_rows: list[float] = []
+        for tick in range(int(start_tick), int(start_tick) + int(length)):
+            plan = self._plan_at(tick)
+            if plan is None:
+                return None
+            offset = tick - plan.born_step
+            if offset < 0:
+                raise AssertionError(
+                    f"plan activation precedes its birth: tick={tick}, born={plan.born_step}"
+                )
+            if offset >= len(plan.world_xy):
+                if strict_horizon:
+                    raise ValueError(
+                        "committed prefix exceeds source plan horizon: "
+                        f"tick={tick}, born={plan.born_step}, horizon={len(plan.world_xy)}"
+                    )
+                offset = len(plan.world_xy) - 1
+            xy_rows.append(plan.world_xy[offset])
+            heading_rows.append(float(plan.world_heading[offset]))
+        return np.asarray(xy_rows, dtype=np.float32), np.asarray(heading_rows, dtype=np.float32)
+
+
+def _normalizer_ego_stats(model_args) -> tuple[np.ndarray, np.ndarray]:
+    normalizer = model_args.state_normalizer
+
+    def as_numpy(value):
+        if torch.is_tensor(value):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    mean = as_numpy(normalizer.mean)[0].reshape(-1, POSE_DIM)[0].astype(np.float32)
+    std = as_numpy(normalizer.std)[0].reshape(-1, POSE_DIM)[0].astype(np.float32)
+    if np.any(std == 0.0):
+        raise ValueError("ego state-normalizer std must be non-zero for plan prefix")
+    return mean, std
+
+
+def _attach_committed_prefix(np_dict: dict, s: "_SegState", model_args) -> int:
+    """Attach the scheduled ego prefix in decoder state-normalized coordinates.
+
+    Returns the effective delay.  With no prior active plan (the first
+    inference, or immediately after an unstick reset), no prefix keys are
+    attached and the caller falls back to the existing delay-zero input.
+    """
+
+    delay = int(s.delay_step)
+    if delay <= 0:
+        return 0
+    n_agents = 1 + int(model_args.predicted_neighbor_num)
+    future_len = int(model_args.future_len)
+    if delay > future_len:
+        raise ValueError(f"delay_step={delay} exceeds model future_len={future_len}")
+    sampled = np.zeros((1, n_agents, future_len + 1, POSE_DIM), dtype=np.float32)
+    np_dict["sampled_trajectories"] = sampled
+    np_dict["delay"] = np.array([0], dtype=np.int64)
+    committed = (
+        s.plan_schedule.reference(s.k, delay, strict_horizon=True)
+        if s.plan_schedule is not None
+        else None
+    )
+    if committed is None:
+        return 0
+    world_xy, world_heading = committed
+    ego_prefix = _world_plan_to_ego(
+        world_xy,
+        world_heading,
+        float(s.live_pose[0]),
+        float(s.live_pose[1]),
+        float(s.live_pose[2]),
+    )
+    if bool(getattr(model_args, "use_velocity_representation", False)):
+        current = np.array([[0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
+        positions = np.concatenate([current, ego_prefix], axis=0)
+        represented = ego_prefix.copy()
+        represented[:, :2] = np.diff(positions[:, :2], axis=0)
+    else:
+        represented = ego_prefix
+
+    mean, std = _normalizer_ego_stats(model_args)
+    represented = (represented - mean) / std
+    sampled[0, 0, 1 : delay + 1] = represented
+    np_dict["delay"] = np.array([delay], dtype=np.int64)
+    return delay
+
+
+def _enqueue_prediction(s: "_SegState", pred: np.ndarray) -> None:
+    if s.plan_schedule is None:
+        s.plan_schedule = _PlanSchedule()
+    immediate = not s.plan_schedule.has_target(s.k)
+    world_xy, world_heading = _ego_pred_to_world(
+        pred[:, :2],
+        pred[:, 2:4],
+        float(s.live_pose[0]),
+        float(s.live_pose[1]),
+        float(s.live_pose[2]),
+    )
+    s.plan_schedule.enqueue(
+        born_step=s.k,
+        world_xy=world_xy,
+        world_heading=world_heading,
+        delay_step=s.delay_step,
+        immediate=immediate,
+    )
+
+
+def _scheduled_prediction(s: "_SegState", future_len: int) -> tuple[np.ndarray, tuple]:
+    if s.plan_schedule is None:
+        raise RuntimeError("scheduled prediction requested before a plan exists")
+    reference = s.plan_schedule.reference(s.k, future_len, strict_horizon=False)
+    if reference is None:
+        raise RuntimeError(f"no active plan at simulation step {s.k}")
+    world_xy, world_heading = reference
+    pred = _world_plan_to_ego(
+        world_xy,
+        world_heading,
+        float(s.live_pose[0]),
+        float(s.live_pose[1]),
+        float(s.live_pose[2]),
+    )
+    return pred, (world_xy, world_heading)
+
+
 def _rel_pose(recorded_pose: np.ndarray, live_pose: np.ndarray) -> tuple[float, float, float]:
     """Live ego pose expressed in the recorded-ego frame (dx, dy, dyaw)."""
     R = _rotation_matrix(float(recorded_pose[2]))  # rotates world delta by -recorded_yaw
@@ -370,7 +562,7 @@ def _arrays_to_device(arrays: dict, device: str) -> dict:
     for k, arr in arrays.items():
         if k in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
             out[k] = torch.from_numpy(arr).to(device)
-        elif k == "turn_indicators":
+        elif k in ("turn_indicators", "delay"):
             out[k] = torch.from_numpy(arr).long().to(device)
         else:
             out[k] = torch.from_numpy(arr.astype(np.float32)).to(device)
@@ -380,11 +572,15 @@ def _arrays_to_device(arrays: dict, device: str) -> dict:
 def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
     """Add the per-batch ``delay`` + zero ``sampled_trajectories`` the model expects
     (P = 1 ego + predicted neighbors, T = future_len + 1). In place."""
-    data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
+    if "delay" not in data:
+        data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
     n_agents = 1 + model_args.predicted_neighbor_num
-    data["sampled_trajectories"] = torch.zeros(
-        (n, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
-    )
+    if "sampled_trajectories" not in data:
+        data["sampled_trajectories"] = torch.zeros(
+            (n, n_agents, model_args.future_len + 1, POSE_DIM),
+            dtype=torch.float32,
+            device=device,
+        )
 
 
 def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
@@ -586,6 +782,7 @@ class _SegState:
     world_idx: int | None = None
     metric_np_dict: dict | None = None
     metric_neighbors_live: np.ndarray | None = None
+    plan_schedule: _PlanSchedule | None = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -648,7 +845,7 @@ def _seed_state(
     plant_parameters=None,
     controller_compensation: bool = False,
 ) -> _SegState:
-    from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
+    from scenario_generation.mpc_tracker import DelayedPlantTracker, MPCTracker, PerfectTracker
 
     # Step cap: defaults to the segment length, but can exceed it so a slow ego
     # (e.g. one that waited out a long red light) can still drive to the segment end.
@@ -683,6 +880,15 @@ def _seed_state(
         # telemetry live on it); only the per-tick SOLVE is batched across
         # segments in run_segments_batched (see mpc_tracker_batched.track_many).
         tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
+    elif tracker_mode == "delayed":
+        if plant_parameters is None:
+            raise ValueError("tracker_mode='delayed' requires resolved plant_parameters")
+        tracker = DelayedPlantTracker(
+            wheelbase=wheelbase,
+            dt=DT,
+            plant_parameters=plant_parameters,
+            controller_compensation=controller_compensation,
+        )
     else:
         raise ValueError(
             f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect', 'mpc', or 'mpc_batched'"
@@ -723,6 +929,7 @@ def _seed_state(
         delay_step=int(delay_step),
         plant_parameters=plant_parameters,
         controller_compensation=bool(controller_compensation),
+        plan_schedule=_PlanSchedule() if int(delay_step) > 0 else None,
     )
 
 
@@ -1038,6 +1245,12 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.last_turn_indicator = int(s.turn_hist[-1])
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
+                if s.plan_schedule is not None:
+                    s.plan_schedule.clear()
+                    # A delayed-plan run must not carry MPC warm starts or
+                    # plant command buffers across a discontinuous teleport.
+                    if hasattr(s.tracker, "reset"):
+                        s.tracker.reset()
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
                 s.stuck = 0
@@ -1959,59 +2172,74 @@ def render_segment(
                 )
                 + "\n"
             )
-            # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
-            # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
-            # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-            # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-            # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-            # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
+            # delay_step=0 retains the established cached-plan path exactly.
+            # With plan activation enabled, every generated plan is scheduled
+            # on the absolute sim clock; the old plan remains active through
+            # the committed prefix and every tracker runs on that schedule.
             offset = k % replan_interval
             override = None
-            if plan_world is None or offset == 0:
-                data = _to_torch_batch([np_dict], model_args, device)
-                # No-op unless the model was compiled with cudagraphs; one inference is one step.
-                mark_inference_step()
-                _, outputs = model(data)
-                pred = outputs["prediction"][0, 0].cpu().numpy()
-                plan_world = _ego_pred_to_world(
-                    pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
-                )
-                pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
-                _feed_turn_indicator(s, outputs)
+            if delay_step == 0:
+                if plan_world is None or offset == 0:
+                    data = _to_torch_batch([np_dict], model_args, device)
+                    # No-op unless the model was compiled with cudagraphs; one inference is one step.
+                    mark_inference_step()
+                    _, outputs = model(data)
+                    pred = outputs["prediction"][0, 0].cpu().numpy()
+                    plan_world = _ego_pred_to_world(
+                        pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
+                    )
+                    pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+                    _feed_turn_indicator(s, outputs)
+                else:
+                    # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
+                    off = min(offset, len(plan_world[0]) - 1)
+                    tx, ty, th = (
+                        float(plan_world[0][off, 0]),
+                        float(plan_world[0][off, 1]),
+                        float(plan_world[1][off]),
+                    )
+                    spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                    override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                    pred_cur = _world_plan_to_ego(
+                        plan_world[0][off:],
+                        plan_world[1][off:],
+                        s.live_pose[0],
+                        s.live_pose[1],
+                        s.live_pose[2],
+                    )
+                    # No fresh inference this step: hold the last decoded turn indicator so the
+                    # 10 Hz turn_indicators history keeps scrolling with the same signal.
+                    _hold_turn_indicator(s)
+                # Complete perfect tracking: land directly on the next predicted world point.
+                if tracker_mode == "perfect" and override is None:
+                    tx, ty, th = (
+                        float(plan_world[0][0, 0]),
+                        float(plan_world[0][0, 1]),
+                        float(plan_world[1][0]),
+                    )
+                    spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                    override = (np.array([tx, ty, th], dtype=np.float64), spd)
             else:
-                # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
-                off = min(offset, len(plan_world[0]) - 1)
-                tx, ty, th = (
-                    float(plan_world[0][off, 0]),
-                    float(plan_world[0][off, 1]),
-                    float(plan_world[1][off]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
-                pred_cur = _world_plan_to_ego(
-                    plan_world[0][off:],
-                    plan_world[1][off:],
-                    s.live_pose[0],
-                    s.live_pose[1],
-                    s.live_pose[2],
-                )
-                # No fresh inference this step: hold the last decoded turn indicator so the
-                # 10 Hz turn_indicators history keeps scrolling with the same signal.
-                _hold_turn_indicator(s)
-            # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
-            # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
-            # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
-            # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
-            # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
-            # override path implements). Every step then lands on the predicted polyline point.
-            if tracker_mode == "perfect" and override is None:
-                tx, ty, th = (
-                    float(plan_world[0][0, 0]),
-                    float(plan_world[0][0, 1]),
-                    float(plan_world[1][0]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                needs_plan = s.plan_schedule is None or not s.plan_schedule.has_target(k)
+                if needs_plan or offset == 0:
+                    _attach_committed_prefix(np_dict, s, model_args)
+                    data = _to_torch_batch([np_dict], model_args, device)
+                    mark_inference_step()
+                    _, outputs = model(data)
+                    pred = outputs["prediction"][0, 0].cpu().numpy()
+                    _enqueue_prediction(s, pred)
+                    _feed_turn_indicator(s, outputs)
+                else:
+                    _hold_turn_indicator(s)
+                pred_cur, scheduled_world = _scheduled_prediction(s, model_args.future_len)
+                if tracker_mode == "perfect":
+                    tx, ty, th = (
+                        float(scheduled_world[0][0, 0]),
+                        float(scheduled_world[0][0, 1]),
+                        float(scheduled_world[1][0]),
+                    )
+                    spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                    override = (np.array([tx, ty, th], dtype=np.float64), spd)
             if (
                 draw_every is not None
                 and (window is None or (window[0] <= k <= window[1]))
@@ -2041,6 +2269,8 @@ def render_segment(
                 # world location, so executing it next step would drag the ego right back. Invalidate
                 # it to force a fresh inference at the snapped pose (else the snap never sticks).
                 plan_world = None
+                if s.plan_schedule is not None:
+                    s.plan_schedule.clear()
     # Every PNG must be on disk before the caller globs the directory for ffmpeg, and a worker
     # exception only surfaces here.
     for f in pending:
@@ -2277,6 +2507,12 @@ def run_segments_batched(
                     pre_list = list(pool.map(lambda s: _pre_step(s, gpu_transform), active))
                 live = [(s, pre) for s, pre in zip(active, pre_list) if pre is not None]
                 if live:
+                    if delay_step > 0:
+                        # p[0] is the CPU scene dict or the raw GPU-transform
+                        # base. Prefix tensors are already live-ego-frame and
+                        # are not among the spatial keys transformed later.
+                        for state, pre in live:
+                            _attach_committed_prefix(pre[0], state, model_args)
                     if gpu_transform:
                         # ONE batched on-device world_to_ego_frame; downstream identical.
                         raw_payloads = [pre for _s, pre in live]
@@ -2334,6 +2570,14 @@ def run_segments_batched(
                         # C++-style keep-bias logic as the perfect-tracker sim (reused helper),
                         # then fed back into turn_hist below (closed-loop, no recorded leak).
                         ti_pred = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
+                    execution_preds = preds
+                    if delay_step > 0:
+                        execution_preds = np.empty_like(preds)
+                        for row_i, (state, *_rest) in enumerate(built):
+                            _enqueue_prediction(state, preds[row_i])
+                            execution_preds[row_i] = _scheduled_prediction(
+                                state, model_args.future_len
+                            )[0]
                     # Score ALL segments in one batched OBB pass, then advance each.
                     with timers("score"):
                         score_list = score_object_step_batched(
@@ -2748,8 +2992,8 @@ def run_segments_batched(
                                 if s.k < s.warmup_steps:
                                     continue
                                 wxy, wh = _ego_pred_to_world(
-                                    preds[i][:, :2],
-                                    preds[i][:, 2:4],
+                                    execution_preds[i][:, :2],
+                                    execution_preds[i][:, 2:4],
                                     s.live_pose[0],
                                     s.live_pose[1],
                                     s.live_pose[2],
@@ -2767,8 +3011,23 @@ def run_segments_batched(
                                 tracked_by_row = dict(zip(rows_b, solved))
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.snap_count
+                        override = None
+                        if delay_step > 0 and tracker_mode == "perfect":
+                            scheduled = s.plan_schedule.reference(
+                                s.k, 1, strict_horizon=False
+                            )
+                            tx, ty = (float(v) for v in scheduled[0][0])
+                            th = float(scheduled[1][0])
+                            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                            override = (np.array([tx, ty, th], dtype=np.float64), spd)
                         _advance_step(
-                            s, preds[i], idx, device, timers, tracked=tracked_by_row.get(i)
+                            s,
+                            execution_preds[i],
+                            idx,
+                            device,
+                            timers,
+                            override=override,
+                            tracked=tracked_by_row.get(i),
                         )
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved

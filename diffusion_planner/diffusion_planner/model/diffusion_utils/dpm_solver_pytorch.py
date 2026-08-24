@@ -507,14 +507,15 @@ class DPM_Solver:
             timesteps = self.get_time_steps(
                 skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
             )
-            timesteps_masked = self.get_time_steps(
-                skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
-            )
+            # Prefix values are clean and re-applied after every solver update;
+            # label those positions with the clean endpoint as well. The caller
+            # excludes index 0 from prefix_mask, preserving delay-zero behavior.
+            prefix_time = torch.as_tensor(t_0, dtype=timesteps.dtype, device=device)
             assert timesteps.shape[0] - 1 == steps
             # Init the initial values.
             step = 0
             t = timesteps[step]
-            t_masked = timesteps_masked[step]
+            t_masked = prefix_time
             t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
             t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
             t_prev_list = [t]
@@ -524,7 +525,7 @@ class DPM_Solver:
             # Init the first `order` values by lower order multistep DPM-Solver.
             for step in range(1, order):
                 t = timesteps[step]
-                t_masked = timesteps_masked[step]
+                t_masked = prefix_time
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
                 t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
@@ -535,7 +536,7 @@ class DPM_Solver:
             # Compute the remaining values by `order`-th order multistep DPM-Solver.
             for step in range(order, steps + 1):
                 t = timesteps[step]
-                t_masked = timesteps_masked[step]
+                t_masked = prefix_time
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
                 t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
                 # We only use lower order for steps < 10

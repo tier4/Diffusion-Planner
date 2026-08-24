@@ -56,6 +56,31 @@ def replace_current_state(x: torch.Tensor, current_states: torch.Tensor) -> torc
     return torch.cat([current_states[:, :, None, :], x[:, :, 1:, :]], dim=2)
 
 
+def future_prefix_mask(mask: torch.Tensor) -> torch.Tensor:
+    """Exclude index 0, whose legacy current-state constraint is always active.
+
+    Keeping the current state out of the optional future-prefix mask makes
+    ``delay=0`` follow the pre-existing solver path exactly while positive
+    delays cover future indices ``1..delay``.
+    """
+
+    future = mask.clone()
+    future[:, :, :1] = False
+    return future
+
+
+def apply_inference_prefix(
+    xt: torch.Tensor,
+    action_prefix: torch.Tensor,
+    current_states: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Reapply current state plus the opt-in clean future prefix."""
+
+    constrained = replace_current_state(xt.reshape_as(action_prefix), current_states)
+    return torch.where(mask, action_prefix, constrained)
+
+
 def add_current_xy(future: torch.Tensor, current_states: torch.Tensor) -> torch.Tensor:
     """Add current xy position to future xy channels without mutating the input."""
     xy = future[..., :2] + current_states[:, :, None, :2]
@@ -468,12 +493,12 @@ class Decoder(nn.Module):
         B, P, T_plus_1, D = action_prefix.shape
 
         delay = inputs["delay"].to(device=action_prefix.device)
-        mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
+        mask = future_prefix_mask(
+            generate_prefix_mask(delay, P, T_plus_1)
+        )  # future indices 1..delay only
 
         def prefix_constraint(xt, t, step):
-            xt = xt.reshape(B, P, 1 + self._future_len, 4)
-            xt = replace_current_state(xt, current_states)
-            return xt
+            return apply_inference_prefix(xt, action_prefix, current_states, mask)
 
         model_wrapper_params = {
             "classifier_fn": self._guidance_fn,
