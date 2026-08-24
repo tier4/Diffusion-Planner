@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import warnings
 from concurrent.futures import Executor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -213,12 +214,115 @@ def _live_ego_current(dyn: _EgoDyn) -> np.ndarray:
     )
 
 
+def _clock_world_indices(
+    start: int,
+    step: int,
+    end: int,
+    world_delay_mode: str,
+    k_lag: int,
+) -> tuple[int, int]:
+    """Return ``(truth_clock_idx, model_world_idx)`` for one clock-mode step."""
+
+    truth_idx = min(int(start + step), int(end - 1))
+    world_idx = (
+        truth_idx
+        if world_delay_mode == "none"
+        else max(int(start), int(truth_idx - k_lag))
+    )
+    return truth_idx, world_idx
+
+
+def _realign_neighbor_lag(
+    neighbor_agents_past: np.ndarray,
+    lag_ids: list,
+    truth_ids: list,
+) -> np.ndarray:
+    """Place complete lag-frame tracks into the current truth-frame UUID slot order."""
+
+    source = np.asarray(neighbor_agents_past)
+    if source.ndim != 4 or source.shape[0] != 1:
+        raise ValueError(
+            "neighbor_agents_past must have shape (1, N, T, D), got " f"{source.shape}"
+        )
+    out = np.zeros_like(source)
+    by_uuid: dict[str, int] = {}
+    for slot, raw_uuid in enumerate(lag_ids[: source.shape[1]]):
+        uuid = str(raw_uuid).strip() if raw_uuid is not None else ""
+        if not uuid or uuid in by_uuid:
+            continue
+        if not np.any(source[0, slot, :, :6]):
+            continue
+        by_uuid[uuid] = slot
+    used: set[str] = set()
+    for slot, raw_uuid in enumerate(truth_ids[: source.shape[1]]):
+        uuid = str(raw_uuid).strip() if raw_uuid is not None else ""
+        if not uuid or uuid in used:
+            continue
+        used.add(uuid)
+        source_slot = by_uuid.get(uuid)
+        if source_slot is not None:
+            out[0, slot] = source[0, source_slot]
+    return out
+
+
+def _extrapolate_neighbor_lag(
+    neighbor_agents_past: np.ndarray,
+    lag_seconds: float,
+) -> np.ndarray:
+    """Constant-velocity extrapolation of every valid history row in one track block."""
+
+    out = np.asarray(neighbor_agents_past).copy()
+    if lag_seconds == 0.0:
+        return out
+    valid = np.abs(out[..., :6]).sum(axis=-1) != 0
+    out[..., 0] += out[..., 4] * lag_seconds
+    out[..., 1] += out[..., 5] * lag_seconds
+    out[~valid] = 0.0
+    return out
+
+
+def _world_input_base(
+    tl: RouteTimeline,
+    world_idx: int,
+    truth_idx: int,
+    world_delay_mode: str,
+    k_lag: int,
+) -> dict[str, np.ndarray]:
+    """Build the recorded model-input frame, with identity-safe optional world lag."""
+
+    base = _npz_to_model_base(tl.npz(world_idx))
+    if world_delay_mode == "none":
+        return base
+    lag_ids = tl.neighbor_ids(world_idx)
+    truth_ids = tl.neighbor_ids(truth_idx)
+    if lag_ids and truth_ids:
+        base["neighbor_agents_past"] = _realign_neighbor_lag(
+            base["neighbor_agents_past"], lag_ids, truth_ids
+        )
+    else:
+        if not getattr(tl, "_world_delay_missing_ids_warned", False):
+            warnings.warn(
+                "world delay could not UUID-realign neighbor tracks because a sidecar "
+                "neighbor_ids list is missing; retaining lag-frame slot order",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            tl._world_delay_missing_ids_warned = True
+    if world_delay_mode == "lag_extrapolated":
+        base["neighbor_agents_past"] = _extrapolate_neighbor_lag(
+            base["neighbor_agents_past"], k_lag * DT
+        )
+    return base
+
+
 def build_input_np(
     tl: RouteTimeline,
     idx: int,
     live_pose: np.ndarray,
     ego_hist_world: np.ndarray,
     dyn: _EgoDyn,
+    *,
+    base: dict[str, np.ndarray] | None = None,
 ) -> tuple[dict, np.ndarray]:
     """CPU-only per-segment input build (numpy, no torch/normalize).
 
@@ -228,7 +332,7 @@ def build_input_np(
     torch conversion + normalization happen once for the whole batch afterwards
     (see ``_to_torch_batch``).
     """
-    base = _npz_to_model_base(tl.npz(idx))
+    base = _npz_to_model_base(tl.npz(idx)) if base is None else base
     dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
     recen = world_to_ego_frame(base, dx, dy, dyaw)  # re-center recorded frame on live ego
     # Swap in the live ego's own history + dynamics (closed-loop truth).
@@ -244,12 +348,14 @@ def build_input_raw(
     live_pose: np.ndarray,
     ego_hist_world: np.ndarray,
     dyn: _EgoDyn,
+    *,
+    base: dict[str, np.ndarray] | None = None,
 ) -> tuple:
     """gpu_transform variant of :func:`build_input_np`: skip the numpy
     ``world_to_ego_frame`` (it runs once, batched, on the GPU in ``_to_torch_batch_gpu``)
     and return the UN-transformed recorded base + the relative pose + the live-ego arrays.
     Still threadable (only ``np.load`` + cheap live-ego construction)."""
-    base = _npz_to_model_base(tl.npz(idx))
+    base = _npz_to_model_base(tl.npz(idx)) if base is None else base
     dxyz = _rel_pose(tl.poses[idx], live_pose)
     live_past = _live_ego_past(ego_hist_world, live_pose)  # (1, PAST, 4), already ego-frame
     live_cur = _live_ego_current(dyn)  # (1, 10), already ego-frame
@@ -471,6 +577,15 @@ class _SegState:
     # the model trains. Accumulated only in render_segment's loop; 0 count -> reported inf.
     gt_dev_sum: float = 0.0
     gt_dev_count: int = 0
+    world_delay_mode: str = "none"
+    k_lag: int = 0
+    delay_step: int = 0
+    plant_parameters: object = None
+    controller_compensation: bool = False
+    clock_idx: int | None = None
+    world_idx: int | None = None
+    metric_np_dict: dict | None = None
+    metric_neighbors_live: np.ndarray | None = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -527,6 +642,11 @@ def _seed_state(
     tracker_mode="mpc_batched",
     strong_brake_mps2=-2.5,
     yaw_gate: bool = True,
+    world_delay_mode: str = "none",
+    k_lag: int = 0,
+    delay_step: int = 0,
+    plant_parameters=None,
+    controller_compensation: bool = False,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -598,6 +718,11 @@ def _seed_state(
         unstick_teleport_after=int(unstick_teleport_after),
         replay_mode=str(replay_mode),
         nbr_tracker=nbr_tracker,
+        world_delay_mode=world_delay_mode,
+        k_lag=int(k_lag),
+        delay_step=int(delay_step),
+        plant_parameters=plant_parameters,
+        controller_compensation=bool(controller_compensation),
     )
 
 
@@ -617,13 +742,16 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         s.terminated, s.done = "goal", True
         return None
     if s.replay_mode == "clock":
-        idx = min(int(s.start + s.k), int(s.end - 1))
+        idx, world_idx = _clock_world_indices(
+            s.start, s.k, s.end, s.world_delay_mode, s.k_lag
+        )
         s.cursor.max_idx_reached = idx
         s.prev_max_idx = idx
         s.stuck = 0
         s.cursor._update_base_state(repeat=False)
     else:
         idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time, sim_yaw=float(s.live_pose[2]))
+        world_idx = idx
         if s.cursor.max_idx_reached > s.prev_max_idx:
             s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
         else:
@@ -631,6 +759,18 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if s.max_stuck_steps > 0 and s.stuck >= s.max_stuck_steps:
         s.terminated, s.done = "stuck", True
         return None
+    s.clock_idx = int(idx)
+    s.world_idx = int(world_idx)
+    model_base = _world_input_base(
+        s.tl, s.world_idx, s.clock_idx, s.world_delay_mode, s.k_lag
+    )
+    if s.world_delay_mode != "none":
+        s.metric_np_dict, s.metric_neighbors_live = build_input_np(
+            s.tl, s.clock_idx, s.live_pose, s.ego_hist, s.dyn
+        )
+    else:
+        s.metric_np_dict = None
+        s.metric_neighbors_live = None
     sim_nb = None
     slot_uuids = None  # slot -> UUID for the sim neighbor block (sim mode only)
     world_by_uuid = None  # UUID -> current shown world pose (for sim-future assembly)
@@ -642,12 +782,14 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if gpu_transform:
         # 8-tuple (..., sim_nb, slot_uuids, world_by_uuid); sim_nb overrides the recorded
         # neighbor block AFTER the batched world_to_ego transform (None = recorded mode).
-        base, dxyz, live_past, live_cur, ridx = build_input_raw(
-            s.tl, idx, s.live_pose, s.ego_hist, s.dyn
+        base, dxyz, live_past, live_cur, _ridx = build_input_raw(
+            s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
         )
         base["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
-        return (base, dxyz, live_past, live_cur, ridx, sim_nb, slot_uuids, world_by_uuid)
-    np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
+        return (base, dxyz, live_past, live_cur, s.clock_idx, sim_nb, slot_uuids, world_by_uuid)
+    np_dict, neighbors_live = build_input_np(
+        s.tl, s.world_idx, s.live_pose, s.ego_hist, s.dyn, base=model_base
+    )
     if sim_nb is not None:
         np_dict["neighbor_agents_past"] = sim_nb
         neighbors_live = sim_nb[0, :, -1, :].copy()
@@ -1150,7 +1292,9 @@ def _interp_pose(anchors: tuple, idx: int) -> tuple[float, float, float]:
     )
 
 
-def _apply_neighbor_interp(np_dict, neighbor_ids, live_pose, idx, interp):
+def _apply_neighbor_interp(
+    np_dict, neighbor_ids, live_pose, idx, interp, *, extrapolate_s: float = 0.0
+):
     """Replace each neighbor's current pose with its interpolated world pose.
 
     Mutates ``np_dict`` neighbor current (x, y, cos, sin) in the live-ego frame.
@@ -1172,6 +1316,9 @@ def _apply_neighbor_interp(np_dict, neighbor_ids, live_pose, idx, interp):
         lh = wh - eyaw
         nb[slot, -1, 2] = math.cos(lh)
         nb[slot, -1, 3] = math.sin(lh)
+        if extrapolate_s:
+            nb[slot, -1, 0] += nb[slot, -1, 4] * extrapolate_s
+            nb[slot, -1, 1] += nb[slot, -1, 5] * extrapolate_s
 
 
 # --------------------------------------------------------------------------- #
@@ -1495,6 +1642,16 @@ def render_segment(
     max_steps: int | None,
     timeline_progress_mode: str,
     draw_pool: Executor | None,
+    world_delay_mode: str = "none",
+    k_lag: int = 0,
+    delay_step: int = 0,
+    plant_parameter_set: str = "official",
+    steer_dead_time_s: float | None = None,
+    steer_time_constant_s: float | None = None,
+    accel_dead_time_s: float | None = None,
+    accel_time_constant_s: float | None = None,
+    plant_parameters=None,
+    controller_compensation: bool = False,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1570,6 +1727,30 @@ def render_segment(
     """
     from pathlib import Path
 
+    from scenario_generation.closed_loop_delay import (
+        resolve_plant_parameters,
+        validate_delay_options,
+    )
+
+    validate_delay_options(
+        timeline_progress_mode=timeline_progress_mode,
+        world_delay_mode=world_delay_mode,
+        k_lag=k_lag,
+        delay_step=delay_step,
+        tracker_mode=tracker_mode,
+        neighbor_history_mode=neighbor_history_mode,
+        replan_interval=replan_interval,
+        controller_compensation=controller_compensation,
+        future_len=model_args.future_len,
+    )
+    if plant_parameters is None:
+        plant_parameters = resolve_plant_parameters(
+            plant_parameter_set,
+            steer_dead_time_s=steer_dead_time_s,
+            steer_time_constant_s=steer_time_constant_s,
+            accel_dead_time_s=accel_dead_time_s,
+            accel_time_constant_s=accel_time_constant_s,
+        )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = max_steps if max_steps is not None else 3 * (end - start)
@@ -1595,6 +1776,11 @@ def render_segment(
         goal_mode=goal_mode,
         strong_brake_mps2=strong_brake_mps2,
         yaw_gate=yaw_gate,
+        world_delay_mode=world_delay_mode,
+        k_lag=k_lag,
+        delay_step=delay_step,
+        plant_parameters=plant_parameters,
+        controller_compensation=controller_compensation,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1667,6 +1853,15 @@ def render_segment(
                 if "static_objects" in np_dict:
                     np_dict["static_objects"] = np.zeros_like(np_dict["static_objects"])
                 neighbors_live = np.zeros_like(neighbors_live)
+                if s.metric_np_dict is not None:
+                    s.metric_np_dict["neighbor_agents_past"] = np.zeros_like(
+                        s.metric_np_dict["neighbor_agents_past"]
+                    )
+                    if "static_objects" in s.metric_np_dict:
+                        s.metric_np_dict["static_objects"] = np.zeros_like(
+                            s.metric_np_dict["static_objects"]
+                        )
+                    s.metric_neighbors_live = np.zeros_like(s.metric_neighbors_live)
 
             # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
             # last step's advance — an already-diverged segment skips inference too instead of just
@@ -1704,12 +1899,31 @@ def render_segment(
             # would make clearance/collision noisier than what's actually rendered.
             nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
             if interpolate and nids and interp:
-                _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
+                interp_idx = s.world_idx if s.world_idx is not None else idx
+                extrapolate_s = (
+                    s.k_lag * DT if s.world_delay_mode == "lag_extrapolated" else 0.0
+                )
+                _apply_neighbor_interp(
+                    np_dict,
+                    nids,
+                    s.live_pose,
+                    interp_idx,
+                    interp,
+                    extrapolate_s=extrapolate_s,
+                )
 
             # Scored here (before the replan/draw below) so this step's clearance/collision/
             # road-border-distance are available for the per-step trace line right below — used by
             # trajectory_colormap.py to color the rendered path by risk.
-            _score_into(s, neighbors_live, device, timers, np_dict)
+            _score_into(
+                s,
+                s.metric_neighbors_live
+                if s.metric_neighbors_live is not None
+                else neighbors_live,
+                device,
+                timers,
+                s.metric_np_dict if s.metric_np_dict is not None else np_dict,
+            )
 
             # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
             # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
@@ -1867,6 +2081,15 @@ def run_segments_batched(
     neighbor_history_mode: str = "recorded",
     tracker_mode: str = "mpc_batched",
     timeline_progress_mode: str = "pose",
+    world_delay_mode: str = "none",
+    k_lag: int = 0,
+    delay_step: int = 0,
+    plant_parameter_set: str = "official",
+    steer_dead_time_s: float | None = None,
+    steer_time_constant_s: float | None = None,
+    accel_dead_time_s: float | None = None,
+    accel_time_constant_s: float | None = None,
+    controller_compensation: bool = False,
     strong_brake_mps2: float = -2.5,
     yaw_gate: bool = True,
     credit_save_dir=None,
@@ -1914,8 +2137,30 @@ def run_segments_batched(
     way — prefetch only warms the cache).
     """
     from concurrent.futures import ThreadPoolExecutor
+    from scenario_generation.closed_loop_delay import (
+        resolve_plant_parameters,
+        validate_delay_options,
+    )
 
     timers = timers or Timers()
+    validate_delay_options(
+        timeline_progress_mode=timeline_progress_mode,
+        world_delay_mode=world_delay_mode,
+        k_lag=k_lag,
+        delay_step=delay_step,
+        tracker_mode=tracker_mode,
+        neighbor_history_mode=neighbor_history_mode,
+        replan_interval=1,
+        controller_compensation=controller_compensation,
+        future_len=model_args.future_len,
+    )
+    plant_parameters = resolve_plant_parameters(
+        plant_parameter_set,
+        steer_dead_time_s=steer_dead_time_s,
+        steer_time_constant_s=steer_time_constant_s,
+        accel_dead_time_s=accel_dead_time_s,
+        accel_time_constant_s=accel_time_constant_s,
+    )
     if save_dir is not None and save_max_scenes < save_pre_steps + 1:
         # The buffer is save_max_scenes+1 deep and the window is >= save_pre_steps frames
         # plus the collision step. A smaller cap would silently truncate the window — fail
@@ -1951,6 +2196,11 @@ def run_segments_batched(
                     strong_brake_mps2=strong_brake_mps2,
                     yaw_gate=yaw_gate,
                     goal_mode=goal_mode,
+                    world_delay_mode=world_delay_mode,
+                    k_lag=k_lag,
+                    delay_step=delay_step,
+                    plant_parameters=plant_parameters,
+                    controller_compensation=controller_compensation,
                 )
                 for (tl, start, end) in chunk
             ]
@@ -2087,11 +2337,42 @@ def run_segments_batched(
                     # Score ALL segments in one batched OBB pass, then advance each.
                     with timers("score"):
                         score_list = score_object_step_batched(
-                            [b[2] for b in built], [b[0].ego_shape for b in built], device
+                            [
+                                b[0].metric_neighbors_live
+                                if b[0].metric_neighbors_live is not None
+                                else b[2]
+                                for b in built
+                            ],
+                            [b[0].ego_shape for b in built],
+                            device,
                         )
                     with timers("danger_scorer"):
+                        danger_inputs = built
+                        if any(s.metric_np_dict is not None for s, *_rest in built):
+                            danger_inputs = [
+                                (
+                                    s,
+                                    s.metric_np_dict
+                                    if s.metric_np_dict is not None
+                                    else np_dict,
+                                    s.metric_neighbors_live
+                                    if s.metric_neighbors_live is not None
+                                    else neighbors,
+                                    idx,
+                                    slot_uuids,
+                                    world_by_uuid,
+                                )
+                                for (
+                                    s,
+                                    np_dict,
+                                    neighbors,
+                                    idx,
+                                    slot_uuids,
+                                    world_by_uuid,
+                                ) in built
+                            ]
                         danger_rows = (
-                            danger_scorer(built, preds, data, device)
+                            danger_scorer(danger_inputs, preds, data, device)
                             if danger_scorer is not None
                             else [None] * len(built)
                         )
@@ -2157,7 +2438,13 @@ def run_segments_batched(
                                     _s.realized_lag_streak = 0
                         realized_rows.append(
                             realized_event_scorer(
-                                gpu_scenes[_row_i] if gpu_scenes is not None else np_dict,
+                                _s.metric_np_dict
+                                if _s.metric_np_dict is not None
+                                else (
+                                    gpu_scenes[_row_i]
+                                    if gpu_scenes is not None
+                                    else np_dict
+                                ),
                                 collided=bool(col),
                                 step=_s.k,
                                 model_pred_world=model_pred_world,
@@ -2182,7 +2469,11 @@ def run_segments_batched(
                             timers,
                             # GPU-resident slice when available: the rb / red-light
                             # scorers then skip their per-step H2D re-upload.
-                            np_dict=gpu_scenes[row_idx] if gpu_scenes is not None else _np,
+                            np_dict=(
+                                s.metric_np_dict
+                                if s.metric_np_dict is not None
+                                else (gpu_scenes[row_idx] if gpu_scenes is not None else _np)
+                            ),
                             object_cl=float(cl),
                             object_col=bool(col),
                         )
