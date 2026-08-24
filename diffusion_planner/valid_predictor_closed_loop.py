@@ -276,6 +276,19 @@ def parse_args() -> argparse.Namespace:
     w.add_argument("--divergence_flag_min_m", type=float, default=5.0)
     w.add_argument("--divergence_flag_headway_s", type=float, default=2.0)
     w.add_argument(
+        "--clearance_weight",
+        type=float,
+        default=0.0,
+        help="weight of the moving-clearance term in the weighted average (0 = nuPlan weights "
+        "only; every window stores its terms so the aggregate can be re-weighted later)",
+    )
+    w.add_argument(
+        "--include_recorded_stop",
+        action="store_true",
+        help="score windows where the recorded ego made an operational stop (bus stop, roadside) "
+        "in the main bucket instead of listing them separately",
+    )
+    w.add_argument(
         "--max_windows_per_route",
         type=int,
         default=None,
@@ -319,6 +332,8 @@ def _window_config(args: argparse.Namespace):
         truncate_on_ghost_contact=not args.no_truncate_on_ghost_contact,
         divergence_flag_min_m=args.divergence_flag_min_m,
         divergence_flag_headway_s=args.divergence_flag_headway_s,
+        clearance_weight=args.clearance_weight,
+        include_recorded_stop=args.include_recorded_stop,
     )
 
 

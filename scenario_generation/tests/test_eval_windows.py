@@ -477,3 +477,15 @@ def test_at_fault_block_reports_dedup_and_hard_brake_counts():
         rear_under_hard_brake=1,
     )
     assert block["collided_tracks"] == 2 and block["rear_under_hard_brake_tracks"] == 1
+
+
+def test_rescore_windows_reweights_from_stored_terms():
+    e = _epdms(1.0)
+    e["terms"]["clearance"] = 0.0
+    e["weights"] = {"ep": 5.0, "ttc": 5.0, "sl": 4.0, "comfort": 2.0, "lk": 2.0}
+    rows = [{"route": "a", "epdms": e}]
+    out = ew.rescore_windows(rows, weights={"clearance": 2.0})
+    assert out[0]["epdms"]["score"] == pytest.approx(18 / 20)
+    assert rows[0]["epdms"]["score"] == 1.0  # input untouched
+    out = ew.rescore_windows(rows, weights={"clearance": 0.0})
+    assert out[0]["epdms"]["score"] == 1.0

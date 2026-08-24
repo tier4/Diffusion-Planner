@@ -83,6 +83,8 @@ class WindowConfig:
     truncate_on_ghost_contact: bool = True
     divergence_flag_min_m: float = 5.0
     divergence_flag_headway_s: float = 2.0
+    clearance_weight: float = 0.0
+    include_recorded_stop: bool = False
 
     def score_config(self) -> "ScoreConfig":
         return ScoreConfig(
@@ -92,6 +94,7 @@ class WindowConfig:
             divergence_flag_min_m=self.divergence_flag_min_m,
             divergence_flag_headway_s=self.divergence_flag_headway_s,
             polyline_margin_frames=self.polyline_margin_frames,
+            clearance_weight=self.clearance_weight,
         )
 
     def validate(self) -> "WindowConfig":
@@ -482,7 +485,7 @@ def run_windowed_eval(
                         f"term={metrics['terminated']}",
                         flush=True,
                     )
-    summary = summarize_windows(rows)
+    summary = summarize_windows(rows, include_recorded_stop=cfg.include_recorded_stop)
     summary.update(
         {
             "schema": WINDOW_SCHEMA,
@@ -495,3 +498,31 @@ def run_windowed_eval(
     with open(out_dir / "windows_summary.json", "w") as f:
         json.dump(summary, f, indent=2, default=float)
     return summary
+
+
+def rescore_windows(rows: list[dict], *, weights: dict | None = None) -> list[dict]:
+    """Recompute every window's score from its stored terms with new weighted-term weights.
+
+    ``weights`` maps term name -> weight (e.g. ``{"ep": 5, "ttc": 5, "sl": 4, "comfort": 2,
+    "lk": 2, "clearance": 2}``); omitted terms keep the weight stored in the row.  Multiplicative
+    terms are unchanged.  Returns new rows (the inputs are not modified).
+    """
+    out = []
+    for r in rows:
+        e = dict(r["epdms"])
+        if e.get("score") is None:
+            out.append(r)
+            continue
+        w = dict(e["weights"])
+        if weights:
+            w.update({k: float(v) for k, v in weights.items()})
+        w = {k: v for k, v in w.items() if v > 0}
+        weighted = sum(v * float(e["terms"][k]) for k, v in w.items()) / sum(w.values())
+        e = {
+            **e,
+            "weights": w,
+            "weighted": float(weighted),
+            "score": float(e["multiplicative"] * weighted),
+        }
+        out.append({**r, "epdms": e})
+    return out
