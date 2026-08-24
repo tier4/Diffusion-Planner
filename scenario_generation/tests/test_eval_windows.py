@@ -6,7 +6,11 @@ import pytest
 
 from planner_metrics.pdms_navsim import CollisionType
 from scenario_generation import eval_windows as ew
-from scenario_generation.metrics.at_fault import at_fault_block, classify_collision_step
+from scenario_generation.metrics.at_fault import (
+    at_fault_block,
+    classify_collision_step,
+    classify_new_collisions,
+)
 from scenario_generation.reproducer_rollout import _event_count
 
 EGO_SHAPE = np.array([2.8, 4.8, 1.9], dtype=np.float32)  # wheelbase, length, width
@@ -205,13 +209,15 @@ def _scene(*rows):
 
 def test_front_collision_into_stopped_track_is_at_fault():
     # Ego center is 0.5*wheelbase ahead of the rear axle; a stopped car 3 m ahead overlaps.
-    fault, types = classify_collision_step(_scene(_neighbor(3.0, 0.0)), EGO_SHAPE, 3.0, "cpu")
+    fault, types, _slots = classify_collision_step(
+        _scene(_neighbor(3.0, 0.0)), EGO_SHAPE, 3.0, "cpu"
+    )
     assert fault is True
     assert types == [int(CollisionType.STOPPED_TRACK_COLLISION)]
 
 
 def test_active_front_collision_is_at_fault():
-    fault, types = classify_collision_step(
+    fault, types, _slots = classify_collision_step(
         _scene(_neighbor(3.0, 0.0, vx=1.0)), EGO_SHAPE, 3.0, "cpu"
     )
     assert fault is True
@@ -219,7 +225,7 @@ def test_active_front_collision_is_at_fault():
 
 
 def test_stopped_ego_hit_is_not_at_fault():
-    fault, types = classify_collision_step(
+    fault, types, _slots = classify_collision_step(
         _scene(_neighbor(3.0, 0.0, vx=1.0)), EGO_SHAPE, 0.0, "cpu"
     )
     assert fault is False
@@ -228,7 +234,7 @@ def test_stopped_ego_hit_is_not_at_fault():
 
 def test_rear_end_by_follower_is_not_at_fault():
     # Moving neighbor overlapping the ego from behind (ego moving forward).
-    fault, types = classify_collision_step(
+    fault, types, _slots = classify_collision_step(
         _scene(_neighbor(-2.5, 0.0, vx=5.0)), EGO_SHAPE, 3.0, "cpu"
     )
     assert fault is False
@@ -237,10 +243,10 @@ def test_rear_end_by_follower_is_not_at_fault():
 
 def test_lateral_contact_is_lenient_and_mixed_scene_reports_all_types():
     lateral = _neighbor(1.0, 1.7, vx=1.0)  # side-by-side moving car overlapping laterally
-    fault, types = classify_collision_step(_scene(lateral), EGO_SHAPE, 3.0, "cpu")
+    fault, types, _slots = classify_collision_step(_scene(lateral), EGO_SHAPE, 3.0, "cpu")
     assert fault is False
     assert types == [int(CollisionType.ACTIVE_LATERAL_COLLISION)]
-    fault, types = classify_collision_step(
+    fault, types, _slots = classify_collision_step(
         _scene(lateral, _neighbor(3.0, 0.0)), EGO_SHAPE, 3.0, "cpu"
     )
     assert fault is True
@@ -253,8 +259,9 @@ def test_no_collision_and_empty_scene():
     assert classify_collision_step(_scene(_neighbor(20.0, 0.0)), EGO_SHAPE, 3.0, "cpu") == (
         False,
         [],
+        [],
     )
-    assert classify_collision_step(_scene(), EGO_SHAPE, 3.0, "cpu") == (False, [])
+    assert classify_collision_step(_scene(), EGO_SHAPE, 3.0, "cpu") == (False, [], [])
 
 
 def test_collision_set_matches_score_object_step():
@@ -274,7 +281,7 @@ def test_collision_set_matches_score_object_step():
         ]
         scene = _scene(*rows)
         _, col, _ = score_object_step(scene, EGO_SHAPE, "cpu")
-        _, types = classify_collision_step(scene, EGO_SHAPE, 2.0, "cpu")
+        _, types, _ = classify_collision_step(scene, EGO_SHAPE, 2.0, "cpu")
         assert bool(types) == bool(col)
 
 
@@ -356,3 +363,61 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
         rows[0]["v2"]["score"]
     )
     assert (tmp_path / "windows_summary.json").is_file()
+
+
+def test_rear_end_track_is_not_reclassified_when_it_ends_up_ahead():
+    collided: dict = {}
+    uuids = ["follower"] + [""] * 319
+    # Tick 1: replayed follower hits the ego from behind -> ACTIVE_REAR, not at fault.
+    fault, types, new = classify_new_collisions(
+        _scene(_neighbor(-2.5, 0.0, vx=5.0)),
+        EGO_SHAPE,
+        3.0,
+        "cpu",
+        slot_uuids=uuids,
+        collided=collided,
+    )
+    assert fault is False and types == [int(CollisionType.ACTIVE_REAR_COLLISION)]
+    assert new == ["follower"] and collided == {
+        "follower": int(CollisionType.ACTIVE_REAR_COLLISION)
+    }
+    # Tick 2: the same track has pushed through and now overlaps ahead of the ego.
+    fault, types, new = classify_new_collisions(
+        _scene(_neighbor(3.0, 0.0, vx=5.0)),
+        EGO_SHAPE,
+        3.0,
+        "cpu",
+        slot_uuids=uuids,
+        collided=collided,
+    )
+    assert fault is False and types == [] and new == []
+    # A different track hit head-on is still classified and at fault.
+    uuids2 = ["follower", "lead"] + [""] * 318
+    fault, types, new = classify_new_collisions(
+        _scene(_neighbor(3.0, 0.0, vx=5.0), _neighbor(3.0, 0.0)),
+        EGO_SHAPE,
+        3.0,
+        "cpu",
+        slot_uuids=uuids2,
+        collided=collided,
+    )
+    assert (
+        fault is True and types == [int(CollisionType.STOPPED_TRACK_COLLISION)] and new == ["lead"]
+    )
+    # No UUID list: slots stand in for tracks.
+    collided2: dict = {}
+    classify_new_collisions(
+        _scene(_neighbor(3.0, 0.0)), EGO_SHAPE, 3.0, "cpu", slot_uuids=None, collided=collided2
+    )
+    assert collided2 == {"slot0": int(CollisionType.STOPPED_TRACK_COLLISION)}
+
+
+def test_at_fault_block_reports_dedup_and_hard_brake_counts():
+    block = at_fault_block(
+        np.array([0, 1], dtype=bool),
+        [[], [2]],
+        _event_count,
+        collided={"a": 2, "b": 3},
+        rear_under_hard_brake=1,
+    )
+    assert block["collided_tracks"] == 2 and block["rear_under_hard_brake_tracks"] == 1

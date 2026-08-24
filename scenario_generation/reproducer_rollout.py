@@ -32,6 +32,7 @@ import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
 
+from planner_metrics.pdms_navsim import CollisionType
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.inference_compile import mark_inference_step
@@ -786,6 +787,8 @@ class _SegState:
     at_fault_scoring: bool = False
     at_fault: np.ndarray | None = None
     collision_types: list | None = None
+    collided_uuids: dict | None = None  # track uuid -> first CollisionType (navsim dedup)
+    rear_under_hard_brake: int = 0
     clock_idx: int | None = None
     world_idx: int | None = None
     metric_np_dict: dict | None = None
@@ -943,6 +946,7 @@ def _seed_state(
         at_fault_scoring=bool(at_fault_scoring),
         at_fault=np.zeros(cap, dtype=bool) if at_fault_scoring else None,
         collision_types=[[] for _ in range(cap)] if at_fault_scoring else None,
+        collided_uuids={} if at_fault_scoring else None,
         plan_schedule=_PlanSchedule() if int(delay_step) > 0 else None,
     )
 
@@ -1123,11 +1127,14 @@ def _score_into(
     *,
     object_cl: float | None = None,
     object_col: bool | None = None,
+    slot_uuids: list | None = None,
 ):
     """Score this step's object / road-border / red-light metrics into the segment state.
 
     When ``object_cl`` / ``object_col`` are provided (batched path already scored
     neighbors), reuse them instead of calling ``score_object_step`` again.
+    ``slot_uuids`` (slot -> track UUID, same order as ``neighbors_live``) lets the opt-in
+    at-fault scorer classify each track once (``classify_new_collisions``).
     """
     with timers("score"):
         if object_cl is not None and object_col is not None:
@@ -1138,13 +1145,25 @@ def _score_into(
             s.clearances[s.k] = cl
             s.collisions[s.k] = col
         if s.at_fault_scoring and bool(s.collisions[s.k]):
-            from scenario_generation.metrics.at_fault import classify_collision_step
+            from scenario_generation.metrics.at_fault import classify_new_collisions
 
-            fault, types = classify_collision_step(
-                neighbors_live, s.ego_shape, float(s.dyn.speed), device
+            fault, types, _uuids = classify_new_collisions(
+                neighbors_live,
+                s.ego_shape,
+                float(s.dyn.speed),
+                device,
+                slot_uuids=slot_uuids,
+                collided=s.collided_uuids,
             )
             s.at_fault[s.k] = fault
             s.collision_types[s.k] = types
+            if types and s.accels is not None:
+                recent = s.accels[max(0, s.k - 10) : s.k]
+                hard = bool(len(recent)) and float(recent.min()) <= float(s.strong_brake_mps2)
+                if hard:
+                    s.rear_under_hard_brake += sum(
+                        1 for t in types if t == int(CollisionType.ACTIVE_REAR_COLLISION)
+                    )
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
@@ -1438,7 +1457,15 @@ def _finalize(s: _SegState) -> dict:
             "repeat_steps": int(s.cursor.repeat_steps),
         },
         **(
-            {"at_fault": at_fault_block(s.at_fault[: s.k], s.collision_types[: s.k], _event_count)}
+            {
+                "at_fault": at_fault_block(
+                    s.at_fault[: s.k],
+                    s.collision_types[: s.k],
+                    _event_count,
+                    collided=s.collided_uuids,
+                    rear_under_hard_brake=s.rear_under_hard_brake,
+                )
+            }
             if s.at_fault_scoring
             else {}
         ),
@@ -2185,6 +2212,7 @@ def render_segment(
                 device,
                 timers,
                 s.metric_np_dict if s.metric_np_dict is not None else np_dict,
+                slot_uuids=nids,
             )
 
             # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
