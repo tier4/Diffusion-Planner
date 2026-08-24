@@ -267,6 +267,14 @@ def parse_args() -> argparse.Namespace:
         help="render a PNG every N ticks per window and encode <window>.mp4 (default: no video)",
     )
     w.add_argument("--window_video_fps", type=float, default=5.0)
+    w.add_argument("--window_min_valid_s", type=float, default=3.0)
+    w.add_argument(
+        "--no_truncate_on_ghost_contact",
+        action="store_true",
+        help="keep scoring after a not-at-fault contact (default: the valid span ends there)",
+    )
+    w.add_argument("--divergence_flag_min_m", type=float, default=5.0)
+    w.add_argument("--divergence_flag_headway_s", type=float, default=2.0)
     w.add_argument(
         "--max_windows_per_route",
         type=int,
@@ -307,6 +315,10 @@ def _window_config(args: argparse.Namespace):
         window_indices=tuple(args.window_indices) if args.window_indices else None,
         draw_every=args.window_draw_every,
         video_fps=args.window_video_fps,
+        min_valid_s=args.window_min_valid_s,
+        truncate_on_ghost_contact=not args.no_truncate_on_ghost_contact,
+        divergence_flag_min_m=args.divergence_flag_min_m,
+        divergence_flag_headway_s=args.divergence_flag_headway_s,
     )
 
 
@@ -478,14 +490,23 @@ def main() -> None:
             f"{summary['n_routes']} routes in {summary['elapsed_sec']:.1f}s ==="
         )
         for key in (
+            "n_valid",
+            "invalid_windows",
+            "valid_span_reasons",
             "score_macro",
             "score_micro",
-            "graded_mean",
-            "gate_pass_rate",
+            "multiplicative_mean",
+            "weighted_mean",
+            "term_means",
+            "zero_windows",
             "progress_ratio_mean",
             "ade_lon_m_mean",
             "ade_lat_m_mean",
+            "route_adherence_mean",
+            "tl_measured_frac_mean",
+            "divergence_flag_windows",
             "at_fault_windows",
+            "rear_under_hard_brake_tracks",
             "road_border_windows",
             "diverged_windows",
         ):

@@ -165,29 +165,63 @@ def test_score_requires_at_fault_block():
         ew.score_window({"terminated": "max_steps", "road_border": {}}, _div(), ew.WindowConfig())
 
 
-def test_summary_macro_vs_micro():
-    def row(route, score):
-        return {
-            "route": route,
-            "terminated": "max_steps",
-            "object": {"collision_count": 0},
-            "road_border": {"collision_steps": 0},
-            "at_fault": {"count": 0},
-            "v2": {
-                "score": score,
-                "graded": score,
-                "gate": 1 if score > 0 else 0,
-                "gates": {"coverage": 1, "nc": 1, "offroad": 1, "progress": 1},
-                "progress_ratio": 1.0,
-                "divergence": {"ade_lon_m": 1.0, "ade_lat_m": 0.1},
-            },
-        }
+def _epdms(score, *, invalid=False, reason="window_end", nc=1.0):
+    return {
+        "score": score,
+        "invalid": invalid,
+        "valid_ticks": 150,
+        "valid_span": {"reason": reason, "tick": 150},
+        "multiplicative": 1.0 if score else 0.0,
+        "weighted": score if score else 0.5,
+        "terms": {
+            "nc": nc,
+            "dac": 1.0,
+            "ddc": 1.0,
+            "tlc": 1.0,
+            "mp": 1.0,
+            "ep": 1.0,
+            "ttc": 1.0,
+            "sl": 1.0,
+            "comfort": 1.0,
+            "lk": 1.0,
+        },
+        "detail": {
+            "progress_ratio": 1.0,
+            "ade_lon_m": 1.0,
+            "ade_lat_m": 0.1,
+            "route_adherence_frac": 1.0,
+            "tl_measured_frac": 0.5,
+            "divergence_flag_ticks": 0,
+        },
+    }
 
-    s = ew.summarize_windows([row("a", 1.0), row("a", 0.0), row("b", 1.0)])
-    assert s["n_windows"] == 3 and s["n_routes"] == 2
+
+def _row(route, score, **kw):
+    return {
+        "route": route,
+        "terminated": "max_steps",
+        "object": {"collision_count": 0},
+        "road_border": {"collision_steps": 0},
+        "at_fault": {"count": 0},
+        "epdms": _epdms(score, **kw),
+    }
+
+
+def test_summary_macro_vs_micro_and_invalid_windows():
+    rows = [
+        _row("a", 1.0),
+        _row("a", 0.0, nc=0.0),
+        _row("b", 1.0),
+        _row("b", None, invalid=True, reason="ghost_contact"),
+    ]
+    s = ew.summarize_windows(rows)
+    assert s["n_windows"] == 4 and s["n_routes"] == 2 and s["n_valid"] == 3
+    assert s["invalid_windows"] == 1
+    assert s["valid_span_reasons"] == {"window_end": 3, "ghost_contact": 1}
     assert s["score_micro"] == pytest.approx(2 / 3)
     assert s["score_macro"] == pytest.approx((0.5 + 1.0) / 2)
-    assert s["gate_zero_windows"] == 1
+    assert s["zero_windows"]["nc"] == 1
+    assert s["term_means"]["nc"] == pytest.approx(2 / 3)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,6 +345,9 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
         def __len__(self):
             return n
 
+        def npz(self, idx):
+            return {"ego_shape": np.array([2.8, 4.8, 1.9], dtype=np.float32)}
+
     calls = []
 
     def fake_render(model, model_args, tl, lo, hi, out_dir, **kw):
@@ -319,7 +356,12 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
         with open(out_dir / "rollout.jsonl", "w") as f:
             f.write(json.dumps({"event": "start"}) + "\n")
             for k in range(hi - lo):
-                f.write(json.dumps({"k": k, "ego": [float(poses[lo + k, 0]), 0.2]}) + "\n")
+                f.write(
+                    json.dumps(
+                        {"k": k, "ego": [float(poses[lo + k, 0]), 0.2], "yaw": 0.0, "speed": 1.0}
+                    )
+                    + "\n"
+                )
         return {
             "segment": [lo, hi],
             "n_steps_run": hi - lo,
@@ -336,6 +378,13 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(ew, "render_segment", fake_render)
+    seen = []
+
+    def fake_epdms(tl, lo, hi, rows, ego_shape, cfg, **kw):
+        seen.append((lo, hi, len(rows), tuple(ego_shape), cfg))
+        return _epdms(0.75)
+
+    monkeypatch.setattr(ew, "score_window_epdms", fake_epdms)
     monkeypatch.setattr(ew, "RouteTimeline", _TL)
     monkeypatch.setattr(
         ew, "enumerate_multi_root_routes", lambda _root: ({"routeA": ["p"]}, {"routeA": "d"})
@@ -356,12 +405,13 @@ def test_run_windowed_eval_pins_window_contract(tmp_path, monkeypatch):
     assert kw["goal_reach_m"] == 0.0 and kw["timeline_progress_mode"] == "clock"
     assert kw["at_fault_scoring"] is True and kw["abort_deviation_m"] == 100.0
     assert kw["k_lag"] == 3  # caller knobs survive
-    rows = [json.loads(l) for l in open(tmp_path / "windows.jsonl")]
+    rows = [json.loads(line) for line in open(tmp_path / "windows.jsonl")]
     assert len(rows) == 3 and "_tdigest" not in rows[0]["object"]
     assert rows[0]["v2"]["score"] == pytest.approx(1.0 - 0.25 * 0.2 / 3.0)
-    assert summary["n_windows"] == 3 and summary["score_micro"] == pytest.approx(
-        rows[0]["v2"]["score"]
-    )
+    assert rows[0]["epdms"]["score"] == 0.75
+    assert [(lo, hi, n) for lo, hi, n, _, _ in seen] == [(0, 50, 50), (50, 100, 50), (100, 130, 30)]
+    assert seen[0][4].min_valid_s == cfg.min_valid_s
+    assert summary["n_windows"] == 3 and summary["score_micro"] == pytest.approx(0.75)
     assert (tmp_path / "windows_summary.json").is_file()
 
 

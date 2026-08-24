@@ -48,6 +48,7 @@ from scenario_generation.closed_loop_eval import (
 from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.tools._heatmap_common import project_points_to_polyline
+from scenario_generation.window_metrics import ScoreConfig, read_rollout, score_window_epdms
 
 WINDOW_SCHEMA = "closed_loop_windows/1.0"
 
@@ -77,6 +78,21 @@ class WindowConfig:
     window_indices: tuple[int, ...] | None = None  # evaluate only these window indices per route
     draw_every: int | None = None  # render a PNG every N ticks and encode <window>.mp4
     video_fps: float = 5.0
+    # EPDMS-style scoring (scenario_generation.window_metrics).
+    min_valid_s: float = 3.0
+    truncate_on_ghost_contact: bool = True
+    divergence_flag_min_m: float = 5.0
+    divergence_flag_headway_s: float = 2.0
+
+    def score_config(self) -> "ScoreConfig":
+        return ScoreConfig(
+            min_recorded_progress_m=self.min_recorded_progress_m,
+            min_valid_s=self.min_valid_s,
+            truncate_on_ghost_contact=self.truncate_on_ghost_contact,
+            divergence_flag_min_m=self.divergence_flag_min_m,
+            divergence_flag_headway_s=self.divergence_flag_headway_s,
+            polyline_margin_frames=self.polyline_margin_frames,
+        )
 
     def validate(self) -> "WindowConfig":
         if self.mode not in ("fixed", "anchor"):
@@ -263,17 +279,6 @@ def score_window(metrics: dict, divergence: dict, cfg: WindowConfig) -> dict:
     }
 
 
-def _read_live_xy(rollout_jsonl: Path) -> np.ndarray:
-    xs: list[list[float]] = []
-    with open(rollout_jsonl) as f:
-        for line in f:
-            row = json.loads(line)
-            if "event" in row:
-                continue
-            xs.append([float(row["ego"][0]), float(row["ego"][1])])
-    return np.asarray(xs, dtype=np.float64).reshape(-1, 2)
-
-
 # --------------------------------------------------------------------------- #
 # driver
 # --------------------------------------------------------------------------- #
@@ -298,36 +303,76 @@ _WINDOW_RENDER_OVERRIDES = dict(
 )
 
 
-def summarize_windows(rows: list[dict]) -> dict:
-    """Macro (route-mean of window-mean) and micro (all-window mean) aggregates."""
+def summarize_windows(rows: list[dict], *, include_recorded_stop: bool = False) -> dict:
+    """EPDMS-style aggregate: one score plus its breakdown.
+
+    ``score_macro`` = mean over routes of the per-route mean window score, ``score_micro`` =
+    mean over all VALID windows.  Invalid windows (valid span shorter than ``min_valid_s``)
+    are counted, not scored.  Multiplicative zero counts and weighted-term means are the
+    breakdown; the raw ``v2`` divergence block is aggregated alongside.
+    """
     if not rows:
-        return {"n_windows": 0, "n_routes": 0}
+        return {"n_windows": 0, "n_routes": 0, "n_valid": 0}
+    scored = [
+        r for r in rows if not r["epdms"].get("invalid") and r["epdms"].get("score") is not None
+    ]
+    stop_rows = [r for r in scored if r["epdms"].get("recorded_stop")]
+    valid = scored if include_recorded_stop else [r for r in scored if r not in stop_rows]
     by_route: dict[str, list[float]] = {}
-    for r in rows:
-        by_route.setdefault(r["route"], []).append(float(r["v2"]["score"]))
-    scores = np.array([float(r["v2"]["score"]) for r in rows])
-    gates = {
-        g: float(np.mean([r["v2"]["gates"][g] for r in rows]))
-        for g in ("coverage", "nc", "offroad", "progress")
+    for r in valid:
+        by_route.setdefault(r["route"], []).append(float(r["epdms"]["score"]))
+    terms = ("nc", "dac", "ddc", "tlc", "mp", "ep", "ttc", "sl", "comfort", "lk")
+    term_means = {
+        t: float(np.mean([r["epdms"]["terms"][t] for r in valid])) if valid else None for t in terms
     }
-    finite = [r for r in rows if math.isfinite(r["v2"]["divergence"]["ade_lon_m"])]
+    zero = {
+        t: int(sum(1 for r in valid if r["epdms"]["terms"][t] == 0.0))
+        for t in ("nc", "dac", "ddc", "tlc", "mp", "ttc", "sl", "comfort", "lk")
+    }
+    cut_reasons: dict[str, int] = {}
+    for r in rows:
+        reason = r["epdms"]["valid_span"]["reason"]
+        cut_reasons[reason] = cut_reasons.get(reason, 0) + 1
+    finite = [r for r in valid if math.isfinite(r["epdms"]["detail"]["ade_lon_m"])]
+
+    def _mean(key: str):
+        vals = [r["epdms"]["detail"][key] for r in finite if r["epdms"]["detail"][key] is not None]
+        return float(np.mean(vals)) if vals else None
+
     return {
         "n_windows": int(len(rows)),
-        "n_routes": int(len(by_route)),
-        "score_macro": float(np.mean([np.mean(v) for v in by_route.values()])),
-        "score_micro": float(scores.mean()),
-        "graded_mean": float(np.mean([r["v2"]["graded"] for r in rows])),
-        "gate_pass_rate": gates,
-        "gate_zero_windows": int(sum(1 for r in rows if r["v2"]["gate"] == 0)),
-        "progress_ratio_mean": float(np.mean([r["v2"]["progress_ratio"] for r in rows])),
-        "ade_lon_m_mean": float(np.mean([r["v2"]["divergence"]["ade_lon_m"] for r in finite]))
-        if finite
-        else float("inf"),
-        "ade_lat_m_mean": float(np.mean([r["v2"]["divergence"]["ade_lat_m"] for r in finite]))
-        if finite
-        else float("inf"),
+        "n_routes": int(len({r["route"] for r in rows})),
+        "n_valid": int(len(valid)),
+        "invalid_windows": int(len(rows) - len(scored)),
+        "recorded_stop_windows": int(len(stop_rows)),
+        "recorded_stop_included": bool(include_recorded_stop),
+        "recorded_stop_score_micro": float(np.mean([r["epdms"]["score"] for r in stop_rows]))
+        if stop_rows
+        else None,
+        "valid_span_reasons": cut_reasons,
+        "score_macro": float(np.mean([np.mean(v) for v in by_route.values()]))
+        if by_route
+        else None,
+        "score_micro": float(np.mean([r["epdms"]["score"] for r in valid])) if valid else None,
+        "multiplicative_mean": float(np.mean([r["epdms"]["multiplicative"] for r in valid]))
+        if valid
+        else None,
+        "weighted_mean": float(np.mean([r["epdms"]["weighted"] for r in valid])) if valid else None,
+        "term_means": term_means,
+        "zero_windows": zero,
+        "progress_ratio_mean": _mean("progress_ratio"),
+        "ade_lon_m_mean": _mean("ade_lon_m"),
+        "ade_lat_m_mean": _mean("ade_lat_m"),
+        "route_adherence_mean": _mean("route_adherence_frac"),
+        "tl_measured_frac_mean": _mean("tl_measured_frac"),
+        "divergence_flag_windows": int(
+            sum(1 for r in valid if r["epdms"]["detail"]["divergence_flag_ticks"] > 0)
+        ),
         "at_fault_windows": int(sum(1 for r in rows if r["at_fault"]["count"] > 0)),
         "at_fault_events": int(sum(r["at_fault"]["count"] for r in rows)),
+        "rear_under_hard_brake_tracks": int(
+            sum(r["at_fault"].get("rear_under_hard_brake_tracks", 0) for r in rows)
+        ),
         "raw_collision_windows": int(sum(1 for r in rows if r["object"]["collision_count"] > 0)),
         "road_border_windows": int(sum(1 for r in rows if r["road_border"]["collision_steps"] > 0)),
         "diverged_windows": int(sum(1 for r in rows if r["terminated"] == "diverged")),
@@ -387,12 +432,23 @@ def run_windowed_eval(
                 )
                 if cfg.draw_every is not None and any(wdir.glob("*.png")):
                     build_mp4(wdir, out_dir / key / f"{wdir.name}.mp4", cfg.video_fps)
-                live_xy = _read_live_xy(wdir / "rollout.jsonl")
+                rollout_rows = read_rollout(wdir / "rollout.jsonl")
+                live_xy = np.array([r["ego"][:2] for r in rollout_rows], dtype=np.float64)
                 div = window_divergence(
                     tl.poses, lo, hi, live_xy, margin_frames=cfg.polyline_margin_frames
                 )
                 v2 = score_window(metrics, div, cfg)
                 v2["divergence"] = div
+                epdms = score_window_epdms(
+                    tl,
+                    lo,
+                    hi,
+                    rollout_rows,
+                    np.asarray(tl.npz(lo)["ego_shape"]).reshape(-1)[:3],
+                    cfg.score_config(),
+                    at_fault_block=metrics.get("at_fault"),
+                    terminated=metrics["terminated"],
+                )
                 row = segment_row_for_json(metrics, route=key)
                 row.update(
                     {
@@ -401,17 +457,22 @@ def run_windowed_eval(
                         "start_frame_id": int(tl.frame_indices[lo]),
                         "end_frame_id": int(tl.frame_indices[hi - 1]),
                         "v2": v2,
+                        "epdms": epdms,
                     }
                 )
                 fout.write(json.dumps(row, default=float) + "\n")
                 fout.flush()
                 rows.append(row)
                 if verbose:
+                    sc = epdms.get("score")
+                    terms = " ".join(f"{k}={v:.2f}" for k, v in epdms.get("terms", {}).items())
                     print(
                         f"[{ri + 1}/{len(route_keys)}] {key} w{wi:03d} [{lo},{hi}) "
-                        f"score={v2['score']:.3f} gates={v2['gates']} "
-                        f"prog={v2['progress_ratio']:.2f} lon={div['ade_lon_m']:.2f} "
-                        f"lat={div['ade_lat_m']:.2f} term={metrics['terminated']}",
+                        f"score={'-' if sc is None else f'{sc:.3f}'} "
+                        f"valid={epdms['valid_ticks']}/{hi - lo}({epdms['valid_span']['reason']})"
+                        f"{' INVALID' if epdms.get('invalid') else ''} | {terms} | "
+                        f"lon={div['ade_lon_m']:.2f} lat={div['ade_lat_m']:.2f} "
+                        f"term={metrics['terminated']}",
                         flush=True,
                     )
     summary = summarize_windows(rows)
