@@ -57,6 +57,11 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     save_utd: int = cli("checkpoint save cadence in epochs", default=10)
     learning_rate: float = 1e-4
     warm_up_epoch: int = 5
+    lr_schedule: Literal["constant", "cosine"] = cli(
+        "post-warm-up LR schedule: 'constant' holds the configured LR (default; matches "
+        "every existing checkpoint), 'cosine' anneals it to 0 by the final epoch.",
+        default="constant",
+    )
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True

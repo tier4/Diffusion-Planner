@@ -366,7 +366,12 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    scheduler = CosineAnnealingWarmUpRestarts(
+        optimizer,
+        train_epochs,
+        args.warm_up_epoch,
+        lr_schedule=args.lr_schedule,
+    )
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
