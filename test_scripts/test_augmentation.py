@@ -12,12 +12,13 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
+from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
 from diffusion_planner.utils.visualize_input import visualize_inputs
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_npz", type=Path)
 parser.add_argument("save_dir", type=Path)
-parser.add_argument("--augment_type", choices=["quintic", "bridge"], default="quintic")
+parser.add_argument("--augment_type", choices=["quintic", "bridge", "frenet"], default="quintic")
 parser.add_argument(
     "--no_smoothing_future_trajectory",
     action="store_true",
@@ -51,6 +52,8 @@ if args.augment_type == "quintic":
         ego_past_noise_std=0.1,
         use_smoothing_future_trajectory=not args.no_smoothing_future_trajectory,
     )
+elif args.augment_type == "frenet":
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
 else:
     aug = BridgeStatePerturbation(augment_prob=1.0, device="cpu")
 

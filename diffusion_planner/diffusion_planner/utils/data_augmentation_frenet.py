@@ -52,8 +52,6 @@ LIMITS = {
     # Ackermann / kinematic-bicycle feasibility (needs wheelbase from ego_shape):
     # steering angle delta = atan(WB * kappa), kappa = yaw_rate / speed.
     "steer": 0.61,  # rad (~35 deg), typical passenger-car lock
-    "steer_rate": 0.5,  # rad/s
-    "lon_acc": 3.0,  # m/s^2 (report only for now; GT noise can exceed it)
 }
 
 
@@ -96,11 +94,13 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # polyline's finite-diff velocity leaves a small tangent/heading residual
         # in vy (<= 0.08 m/s) after re-centering — project it out so augmented
         # states stay exactly on the data manifold. No-op for non-augmented rows.
-        cur = inputs["ego_current_state"]
-        vx, vy = cur[:, 4], cur[:, 5]
-        cur[:, 4] = torch.sqrt(vx * vx + vy * vy) * torch.where(vx < 0, -1.0, 1.0)
-        cur[:, 5] = 0.0
-        cur[:, 7] = 0.0  # ay
+        rows = self._aug_rows
+        if rows is not None and bool(rows.any()):
+            cur = inputs["ego_current_state"]
+            vx, vy = cur[rows, 4], cur[rows, 5]
+            cur[rows, 4] = torch.sqrt(vx * vx + vy * vy) * torch.where(vx < 0, -1.0, 1.0)
+            cur[rows, 5] = 0.0
+            cur[rows, 7] = 0.0  # ay
         return out
 
     def __init__(
@@ -125,11 +125,20 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # re-centered with the future in centric_transform (quintic/bridge keep the
         # GT past and skip that transform).
         self._transform_ego_past = True
+        # rows augmented in the most recent __call__; centric_transform re-projects
+        # velocity/accel to base_link (vy = ay = 0) for exactly these rows
+        self._aug_rows = None
         self.n_draws = n_draws
         self.dy_max = dy_max
         self.dth_max = dth_max
         self.knobs = knobs
-        self.gen = torch.Generator(device="cpu").manual_seed(seed)
+        # offset the stream per DDP rank so ranks draw independent perturbations
+        rank = (
+            torch.distributed.get_rank()
+            if torch.distributed.is_available() and torch.distributed.is_initialized()
+            else 0
+        )
+        self.gen = torch.Generator(device="cpu").manual_seed(seed + rank)
         self.ranked_temp_s = float(ranked_temp_s)
         self._basis_cache = {}
 
@@ -171,14 +180,19 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         return out
 
     # ---------- corridor, fully batched ----------
-    def _corridor(self, inputs, xy, tan, nrm, t, half_w, half_l):
+    def _corridor(self, inputs, xy, tan, nrm, half_w, half_l, wb):
         B, T, _ = xy.shape
         dev, dtype = xy.device, xy.dtype
         lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
         hi = torch.full((B, T), 20.0, device=dev, dtype=dtype)
 
         ls = inputs.get("line_strings")
-        if ls is not None and ls.shape[-1] >= 4:
+        if ls is not None and ls.shape[-1] < 4:
+            raise ValueError(
+                f"line_strings has {ls.shape[-1]} channels; frenet augmentation needs "
+                "channel 3 (road-border flag) to constrain the corridor"
+            )
+        if ls is not None:
             pts = ls[..., :2]  # (B, L, P, 2)
             is_border = (ls[..., 3] > 0.5).any(-1)  # (B, L)
             pv = pts.norm(dim=-1) > 1e-6
@@ -203,8 +217,18 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         past = inputs.get("neighbor_agents_past")
         fut = inputs.get("neighbor_agents_future")
         if past is not None and fut is not None:
-            # time-aligned neighbor states on the SAME grid as the ego polyline
-            st = torch.cat([past[..., :4], fut[..., :4]], dim=2)  # (B, N, T, 4)
+            # time-aligned neighbor states on the SAME grid as the ego polyline.
+            # Futures come in two layouts: 4-col (x, y, cos, sin) or the canonical
+            # 3-col (x, y, heading) — train_epoch only converts to cos/sin AFTER
+            # augmentation, so handle both here.
+            if fut.shape[-1] >= 4:
+                fut4 = fut[..., :4]
+            else:
+                fut4 = torch.cat([fut[..., :2], fut[..., 2:3].cos(), fut[..., 2:3].sin()], dim=-1)
+                # keep padded rows padded: an all-zero 3-col row must not become
+                # (0, 0, 1, 0) after cos/sin
+                fut4 = fut4 * (fut.abs().sum(-1, keepdim=True) > 0)
+            st = torch.cat([past[..., :4], fut4], dim=2)  # (B, N, T, 4)
             valid = st.abs().sum(-1) > 0  # (B, N, T)
             l_n = past[:, :, -1, 7][..., None]  # (B, N, 1)
             w_n = past[:, :, -1, 6][..., None]
@@ -212,7 +236,11 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             axi = st[..., 2:4]
             per = torch.stack([-axi[..., 1], axi[..., 0]], dim=-1)
             rel = c - xy[:, None]  # (B, N, T, 2)
-            lon = (rel * tan[:, None]).sum(-1)
+            # ego xy is base_link (rear axle); the footprint CENTER sits wb/2
+            # ahead along the tangent, so shift the longitudinal window there —
+            # otherwise a transient neighbor overlapping only the front bumper
+            # imposes no lateral cut.
+            lon = (rel * tan[:, None]).sum(-1) - (wb / 2)[:, None, None]
             lat = (rel * nrm[:, None]).sum(-1)
             ext_lon = (
                 (tan[:, None] * axi).sum(-1).abs() * l_n + (tan[:, None] * per).sum(-1).abs() * w_n
@@ -255,24 +283,27 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         half_w = inputs["ego_shape"][:, 2] / 2 + CORRIDOR_MARGIN
         half_l = inputs["ego_shape"][:, 1] / 2
 
-        lo, hi = self._corridor(inputs, xy, tan, nrm, t, half_w, half_l)
+        lo, hi = self._corridor(inputs, xy, tan, nrm, half_w, half_l, wb)
 
         K, C = self.n_draws, len(combos)
-        r = torch.rand((B, 3 * K + 1), generator=self.gen).to(dev)
+        r = torch.rand((B, 2 * K + 1), generator=self.gen).to(dev)
         do_aug = r[:, -1] < self._augment_prob
+        # Low-speed / reverse gate (same threshold as the quintic augmenter): a
+        # near-stationary ego makes every path-relative feasibility metric
+        # degenerate (a pure sideways translation has zero lateral accel/jerk/yaw
+        # rate), and a reversing ego would get motion-direction headings flipped
+        # 180 deg by the polyline rewrite. Both train on plain GT instead.
+        do_aug = do_aug & (inputs["ego_current_state"][:, 4] >= 2.0)
         dy = (r[:, :K] * 2 - 1) * self.dy_max
         dth = (r[:, K : 2 * K] * 2 - 1) * self.dth_max
-        j = (r[:, 2 * K : 3 * K] * C).long().clamp(max=C - 1)
 
         slope = v0[:, None] * torch.tan(dth)
-        # NO combo loop: gather each candidate's OWN basis / masks by its drawn
-        # tuple index, then evaluate everything in one einsum per derivative.
-        # (C=40 tiny GEMMs in a python loop cost ~240 kernel launches of pure
-        # overhead - the gathered form is a single batched contraction.)
+        # NO combo loop: stack every combo's basis/mask once, then evaluate all
+        # (draw, combo) pairs in one einsum per derivative. (C=40 tiny GEMMs in
+        # a python loop cost ~240 kernel launches of pure overhead - the stacked
+        # form is a single batched contraction.)
         Ball = torch.stack([cb["B"] for cb in combos])  # (C, 4, 3, T)
         m_all = torch.stack([cb["m"] for cb in combos])  # (C, T)
-        mh_all = torch.stack([cb["mh"] for cb in combos])
-        mf_all = torch.stack([cb["mf"] for cb in combos])
         merges = torch.tensor([cb["merge"] for cb in combos], device=dev, dtype=dtype)
         fracs = torch.tensor([cb["frac"] for cb in combos], device=dev, dtype=dtype)
 
@@ -287,7 +318,11 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         prof = torch.einsum("bkci,cdit->bkcdt", bc, Ball)  # (B, K, C, 4, T)
         L, V, A, J = prof.unbind(dim=3)
         m = m_all[None, None]  # (1, 1, C, T)
-        rot = half_l[:, None, None, None] * (V.abs() / speed[:, None, None]).clamp(max=0.35)
+        # rotation margin lever arm = rear axle -> front bumper (wb/2 + L/2),
+        # since the candidate lateral offset is applied at the rear-axle point
+        rot = (wb / 2 + half_l)[:, None, None, None] * (V.abs() / speed[:, None, None]).clamp(
+            max=0.35
+        )
         in_corr = ((L - rot >= lo[:, None, None]) & (L + rot <= hi[:, None, None]) | ~m).all(
             -1
         )  # (B, K, C)
@@ -337,9 +372,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             feas_k = feasible[bi, first]  # (B, C) — valid combos for the chosen draw
             jerk_k = jerk_fut_peak[bi, first]  # (B, C)
             BIG = torch.tensor(1e9, device=dev, dtype=dtype)
-            # merge time sampled among feasible Ms with P(M) ∝ exp(-(M-Mmin)/temp)
-            # — biased to fast convergence, slower merges keep a chance; within
-            # the sampled M, lowest peak future jerk wins.
+            # merge time sampled with per-combo weight exp(-(M-Mmin)/temp), i.e.
+            # P(M) ∝ n_feasible_combos(M) * exp(-(M-Mmin)/temp) — biased to fast
+            # convergence, slower merges keep a chance; within the sampled M,
+            # lowest peak future jerk wins.
             m_feas = torch.where(feas_k, merges[None, :], BIG)
             m_min = m_feas.amin(-1, keepdim=True)
             w = torch.exp(-(merges[None, :] - m_min) / self.ranked_temp_s) * feas_k
@@ -396,4 +432,5 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             n_cols = min(new_cur.shape[-1], cur.shape[-1])
             cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
 
+        self._aug_rows = has
         return self.centric_transform(inputs, ego_future, neighbors_future)

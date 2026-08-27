@@ -1057,7 +1057,80 @@ def test_augment_collision_batch_selectively_suppresses():
 # ──────────────────────────────── runner ────────────────────────────────────
 
 
+# ──────────────────────────── frenet augmentation ───────────────────────────
+
+
+def _make_frenet_inputs(B: int = 4, vx: float = 5.0, T_past: int = 21, T_fut: int = 80):
+    """Inputs for FrenetStatePerturbationTensor: 4-col past, ego_shape, 4-ch borders,
+    and the canonical 3-col (x, y, heading) neighbor future."""
+    inputs, ego_future, neighbors_future = _make_inputs(B=B, T_past=T_past, T_fut=T_fut)
+    inputs["ego_current_state"] = _ego_state(B, vx=vx)
+    # 4-col (x, y, cos, sin) past, straight along +x at `vx`
+    past = torch.zeros(B, T_past, 4, dtype=torch.float32)
+    for t in range(T_past):
+        past[:, t, 0] = (t - (T_past - 1)) * 0.1 * vx
+    past[:, :, 2] = 1.0
+    inputs["ego_agent_past"] = past
+    inputs["ego_shape"] = torch.tensor([[2.7, 4.5, 1.9]] * B, dtype=torch.float32)
+    inputs["line_strings"] = torch.zeros(B, 2, 5, 4, dtype=torch.float32)
+    inputs["goal_pose"] = torch.zeros(B, 4, dtype=torch.float32)
+    for t in range(T_fut):
+        ego_future[:, t, 0] = (t + 1) * 0.1 * vx
+    # neighbor future stays 3-col: the frenet corridor must handle (x, y, heading)
+    assert neighbors_future.shape[-1] == 3
+    inputs["neighbor_agents_future"] = neighbors_future
+    return inputs, ego_future, neighbors_future
+
+
+def test_frenet_handles_3col_neighbor_future():
+    """Regression: canonical NPZs carry 3-col neighbor futures and train_epoch
+    converts to cos/sin only AFTER augmentation — frenet must not crash, must
+    keep shapes/contract, and must leave the t=0 state on base_link (vy=ay=0)."""
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=8, vx=5.0)
+    fut_before = ego_future.clone()
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    out_inputs, out_future, out_nbr = aug(inputs, ego_future, neighbors_future)
+
+    assert out_future.shape == fut_before.shape
+    assert out_nbr.shape == neighbors_future.shape
+    cur = out_inputs["ego_current_state"]
+    assert cur.shape[-1] == 10
+    moved = (out_future[..., :2] - fut_before[..., :2]).norm(dim=-1).amax(-1) > 0.05
+    assert bool(moved.any()), "augment_prob=1 at 5 m/s should perturb at least one row"
+    assert torch.allclose(cur[moved, 5], torch.zeros_like(cur[moved, 5]), atol=ATOL), "vy != 0"
+    assert torch.allclose(cur[moved, 7], torch.zeros_like(cur[moved, 7]), atol=ATOL), "ay != 0"
+    assert torch.isfinite(out_future).all() and torch.isfinite(cur).all()
+    print("  [PASS] frenet handles 3-col neighbor futures + base_link contract")
+
+
+def test_frenet_low_speed_gate():
+    """A near-stationary or reversing ego must never be augmented (the quintic
+    augmenter has the same gate): sideways translation of a stopped ego passes
+    every path-relative feasibility metric trivially."""
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    for vx in (0.0, 0.5, -5.0):
+        torch.manual_seed(0)
+        inputs, ego_future, neighbors_future = _make_frenet_inputs(B=4, vx=vx)
+        fut_before = ego_future.clone()
+        past_before = inputs["ego_agent_past"].clone()
+        aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+        out_inputs, out_future, _ = aug(inputs, ego_future, neighbors_future)
+        assert torch.allclose(out_future[..., :2], fut_before[..., :2], atol=ATOL), (
+            f"vx={vx}: future rewritten despite the low-speed/reverse gate"
+        )
+        assert torch.allclose(out_inputs["ego_agent_past"], past_before, atol=ATOL), (
+            f"vx={vx}: history rewritten despite the low-speed/reverse gate"
+        )
+    print("  [PASS] frenet low-speed / reverse gate")
+
+
 ALL_TESTS = [
+    test_frenet_handles_3col_neighbor_future,
+    test_frenet_low_speed_gate,
     # ── vector_transform ──
     test_vector_transform_identity,
     test_vector_transform_rotation_90,
