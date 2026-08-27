@@ -41,7 +41,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
 
     use_data_augment: bool = True
     augment_prob: float = 0.5
-    augment_type: Literal["quintic", "bridge", "frenet"] = "quintic"
+    augment_type: Literal["quintic", "bridge", "frenet"] = cli(
+        "data augmentation method: quintic (default) = fixed-offset quintic bridge; "
+        "bridge = extended bridge perturbation; frenet = corridor-constrained lateral "
+        "perturbation with feasibility filtering and history rewrite.",
+        default="quintic",
+    )
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True

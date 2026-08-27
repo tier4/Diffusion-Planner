@@ -1106,6 +1106,44 @@ def test_frenet_handles_3col_neighbor_future():
     print("  [PASS] frenet handles 3-col neighbor futures + base_link contract")
 
 
+def test_frenet_cli_selection():
+    """--augment_type frenet must be selectable through the shared dataclass parser,
+    on both the IL config and the GRPO config that inherits it."""
+    from diffusion_planner.config import GRPOConfig, TrainConfig, build_config, build_parser
+
+    for cfg_cls in (TrainConfig, GRPOConfig):
+        args = build_parser(cfg_cls, description="t").parse_args(["--augment_type", "frenet"])
+        cfg = build_config(cfg_cls, args)
+        assert cfg.augment_type == "frenet", f"{cfg_cls.__name__} did not accept frenet"
+    print("  [PASS] frenet selectable via CLI on TrainConfig and GRPOConfig")
+
+
+def test_frenet_handles_4col_futures():
+    """ego/neighbor futures may also arrive as (x, y, cos, sin): column 2 must be
+    read as cos(heading), not as an angle, and written back in the same layout."""
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future3, _ = _make_frenet_inputs(B=8, vx=5.0)
+    ego_future = torch.cat(
+        [ego_future3[..., :2], ego_future3[..., 2:3].cos(), ego_future3[..., 2:3].sin()], dim=-1
+    )
+    nbr_future = torch.zeros(*inputs["neighbor_agents_past"].shape[:2], 80, 4)
+    inputs["neighbor_agents_future"] = nbr_future
+    fut_before = ego_future.clone()
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    _, out_future, _ = aug(inputs, ego_future, nbr_future)
+
+    # centric_transform always returns the canonical 3-col (x, y, heading) future
+    # (same contract as quintic); train_epoch re-converts to cos/sin afterwards.
+    assert out_future.shape[-1] == 3
+    moved = (out_future[..., :2] - fut_before[..., :2]).norm(dim=-1).amax(-1) > 0.05
+    assert bool(moved.any())
+    assert torch.isfinite(out_future).all()
+    assert out_future[..., 2].abs().amax() < 4.0, "column 2 is not a plausible heading angle"
+    print("  [PASS] frenet handles 4-col (x, y, cos, sin) futures")
+
+
 def test_frenet_low_speed_gate():
     """A near-stationary or reversing ego must never be augmented (the quintic
     augmenter has the same gate): sideways translation of a stopped ego passes
@@ -1130,6 +1168,8 @@ def test_frenet_low_speed_gate():
 
 ALL_TESTS = [
     test_frenet_handles_3col_neighbor_future,
+    test_frenet_handles_4col_futures,
+    test_frenet_cli_selection,
     test_frenet_low_speed_gate,
     # ── vector_transform ──
     test_vector_transform_identity,

@@ -266,6 +266,18 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # ---------- the augmentation ----------
     @torch.no_grad()
     def __call__(self, inputs, ego_future, neighbors_future):
+        # ego_future may arrive as (x, y, heading) or (x, y, cos, sin) — same
+        # branch heading_to_cos_sin uses upstream. Canonicalize to 3-col heading
+        # here; centric_transform returns the rebuilt 3-col future either way,
+        # and train_epoch re-converts to cos/sin after augmentation.
+        if ego_future.shape[-1] >= 4:
+            ego_future = torch.cat(
+                [
+                    ego_future[..., :2],
+                    torch.atan2(ego_future[..., 3], ego_future[..., 2])[..., None],
+                ],
+                dim=-1,
+            )
         past4 = inputs["ego_agent_past"]  # (B, P, 4) x, y, cos, sin
         B, P, _ = past4.shape
         F = ego_future.shape[1]
@@ -367,70 +379,71 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         has = draw_ok.any(-1)  # (B,)
         first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
 
-        if bool(has.any()):
-            bi = torch.arange(B, device=dev)
-            feas_k = feasible[bi, first]  # (B, C) — valid combos for the chosen draw
-            jerk_k = jerk_fut_peak[bi, first]  # (B, C)
-            BIG = torch.tensor(1e9, device=dev, dtype=dtype)
-            # merge time sampled with per-combo weight exp(-(M-Mmin)/temp), i.e.
-            # P(M) ∝ n_feasible_combos(M) * exp(-(M-Mmin)/temp) — biased to fast
-            # convergence, slower merges keep a chance; within the sampled M,
-            # lowest peak future jerk wins.
-            m_feas = torch.where(feas_k, merges[None, :], BIG)
-            m_min = m_feas.amin(-1, keepdim=True)
-            w = torch.exp(-(merges[None, :] - m_min) / self.ranked_temp_s) * feas_k
-            w = torch.where(has[:, None], w, torch.ones_like(w))  # avoid all-zero rows
-            pick_m = torch.multinomial(w.cpu().double(), 1, generator=self.gen).to(dev)[:, 0]
-            same_m = feas_k & (merges[None, :] == merges[pick_m][:, None])
-            combo_idx = torch.where(same_m, jerk_k, BIG).argmin(-1)
-            Lw = L[bi, first, combo_idx]  # (B, T)
-            aug_xy = xy + Lw[..., None] * nrm
+        if not bool(has.any()):
+            # nothing feasible this batch: every row trains on plain GT
+            self._aug_rows = has
+            return self.centric_transform(inputs, ego_future, neighbors_future)
 
-            g = torch.gradient(aug_xy, spacing=DT, dim=1)[0]
-            gs = g.norm(dim=-1)
-            hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
-            heading = torch.where(gs > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
+        bi = torch.arange(B, device=dev)
+        feas_k = feasible[bi, first]  # (B, C) — valid combos for the chosen draw
+        jerk_k = jerk_fut_peak[bi, first]  # (B, C)
+        BIG = torch.tensor(1e9, device=dev, dtype=dtype)
+        # merge time sampled with per-combo weight exp(-(M-Mmin)/temp), i.e.
+        # P(M) ∝ n_feasible_combos(M) * exp(-(M-Mmin)/temp) — biased to fast
+        # convergence, slower merges keep a chance; within the sampled M,
+        # lowest peak future jerk wins.
+        m_feas = torch.where(feas_k, merges[None, :], BIG)
+        m_min = m_feas.amin(-1, keepdim=True)
+        w = torch.exp(-(merges[None, :] - m_min) / self.ranked_temp_s) * feas_k
+        w = torch.where(has[:, None], w, torch.ones_like(w))  # avoid all-zero rows
+        pick_m = torch.multinomial(w.cpu().double(), 1, generator=self.gen).to(dev)[:, 0]
+        same_m = feas_k & (merges[None, :] == merges[pick_m][:, None])
+        combo_idx = torch.where(same_m, jerk_k, BIG).argmin(-1)
+        Lw = L[bi, first, combo_idx]  # (B, T)
+        aug_xy = xy + Lw[..., None] * nrm
 
-            upd = has  # (B,) rows to rewrite
-            # future (x, y, heading)
-            new_fut = torch.cat([aug_xy[:, P:], heading[:, P:, None]], dim=-1)
-            ego_future[upd, :, :3] = new_fut[upd]
-            # past (x, y, cos, sin) — rewritten so history, current state and
-            # future all lie on the same perturbed polyline
-            new_past = torch.cat(
-                [aug_xy[:, :P], heading[:, :P, None].cos(), heading[:, :P, None].sin()],
-                dim=-1,
-            )
-            inputs["ego_agent_past"][upd] = new_past[upd].to(inputs["ego_agent_past"].dtype)
-            # current state at t=0, kinematically consistent with the new polyline
-            i0 = P - 1
-            cur = inputs["ego_current_state"]
-            vel = g[:, i0]
-            acc = torch.gradient(g, spacing=DT, dim=1)[0][:, i0]
-            yaw_rate = torch.gradient(
-                torch.stack([heading.cos(), heading.sin()], -1), spacing=DT, dim=1
-            )[0][:, i0]
-            yaw_rate = (
-                heading.cos()[:, i0] * yaw_rate[..., 1] - heading.sin()[:, i0] * yaw_rate[..., 0]
-            )
-            steer = torch.atan(wb * yaw_rate / gs[:, i0].clamp(min=0.5))
-            new_cur = torch.stack(
-                [
-                    aug_xy[:, i0, 0],
-                    aug_xy[:, i0, 1],
-                    heading[:, i0].cos(),
-                    heading[:, i0].sin(),
-                    vel[..., 0],
-                    vel[..., 1],
-                    acc[..., 0],
-                    acc[..., 1],
-                    steer,
-                    yaw_rate,
-                ],
-                dim=-1,
-            )
-            n_cols = min(new_cur.shape[-1], cur.shape[-1])
-            cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
+        g = torch.gradient(aug_xy, spacing=DT, dim=1)[0]
+        gs = g.norm(dim=-1)
+        hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
+        heading = torch.where(gs > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
 
+        upd = has  # (B,) rows to rewrite
+        # future (x, y, heading) — canonical 3-col layout
+        new_fut = torch.cat([aug_xy[:, P:], heading[:, P:, None]], dim=-1)
+        ego_future[upd, :, :3] = new_fut[upd]
+        # past (x, y, cos, sin) — rewritten so history, current state and
+        # future all lie on the same perturbed polyline
+        new_past = torch.cat(
+            [aug_xy[:, :P], heading[:, :P, None].cos(), heading[:, :P, None].sin()],
+            dim=-1,
+        )
+        inputs["ego_agent_past"][upd] = new_past[upd].to(inputs["ego_agent_past"].dtype)
+        # current state at t=0, kinematically consistent with the new polyline
+        i0 = P - 1
+        cur = inputs["ego_current_state"]
+        vel = g[:, i0]
+        acc = torch.gradient(g, spacing=DT, dim=1)[0][:, i0]
+        yaw_rate = torch.gradient(
+            torch.stack([heading.cos(), heading.sin()], -1), spacing=DT, dim=1
+        )[0][:, i0]
+        yaw_rate = heading.cos()[:, i0] * yaw_rate[..., 1] - heading.sin()[:, i0] * yaw_rate[..., 0]
+        steer = torch.atan(wb * yaw_rate / gs[:, i0].clamp(min=0.5))
+        new_cur = torch.stack(
+            [
+                aug_xy[:, i0, 0],
+                aug_xy[:, i0, 1],
+                heading[:, i0].cos(),
+                heading[:, i0].sin(),
+                vel[..., 0],
+                vel[..., 1],
+                acc[..., 0],
+                acc[..., 1],
+                steer,
+                yaw_rate,
+            ],
+            dim=-1,
+        )
+        n_cols = min(new_cur.shape[-1], cur.shape[-1])
+        cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
         self._aug_rows = has
         return self.centric_transform(inputs, ego_future, neighbors_future)
