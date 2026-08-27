@@ -13,7 +13,7 @@ The JSON maps each metric name to a list of NPZ files:
 }
 ```
 
-Supported metrics are `centerline` and `departure`. The NPZ files must use the standard planner input format; centerline evaluation requires `route_lanes` or `lanes`, and departure evaluation requires `ego_current_state`.
+Supported metrics are `centerline`, `departure`, and `pedestrian_stop_safety`. The NPZ files must use the standard planner input format; centerline evaluation requires `route_lanes` or `lanes`, departure evaluation requires `ego_current_state`, and pedestrian-stop safety requires `neighbor_agents_future`, `neighbor_agents_past`, and `ego_shape` in the OR-interval-start NPZ.
 
 Pass the file with:
 

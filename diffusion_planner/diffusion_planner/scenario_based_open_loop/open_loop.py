@@ -13,10 +13,12 @@ from torch.utils.data import DataLoader
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
+from planner_metrics.pedestrian_stop_safety import evaluate_pedestrian_stop_safety_with_details
 
 METRICS = {
     "centerline": evaluate_centerline_with_details,
     "departure": evaluate_departure_with_details,
+    "pedestrian_stop_safety": evaluate_pedestrian_stop_safety_with_details,
 }
 
 
@@ -214,7 +216,7 @@ def run_scenario_based_open_loop_validation(
                     encoding="utf-8",
                 )
 
-            summaries[metric_name] = {"sample_count": float(count)}
+            summaries[metric_name] = {}
             summaries[metric_name].update(
                 {key: total / count for key, total in totals.items()} if count else {}
             )

@@ -55,7 +55,7 @@ def test_scenario_based_open_loop_rejects_unknown_metric(tmp_path):
 
 def test_scenario_metric_registry_has_initial_metrics():
     """Keep the initial centerline and departure registry entries explicit."""
-    assert set(METRICS) == {"centerline", "departure"}
+    assert set(METRICS) == {"centerline", "departure", "pedestrian_stop_safety"}
 
 
 def test_metric_parameters_are_derived_from_train_config_field_names():
@@ -70,4 +70,5 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
     assert _metric_parameters_from_args(Args()) == {
         "centerline": {"horizon_seconds": 8.0},
         "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
+        "pedestrian_stop_safety": {},
     }
