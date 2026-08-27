@@ -6,6 +6,24 @@ from torch.optim.lr_scheduler import (
 )
 
 
+def final_phase_lr(base_lr, epoch, train_epochs, lr_schedule="constant", final_epoch_count=10):
+    """LR override for the last ``final_epoch_count`` epochs of the constant schedule.
+
+    Returns the adjusted LR (``0.1 * base_lr`` for the first half of the final
+    phase, ``0.01 * base_lr`` for the second half), or ``None`` when no override
+    applies. Under ``"cosine"`` there is never an override: the annealed schedule
+    already decays smoothly to 0, and stamping ``0.1 * base_lr`` over its tail
+    would *raise* the LR back up in the very epochs it is meant to settle.
+    """
+    if lr_schedule == "cosine":
+        return None
+    if epoch < train_epochs - final_epoch_count:
+        return None
+    if epoch >= train_epochs - final_epoch_count // 2:
+        return base_lr * 0.01
+    return base_lr * 0.1
+
+
 def CosineAnnealingWarmUpRestarts(
     optimizer, epoch, warm_up_epoch, start_factor=0.1, lr_schedule="constant"
 ):
