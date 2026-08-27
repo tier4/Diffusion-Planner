@@ -23,6 +23,7 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
+from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -261,6 +262,8 @@ def model_training(args: TrainConfig):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        elif args.augment_type == "frenet":
+            aug = FrenetStatePerturbationTensor(augment_prob=args.augment_prob, device=args.device)
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
