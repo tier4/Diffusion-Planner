@@ -19,10 +19,14 @@ dataset:
     position_scale: 50.0
     speed_scale: 15.0
     vehicle_shape_scale: 10.0
-# This batch size applies to each process/GPU.
-batch_size: 256
+# This batch size applies to each process/GPU (4096 globally with 8 GPUs).
+batch_size: 512
 shuffle: true
 # Each process creates this many independent H5 streams.
 num_workers: 16
+# Keep more completed batches ready to absorb NFS latency spikes.
+prefetch_factor: 4
+# Do not let one slow H5 stream block ready batches from other workers.
+in_order: false
 pin_memory: true
 drop_last: true

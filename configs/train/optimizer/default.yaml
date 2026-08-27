@@ -1,5 +1,5 @@
 _target_: diffusion_planner.utils.optimizer.build_optimizer
-learning_rate: 1.0e-4
+learning_rate: 2.0e-4
 weight_decay: 0.01
 muon_momentum: 0.95
 muon_nesterov: true
