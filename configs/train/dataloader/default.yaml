@@ -5,7 +5,8 @@ dataset:
   # H5 frame index written by scripts/dataset/create_h5_dataset.py.
   _target_: diffusion_planner.data.PlannerDataset
   parquet_path: ???
-  file_capacity: 8
+  shuffle_buffer_size: 256
+  seed: ${seed}
   data_augmentation:
     _target_: diffusion_planner.data.PlannerDataAugmentation
     lateral_offset_range: [-1.5, 1.5]
@@ -21,7 +22,7 @@ dataset:
 # This batch size applies to each process/GPU.
 batch_size: 256
 shuffle: true
-# Each process creates this many workers, and each worker owns its own H5 cache.
-num_workers: 64
+# Each process creates this many independent H5 streams.
+num_workers: 16
 pin_memory: true
 drop_last: true

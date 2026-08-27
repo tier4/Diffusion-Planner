@@ -8,7 +8,7 @@ from pathlib import Path
 import hydra
 import torch
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import send_to_device, set_seed
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
@@ -79,7 +79,7 @@ def main(config: DictConfig) -> None:
         ),
         verbose=accelerator.is_main_process,
     )
-    planner, optimizer, loader = accelerator.prepare(planner, optimizer, loader)
+    planner, optimizer = accelerator.prepare(planner, optimizer)
     total_epochs = int(config.training.total_epochs)
     steps_per_epoch = len(loader)
     total_steps = total_epochs * steps_per_epoch
@@ -117,8 +117,8 @@ def main(config: DictConfig) -> None:
     optimizer.zero_grad(set_to_none=True)
     log_interval = int(config.training.log_interval)
     for epoch in range(start_epoch, total_epochs):
-        if hasattr(loader, "set_epoch"):
-            loader.set_epoch(epoch)
+        if hasattr(loader.dataset, "set_epoch"):
+            loader.dataset.set_epoch(epoch)
         progress = tqdm(
             loader,
             desc=f"epoch {epoch + 1}/{total_epochs}",
@@ -126,9 +126,10 @@ def main(config: DictConfig) -> None:
             dynamic_ncols=True,
         )
         for step_in_epoch, batch in enumerate(progress, start=1):
+            batch = send_to_device(batch, accelerator.device, non_blocking=True)
             losses = compute_diffusion_planner_loss(
                 planner,
-                batch,
+                batch,  # pyright: ignore[reportArgumentType]
                 time_mean=float(config.training.time_mean),
                 time_std=float(config.training.time_std),
                 time_epsilon=float(config.training.time_epsilon),

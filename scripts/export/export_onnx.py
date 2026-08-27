@@ -51,17 +51,13 @@ def _parse_args() -> argparse.Namespace:
 def _load_frame(parquet_path: Path, frame_index: int) -> dict[str, torch.Tensor]:
     dataset = PlannerDataset(
         parquet_path,
-        file_capacity=1,
         data_normalizer=PlannerDataNormalizer(),
     )
-    try:
-        if not 0 <= frame_index < len(dataset):
-            raise IndexError(
-                f"frame-index {frame_index} is outside dataset with {len(dataset)} rows"
-            )
-        return dataset[frame_index]
-    finally:
-        dataset.close()
+    if not 0 <= frame_index < len(dataset):
+        raise IndexError(
+            f"frame-index {frame_index} is outside dataset with {len(dataset)} rows"
+        )
+    return dataset[frame_index]
 
 
 def _scene_inputs(frame: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:

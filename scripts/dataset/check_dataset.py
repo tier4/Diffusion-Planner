@@ -119,7 +119,7 @@ def main() -> None:
         parser.error("--warmup-batches must not be negative")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
-    dataset = PlannerDataset(args.parquet, file_capacity=1000)
+    dataset = PlannerDataset(args.parquet)
     benchmark_loading(
         dataset,
         jobs=args.jobs,
