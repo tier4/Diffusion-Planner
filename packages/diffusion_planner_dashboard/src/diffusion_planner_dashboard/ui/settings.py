@@ -56,6 +56,14 @@ def render_plot_options() -> FramePlotOptions:
         agent_history = st.checkbox("Agent history", value=True)
         agent_future = st.checkbox("Agent future labels", value=True)
         agent_prediction = st.checkbox("Agent prediction", value=True)
+        ego_future_footprints = st.checkbox("Ego future footprints", value=False)
+        ego_future_footprint_stride = st.slider(
+            "Future footprint interval [steps]",
+            min_value=1,
+            max_value=40,
+            value=10,
+            disabled=not ego_future_footprints,
+        )
         prediction_footprints = st.checkbox("Ego prediction footprints", value=False)
         prediction_footprint_stride = st.slider(
             "Prediction footprint interval [steps]",
@@ -73,6 +81,8 @@ def render_plot_options() -> FramePlotOptions:
         show_agent_history=agent_history,
         show_agent_future=agent_future,
         show_agent_prediction=agent_prediction,
+        show_ego_future_footprints=ego_future_footprints,
+        ego_future_footprint_stride=ego_future_footprint_stride,
         show_prediction_footprints=prediction_footprints,
         prediction_footprint_stride=prediction_footprint_stride,
         show_ego_shape=ego_shape,

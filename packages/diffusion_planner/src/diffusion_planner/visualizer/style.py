@@ -41,6 +41,8 @@ class FramePlotOptions:
     show_agent_history: bool = True
     show_agent_future: bool = True
     show_agent_prediction: bool = True
+    show_ego_future_footprints: bool = False
+    ego_future_footprint_stride: int = 10
     show_prediction_footprints: bool = False
     prediction_footprint_stride: int = 10
     show_ego_shape: bool = True
