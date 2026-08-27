@@ -1,78 +1,100 @@
 # Diffusion Planner
 
-This is the project for the diffusion planner, which is used for the Autoware.
+Diffusion Planner is an Autoware trajectory planner built with diffusion and flow
+matching models. This repository contains the training pipeline, dataset tools,
+visualization dashboard, ONNX export tools, and the ROS 2 inference node.
 
-## Workspace layout
+## Components
 
-This repository is managed as a uv workspace with one shared environment and
-lockfile.
+| Path | Role |
+| --- | --- |
+| `packages/diffusion_planner/` | Model, dataset, and visualization library |
+| `packages/diffusion_planner_dashboard/` | Streamlit dataset and inference viewer |
+| `scripts/dataset/` | Rosbag-to-H5 dataset generation and checks |
+| `scripts/train/` | Hydra-based training |
+| `scripts/export/` | ONNX export and validation |
+| `configs/` | Dataset and training configuration |
+| `ros2_ws/src/diffusion_planner_data_tools/` | Rosbag preprocessing and label generation |
+| `ros2_ws/src/deps/autoware_universe/planning/autoware_diffusion_planner/` | Autoware ROS 2 inference node |
 
-```text
-configs/                             # Hydra configuration tree, split by purpose
-├── dataset/
-└── train/
-scripts/                             # command line entry points, split by purpose
-├── dataset/
-└── train/
-packages/
-├── diffusion_planner/
-│   ├── pyproject.toml
-│   ├── src/diffusion_planner/
-│   └── tests/
-└── diffusion_planner_dashboard/
-    ├── pyproject.toml
-    └── src/diffusion_planner_dashboard/
-```
+The dataset tools and ROS 2 node share their C++ preprocessing implementation so
+that training and inference use the same model inputs.
 
-Synchronize all workspace packages from the repository root:
+## Setup
+
+Python packages use a shared [uv](https://docs.astral.sh/uv/) workspace. From the
+repository root, install them with:
 
 ```bash
 uv sync
 ```
 
-## Frame dashboard
-
-Start the Streamlit dashboard:
+Dataset generation also requires a built ROS 2 workspace. Import the repositories
+listed in `ros2_ws/diffusion_planner.repos`, build the workspace with `colcon`, and
+source it before running ROS-dependent commands:
 
 ```bash
-uv run diffusion-planner-dashboard
+source ros2_ws/install/setup.bash
 ```
 
-Configure either a `frames.h5` file or the generated frame-index Parquet from
-the dashboard sidebar. Generated Parquet indexes contain absolute paths to their
-H5 shards, so no separate H5 root configuration is needed.
+## Dataset
 
-The H5 shards and Parquet index are generated directly from rosbags:
+Generate one `frames.h5` shard per rosbag and a Parquet frame index:
 
 ```bash
 source ros2_ws/install/setup.bash
 uv run python scripts/dataset/create_h5_dataset.py \
-  root=/data/rosbags_from_label \
+  root=/data/rosbags \
   output_root=/data/diffusion_planner_h5 \
   split=train
 ```
 
-The script writes one `frames.h5` per rosbag while preserving the source
-directory hierarchy. Complete H5 shards can be reused when rebuilding an
-interrupted Parquet index.
+Configuration is defined in `configs/dataset/create_h5_dataset.yaml`. Completed H5
+shards are reused when an interrupted index build is resumed.
 
-## Training
-
-The entry point is driven by Hydra; its configuration lives in `configs/train/`.
-
-```bash
-source ros2_ws/install/setup.bash
-uv run --package diffusion-planner python scripts/train/train.py \
-  dataloader.dataset.parquet_path=/data/diffusion_planner_h5/indexes/train.parquet
-```
-
-The tensors already contain the vehicle shape generated from
-`configs/dataset/vehicles/`, so training performs no rosbag or map preprocessing.
-
-Benchmark training-style dataset loading:
+Inspect loading performance with:
 
 ```bash
 uv run --package diffusion-planner python scripts/dataset/check_dataset.py \
   /data/diffusion_planner_h5/indexes/train.parquet \
   --jobs 32
 ```
+
+For tensor inspection and frame visualization, start the dashboard and select an
+H5 shard or Parquet index from the sidebar:
+
+```bash
+uv run diffusion-planner-dashboard
+```
+
+The dataset format is documented in `docs/h5_dataset_schema.md`.
+
+## Training
+
+Training is configured with Hydra under `configs/train/` and logs runs to Weights &
+Biases.
+
+```bash
+source ros2_ws/install/setup.bash
+uv run --package diffusion-planner python scripts/train/train.py \
+  experiment_name=my_experiment \
+  dataloader.dataset.parquet_path=/data/diffusion_planner_h5/indexes/train.parquet
+```
+
+Checkpoints are written to `checkpoints/` by default. Dataset tensors already contain
+the preprocessed map, agent, route, and vehicle-shape features; training does not read
+rosbags directly.
+
+## ONNX and Autoware
+
+Export a checkpoint for runtime inference with:
+
+```bash
+uv run --package diffusion-planner python scripts/export/export_onnx.py \
+  checkpoints/<checkpoint> \
+  --parquet-path /data/diffusion_planner_h5/indexes/train.parquet
+```
+
+The exporter validates the generated ONNX models with ONNX Runtime. For ROS 2 node
+parameters, topics, model compatibility, and launch instructions, see
+`ros2_ws/src/deps/autoware_universe/planning/autoware_diffusion_planner/README.md`.
