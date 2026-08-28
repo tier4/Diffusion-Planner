@@ -526,8 +526,13 @@ argument and the stages fail loudly on unreadable inputs.
 The `takeoff` stage keeps stopped-input frames whose route lane shows GREEN
 and whose recorded future genuinely departs (threshold required — creeps are
 rejected on purpose): the go-decision evidence that failure-window corpora
-under-represent. Feed its output to `training.anchor.takeoff_scene_list` /
-`takeoff_fraction` (set together; `waits_fraction + takeoff_fraction < 1`).
+under-represent. Departure distance is measured over the valid
+(non-zero-padded) future waypoints only, so a truncated future cannot count the
+phantom jump back to the origin as travel. Feed its output to
+`training.anchor.takeoff_scene_list` / `takeoff_fraction` (set together;
+`waits_fraction + takeoff_fraction < 1`). Stratum quotas are floored when the
+anchor slice is drawn, so the normal slice the fraction sum promises survives
+even tiny anchor budgets.
 `build_resume_benchmark.py` selects quasi-stationary-at-t0 scenes whose
 recorded ego resumes mid-horizon — the take-off decision benchmark.
 `prep_ddp_ema.py` rewrites checkpoint keys with the ``module.`` prefix so EMA
@@ -563,11 +568,13 @@ through the chunk manifest (required — scene-list-only mining carries no
 provenance), walks `post_window_s` seconds past the offense at `stride_s`, and
 keeps a frame by traffic-light alignment: route-lane RED (and not also green)
 frames teach patience unconditionally; GREEN/no-TL frames are kept only when the recorded future
-travels at least `min_takeoff_travel_m` (a genuine release — keeping creeps
-would re-teach the bias). The kept rows are sampled to `ratio` x the round's
+travels at least `min_takeoff_travel_m` over its valid (non-zero-padded)
+waypoints (a genuine release — keeping creeps would re-teach the bias). The kept rows are sampled to `ratio` x the round's
 focus count and unioned into the training list as ordinary recorded scenes:
 nothing is generated, relabeled, or removed from the repaired set. All knobs
-are required; base_sft backend only.
+are required; base_sft backend only. `post_window_s` must convert to at least
+one frame at `frame_hz` — a sub-frame window is rejected at startup instead of
+silently degenerating the band to the offense frame itself.
 
 ## Hard-Example Signal (`target_gt_disagreement`)
 
