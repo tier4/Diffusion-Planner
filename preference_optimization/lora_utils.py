@@ -195,8 +195,9 @@ class UnfusedMHA(nn.Module):
 def _replace_dit_mha_with_unfused(model: nn.Module) -> None:
     """Replace nn.MultiheadAttention in DiT decoder blocks with UnfusedMHA in-place.
 
-    Iterates model.decoder.dit.blocks and replaces each block's .attn and .cross_attn
-    with an UnfusedMHA that carries the same weights. After this call, PEFT targets
+    Iterates model.decoder.dit.blocks and replaces each block's .cross_attn (and .attn, on
+    checkpoints old enough to still have agent self-attention) with an UnfusedMHA that
+    carries the same weights. After this call, PEFT targets
     the constituent nn.Linear layers with stable LinearLoRA instead of the fragile
     MultiheadAttentionLoRA.
 
@@ -204,7 +205,7 @@ def _replace_dit_mha_with_unfused(model: nn.Module) -> None:
     """
     inner = model.module if hasattr(model, "module") else model
     for block in inner.decoder.dit.blocks:
-        if isinstance(block.attn, nn.MultiheadAttention):
+        if isinstance(getattr(block, "attn", None), nn.MultiheadAttention):
             block.attn = UnfusedMHA.from_mha(block.attn)
         if isinstance(block.cross_attn, nn.MultiheadAttention):
             block.cross_attn = UnfusedMHA.from_mha(block.cross_attn)

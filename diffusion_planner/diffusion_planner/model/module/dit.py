@@ -13,19 +13,27 @@ def modulate(x, shift, scale):
 class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning for ego and Cross-Attention.
+
+    The block deliberately has no attention between agents. Every agent token only attends to
+    the scene memory, which already carries the observed histories of the neighbors, so one
+    generated future never conditions another one. Agent-level self-attention would feed the
+    noised future of a neighbor into the ego prediction, and those futures are only partially
+    supervised: a neighbor label can stop early (e.g. nothing beyond 4 s), and the values filling
+    the missing part - plus the noise added to them - stay in the model input even though the loss
+    masks them out. Interaction through such unsupervised representations would destabilize the
+    agents that do have valid labels. Making it work would require attention that knows the
+    validity of every single future timestep, which the per-agent mask cannot express.
     """
 
     def __init__(self, dim=192, heads=6, dropout=0.1, mlp_ratio=4.0):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp1 = Mlp(
             in_features=dim, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0
         )
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim, bias=True))
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 3 * dim, bias=True))
         self.norm3 = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm4 = nn.LayerNorm(dim)
@@ -34,23 +42,8 @@ class DiTBlock(nn.Module):
             in_features=dim, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0
         )
 
-    def forward(self, x, cross_c, y, attn_mask):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
-            y
-        ).chunk(6, dim=2)
-
-        modulated_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        x = (
-            x
-            + gate_msa
-            * self.attn(
-                modulated_x,
-                modulated_x,
-                modulated_x,
-                key_padding_mask=attn_mask,
-                need_weights=False,
-            )[0]
-        )
+    def forward(self, x, cross_c, y):
+        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(y).chunk(3, dim=2)
 
         modulated_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp * self.mlp1(modulated_x)
@@ -152,11 +145,14 @@ class DiT(nn.Module):
         x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, hidden_dim)
         x = x + x_embedding
 
+        # Invalid agents carry no information, so their tokens are zeroed instead of being
+        # attended over. See DiTBlock for why agent tokens never attend to each other.
         ego_mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
-        attn_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)
+        agent_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)  # (B, P)
+        x = x.masked_fill(agent_mask[:, :, None], 0.0)
 
         for block in self.blocks:
-            x = block(x, cross_c, t, attn_mask)
+            x = block(x, cross_c, t)
 
         x = self.final_layer(x, t)  # (B, P, output_dim)
         x = x.reshape(B, P, T, D)
