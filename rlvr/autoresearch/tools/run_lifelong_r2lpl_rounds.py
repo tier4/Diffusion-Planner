@@ -555,6 +555,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
         "realized_reward": bool(workflow.get("realized_reward", False)),
+        **(
+            {"release_bands": dict(workflow["release_bands"])}
+            if workflow.get("release_bands")
+            else {}
+        ),
         "final_round_mining": bool(
             workflow.get("final_round_mining", workflow.get("realized_reward", False))
         ),

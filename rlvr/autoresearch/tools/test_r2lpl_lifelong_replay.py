@@ -1404,6 +1404,51 @@ def test_anchor_slice_paths_takeoff_stratification(tmp_path):
         )
 
 
+def test_workflow_contract_carries_release_bands(tmp_path):
+    """The contract builder must not silently drop the release_bands block —
+    a dropped block disables the extraction with no error (dark-lever class)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    bands = {
+        "post_window_s": 10.0,
+        "stride_s": 0.5,
+        "min_takeoff_travel_m": 10.0,
+        "frame_hz": 10,
+        "ratio": 1.0,
+        "seed": 0,
+        "workers": 2,
+    }
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+                "replay_memory": {"capacity": 200},
+                "training": {"val_scenes": "/tmp/valid.json"},
+                "release_bands": bands,
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "out"),
+        }
+    )
+    assert cfg.get("release_bands") == bands
+
+
 def test_validate_release_bands_config_requires_all_knobs():
     base = {
         "training_backend": "base_sft",
