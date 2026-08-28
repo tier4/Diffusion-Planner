@@ -57,6 +57,10 @@ def main() -> None:
         if args.output_dir
         else model_dir / f"validation_result_{datetime.now():%Y%m%d_%H%M%S}"
     )
+    # valid_predictor.py runs with ``diffusion_planner/`` as its working
+    # directory. Resolve here so an explicitly supplied relative --output_dir
+    # remains relative to the directory from which this launcher was invoked.
+    output_root = output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     save_dir = output_root / "predictions"
 
