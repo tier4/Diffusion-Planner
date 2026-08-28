@@ -72,12 +72,16 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            mixer_hidden_dim=config.encoder_mixer_hidden_dim,
+            mixer_token_dim=config.encoder_mixer_token_dim,
         )
         self.neighbor_encoder = NeighborEncoder(
             config.time_len,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            mixer_hidden_dim=config.encoder_mixer_hidden_dim,
+            mixer_token_dim=config.encoder_mixer_token_dim,
         )
         self.static_encoder = StaticEncoder(
             config.static_objects_state_dim,
@@ -90,6 +94,8 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            mixer_hidden_dim=config.encoder_mixer_hidden_dim,
+            mixer_token_dim=config.encoder_mixer_token_dim,
         )
         self.route_encoder = LaneEncoder(
             config.route_len,
@@ -97,6 +103,8 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            mixer_hidden_dim=config.encoder_mixer_hidden_dim,
+            mixer_token_dim=config.encoder_mixer_token_dim,
         )
         self.polygon_encoder = LineEncoder(
             config.polygon_len,
@@ -104,6 +112,8 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            mixer_hidden_dim=config.encoder_mixer_hidden_dim,
+            mixer_token_dim=config.encoder_mixer_token_dim,
             point_dim=2 + POLYGON_TYPE_NUM,
         )
         self.line_string_encoder = LineEncoder(
@@ -112,6 +122,8 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            mixer_hidden_dim=config.encoder_mixer_hidden_dim,
+            mixer_token_dim=config.encoder_mixer_token_dim,
             point_dim=2 + LINE_STRING_TYPE_NUM,
         )
         self.goal_pose_encoder = GoalPoseEncoder(
@@ -351,10 +363,12 @@ class SelfAttentionBlock(nn.Module):
 
 
 class EgoEncoder(nn.Module):
-    def __init__(self, time_len, drop_path_rate, hidden_dim, depth):
+    def __init__(
+        self, time_len, drop_path_rate, hidden_dim, depth, mixer_hidden_dim, mixer_token_dim
+    ):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
+        tokens_mlp_dim = mixer_token_dim
+        channels_mlp_dim = mixer_hidden_dim
 
         self._hidden_dim = hidden_dim
 
@@ -414,10 +428,12 @@ class EgoEncoder(nn.Module):
 
 
 class NeighborEncoder(nn.Module):
-    def __init__(self, time_len, drop_path_rate, hidden_dim, depth):
+    def __init__(
+        self, time_len, drop_path_rate, hidden_dim, depth, mixer_hidden_dim, mixer_token_dim
+    ):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
+        tokens_mlp_dim = mixer_token_dim
+        channels_mlp_dim = mixer_hidden_dim
 
         self._hidden_dim = hidden_dim
 
@@ -554,10 +570,19 @@ class StaticEncoder(nn.Module):
 
 
 class LaneEncoder(nn.Module):
-    def __init__(self, lane_len, class_type, drop_path_rate, hidden_dim, depth):
+    def __init__(
+        self,
+        lane_len,
+        class_type,
+        drop_path_rate,
+        hidden_dim,
+        depth,
+        mixer_hidden_dim,
+        mixer_token_dim,
+    ):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
+        tokens_mlp_dim = mixer_token_dim
+        channels_mlp_dim = mixer_hidden_dim
 
         assert class_type in [CLASS_TYPE_LANE, CLASS_TYPE_ROUTE], (
             "Invalid class type for LaneEncoder"
@@ -658,11 +683,21 @@ class LaneEncoder(nn.Module):
 
 
 class LineEncoder(nn.Module):
-    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, point_dim=2):
+    def __init__(
+        self,
+        line_len,
+        class_type,
+        drop_path_rate,
+        hidden_dim,
+        depth,
+        mixer_hidden_dim,
+        mixer_token_dim,
+        point_dim,
+    ):
         super().__init__()
         self._class_type = class_type
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
+        tokens_mlp_dim = mixer_token_dim
+        channels_mlp_dim = mixer_hidden_dim
 
         self._line_len = line_len
 
