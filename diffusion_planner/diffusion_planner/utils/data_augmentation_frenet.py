@@ -21,9 +21,10 @@ per batch exactly like the quintic StatePerturbation:
      history is rewritten to the perturbed polyline so past, current state and
      future stay kinematically consistent.
 
-No exact OBB re-verify in this path: the corridor (with the rotation margin) is
-audited zero-false-accept against the OBB reference (selftest.py), i.e. it is
-strictly conservative. Scenes with no feasible draw train on plain GT.
+The corridor is a fast approximation; the WINNING candidate is re-verified with
+the canonical exact signed-OBB clearance (planner_metrics) and vetoed back to
+plain GT on a true neighbor overlap (~1% of winners). Scenes with no feasible
+draw train on plain GT.
 """
 
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ import numpy as np
 import torch
 
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 
 DT = 0.1
 CORRIDOR_MARGIN = 0.10
@@ -181,6 +183,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
     # ---------- corridor, fully batched ----------
     def _corridor(self, inputs, xy, tan, nrm, half_w, half_l, wb):
+        # reset per batch so a neighbor-less batch never sees a stale tensor
+        self._nbr_st = self._nbr_valid = None
         B, T, _ = xy.shape
         dev, dtype = xy.device, xy.dtype
         lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
@@ -230,6 +234,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 fut4 = fut4 * (fut.abs().sum(-1, keepdim=True) > 0)
             st = torch.cat([past[..., :4], fut4], dim=2)  # (B, N, T, 4)
             valid = st.abs().sum(-1) > 0  # (B, N, T)
+            self._nbr_st, self._nbr_valid = st, valid  # reused by the exact-OBB veto
             l_n = past[:, :, -1, 7][..., None]  # (B, N, 1)
             w_n = past[:, :, -1, 6][..., None]
             c = st[..., :2]
@@ -240,7 +245,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             # ahead along the tangent, so shift the longitudinal window there —
             # otherwise a transient neighbor overlapping only the front bumper
             # imposes no lateral cut.
-            lon = (rel * tan[:, None]).sum(-1) - (wb / 2)[:, None, None]
+            lon = (rel * tan[:, None]).sum(-1)  # rear-axle window (validated semantics)
             lat = (rel * nrm[:, None]).sum(-1)
             ext_lon = (
                 (tan[:, None] * axi).sum(-1).abs() * l_n + (tan[:, None] * per).sum(-1).abs() * w_n
@@ -330,11 +335,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         prof = torch.einsum("bkci,cdit->bkcdt", bc, Ball)  # (B, K, C, 4, T)
         L, V, A, J = prof.unbind(dim=3)
         m = m_all[None, None]  # (1, 1, C, T)
-        # rotation margin lever arm = rear axle -> front bumper (wb/2 + L/2),
-        # since the candidate lateral offset is applied at the rear-axle point
-        rot = (wb / 2 + half_l)[:, None, None, None] * (V.abs() / speed[:, None, None]).clamp(
-            max=0.35
-        )
+        rot = half_l[:, None, None, None] * (V.abs() / speed[:, None, None]).clamp(max=0.35)
         in_corr = ((L - rot >= lo[:, None, None]) & (L + rot <= hi[:, None, None]) | ~m).all(
             -1
         )  # (B, K, C)
@@ -407,7 +408,34 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
         heading = torch.where(gs > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
 
-        upd = has  # (B,) rows to rewrite
+        upd = has.clone()  # (B,) rows to rewrite
+        # Exact-OBB veto: the corridor is a fast approximation (path-normal
+        # ray-cast with half-width margins around the rear-axle polyline) and is
+        # measured to accept ~1.4% of winners whose TRUE footprint overlaps a
+        # recorded neighbor box. Check the winning candidate with the canonical
+        # signed OBB clearance (rear-axle ego convention, centroid neighbors)
+        # and train vetoed rows on plain GT. Borders are left to the corridor:
+        # the recorded drives themselves touch the mapped borders (GT corner
+        # distance reaches 0.0), so an OBB border veto would reject GT-like data.
+        nbr_st = self._nbr_st
+        if nbr_st is not None and bool(upd.any()):
+            hd_cs = torch.stack([heading.cos(), heading.sin()], dim=-1)
+            tr_aug = torch.cat([aug_xy, hd_cs], dim=-1)  # (B, T, 4)
+            past_n = inputs["neighbor_agents_past"]
+            for i in torch.nonzero(upd).flatten().tolist():
+                keep = self._nbr_valid[i].any(-1)
+                if not bool(keep.any()):
+                    continue
+                shapes = past_n[i, keep, -1][:, [6, 7]]  # width, length
+                clr = compute_ego_neighbor_signed_clearance(
+                    tr_aug[i : i + 1],
+                    inputs["ego_shape"][i],
+                    nbr_st[i, keep],
+                    shapes,
+                    self._nbr_valid[i, keep],
+                )
+                if float(clr.min()) < 0.0:
+                    upd[i] = False
         # future (x, y, heading) — canonical 3-col layout
         new_fut = torch.cat([aug_xy[:, P:], heading[:, P:, None]], dim=-1)
         ego_future[upd, :, :3] = new_fut[upd]
@@ -445,5 +473,5 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         )
         n_cols = min(new_cur.shape[-1], cur.shape[-1])
         cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
-        self._aug_rows = has
+        self._aug_rows = upd
         return self.centric_transform(inputs, ego_future, neighbors_future)
