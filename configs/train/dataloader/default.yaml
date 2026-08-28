@@ -13,6 +13,9 @@ dataset:
     ego_speed_scale_range: [0.5, 1.5]
     pose_probability: 0.5
     speed_probability: 0.5
+    num_refine: 20
+    time_step_s: 0.1
+    pose_augmentation_speed_threshold: 2.0
   data_normalizer:
     _target_: diffusion_planner.data.PlannerDataNormalizer
     position_scale: 50.0
