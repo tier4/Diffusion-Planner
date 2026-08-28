@@ -268,6 +268,38 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             lo = torch.maximum(lo, cut_lo.amax(1))
         return lo, hi
 
+    def _veto_true_overlaps(self, inputs, upd, aug_xy, heading):
+        """Exact-OBB veto on the winning candidates.
+
+        The corridor is a fast approximation (path-normal ray-cast with
+        half-width margins around the rear-axle polyline) and is measured to
+        accept ~1.4% of winners whose TRUE footprint overlaps a recorded
+        neighbor box. Re-check each winner with the canonical signed OBB
+        clearance (rear-axle ego convention, centroid neighbors) and train
+        vetoed rows on plain GT. Borders are left to the corridor: the recorded
+        drives themselves touch the mapped borders (GT corner distance reaches
+        0.0), so an OBB border veto would reject GT-like data.
+        """
+        if self._nbr_st is None or not bool(upd.any()):
+            return upd
+        hd_cs = torch.stack([heading.cos(), heading.sin()], dim=-1)
+        tr_aug = torch.cat([aug_xy, hd_cs], dim=-1)  # (B, T, 4)
+        past_n = inputs["neighbor_agents_past"]
+        for i in torch.nonzero(upd).flatten().tolist():
+            keep = self._nbr_valid[i].any(-1)
+            if not bool(keep.any()):
+                continue
+            clr = compute_ego_neighbor_signed_clearance(
+                tr_aug[i : i + 1],
+                inputs["ego_shape"][i],
+                self._nbr_st[i, keep],
+                past_n[i, keep, -1][:, [6, 7]],  # width, length
+                self._nbr_valid[i, keep],
+            )
+            if float(clr.min()) < 0.0:
+                upd[i] = False
+        return upd
+
     # ---------- the augmentation ----------
     @torch.no_grad()
     def __call__(self, inputs, ego_future, neighbors_future):
@@ -408,34 +440,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
         heading = torch.where(gs > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
 
-        upd = has.clone()  # (B,) rows to rewrite
-        # Exact-OBB veto: the corridor is a fast approximation (path-normal
-        # ray-cast with half-width margins around the rear-axle polyline) and is
-        # measured to accept ~1.4% of winners whose TRUE footprint overlaps a
-        # recorded neighbor box. Check the winning candidate with the canonical
-        # signed OBB clearance (rear-axle ego convention, centroid neighbors)
-        # and train vetoed rows on plain GT. Borders are left to the corridor:
-        # the recorded drives themselves touch the mapped borders (GT corner
-        # distance reaches 0.0), so an OBB border veto would reject GT-like data.
-        nbr_st = self._nbr_st
-        if nbr_st is not None and bool(upd.any()):
-            hd_cs = torch.stack([heading.cos(), heading.sin()], dim=-1)
-            tr_aug = torch.cat([aug_xy, hd_cs], dim=-1)  # (B, T, 4)
-            past_n = inputs["neighbor_agents_past"]
-            for i in torch.nonzero(upd).flatten().tolist():
-                keep = self._nbr_valid[i].any(-1)
-                if not bool(keep.any()):
-                    continue
-                shapes = past_n[i, keep, -1][:, [6, 7]]  # width, length
-                clr = compute_ego_neighbor_signed_clearance(
-                    tr_aug[i : i + 1],
-                    inputs["ego_shape"][i],
-                    nbr_st[i, keep],
-                    shapes,
-                    self._nbr_valid[i, keep],
-                )
-                if float(clr.min()) < 0.0:
-                    upd[i] = False
+        upd = self._veto_true_overlaps(inputs, has.clone(), aug_xy, heading)
         # future (x, y, heading) — canonical 3-col layout
         new_fut = torch.cat([aug_xy[:, P:], heading[:, P:, None]], dim=-1)
         ego_future[upd, :, :3] = new_fut[upd]
