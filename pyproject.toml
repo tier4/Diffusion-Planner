@@ -12,11 +12,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = [
-    "pre-commit>=4.6.1",
-    "pyright>=1.1.411",
-    "ruff>=0.16.1",
-]
+dev = ["pre-commit>=4.6.1", "pyright>=1.1.411", "ruff>=0.16.1"]
 
 [tool.uv]
 package = false
@@ -54,7 +50,15 @@ include = [
     "packages/diffusion_planner/src",
     "packages/diffusion_planner_dashboard/src",
 ]
-exclude = ["ros2_ws", "outputs", "checkpoints"]
+exclude = [
+    "ros2_ws",
+    "outputs",
+    "checkpoints",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    ".venv",
+]
 pythonVersion = "3.10"
 venvPath = "."
 venv = ".venv"
