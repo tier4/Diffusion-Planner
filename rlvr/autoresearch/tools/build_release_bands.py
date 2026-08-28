@@ -111,6 +111,29 @@ def _band_worker(
     return out
 
 
+def _load_chunk_manifest(chunk_manifest: Path) -> dict[str, str]:
+    manifest: dict[str, str] = {}
+    with open(chunk_manifest) as fh:
+        for line in fh:
+            row = json.loads(line)
+            manifest[str(row["chunk_key"])] = str(row["start_scene_path"])
+    if not manifest:
+        raise ValueError(f"{chunk_manifest} is empty")
+    return manifest
+
+
+def _load_event_offenses(credit_windows: Path) -> dict[str, set[int]]:
+    events: dict[str, set[int]] = {}
+    with open(credit_windows) as fh:
+        for line in fh:
+            row = json.loads(line)
+            key = _chunk_key_of_event(str(row["event_key"]))
+            events.setdefault(key, set()).add(int(row["offense_frame_id"]))
+    if not events:
+        raise ValueError(f"{credit_windows} contains no event rows")
+    return events
+
+
 def build_release_bands(
     credit_windows: Path,
     chunk_manifest: Path,
@@ -129,22 +152,8 @@ def build_release_bands(
     if workers < 1:
         raise ValueError(f"workers must be >= 1: {workers}")
 
-    manifest: dict[str, str] = {}
-    with open(chunk_manifest) as fh:
-        for line in fh:
-            row = json.loads(line)
-            manifest[str(row["chunk_key"])] = str(row["start_scene_path"])
-    if not manifest:
-        raise ValueError(f"{chunk_manifest} is empty")
-
-    events: dict[str, set[int]] = {}
-    with open(credit_windows) as fh:
-        for line in fh:
-            row = json.loads(line)
-            key = _chunk_key_of_event(str(row["event_key"]))
-            events.setdefault(key, set()).add(int(row["offense_frame_id"]))
-    if not events:
-        raise ValueError(f"{credit_windows} contains no event rows")
+    manifest = _load_chunk_manifest(chunk_manifest)
+    events = _load_event_offenses(credit_windows)
     unmatched = sorted(k for k in events if k not in manifest)
     if unmatched:
         raise ValueError(

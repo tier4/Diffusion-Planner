@@ -1177,6 +1177,30 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
     _write_json(out_path, merged)
 
 
+def _anchor_stratum(anchor_cfg: dict[str, Any], name: str) -> tuple[list[str], float] | None:
+    """Resolve one stratified anchor slice (``<name>_scene_list``/``<name>_fraction``).
+
+    Both keys must be given together; the fraction must sit in (0, 1); the
+    referenced list must be non-empty. Returns (pool, fraction) or None when
+    the stratum is not configured.
+    """
+    list_key = f"{name}_scene_list"
+    frac_key = f"{name}_fraction"
+    scene_list = anchor_cfg.get(list_key)
+    fraction = anchor_cfg.get(frac_key)
+    if (scene_list is None) != (fraction is None):
+        raise ValueError(f"training.anchor.{list_key} and {frac_key} must be set together")
+    if scene_list is None:
+        return None
+    frac = float(fraction)
+    if not 0.0 < frac < 1.0:
+        raise ValueError(f"training.anchor.{frac_key} must be in (0, 1): {frac}")
+    pool = [str(p) for p in _read_json_list(Path(scene_list))]
+    if not pool:
+        raise ValueError(f"training.anchor.{list_key} is empty: {scene_list}")
+    return pool, frac
+
+
 def _anchor_slice_paths(
     anchor_cfg: dict[str, Any] | None, n_focus: int, round_idx: int
 ) -> list[str]:
@@ -1206,24 +1230,16 @@ def _anchor_slice_paths(
     ratio = float(anchor_cfg["ratio"])
     if ratio <= 0.0:
         raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
-    waits_list = anchor_cfg.get("waits_scene_list")
-    waits_fraction = anchor_cfg.get("waits_fraction")
-    if (waits_list is None) != (waits_fraction is None):
-        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
-    takeoff_list = anchor_cfg.get("takeoff_scene_list")
-    takeoff_fraction = anchor_cfg.get("takeoff_fraction")
-    if (takeoff_list is None) != (takeoff_fraction is None):
-        raise ValueError(
-            "training.anchor.takeoff_scene_list and takeoff_fraction must be set together"
-        )
-    if (
-        waits_fraction is not None
-        and takeoff_fraction is not None
-        and float(waits_fraction) + float(takeoff_fraction) >= 1.0
-    ):
+    strata = [
+        stratum
+        for name in ("waits", "takeoff")
+        if (stratum := _anchor_stratum(anchor_cfg, name)) is not None
+    ]
+    fractions = [frac for _, frac in strata]
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
         raise ValueError(
             "training.anchor waits_fraction + takeoff_fraction must leave room for the "
-            f"normal slice (< 1.0): {waits_fraction} + {takeoff_fraction}"
+            f"normal slice (< 1.0): {fractions}"
         )
 
     import math as _math
@@ -1243,25 +1259,10 @@ def _anchor_slice_paths(
     if not normal_pool:
         raise ValueError(f"training.anchor.scene_list is empty: {anchor_cfg['scene_list']}")
     picked: list[str] = []
-    if waits_list is not None:
-        frac = float(waits_fraction)
-        if not 0.0 < frac < 1.0:
-            raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {frac}")
-        waits_pool = [str(p) for p in _read_json_list(Path(waits_list))]
-        if not waits_pool:
-            raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
-        n_waits = int(round(frac * n_anchor))
-        picked.extend(_sample(waits_pool, n_waits))
-    if takeoff_list is not None:
-        frac = float(takeoff_fraction)
-        if not 0.0 < frac < 1.0:
-            raise ValueError(f"training.anchor.takeoff_fraction must be in (0, 1): {frac}")
-        takeoff_pool = [str(p) for p in _read_json_list(Path(takeoff_list))]
-        if not takeoff_pool:
-            raise ValueError(f"training.anchor.takeoff_scene_list is empty: {takeoff_list}")
+    for pool, frac in strata:
+        n_slice = int(round(frac * n_anchor))
         already = set(picked)
-        n_takeoff = int(round(frac * n_anchor))
-        picked.extend(_sample([p for p in takeoff_pool if p not in already], n_takeoff))
+        picked.extend(_sample([p for p in pool if p not in already], n_slice))
     picked_set = set(picked)
     picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
     return picked
@@ -2225,6 +2226,44 @@ def _repair_refresh_chunk_targets(
     return targets
 
 
+def _emit_train_args(
+    cmd: list[str],
+    merged: dict[str, Any],
+    passthrough: tuple[str, ...],
+    save_dir: Path,
+) -> None:
+    """Split training knobs between CLI flags and the overrides file.
+
+    The trainer's CLI deliberately exposes only ``cli()``-marked TrainConfig
+    fields; every other knob is handed over via ``--train_overrides_json``
+    (the trainer fails loudly on keys that are not TrainConfig fields, so a
+    rename upstream surfaces here instead of silently training at defaults).
+    Keys are emitted in passthrough order first for stable, diffable commands.
+    """
+    from diffusion_planner.config import TrainConfig as _TrainConfig
+    from diffusion_planner.config import cli_fields as _cli_fields
+
+    cli_exposed = {f.name for f in _cli_fields(_TrainConfig)}
+    if "train_overrides_json" not in cli_exposed:
+        raise RuntimeError(
+            "train_predictor's TrainConfig lacks the train_overrides_json channel; "
+            "cannot pass non-CLI training knobs (learning_rate, ema_decay, ...)"
+        )
+    ordered = [*passthrough, *[k for k in merged if k not in passthrough]]
+    overrides_payload: dict[str, Any] = {}
+    for key in ordered:
+        value = merged.get(key)
+        if value is None:
+            continue
+        if key in cli_exposed:
+            _append_train_arg(cmd, key, value)
+        else:
+            overrides_payload[key] = value
+    overrides_file = save_dir / "train_overrides.json"
+    overrides_file.write_text(json.dumps(overrides_payload, indent=2, sort_keys=True))
+    cmd.extend(["--train_overrides_json", str(overrides_file)])
+
+
 def _base_train_invocation(
     cfg: dict[str, Any],
     *,
@@ -2374,37 +2413,7 @@ def _base_train_invocation(
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
     if "warm_up_epoch" in merged:
         merged["warm_up_epoch"] = max(0, min(int(merged["warm_up_epoch"]), total_epochs))
-    # The trainer's CLI deliberately exposes only cli()-marked TrainConfig
-    # fields; every other knob is handed over via --train_overrides_json (the
-    # trainer fails loudly on keys that are not TrainConfig fields, so a rename
-    # upstream surfaces here instead of silently training at defaults).
-    from diffusion_planner.config import TrainConfig as _TrainConfig
-    from diffusion_planner.config import cli_fields as _cli_fields
-
-    cli_exposed = {f.name for f in _cli_fields(_TrainConfig)}
-    overrides_payload: dict[str, Any] = {}
-    for key in passthrough:
-        if key not in merged:
-            continue
-        if key in cli_exposed:
-            _append_train_arg(cmd, key, merged[key])
-        elif merged[key] is not None:
-            overrides_payload[key] = merged[key]
-    for key, value in merged.items():
-        if key in passthrough or value is None:
-            continue
-        if key in cli_exposed:
-            _append_train_arg(cmd, key, value)
-        else:
-            overrides_payload[key] = value
-    if "train_overrides_json" not in cli_exposed:
-        raise RuntimeError(
-            "train_predictor's TrainConfig lacks the train_overrides_json channel; "
-            "cannot pass non-CLI training knobs (learning_rate, ema_decay, ...)"
-        )
-    overrides_file = save_dir / "train_overrides.json"
-    overrides_file.write_text(json.dumps(overrides_payload, indent=2, sort_keys=True))
-    cmd.extend(["--train_overrides_json", str(overrides_file)])
+    _emit_train_args(cmd, merged, passthrough, save_dir)
 
     env = dict(os.environ)
     repo_root = Path(__file__).resolve().parents[3]
