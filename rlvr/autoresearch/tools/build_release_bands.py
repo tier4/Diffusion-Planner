@@ -33,39 +33,60 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+from diffusion_planner.dimensions import (
+    TRAFFIC_LIGHT_GREEN,
+    TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
+    TRAFFIC_LIGHT_RED,
+)
 
-# route_lanes feature columns 8..12 carry the traffic-light one-hot
+# route_lanes feature columns carry the traffic-light one-hot
 # [green, yellow, red, white, none] (diffusion_planner.dimensions).
-_TL_SLICE = slice(8, 13)
+_TL_SLICE = slice(TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT + 1)
 _TL_GREEN = 0
-_TL_RED = 2
+_TL_RED = TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT_GREEN
 
-_FRAME_RE = re.compile(r"_(\d+)\.npz$")
+_FRAME_RE = re.compile(r"^(.*)_(\d+)\.npz$")
 
 
 def _chunk_key_of_event(event_key: str) -> str:
     """``<chunk_key>_<idx>_<step>_danger_<label>`` -> ``<chunk_key>``.
 
     Chunk keys themselves contain underscores (log names do), so strip the
-    known suffixes from the right instead of splitting from the left.
+    known suffixes from the right instead of splitting from the left. Keys
+    without the ``_danger_`` marker (other credit-window producers use other
+    forms) are rejected loudly rather than mis-stripped.
     """
-    stem = event_key.rsplit("_danger_", 1)[0]
+    stem, marker, _label = event_key.rpartition("_danger_")
+    if not marker:
+        raise ValueError(
+            f"unsupported event_key format (expected ..._danger_<label>): {event_key!r}"
+        )
     parts = stem.split("_")
     if len(parts) < 3:
         raise ValueError(f"unparseable event_key: {event_key!r}")
     return "_".join(parts[:-2])
 
 
-def _sequence_index(scene_path: str) -> tuple[str, dict[int, str]]:
+def _sequence_index(scene_path: str) -> dict[int, str]:
+    """frame -> path for the frames of the SAME LOG as ``scene_path``.
+
+    A dataset directory may hold several logs with overlapping frame numbers;
+    log identity is (directory, filename prefix), matching the convention in
+    the pool/mining tools. Indexing by frame alone would silently mix logs.
+    """
     d = os.path.dirname(scene_path)
+    m = _FRAME_RE.match(os.path.basename(scene_path))
+    if m is None:
+        raise ValueError(f"scene filename carries no frame index: {scene_path}")
+    prefix = m.group(1)
     idx: dict[int, str] = {}
     for f in os.listdir(d):
-        m = _FRAME_RE.search(f)
-        if m and f.endswith(".npz"):
-            idx[int(m.group(1))] = os.path.join(d, f)
+        m = _FRAME_RE.match(f)
+        if m and m.group(1) == prefix:
+            idx[int(m.group(2))] = os.path.join(d, f)
     if not idx:
-        raise ValueError(f"no frame-indexed .npz files next to {scene_path}")
-    return d, idx
+        raise ValueError(f"no frames of log {prefix!r} next to {scene_path}")
+    return idx
 
 
 def _pathlen(xy: np.ndarray) -> float:
@@ -89,14 +110,19 @@ def _band_worker(
     args: tuple[str, list[int], int, int, float],
 ) -> list[str]:
     start_scene_path, offense_frames, post_frames, stride_frames, min_takeoff_m = args
-    _, idx = _sequence_index(start_scene_path)
-    last_frame = max(idx)
+    idx = _sequence_index(start_scene_path)
+    frames = sorted(idx)
     out: list[str] = []
     for f0 in offense_frames:
-        for f in range(f0, min(f0 + post_frames, last_frame) + 1, stride_frames):
-            p = idx.get(f)
-            if p is None:
+        # Walk the frames that actually exist (catalogs may be stored at a
+        # frame step > 1) and thin them to the requested stride by frame id.
+        band = [f for f in frames if f0 <= f <= f0 + post_frames]
+        kept_until = None
+        for f in band:
+            if kept_until is not None and f < kept_until:
                 continue
+            kept_until = f + stride_frames
+            p = idx[f]
             try:
                 with np.load(p) as d:
                     green, red = _route_tl_state(d)
@@ -128,7 +154,13 @@ def _load_event_offenses(credit_windows: Path) -> dict[str, set[int]]:
         for line in fh:
             row = json.loads(line)
             key = _chunk_key_of_event(str(row["event_key"]))
-            events.setdefault(key, set()).add(int(row["offense_frame_id"]))
+            offense = row.get("offense_frame_id")
+            if offense is None:
+                raise ValueError(
+                    f"{credit_windows}: event {row.get('event_key')!r} carries no "
+                    "offense_frame_id — cannot locate its post-offense band"
+                )
+            events.setdefault(key, set()).add(int(offense))
     if not events:
         raise ValueError(f"{credit_windows} contains no event rows")
     return events
@@ -172,6 +204,13 @@ def build_release_bands(
         for result in ex.map(_band_worker, jobs, chunksize=8):
             rows.update(result)
     kept = sorted(rows)
+    if not kept:
+        raise RuntimeError(
+            f"release-band extraction kept 0 rows from {len(events)} event chunks — "
+            "wrong frame_hz for this catalog, a mis-strided sequence layout, or "
+            "frames missing route_lanes/ego_agent_future; refusing to silently "
+            "disable the two-sided teacher"
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(f".tmp{os.getpid()}")
     tmp.write_text(json.dumps(kept))

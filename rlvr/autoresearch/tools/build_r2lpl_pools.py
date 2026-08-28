@@ -13,6 +13,8 @@ ad-hoc job scripts. Stages (each a subcommand, chainable via files):
   arc-region   build a route-region point set from full drives in a route cache
                (arc-length window along the driven path)
   arc-exclude  drop scenes whose recorded pose lies within radius of a region
+  takeoff      stopped-input + route-green + departing-future pool (release
+               evidence; see build_release_bands for the per-event variant)
 
 Every threshold is an explicit required argument — there are no defaults for
 values that change the output, so a config cannot silently drift from the
@@ -134,10 +136,9 @@ def _moving_filter(paths: list[str], thresh: float, workers: int) -> tuple[list[
     return keep, unreadable
 
 
-_TL_SLICE = slice(8, 13)  # route_lanes TL one-hot [green, yellow, red, white, none]
-
-
 def _takeoff_worker(args: tuple[str, int, float, float]) -> tuple[str, bool] | None:
+    from rlvr.autoresearch.tools.build_release_bands import _route_tl_state
+
     path, recent_steps, max_recent_travel_m, min_future_travel_m = args
     try:
         with np.load(path) as d:
@@ -147,13 +148,8 @@ def _takeoff_worker(args: tuple[str, int, float, float]) -> tuple[str, bool] | N
             )
             if recent >= max_recent_travel_m:
                 return (path, False)
-            rl = d["route_lanes"]
-            valid = np.abs(rl).sum(axis=(1, 2)) > 0
-            if not valid.any():
-                return (path, False)
-            onehot = rl[valid][:, 0, _TL_SLICE]
-            hot = onehot.max(axis=1) > 0
-            if not bool((hot & (onehot.argmax(axis=1) == 0)).any()):  # 0 = green
+            green, _red = _route_tl_state(d)
+            if not green:
                 return (path, False)
             fut = d["ego_agent_future"][:, :2]
             travel = float(np.linalg.norm(np.diff(fut, axis=0), axis=1).sum())

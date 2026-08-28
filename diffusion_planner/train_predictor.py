@@ -30,11 +30,30 @@ def apply_overrides_json(cfg: TrainConfig, overrides_path: str) -> TrainConfig:
         overrides = json.load(f)
     if not isinstance(overrides, dict):
         raise ValueError(f"{overrides_path} must contain a JSON object")
-    known = {f.name for f in dataclasses.fields(TrainConfig)}
-    unknown = sorted(set(overrides) - known)
+    all_fields = {f.name: f for f in dataclasses.fields(TrainConfig)}
+    unknown = sorted(set(overrides) - set(all_fields))
     if unknown:
         raise ValueError(f"{overrides_path} sets keys that are not TrainConfig fields: {unknown}")
+    cli_exposed = sorted(k for k in overrides if all_fields[k].metadata.get("cli"))
+    if cli_exposed:
+        raise ValueError(
+            f"{overrides_path} sets CLI-exposed fields {cli_exposed}; pass those as "
+            "command-line flags — a file value would silently shadow the flag"
+        )
+    # JSON cannot express every annotation, but the scalar cases cover the
+    # dangerous silent coercions ('false' is a truthy str; 4.0 is not an int).
+    scalar = {"bool": bool, "int": int, "float": (int, float), "str": str}
     for key, value in overrides.items():
+        field_type = all_fields[key].type
+        annotation = getattr(field_type, "__name__", str(field_type))
+        expected = scalar.get(annotation)
+        if expected is not None and not isinstance(value, expected):
+            raise ValueError(
+                f"{overrides_path}: {key} expects {annotation}, "
+                f"got {type(value).__name__} ({value!r})"
+            )
+        if annotation != "bool" and isinstance(value, bool):
+            raise ValueError(f"{overrides_path}: {key} expects {annotation}, got bool")
         setattr(cfg, key, value)
     return cfg
 

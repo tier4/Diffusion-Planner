@@ -1470,6 +1470,80 @@ def test_trainer_applies_and_rejects_overrides(tmp_path):
     with pytest.raises(ValueError):
         tp.apply_overrides_json(cfg, str(bad))
 
+    # CLI-exposed fields must go through flags, not the file
+    clash = tmp_path / "clash.json"
+    clash.write_text(json.dumps({"batch_size": 8}))
+    with pytest.raises(ValueError):
+        tp.apply_overrides_json(cfg, str(clash))
+
+    # silent-coercion guards: truthy-string bool and float-for-int
+    for payload in ({"use_ema": "false"}, {"num_workers": 4.0}, {"seed": True}):
+        f = tmp_path / "typ.json"
+        f.write_text(json.dumps(payload))
+        with pytest.raises(ValueError):
+            tp.apply_overrides_json(cfg, str(f))
+
+
+def test_release_band_paths_ratio_sampling_and_rewrite(tmp_path, monkeypatch):
+    """Runner-side wiring: ratio subsample, seed+round offset, out_json rewrite,
+    and the manifest fallback to the top-level cfg key."""
+    rows = [str(tmp_path / f"band_{i}.npz") for i in range(10)]
+
+    def _fake_build(credit, manifest, out, **kw):
+        out.write_text(json.dumps(rows))
+        return list(rows)
+
+    import rlvr.autoresearch.tools.build_release_bands as brb
+
+    monkeypatch.setattr(brb, "build_release_bands", _fake_build)
+    cfg = {
+        "release_bands": {
+            "post_window_s": 10.0,
+            "stride_s": 0.5,
+            "min_takeoff_travel_m": 10.0,
+            "frame_hz": 10,
+            "ratio": 0.5,
+            "seed": 0,
+            "workers": 1,
+        },
+        "chunk_manifest": "/tmp/manifest.jsonl",
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+    credit = rdir / "credit.jsonl"
+    credit.write_text("{}")
+    picked = round_runner._release_band_paths(cfg, credit, rdir, round_idx=1, n_focus=8)
+    assert len(picked) == 4  # round(0.5 * 8)
+    out_json = rdir / "round_1_release_bands.json"
+    assert json.loads(out_json.read_text()) == picked  # rewrite matches selection
+    # seeded + round-offset: same round reproduces, next round redraws
+    again = round_runner._release_band_paths(cfg, credit, rdir, round_idx=1, n_focus=8)
+    assert again == picked
+    other = round_runner._release_band_paths(cfg, credit, rdir, round_idx=2, n_focus=8)
+    assert other != picked
+    # tiny rounds keep at least one row instead of silently disabling the feature
+    one = round_runner._release_band_paths(cfg, credit, rdir, round_idx=1, n_focus=1)
+    assert len(one) == 1
+
+
+def test_emit_train_args_rejects_runner_owned_keys(tmp_path):
+    cmd: list[str] = []
+    with pytest.raises(ValueError):
+        round_runner._emit_train_args(
+            cmd, {"train_epochs": 80, "learning_rate": 5e-6}, ("learning_rate",), tmp_path
+        )
+
+
+def test_takeoff_worker_tl_and_creep_alignment(tmp_path):
+    from rlvr.autoresearch.tools.build_r2lpl_pools import _takeoff_worker
+
+    go = _release_band_fixture(tmp_path, tl_state="green", future_travel_m=20.0, frame=1)
+    creep = _release_band_fixture(tmp_path, tl_state="green", future_travel_m=2.0, frame=2)
+    red = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=20.0, frame=3)
+    assert _takeoff_worker((str(go), 10, 0.5, 10.0)) == (str(go), True)
+    assert _takeoff_worker((str(creep), 10, 0.5, 10.0)) == (str(creep), False)
+    assert _takeoff_worker((str(red), 10, 0.5, 10.0)) == (str(red), False)
+
 
 def test_workflow_contract_carries_release_bands(tmp_path):
     """The contract builder must not silently drop the release_bands block —
@@ -1516,10 +1590,12 @@ def test_workflow_contract_carries_release_bands(tmp_path):
     assert cfg.get("release_bands") == bands
 
 
-def test_validate_release_bands_config_requires_all_knobs():
+def test_validate_release_bands_config_requires_all_knobs(tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("{}")
     base = {
         "training_backend": "base_sft",
-        "perception_mining": {"chunk_manifest": "/tmp/manifest.jsonl"},
+        "perception_mining": {"chunk_manifest": str(manifest)},
     }
     # absent section is fine; empty section is loud
     round_runner._validate_release_bands_config(dict(base))

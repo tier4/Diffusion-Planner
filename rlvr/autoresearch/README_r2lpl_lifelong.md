@@ -561,8 +561,8 @@ recorded frames from its own post-offense band:
 Per round, `build_release_bands.py` resolves each event to its source sequence
 through the chunk manifest (required — scene-list-only mining carries no
 provenance), walks `post_window_s` seconds past the offense at `stride_s`, and
-keeps a frame by traffic-light alignment: route-lane RED frames teach patience
-unconditionally; GREEN/no-TL frames are kept only when the recorded future
+keeps a frame by traffic-light alignment: route-lane RED (and not also green)
+frames teach patience unconditionally; GREEN/no-TL frames are kept only when the recorded future
 travels at least `min_takeoff_travel_m` (a genuine release — keeping creeps
 would re-teach the bias). The kept rows are sampled to `ratio` x the round's
 focus count and unioned into the training list as ordinary recorded scenes:

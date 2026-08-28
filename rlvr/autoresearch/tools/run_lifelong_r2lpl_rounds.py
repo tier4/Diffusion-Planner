@@ -556,8 +556,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
         "realized_reward": bool(workflow.get("realized_reward", False)),
         **(
-            {"release_bands": dict(workflow["release_bands"])}
-            if workflow.get("release_bands")
+            {"release_bands": dict(workflow["release_bands"] or {})}
+            if "release_bands" in workflow
             else {}
         ),
         "final_round_mining": bool(
@@ -1501,12 +1501,17 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
         raise ValueError(f"training.anchor is missing required fields: {missing}")
     if float(anchor_cfg["ratio"]) <= 0.0:
         raise ValueError(f"training.anchor.ratio must be > 0: {anchor_cfg['ratio']}")
-    if (anchor_cfg.get("waits_scene_list") is None) != (anchor_cfg.get("waits_fraction") is None):
-        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
-    waits_fraction = anchor_cfg.get("waits_fraction")
-    if waits_fraction is not None and not 0.0 < float(waits_fraction) < 1.0:
-        raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {waits_fraction}")
-    for key in ("scene_list", "waits_scene_list"):
+    fractions: list[float] = []
+    for name in ("waits", "takeoff"):
+        stratum = _anchor_stratum(anchor_cfg, name)  # pairing/range/emptiness
+        if stratum is not None:
+            fractions.append(stratum[1])
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {fractions}"
+        )
+    for key in ("scene_list", "waits_scene_list", "takeoff_scene_list"):
         value = anchor_cfg.get(key)
         if value is None:
             continue
@@ -1602,19 +1607,29 @@ def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
     missing = [k for k in _RELEASE_BANDS_REQUIRED if bands_cfg.get(k) is None]
     if missing:
         raise ValueError(f"release_bands is missing required fields: {missing}")
-    if float(bands_cfg["ratio"]) <= 0.0:
-        raise ValueError(f"release_bands.ratio must be > 0: {bands_cfg['ratio']}")
+    for key in ("post_window_s", "stride_s", "min_takeoff_travel_m", "frame_hz", "ratio"):
+        if float(bands_cfg[key]) <= 0.0:
+            raise ValueError(f"release_bands.{key} must be > 0: {bands_cfg[key]}")
+    if int(bands_cfg["workers"]) < 1:
+        raise ValueError(f"release_bands.workers must be >= 1: {bands_cfg['workers']}")
     if str(cfg.get("training_backend", "base_sft")) != "base_sft":
         raise ValueError(
             "release_bands is only wired into the base_sft training backend; "
             f"got training_backend={cfg.get('training_backend')!r}"
         )
-    mining = cfg.get("perception_mining") or {}
-    if not (mining.get("chunk_manifest") or cfg.get("chunk_manifest")):
+    manifest = _release_bands_manifest(cfg)
+    if manifest is None:
         raise ValueError(
             "release_bands requires a chunk manifest (event -> source sequence "
             "provenance); scene_list-only mining cannot locate post-offense frames"
         )
+    if not Path(manifest).is_file():
+        raise ValueError(f"release_bands chunk manifest does not exist: {manifest}")
+
+
+def _release_bands_manifest(cfg: dict[str, Any]) -> str | None:
+    mining = cfg.get("perception_mining") or {}
+    return mining.get("chunk_manifest") or cfg.get("chunk_manifest")
 
 
 def _release_band_paths(
@@ -1630,8 +1645,7 @@ def _release_band_paths(
         return []
     from rlvr.autoresearch.tools.build_release_bands import build_release_bands
 
-    mining = cfg.get("perception_mining") or {}
-    manifest = mining.get("chunk_manifest") or cfg.get("chunk_manifest")
+    manifest = _release_bands_manifest(cfg)
     out_json = rdir / f"round_{round_idx}_release_bands.json"
     rows = build_release_bands(
         credit_jsonl,
@@ -1643,14 +1657,16 @@ def _release_band_paths(
         frame_hz=float(bands_cfg["frame_hz"]),
         workers=int(bands_cfg["workers"]),
     )
-    n_keep = int(round(float(bands_cfg["ratio"]) * n_focus))
+    # Never round a configured feature down to nothing: tiny rounds keep at
+    # least one band row per event corpus rather than silently disabling it.
+    n_keep = max(1, int(round(float(bands_cfg["ratio"]) * n_focus)))
     if len(rows) > n_keep:
         import random as _random
 
         rng = _random.Random(int(bands_cfg["seed"]) + round_idx)
         rows = sorted(rng.sample(rows, n_keep))
         _write_json(out_json, rows)
-    return [str(r) for r in rows]
+    return rows
 
 
 def _validate_guards_config(cfg: dict[str, Any]) -> None:
@@ -2244,6 +2260,22 @@ def _emit_train_args(
     from diffusion_planner.config import cli_fields as _cli_fields
 
     cli_exposed = {f.name for f in _cli_fields(_TrainConfig)}
+    reserved = {
+        "exp_name",
+        "save_dir",
+        "train_set_list",
+        "valid_set_list",
+        "train_epochs",
+        "resume_model_path",
+        "train_overrides_json",
+    }
+    clashing = sorted(reserved & set(merged))
+    if clashing:
+        raise ValueError(
+            f"train_args must not set runner-owned keys {clashing}: the round runner "
+            "computes these (cumulative epochs, per-round scene list, warm-start "
+            "checkpoint) and a duplicate flag would override them argparse-last-wins"
+        )
     if "train_overrides_json" not in cli_exposed:
         raise RuntimeError(
             "train_predictor's TrainConfig lacks the train_overrides_json channel; "

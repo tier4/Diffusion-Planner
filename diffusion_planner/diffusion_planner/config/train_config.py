@@ -46,12 +46,8 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True
     normalization_file_path: str = "normalization.json"
-    # Programmatic override channel for launch wrappers (e.g. the R2LPL round
-    # runner): most TrainConfig fields are deliberately not CLI-exposed, but a
-    # wrapper still has to SET them per run — silently training a fine-tune at
-    # the from-scratch defaults (learning_rate 1e-4, warm_up_epoch 5, ...) is
-    # exactly the failure this channel prevents. Points at a JSON object whose
-    # keys must be TrainConfig field names; unknown keys fail loudly.
+    # Override channel for launch wrappers: JSON object of non-CLI TrainConfig
+    # fields; unknown keys fail loudly (see train_predictor.apply_overrides_json).
     train_overrides_json: str = cli(
         "JSON object of TrainConfig field overrides applied after CLI parsing",
         path=True,
