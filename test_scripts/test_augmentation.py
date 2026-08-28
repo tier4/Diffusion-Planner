@@ -65,24 +65,36 @@ fig, ax = plt.subplots(figsize=(10, 10))
 view_range = 30
 visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
 
-# Get augmentation ranges from the aug object
-lo = aug._low.cpu().numpy()[0]  # Extract from tuple
-hi = aug._high.cpu().numpy()[0]  # Extract from tuple
-x_min, y_min = lo[0], lo[1]
-x_max, y_max = hi[0], hi[1]
-
-# Draw the augmentation range rectangle
-rect = patches.Rectangle(
-    (x_min, y_min),
-    x_max - x_min,
-    y_max - y_min,
-    linewidth=2,
-    edgecolor="red",
-    facecolor="none",
-    linestyle="--",
-    label="Augmentation Range",
-)
-ax.add_patch(rect)
+# Draw the augmentation range. Frenet does not sample from the quintic offset
+# table it inherits (_low/_high) — its t=0 displacement is lateral-only, bounded
+# by dy_max — so draw that band instead of a misleading rectangle.
+if args.augment_type == "frenet":
+    ax.axhline(aug.dy_max, color="red", linestyle="--", linewidth=2)
+    ax.axhline(
+        -aug.dy_max,
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label="Augmentation Range (lateral)",
+    )
+else:
+    # bounds are (9,) since the perturbation-dim decorrelation fix; older
+    # checkouts carried (1, 9) — handle both
+    lo = np.atleast_2d(aug._low.cpu().numpy())[0]
+    hi = np.atleast_2d(aug._high.cpu().numpy())[0]
+    x_min, y_min = lo[0], lo[1]
+    x_max, y_max = hi[0], hi[1]
+    rect = patches.Rectangle(
+        (x_min, y_min),
+        x_max - x_min,
+        y_max - y_min,
+        linewidth=2,
+        edgecolor="red",
+        facecolor="none",
+        linestyle="--",
+        label="Augmentation Range",
+    )
+    ax.add_patch(rect)
 ax.legend()
 
 plt.tight_layout()
