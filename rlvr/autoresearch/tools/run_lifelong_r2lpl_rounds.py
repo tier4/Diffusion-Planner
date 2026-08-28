@@ -2297,9 +2297,8 @@ def _base_train_invocation(
         str(total_epochs),
         "--resume_model_path",
         str(model_path),
-        "--normalization_file_path",
-        normalization_path,
     ]
+    overrides.setdefault("normalization_file_path", normalization_path)
 
     passthrough = (
         "train_subsample_step",
@@ -2375,9 +2374,37 @@ def _base_train_invocation(
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
     if "warm_up_epoch" in merged:
         merged["warm_up_epoch"] = max(0, min(int(merged["warm_up_epoch"]), total_epochs))
+    # The trainer's CLI deliberately exposes only cli()-marked TrainConfig
+    # fields; every other knob is handed over via --train_overrides_json (the
+    # trainer fails loudly on keys that are not TrainConfig fields, so a rename
+    # upstream surfaces here instead of silently training at defaults).
+    from diffusion_planner.config import TrainConfig as _TrainConfig
+    from diffusion_planner.config import cli_fields as _cli_fields
+
+    cli_exposed = {f.name for f in _cli_fields(_TrainConfig)}
+    overrides_payload: dict[str, Any] = {}
     for key in passthrough:
-        if key in merged:
+        if key not in merged:
+            continue
+        if key in cli_exposed:
             _append_train_arg(cmd, key, merged[key])
+        elif merged[key] is not None:
+            overrides_payload[key] = merged[key]
+    for key, value in merged.items():
+        if key in passthrough or value is None:
+            continue
+        if key in cli_exposed:
+            _append_train_arg(cmd, key, value)
+        else:
+            overrides_payload[key] = value
+    if "train_overrides_json" not in cli_exposed:
+        raise RuntimeError(
+            "train_predictor's TrainConfig lacks the train_overrides_json channel; "
+            "cannot pass non-CLI training knobs (learning_rate, ema_decay, ...)"
+        )
+    overrides_file = save_dir / "train_overrides.json"
+    overrides_file.write_text(json.dumps(overrides_payload, indent=2, sort_keys=True))
+    cmd.extend(["--train_overrides_json", str(overrides_file)])
 
     env = dict(os.environ)
     repo_root = Path(__file__).resolve().parents[3]

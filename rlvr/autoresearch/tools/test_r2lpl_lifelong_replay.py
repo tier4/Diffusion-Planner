@@ -1404,6 +1404,73 @@ def test_anchor_slice_paths_takeoff_stratification(tmp_path):
         )
 
 
+def test_base_train_invocation_uses_override_channel(tmp_path):
+    """Non-CLI training knobs must travel via --train_overrides_json: the slim
+    trainer CLI rejects them as flags, and training a fine-tune at TrainConfig
+    defaults (learning_rate 1e-4 vs an intended 5e-6) is a silent disaster."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "best_model.pth").write_bytes(b"x")
+    (model_dir / "args.json").write_text(
+        json.dumps({"learning_rate": 1e-4, "batch_size": 64, "seed": 3407, "ddp": True})
+    )
+    train_list = tmp_path / "train.json"
+    train_list.write_text(json.dumps([str(tmp_path / f"s{i}.npz") for i in range(4)]))
+    training_cfg = tmp_path / "training.json"
+    training_cfg.write_text(
+        json.dumps(
+            {
+                "backend": "base_sft",
+                "train_args": {"learning_rate": 5e-6, "warm_up_epoch": 0},
+            }
+        )
+    )
+    cfg = {
+        "training_config": str(training_cfg),
+        "val_scenes": "/tmp/val.json",
+        "epochs_per_round": 1,
+        "gpu_ids": [0],
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+    cmd, next_model, _cwd, _env = round_runner._base_train_invocation(
+        cfg,
+        model_path=model_dir / "best_model.pth",
+        train_list=train_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    joined = " ".join(cmd)
+    assert "--learning_rate" not in joined
+    assert "--train_overrides_json" in joined
+    overrides_file = Path(cmd[cmd.index("--train_overrides_json") + 1])
+    payload = json.loads(overrides_file.read_text())
+    assert payload["learning_rate"] == 5e-6
+    assert payload["warm_up_epoch"] == 0
+    assert "normalization_file_path" in payload
+    # CLI-exposed knobs stay flags
+    assert "--batch_size" in joined
+
+
+def test_trainer_applies_and_rejects_overrides(tmp_path):
+    import importlib
+
+    tp = importlib.import_module("train_predictor")
+    from diffusion_planner.config import TrainConfig
+
+    cfg = TrainConfig(train_set_list="", valid_set_list="")
+    good = tmp_path / "ok.json"
+    good.write_text(json.dumps({"learning_rate": 5e-6, "warm_up_epoch": 0}))
+    cfg = tp.apply_overrides_json(cfg, str(good))
+    assert cfg.learning_rate == 5e-6
+    assert cfg.warm_up_epoch == 0
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"learning_rte": 5e-6}))
+    with pytest.raises(ValueError):
+        tp.apply_overrides_json(cfg, str(bad))
+
+
 def test_workflow_contract_carries_release_bands(tmp_path):
     """The contract builder must not silently drop the release_bands block —
     a dropped block disables the extraction with no error (dark-lever class)."""
