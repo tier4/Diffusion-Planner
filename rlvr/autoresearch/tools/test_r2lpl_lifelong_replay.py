@@ -1545,6 +1545,137 @@ def test_takeoff_worker_tl_and_creep_alignment(tmp_path):
     assert _takeoff_worker((str(red), 10, 0.5, 10.0)) == (str(red), False)
 
 
+def test_future_pathlen_masks_zero_padding(tmp_path):
+    """A short valid motion followed by zero padding must NOT count the phantom
+    jump back to the origin as travel — in both the band builder and the
+    take-off filter (they share valid_future_pathlen)."""
+    from rlvr.autoresearch.tools.build_r2lpl_pools import _takeoff_worker
+    from rlvr.autoresearch.tools.build_release_bands import valid_future_pathlen
+
+    # 2 m of real motion, then 80-10 padded rows: raw diffs would report ~4 m
+    # (2 m out + 2 m phantom return); the masked length must stay ~2 m.
+    fut = np.zeros((80, 3), dtype=np.float32)
+    fut[:10, 0] = np.linspace(0.5, 2.5, 10, dtype=np.float32)
+    assert valid_future_pathlen(fut) == pytest.approx(2.0, abs=1e-4)
+
+    padded_creep = _release_band_fixture(
+        tmp_path, tl_state="green", future_travel_m=20.0, frame=5, valid_steps=10
+    )
+    # raw length ~2.3 m valid + ~2.3 m phantom jump: must be rejected at 4 m
+    assert _takeoff_worker((str(padded_creep), 10, 0.5, 4.0)) == (str(padded_creep), False)
+
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    start = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=0.0, frame=200)
+    manifest = tmp_path / "pad_manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"chunk_key": "g001_logB_00000000", "start_scene_path": str(start)}) + "\n"
+    )
+    credit = tmp_path / "pad_credit.jsonl"
+    credit.write_text(
+        json.dumps(
+            {
+                "event_key": "g001_logB_00000000_0_16_danger_expert_disagreement",
+                "offense_frame_id": 200,
+            }
+        )
+        + "\n"
+    )
+    _release_band_fixture(
+        tmp_path, tl_state="green", future_travel_m=20.0, frame=210, valid_steps=10
+    )
+    rows = build_release_bands(
+        credit,
+        manifest,
+        tmp_path / "pad_bands.json",
+        post_window_s=2.0,
+        stride_s=1.0,
+        min_takeoff_travel_m=4.0,
+        frame_hz=10.0,
+        workers=1,
+    )
+    # only the red patience frame survives; the padded green pseudo-departure is out
+    assert rows == [str(start)]
+
+
+def test_build_release_bands_rejects_subframe_window(tmp_path):
+    """post_window_s that rounds to zero frames must fail loudly, not silently
+    degenerate the two-sided corpus to offense frames only."""
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    start = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=0.0, frame=300)
+    manifest = tmp_path / "sub_manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"chunk_key": "g002_logC_00000000", "start_scene_path": str(start)}) + "\n"
+    )
+    credit = tmp_path / "sub_credit.jsonl"
+    credit.write_text(
+        json.dumps(
+            {
+                "event_key": "g002_logC_00000000_0_16_danger_expert_disagreement",
+                "offense_frame_id": 300,
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="zero post-offense frames"):
+        build_release_bands(
+            credit,
+            manifest,
+            tmp_path / "sub_bands.json",
+            post_window_s=0.01,
+            stride_s=1.0,
+            min_takeoff_travel_m=4.0,
+            frame_hz=10.0,
+            workers=1,
+        )
+
+    # the startup validator must reject the same configuration
+    with pytest.raises(ValueError, match="zero post-offense frames"):
+        round_runner._validate_release_bands_config(
+            {
+                "training_backend": "base_sft",
+                "chunk_manifest": str(manifest),
+                "release_bands": {
+                    "post_window_s": 0.01,
+                    "stride_s": 1.0,
+                    "min_takeoff_travel_m": 4.0,
+                    "frame_hz": 10,
+                    "ratio": 1.0,
+                    "seed": 0,
+                    "workers": 1,
+                },
+            }
+        )
+
+
+def test_anchor_slice_paths_small_budget_keeps_normal_slice(tmp_path):
+    """Independent per-stratum rounding must not consume the whole anchor
+    budget: fractions summing to 0.8 with n_anchor=2 previously rounded to
+    1 + 1 and produced zero normal anchors despite passing validation."""
+    normal = [f"/tmp/normal_{i}.npz" for i in range(10)]
+    waits = [f"/tmp/waits_{i}.npz" for i in range(10)]
+    takeoff = [f"/tmp/takeoff_{i}.npz" for i in range(10)]
+    normal_json = tmp_path / "normal.json"
+    waits_json = tmp_path / "waits.json"
+    takeoff_json = tmp_path / "takeoff.json"
+    normal_json.write_text(json.dumps(normal))
+    waits_json.write_text(json.dumps(waits))
+    takeoff_json.write_text(json.dumps(takeoff))
+    cfg = {
+        "scene_list": str(normal_json),
+        "ratio": 1.0,
+        "waits_scene_list": str(waits_json),
+        "waits_fraction": 0.4,
+        "takeoff_scene_list": str(takeoff_json),
+        "takeoff_fraction": 0.4,
+        "seed": 0,
+    }
+    picked = round_runner._anchor_slice_paths(cfg, n_focus=2, round_idx=1)
+    assert len(picked) == 2
+    assert any("normal_" in p for p in picked)
+
+
 def test_workflow_contract_carries_release_bands(tmp_path):
     """The contract builder must not silently drop the release_bands block —
     a dropped block disables the extraction with no error (dark-lever class)."""
@@ -1622,8 +1753,13 @@ def test_validate_release_bands_config_requires_all_knobs(tmp_path):
         )
 
 
-def _release_band_fixture(tmp_path, *, tl_state: str, future_travel_m: float, frame: int):
-    """One frame NPZ with a route-lane TL one-hot and a straight-line future."""
+def _release_band_fixture(
+    tmp_path, *, tl_state: str, future_travel_m: float, frame: int, valid_steps: int = 80
+):
+    """One frame NPZ with a route-lane TL one-hot and a straight-line future.
+
+    ``valid_steps`` < 80 zero-pads the tail, reproducing a truncated future.
+    """
     seq = tmp_path / "seq"
     seq.mkdir(exist_ok=True)
     onehot = {"green": 8, "red": 10}[tl_state]
@@ -1633,6 +1769,7 @@ def _release_band_fixture(tmp_path, *, tl_state: str, future_travel_m: float, fr
     step = future_travel_m / 79.0
     future = np.zeros((80, 3), dtype=np.float32)
     future[:, 0] = np.arange(80, dtype=np.float32) * step
+    future[valid_steps:] = 0.0
     path = seq / f"scene_{frame:016d}.npz"
     np.savez(
         path,

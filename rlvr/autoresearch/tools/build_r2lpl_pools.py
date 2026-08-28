@@ -137,7 +137,10 @@ def _moving_filter(paths: list[str], thresh: float, workers: int) -> tuple[list[
 
 
 def _takeoff_worker(args: tuple[str, int, float, float]) -> tuple[str, bool] | None:
-    from rlvr.autoresearch.tools.build_release_bands import _route_tl_state
+    from rlvr.autoresearch.tools.build_release_bands import (
+        _route_tl_state,
+        valid_future_pathlen,
+    )
 
     path, recent_steps, max_recent_travel_m, min_future_travel_m = args
     try:
@@ -151,8 +154,7 @@ def _takeoff_worker(args: tuple[str, int, float, float]) -> tuple[str, bool] | N
             green, _red = _route_tl_state(d)
             if not green:
                 return (path, False)
-            fut = d["ego_agent_future"][:, :2]
-            travel = float(np.linalg.norm(np.diff(fut, axis=0), axis=1).sum())
+            travel = valid_future_pathlen(d["ego_agent_future"])
     except Exception:
         return None
     return (path, travel >= min_future_travel_m)

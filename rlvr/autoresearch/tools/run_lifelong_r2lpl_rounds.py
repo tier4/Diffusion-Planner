@@ -1259,8 +1259,12 @@ def _anchor_slice_paths(
     if not normal_pool:
         raise ValueError(f"training.anchor.scene_list is empty: {anchor_cfg['scene_list']}")
     picked: list[str] = []
+    # Floor each special stratum: independent rounding could consume the whole
+    # budget on tiny n_anchor (e.g. 0.4+0.4 with n_anchor=2 rounds to 1+1),
+    # eliminating the normal slice the fraction-sum validation promised.
+    # With sum(fractions) < 1, the floors sum to at most n_anchor - 1.
     for pool, frac in strata:
-        n_slice = int(round(frac * n_anchor))
+        n_slice = int(_math.floor(frac * n_anchor))
         already = set(picked)
         picked.extend(_sample([p for p in pool if p not in already], n_slice))
     picked_set = set(picked)
@@ -1612,6 +1616,12 @@ def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
             raise ValueError(f"release_bands.{key} must be > 0: {bands_cfg[key]}")
     if int(bands_cfg["workers"]) < 1:
         raise ValueError(f"release_bands.workers must be >= 1: {bands_cfg['workers']}")
+    if int(round(float(bands_cfg["post_window_s"]) * float(bands_cfg["frame_hz"]))) < 1:
+        raise ValueError(
+            f"release_bands.post_window_s={bands_cfg['post_window_s']} at "
+            f"frame_hz={bands_cfg['frame_hz']} rounds to zero post-offense frames — "
+            "the band would degenerate to the offense frame itself"
+        )
     if str(cfg.get("training_backend", "base_sft")) != "base_sft":
         raise ValueError(
             "release_bands is only wired into the base_sft training backend; "

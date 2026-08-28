@@ -89,7 +89,19 @@ def _sequence_index(scene_path: str) -> dict[int, str]:
     return idx
 
 
-def _pathlen(xy: np.ndarray) -> float:
+def valid_future_pathlen(future: np.ndarray) -> float:
+    """Arc length over the VALID waypoints of a zero-padded ego future.
+
+    ``ego_agent_future`` zero-pads invalid steps; a padded row sits at the
+    origin, so summing raw diffs adds a phantom jump back to (0, 0) that can
+    turn a short truncated motion into an apparent long departure. Mask with
+    the canonical non-zero-waypoint rule (see add_distractor_neighbors_npz)
+    before measuring.
+    """
+    xy = future[:, :2]
+    xy = xy[np.abs(xy).sum(axis=1) > 1e-6]
+    if len(xy) < 2:
+        return 0.0
     return float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum())
 
 
@@ -129,7 +141,7 @@ def _band_worker(
                     if red and not green:
                         out.append(p)
                         continue
-                    fut = _pathlen(d["ego_agent_future"][:, :2])
+                    fut = valid_future_pathlen(d["ego_agent_future"])
             except Exception:
                 continue
             if fut >= min_takeoff_m:
@@ -194,6 +206,12 @@ def build_release_bands(
         )
 
     post_frames = int(round(post_window_s * frame_hz))
+    if post_frames < 1:
+        raise ValueError(
+            f"post_window_s={post_window_s} at frame_hz={frame_hz} rounds to zero "
+            "post-offense frames — the band would degenerate to the offense frame "
+            "itself, silently disabling the two-sided teacher"
+        )
     stride_frames = max(1, int(round(stride_s * frame_hz)))
     jobs = [
         (manifest[key], sorted(frames), post_frames, stride_frames, min_takeoff_travel_m)
