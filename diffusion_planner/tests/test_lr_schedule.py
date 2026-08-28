@@ -9,7 +9,6 @@ state.
 import math
 
 import torch
-
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
 
 BASE_LR = 1e-4
