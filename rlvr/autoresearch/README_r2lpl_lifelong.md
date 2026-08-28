@@ -523,6 +523,11 @@ list as chainable stages (seeded subsample, moving filter, stop-go waits via
 `build_patience_benchmark --out_pool`, per-log frame dedup, `is_skipped` audit,
 route-arc region exclusion). Every output-changing threshold is a required
 argument and the stages fail loudly on unreadable inputs.
+The `takeoff` stage keeps stopped-input frames whose route lane shows GREEN
+and whose recorded future genuinely departs (threshold required — creeps are
+rejected on purpose): the go-decision evidence that failure-window corpora
+under-represent. Feed its output to `training.anchor.takeoff_scene_list` /
+`takeoff_fraction` (set together; `waits_fraction + takeoff_fraction < 1`).
 `build_resume_benchmark.py` selects quasi-stationary-at-t0 scenes whose
 recorded ego resumes mid-horizon — the take-off decision benchmark.
 `prep_ddp_ema.py` rewrites checkpoint keys with the ``module.`` prefix so EMA
@@ -533,6 +538,36 @@ reward total when the width fields are absent (repaired rows), and
 ``label_quotas`` keys accept the ``label/reason`` form (e.g.
 ``expert_disagreement/model_lagging_expert``) so per-reason teacher classes can
 be reserved separately from the umbrella label.
+
+## Release Bands (`release_bands`) — the two-sided teacher
+
+Mining carves credit windows that end at the offense, so every repaired target
+teaches the entry into a braking manoeuvre and never its resolution — the
+recorded release lies just past the window edge. A corpus built only from
+those windows is systematically deceleration-flavoured, and each additional
+training epoch absorbs more of that bias into the EMA (visible as a monotone
+per-epoch erosion of take-off response at heavily-mined geometries, while red
+compliance persists). The `release_bands` block pairs every mined event with
+recorded frames from its own post-offense band:
+
+```json
+"release_bands": {
+  "post_window_s": 10.0, "stride_s": 0.5,
+  "min_takeoff_travel_m": 10.0, "frame_hz": 10,
+  "ratio": 1.0, "seed": 0, "workers": 12
+}
+```
+
+Per round, `build_release_bands.py` resolves each event to its source sequence
+through the chunk manifest (required — scene-list-only mining carries no
+provenance), walks `post_window_s` seconds past the offense at `stride_s`, and
+keeps a frame by traffic-light alignment: route-lane RED frames teach patience
+unconditionally; GREEN/no-TL frames are kept only when the recorded future
+travels at least `min_takeoff_travel_m` (a genuine release — keeping creeps
+would re-teach the bias). The kept rows are sampled to `ratio` x the round's
+focus count and unioned into the training list as ordinary recorded scenes:
+nothing is generated, relabeled, or removed from the repaired set. All knobs
+are required; base_sft backend only.
 
 ## Hard-Example Signal (`target_gt_disagreement`)
 

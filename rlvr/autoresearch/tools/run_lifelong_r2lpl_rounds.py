@@ -1187,8 +1187,11 @@ def _anchor_slice_paths(
     Config (``training.anchor`` in the workflow JSON): ``scene_list`` +
     ``ratio`` are required when the section is present (fail loudly, no silent
     defaults); ``waits_scene_list``/``waits_fraction`` must be given together;
-    ``seed`` (default 0) is offset by the round index so each round redraws
-    reproducibly.
+    ``takeoff_scene_list``/``takeoff_fraction`` (also set together) stratify a
+    green take-off slice into the anchors — the release-side evidence that the
+    failure-window corpus under-represents (build with
+    ``build_r2lpl_pools takeoff``); ``seed`` (default 0) is offset by the round
+    index so each round redraws reproducibly.
     """
     if not anchor_cfg:
         return []
@@ -1202,6 +1205,21 @@ def _anchor_slice_paths(
     waits_fraction = anchor_cfg.get("waits_fraction")
     if (waits_list is None) != (waits_fraction is None):
         raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+    takeoff_list = anchor_cfg.get("takeoff_scene_list")
+    takeoff_fraction = anchor_cfg.get("takeoff_fraction")
+    if (takeoff_list is None) != (takeoff_fraction is None):
+        raise ValueError(
+            "training.anchor.takeoff_scene_list and takeoff_fraction must be set together"
+        )
+    if (
+        waits_fraction is not None
+        and takeoff_fraction is not None
+        and float(waits_fraction) + float(takeoff_fraction) >= 1.0
+    ):
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {waits_fraction} + {takeoff_fraction}"
+        )
 
     import math as _math
     import random as _random
@@ -1229,6 +1247,16 @@ def _anchor_slice_paths(
             raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
         n_waits = int(round(frac * n_anchor))
         picked.extend(_sample(waits_pool, n_waits))
+    if takeoff_list is not None:
+        frac = float(takeoff_fraction)
+        if not 0.0 < frac < 1.0:
+            raise ValueError(f"training.anchor.takeoff_fraction must be in (0, 1): {frac}")
+        takeoff_pool = [str(p) for p in _read_json_list(Path(takeoff_list))]
+        if not takeoff_pool:
+            raise ValueError(f"training.anchor.takeoff_scene_list is empty: {takeoff_list}")
+        already = set(picked)
+        n_takeoff = int(round(frac * n_anchor))
+        picked.extend(_sample([p for p in takeoff_pool if p not in already], n_takeoff))
     picked_set = set(picked)
     picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
     return picked
@@ -1535,6 +1563,88 @@ def _validate_repair_generation_config(cfg: dict[str, Any]) -> None:
             f"repair variant {variant_name!r} needs K >= {min_k} "
             f"(det + {min_k - 1} fixed slots), got K={k}"
         )
+
+
+_RELEASE_BANDS_REQUIRED = (
+    "post_window_s",
+    "stride_s",
+    "min_takeoff_travel_m",
+    "frame_hz",
+    "ratio",
+    "seed",
+    "workers",
+)
+
+
+def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on release_bands misconfiguration.
+
+    The block extends each round's training corpus with post-offense recorded
+    frames from the SAME events the repair phase mined (see
+    build_release_bands): pairing every failure window with its recorded
+    resolution keeps the corpus from being one-sidedly deceleration-flavoured.
+    All knobs are required — no silent defaults.
+    """
+    bands_cfg = cfg.get("release_bands")
+    if "release_bands" in cfg and not bands_cfg:
+        raise ValueError(
+            "config has an empty 'release_bands' section; remove it or fill in "
+            f"{list(_RELEASE_BANDS_REQUIRED)}"
+        )
+    if not bands_cfg:
+        return
+    missing = [k for k in _RELEASE_BANDS_REQUIRED if bands_cfg.get(k) is None]
+    if missing:
+        raise ValueError(f"release_bands is missing required fields: {missing}")
+    if float(bands_cfg["ratio"]) <= 0.0:
+        raise ValueError(f"release_bands.ratio must be > 0: {bands_cfg['ratio']}")
+    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
+        raise ValueError(
+            "release_bands is only wired into the base_sft training backend; "
+            f"got training_backend={cfg.get('training_backend')!r}"
+        )
+    mining = cfg.get("perception_mining") or {}
+    if not (mining.get("chunk_manifest") or cfg.get("chunk_manifest")):
+        raise ValueError(
+            "release_bands requires a chunk manifest (event -> source sequence "
+            "provenance); scene_list-only mining cannot locate post-offense frames"
+        )
+
+
+def _release_band_paths(
+    cfg: dict[str, Any],
+    credit_jsonl: Path,
+    rdir: Path,
+    round_idx: int,
+    n_focus: int,
+) -> list[str]:
+    """Extract + sample this round's release bands (see build_release_bands)."""
+    bands_cfg = cfg.get("release_bands")
+    if not bands_cfg:
+        return []
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    mining = cfg.get("perception_mining") or {}
+    manifest = mining.get("chunk_manifest") or cfg.get("chunk_manifest")
+    out_json = rdir / f"round_{round_idx}_release_bands.json"
+    rows = build_release_bands(
+        credit_jsonl,
+        Path(str(manifest)),
+        out_json,
+        post_window_s=float(bands_cfg["post_window_s"]),
+        stride_s=float(bands_cfg["stride_s"]),
+        min_takeoff_travel_m=float(bands_cfg["min_takeoff_travel_m"]),
+        frame_hz=float(bands_cfg["frame_hz"]),
+        workers=int(bands_cfg["workers"]),
+    )
+    n_keep = int(round(float(bands_cfg["ratio"]) * n_focus))
+    if len(rows) > n_keep:
+        import random as _random
+
+        rng = _random.Random(int(bands_cfg["seed"]) + round_idx)
+        rows = sorted(rng.sample(rows, n_keep))
+        _write_json(out_json, rows)
+    return [str(r) for r in rows]
 
 
 def _validate_guards_config(cfg: dict[str, Any]) -> None:
@@ -2985,6 +3095,7 @@ def main() -> None:
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
     _validate_anchor_config(cfg)
+    _validate_release_bands_config(cfg)
     _validate_guards_config(cfg)
     _validate_repair_generation_config(cfg)
     _validate_normal_scene_list_config(cfg)
@@ -3200,9 +3311,17 @@ def main() -> None:
             # just replaced. Point it at the spliced list instead.
             replay_json = rdir / f"round_{round_idx}_replay_scenes_refreshed.json"
             _write_json(replay_json, replay_paths)
-        anchor_paths = _anchor_slice_paths(
-            cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
-        )
+        n_focus = len(set(repaired_paths) | set(replay_paths))
+        band_paths = _release_band_paths(cfg, credit_jsonl, rdir, round_idx, n_focus)
+        if band_paths:
+            band_paths = _ensure_4col_neighbor_futures(
+                band_paths, rdir.parent / "release_bands_4col"
+            )
+            print(
+                f"[round {round_idx}] release bands: {len(band_paths)} recorded "
+                f"post-offense rows paired with {n_focus} focus scenes"
+            )
+        anchor_paths = _anchor_slice_paths(cfg.get("anchor"), n_focus, round_idx)
         if anchor_paths:
             # Campaign-level cache dir: the anchor pool is largely the same
             # scenes every round, so convert once per campaign, not per round.
@@ -3213,7 +3332,9 @@ def main() -> None:
                 f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
                 f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"
             )
-        _union_scene_lists(repaired_paths, [*replay_paths, *anchor_paths], train_input_list)
+        _union_scene_lists(
+            repaired_paths, [*replay_paths, *band_paths, *anchor_paths], train_input_list
+        )
         if bool(cfg.get("validate_on_repaired_targets", False)):
             cfg["val_scenes"] = str(train_input_list)
 

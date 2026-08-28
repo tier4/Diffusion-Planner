@@ -1358,6 +1358,159 @@ def test_anchor_slice_paths_ratio_and_waits_stratification(tmp_path):
         )
 
 
+def test_anchor_slice_paths_takeoff_stratification(tmp_path):
+    normal = [f"/tmp/normal_{i}.npz" for i in range(100)]
+    waits = [f"/tmp/waits_{i}.npz" for i in range(50)]
+    takeoff = [f"/tmp/takeoff_{i}.npz" for i in range(50)]
+    normal_json = tmp_path / "normal.json"
+    waits_json = tmp_path / "waits.json"
+    takeoff_json = tmp_path / "takeoff.json"
+    normal_json.write_text(json.dumps(normal))
+    waits_json.write_text(json.dumps(waits))
+    takeoff_json.write_text(json.dumps(takeoff))
+
+    cfg = {
+        "scene_list": str(normal_json),
+        "ratio": 2.0,
+        "waits_scene_list": str(waits_json),
+        "waits_fraction": 0.3,
+        "takeoff_scene_list": str(takeoff_json),
+        "takeoff_fraction": 0.2,
+        "seed": 3,
+    }
+    picked = round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=1)
+    assert len(picked) == 20
+    assert sum(1 for p in picked if "waits_" in p) == 6  # round(0.3 * 20)
+    assert sum(1 for p in picked if "takeoff_" in p) == 4  # round(0.2 * 20)
+    assert len(set(picked)) == len(picked)
+
+    # loud on partial config and on fractions that leave no normal slice
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths(
+            {"scene_list": str(normal_json), "ratio": 1.0, "takeoff_fraction": 0.2}, 10, 1
+        )
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths(
+            {
+                "scene_list": str(normal_json),
+                "ratio": 1.0,
+                "waits_scene_list": str(waits_json),
+                "waits_fraction": 0.6,
+                "takeoff_scene_list": str(takeoff_json),
+                "takeoff_fraction": 0.4,
+            },
+            10,
+            1,
+        )
+
+
+def test_validate_release_bands_config_requires_all_knobs():
+    base = {
+        "training_backend": "base_sft",
+        "perception_mining": {"chunk_manifest": "/tmp/manifest.jsonl"},
+    }
+    # absent section is fine; empty section is loud
+    round_runner._validate_release_bands_config(dict(base))
+    with pytest.raises(ValueError):
+        round_runner._validate_release_bands_config({**base, "release_bands": {}})
+    full = {
+        "post_window_s": 10.0,
+        "stride_s": 0.5,
+        "min_takeoff_travel_m": 10.0,
+        "frame_hz": 10.0,
+        "ratio": 1.0,
+        "seed": 0,
+        "workers": 4,
+    }
+    round_runner._validate_release_bands_config({**base, "release_bands": dict(full)})
+    for key in full:
+        broken = {k: v for k, v in full.items() if k != key}
+        with pytest.raises(ValueError):
+            round_runner._validate_release_bands_config({**base, "release_bands": broken})
+    # a chunk manifest is mandatory provenance
+    with pytest.raises(ValueError):
+        round_runner._validate_release_bands_config(
+            {"training_backend": "base_sft", "release_bands": dict(full)}
+        )
+
+
+def _release_band_fixture(tmp_path, *, tl_state: str, future_travel_m: float, frame: int):
+    """One frame NPZ with a route-lane TL one-hot and a straight-line future."""
+    seq = tmp_path / "seq"
+    seq.mkdir(exist_ok=True)
+    onehot = {"green": 8, "red": 10}[tl_state]
+    route = np.zeros((2, 20, 33), dtype=np.float32)
+    route[0, :, 0] = 1.0  # mark the lane valid
+    route[0, 0, onehot] = 1.0
+    step = future_travel_m / 79.0
+    future = np.zeros((80, 3), dtype=np.float32)
+    future[:, 0] = np.arange(80, dtype=np.float32) * step
+    path = seq / f"scene_{frame:016d}.npz"
+    np.savez(
+        path,
+        ego_agent_past=np.zeros((31, 3), dtype=np.float32),
+        ego_agent_future=future,
+        route_lanes=route,
+    )
+    return path
+
+
+def test_build_release_bands_tl_alignment(tmp_path):
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    start = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=0.0, frame=100)
+    _release_band_fixture(tmp_path, tl_state="green", future_travel_m=2.0, frame=110)  # creep
+    kept_go = _release_band_fixture(tmp_path, tl_state="green", future_travel_m=20.0, frame=120)
+
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"chunk_key": "g000_logA_00000000", "start_scene_path": str(start)}) + "\n"
+    )
+    credit = tmp_path / "credit.jsonl"
+    credit.write_text(
+        json.dumps(
+            {
+                "event_key": "g000_logA_00000000_0_16_danger_expert_disagreement",
+                "offense_frame_id": 100,
+            }
+        )
+        + "\n"
+    )
+    out = tmp_path / "bands.json"
+    rows = build_release_bands(
+        credit,
+        manifest,
+        out,
+        post_window_s=3.0,
+        stride_s=1.0,
+        min_takeoff_travel_m=10.0,
+        frame_hz=10.0,
+        workers=1,
+    )
+    # red frame kept (patience), green take-off kept (release), green creep dropped
+    assert str(start) in rows
+    assert str(kept_go) in rows
+    assert len(rows) == 2
+    assert json.loads(out.read_text()) == rows
+
+    # unmatched chunk keys fail loudly
+    bad_credit = tmp_path / "bad_credit.jsonl"
+    bad_credit.write_text(
+        json.dumps({"event_key": "g999_other_00000000_0_1_danger_x", "offense_frame_id": 1}) + "\n"
+    )
+    with pytest.raises(ValueError):
+        build_release_bands(
+            bad_credit,
+            manifest,
+            tmp_path / "x.json",
+            post_window_s=1.0,
+            stride_s=1.0,
+            min_takeoff_travel_m=10.0,
+            frame_hz=10.0,
+            workers=1,
+        )
+
+
 def test_round_runner_checkpoint_policy_prefers_latest_lora(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
