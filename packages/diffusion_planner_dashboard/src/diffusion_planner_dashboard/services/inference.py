@@ -96,6 +96,7 @@ def run_onnx_inference(
 
     start = perf_counter()
     prediction = session.run(None, inputs)[0]
+    assert isinstance(prediction, np.ndarray), "ONNX prediction must be an ndarray"
     elapsed = perf_counter() - start
     prediction_array = normalizer.denormalize_trajectory(np.asarray(prediction[0]))
     return prediction_array.astype(np.float32, copy=False), elapsed

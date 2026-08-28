@@ -90,20 +90,31 @@ def _load_h5_index(path: Path) -> FrameIndex:
     """Construct a frame index directly from one H5 shard."""
     with h5py.File(path, "r") as file:
         _validate_h5(file, path)
-        num_frames = int(file.attrs["num_frames"])
+        num_frames_value = file.attrs["num_frames"]
+        if not isinstance(num_frames_value, (int, np.integer)):
+            raise ValueError(f"H5 num_frames must be an integer: {path}")
+        num_frames = int(num_frames_value)
         if num_frames == 0:
             raise ValueError(f"H5 frame source is empty: {path}")
         metadata = file["metadata"]
+        if not isinstance(metadata, h5py.Group):
+            raise ValueError(f"H5 metadata must be a group: {path}")
         if "frame_time_ns" not in metadata:
             raise ValueError(f"H5 metadata/frame_time_ns is missing: {path}")
-        frame_times = np.asarray(metadata["frame_time_ns"][...], dtype=np.int64)
+        frame_time_values = metadata["frame_time_ns"]
+        if not isinstance(frame_time_values, h5py.Dataset):
+            raise ValueError(f"H5 metadata/frame_time_ns must be a dataset: {path}")
+        frame_times = np.asarray(frame_time_values[...], dtype=np.int64)
         if len(frame_times) != num_frames:
             raise ValueError(f"H5 frame time count differs from num_frames: {path}")
-        stats = {
-            name: np.asarray(metadata[name][...])
-            for name in STAT_COLUMNS
-            if name in metadata
-        }
+        stats: dict[str, NDArray[np.generic]] = {}
+        for name in STAT_COLUMNS:
+            if name not in metadata:
+                continue
+            values = metadata[name]
+            if not isinstance(values, h5py.Dataset):
+                raise ValueError(f"H5 metadata/{name} must be a dataset: {path}")
+            stats[name] = np.asarray(values[...])
     return FrameIndex(
         path=path,
         h5_paths=np.asarray([str(path)] * num_frames, dtype=np.str_),

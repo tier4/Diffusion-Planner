@@ -12,7 +12,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pre-commit>=4.6.1", "ruff>=0.16.1"]
+dev = [
+    "pre-commit>=4.6.1",
+    "pyright>=1.1.411",
+    "ruff>=0.16.1",
+]
 
 [tool.uv]
 package = false
@@ -46,7 +50,14 @@ known-first-party = ["diffusion_planner", "diffusion_planner_dashboard"]
 "tests/**/*.py" = ["S101"]
 
 [tool.pyright]
+include = [
+    "packages/diffusion_planner/src",
+    "packages/diffusion_planner_dashboard/src",
+]
+exclude = ["ros2_ws", "outputs", "checkpoints"]
 pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "basic"
 
 reportMissingTypeStubs = false

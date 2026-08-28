@@ -28,14 +28,19 @@ class FrameLoader:
         """Load one model-ready frame from a selected H5 index row."""
         path = Path(row.h5_path)
         file = self._file_for(path)
-        num_frames = int(file.attrs["num_frames"])
+        num_frames_value = file.attrs["num_frames"]
+        if not isinstance(num_frames_value, (int, np.integer)):
+            raise ValueError(f"H5 num_frames must be an integer: {path}")
+        num_frames = int(num_frames_value)
         if not 0 <= row.frame_index < num_frames:
             raise IndexError(
                 f"frame_index {row.frame_index} is outside {path} with {num_frames} frames"
             )
+        frames = file["frames"]
+        if not isinstance(frames, h5py.Group):
+            raise ValueError(f"H5 frames must be a group: {path}")
         return {
-            key: np.asarray(values[row.frame_index])
-            for key, values in file["frames"].items()
+            key: np.asarray(values[row.frame_index]) for key, values in frames.items()
         }
 
     def _file_for(self, path: Path) -> h5py.File:

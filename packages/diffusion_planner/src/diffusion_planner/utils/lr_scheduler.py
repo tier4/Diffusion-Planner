@@ -81,6 +81,8 @@ def build_lr_scheduler(optimizer: Optimizer, args: Any, total_steps: int) -> Sch
         step_on_epochs=False,
         updates_per_epoch=1,
     )
+    if scheduler is None:
+        raise ValueError(f"timm could not create LR scheduler {sched!r}")
     return scheduler
 
 
