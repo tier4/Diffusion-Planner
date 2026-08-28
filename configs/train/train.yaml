@@ -4,7 +4,7 @@
 # leading slash makes it absolute against configs/ and @ binds it to a short key.
 defaults:
   - /train/dataloader@dataloader: default
-  - /train/model@model: default
+  - /train/model@model: large_33m
   - /train/optimizer@optimizer: default
   - /train/scheduler@scheduler: default
   - _self_
