@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+from .base import Frame, FrameLike
 
 
 def _forward_fill_unknown(past: NDArray[Any], future: NDArray[Any]) -> NDArray[Any]:
@@ -26,8 +27,8 @@ def _forward_fill_unknown(past: NDArray[Any], future: NDArray[Any]) -> NDArray[A
 
 
 def fill_unknown_traffic_light_futures(
-    frame: Mapping[str, NDArray[Any]],
-) -> dict[str, NDArray[Any]]:
+    frame: FrameLike,
+) -> Frame:
     """Forward-fill Unknown lane and route future states without mutating input."""
     result = dict(frame)
     for past_key, future_key in (
@@ -40,3 +41,10 @@ def fill_unknown_traffic_light_futures(
             np.asarray(result[past_key]), np.asarray(result[future_key])
         )
     return result
+
+
+class FillUnknownTrafficLightFutures:
+    """Forward-fill unknown traffic-light futures as a dataset transform."""
+
+    def __call__(self, frame: FrameLike) -> Frame:
+        return fill_unknown_traffic_light_futures(frame)

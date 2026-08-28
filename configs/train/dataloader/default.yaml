@@ -1,26 +1,23 @@
 # The dataset is nested here rather than being its own group: it exists only to feed this
 # loader, and Hydra instantiates it recursively when the loader is built.
+defaults:
+  - /train/dataloader/transforms@_global_.transform_configs.speed_augmentation: speed_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.quintic_hermite_augmentation: quintic_hermite_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.traffic_light: traffic_light
+  - /train/dataloader/transforms@_global_.transform_configs.normalization: normalization
+  - _self_
+
 _target_: diffusion_planner.data.build_dataloader
 dataset:
   # H5 frame index written by scripts/dataset/create_h5_dataset.py.
   _target_: diffusion_planner.data.PlannerDataset
   parquet_path: ???
   file_capacity: 8
-  data_augmentation:
-    _target_: diffusion_planner.data.PlannerDataAugmentation
-    lateral_offset_range: [-1.5, 1.5]
-    yaw_offset_range: [-0.0872665, 0.0872665]
-    ego_speed_scale_range: [0.5, 1.5]
-    pose_probability: 0.5
-    speed_probability: 0.5
-    num_refine: 20
-    time_step_s: 0.1
-    pose_augmentation_speed_threshold: 2.0
-  data_normalizer:
-    _target_: diffusion_planner.data.PlannerDataNormalizer
-    position_scale: 50.0
-    speed_scale: 15.0
-    vehicle_shape_scale: 10.0
+  transforms:
+    - ${transform_configs.speed_augmentation}
+    - ${transform_configs.quintic_hermite_augmentation}
+    - ${transform_configs.traffic_light}
+    - ${transform_configs.normalization}
 # This batch size applies to each process/GPU.
 batch_size: 256
 shuffle: true

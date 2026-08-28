@@ -10,7 +10,10 @@ from typing import Any
 import numpy as np
 import streamlit as st
 
-from diffusion_planner.data import PlannerDataAugmentation
+from diffusion_planner.data import (
+    PlannerQuinticHermiteAugmentation,
+    PlannerSpeedAugmentation,
+)
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
     FrameIndex,
@@ -92,14 +95,16 @@ def _augment_frame(
     yaw_offset: float,
     ego_speed_scale: float,
 ) -> dict[str, Any]:
-    augmentation = PlannerDataAugmentation(
+    speed_augmentation = PlannerSpeedAugmentation(
+        speed_scale_range=(ego_speed_scale, ego_speed_scale),
+        probability=1.0,
+    )
+    pose_augmentation = PlannerQuinticHermiteAugmentation(
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
         pose_probability=1.0,
-        ego_speed_scale_range=(ego_speed_scale, ego_speed_scale),
-        speed_probability=1.0,
     )
-    return augmentation(frame_data)
+    return pose_augmentation(speed_augmentation(frame_data))
 
 
 def _difference_frame(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,7 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader, Dataset
 
-from .data_augmentation import PlannerDataAugmentation
-from .normalization import PlannerDataNormalizer
-from .traffic_light import fill_unknown_traffic_light_futures
+from .transforms import Transform
 
 REQUIRED_INDEX_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
 H5_FORMAT = "diffusion_planner_frame_dataset"
@@ -33,8 +32,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
         parquet_path: str | Path,
         *,
         file_capacity: int = 8,
-        data_augmentation: PlannerDataAugmentation | None = None,
-        data_normalizer: PlannerDataNormalizer | None = None,
+        transforms: Sequence[Transform] = (),
     ) -> None:
         """Load the lightweight index and defer H5 opens to DataLoader workers."""
         self._index_path = Path(parquet_path).expanduser().resolve()
@@ -64,8 +62,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("Parquet index contains a negative frame_index")
 
         self._file_capacity = file_capacity
-        self._data_augmentation = data_augmentation
-        self._data_normalizer = data_normalizer
+        self._transforms = tuple(transforms)
         self._files: OrderedDict[Path, h5py.File] = OrderedDict()
         self._frame_keys: tuple[str, ...] | None = None
 
@@ -77,7 +74,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
         return str(self._resolve_h5_path(index)), int(self._frame_times_ns[index])
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        """Load, augment, normalize, and convert one H5 frame to tensors."""
+        """Load, transform, and convert one H5 frame to tensors."""
         path = self._resolve_h5_path(index)
         file = self._file_for(path)
         frame_index = int(self._frame_indices[index])
@@ -111,11 +108,8 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
             if not isinstance(dataset, h5py.Dataset):
                 raise ValueError(f"H5 'frames/{key}' must be a dataset: {path}")
             frame_arrays[key] = np.asarray(dataset[frame_index])
-        if self._data_augmentation is not None:
-            frame_arrays = self._data_augmentation(frame_arrays)
-        frame_arrays = fill_unknown_traffic_light_futures(frame_arrays)
-        if self._data_normalizer is not None:
-            frame_arrays = self._data_normalizer(frame_arrays)
+        for transform in self._transforms:
+            frame_arrays = transform(frame_arrays)
         return {key: torch.from_numpy(value) for key, value in frame_arrays.items()}
 
     def _resolve_h5_path(self, index: int) -> Path:

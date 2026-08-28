@@ -1,0 +1,7 @@
+_target_: diffusion_planner.data.transforms.PlannerQuinticHermiteAugmentation
+lateral_offset_range: [-1.5, 1.5]
+yaw_offset_range: [-0.0872665, 0.0872665]
+pose_probability: 0.5
+num_refine: 20
+time_step_s: 0.1
+pose_augmentation_speed_threshold: 2.0

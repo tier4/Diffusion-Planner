@@ -8,7 +8,10 @@ import unittest
 import numpy as np
 from numpy.typing import NDArray
 
-from diffusion_planner.data.data_augmentation import PlannerDataAugmentation
+from diffusion_planner.data.transforms import (
+    PlannerQuinticHermiteAugmentation,
+    PlannerSpeedAugmentation,
+)
 
 
 def _pose(
@@ -43,14 +46,13 @@ def _frame() -> dict[str, NDArray[np.float32]]:
     return frame
 
 
-class PlannerDataAugmentationTest(unittest.TestCase):
+class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
     def test_transforms_scene_into_augmented_ego_frame(self) -> None:
         frame = _frame()
-        augmentation = PlannerDataAugmentation(
+        augmentation = PlannerQuinticHermiteAugmentation(
             lateral_offset_range=(2.0, 2.0),
             yaw_offset_range=(math.pi / 2, math.pi / 2),
             pose_probability=1.0,
-            speed_probability=0.0,
         )
 
         result = augmentation(frame)
@@ -76,8 +78,8 @@ class PlannerDataAugmentationTest(unittest.TestCase):
 
     def test_preserves_padding_and_non_coordinate_tensors(self) -> None:
         frame = _frame()
-        augmentation = PlannerDataAugmentation(
-            (1.0, 1.0), (0.1, 0.1), pose_probability=1.0, speed_probability=0.0
+        augmentation = PlannerQuinticHermiteAugmentation(
+            (1.0, 1.0), (0.1, 0.1), pose_probability=1.0
         )
 
         result = augmentation(frame)
@@ -88,12 +90,9 @@ class PlannerDataAugmentationTest(unittest.TestCase):
 
     def test_scales_only_ego_speed_history(self) -> None:
         frame = _frame()
-        augmentation = PlannerDataAugmentation(
-            lateral_offset_range=(0.0, 0.0),
-            yaw_offset_range=(0.0, 0.0),
-            pose_probability=0.0,
-            ego_speed_scale_range=(1.2, 1.2),
-            speed_probability=1.0,
+        augmentation = PlannerSpeedAugmentation(
+            speed_scale_range=(1.2, 1.2),
+            probability=1.0,
         )
 
         result = augmentation(frame)
@@ -101,14 +100,11 @@ class PlannerDataAugmentationTest(unittest.TestCase):
         np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
         np.testing.assert_allclose(result["ego_agent_future"][:, 4], 1.0)
 
-    def test_pose_and_speed_events_are_independent(self) -> None:
+    def test_speed_augmentation_does_not_transform_scene(self) -> None:
         frame = _frame()
-        augmentation = PlannerDataAugmentation(
-            lateral_offset_range=(2.0, 2.0),
-            yaw_offset_range=(0.0, 0.0),
-            pose_probability=0.0,
-            ego_speed_scale_range=(1.2, 1.2),
-            speed_probability=1.0,
+        augmentation = PlannerSpeedAugmentation(
+            speed_scale_range=(1.2, 1.2),
+            probability=1.0,
         )
 
         result = augmentation(frame)

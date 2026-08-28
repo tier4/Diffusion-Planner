@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+from .base import Frame, FrameLike
 
 
 class PlannerDataNormalizer:
@@ -22,7 +23,7 @@ class PlannerDataNormalizer:
         self.speed_scale = speed_scale
         self.vehicle_shape_scale = vehicle_shape_scale
 
-    def __call__(self, frame: Mapping[str, NDArray[Any]]) -> dict[str, NDArray[Any]]:
+    def __call__(self, frame: FrameLike) -> Frame:
         """Return a normalized shallow copy of one unbatched frame."""
         normalized = dict(frame)
         for key in (
