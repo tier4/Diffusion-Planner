@@ -1,0 +1,14 @@
+_target_: diffusion_planner.models.diffusion_planner.DiffusionPlanner
+hidden_dim: 256
+num_heads: 8
+scene_fusion_depth: 4
+element_encoder_depth: 1
+element_mixer_hidden_dim: 32
+decoder_depth: 6
+trajectory_encoder_depth: 1
+trajectory_mixer_hidden_dim: 32
+feedforward_dim: 1024
+drop_path_rate: 0.0
+dropout: 0.0
+velocity_threshold: 0.1
+goal_max_distance: 2.0
