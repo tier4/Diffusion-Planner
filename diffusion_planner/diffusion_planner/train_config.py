@@ -111,7 +111,7 @@ class TrainConfig:
     # ---------------------------------------------------------
     seed: int = 3407
     train_epochs: int = 80
-    batch_size: int = 512
+    batch_size: int = cli("batch size", default=512, type=int)
     save_utd: int = 10
     learning_rate: float = 1e-4
     warm_up_epoch: int = 5
