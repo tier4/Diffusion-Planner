@@ -3651,8 +3651,10 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
     assert cmd[cmd.index("--train_epochs") + 1] == "7"
     assert cmd[cmd.index("--batch_size") + 1] == "2"
     # ema_decay must survive the train_args passthrough — 0.999 is too slow
-    # to absorb behavior changes within a short per-round fine-tune.
-    assert cmd[cmd.index("--ema_decay") + 1] == "0.996"
+    # to absorb behavior changes within a short per-round fine-tune. It is not
+    # CLI-exposed, so it travels via the overrides channel.
+    overrides_file = Path(cmd[cmd.index("--train_overrides_json") + 1])
+    assert json.loads(overrides_file.read_text())["ema_decay"] == 0.996
 
 
 def test_torchrun_subprocess_cleanup_removes_stale_file_store(tmp_path, monkeypatch):
