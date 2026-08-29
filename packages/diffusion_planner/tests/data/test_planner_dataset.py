@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,7 +55,7 @@ class PlannerDatasetTest(unittest.TestCase):
         self.index_path = self.root / "index.parquet"
         self.h5_path = self.root / "project/bag/frames.h5"
         write_shard(self.h5_path)
-        write_index(self.index_path, self.h5_path)
+        write_index(self.index_path, Path("project/bag/frames.h5"))
 
     def tearDown(self) -> None:
         self._directory.cleanup()
@@ -79,11 +80,13 @@ class PlannerDatasetTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             PlannerDataset(bare_path)
 
-    def test_rejects_a_relative_h5_path(self) -> None:
-        relative_path = self.root / "relative.parquet"
-        write_index(relative_path, Path("project/bag/frames.h5"))
-        with self.assertRaisesRegex(ValueError, "must be absolute"):
-            PlannerDataset(relative_path)
+    def test_resolves_h5_after_dataset_is_moved(self) -> None:
+        moved_root = self.root.parent / f"{self.root.name}-moved"
+        shutil.copytree(self.root, moved_root)
+        self.addCleanup(shutil.rmtree, moved_root)
+        dataset = PlannerDataset(moved_root / "index.parquet")
+        path, _ = dataset.source(0)
+        self.assertEqual(Path(path), moved_root / "project/bag/frames.h5")
 
 
 if __name__ == "__main__":

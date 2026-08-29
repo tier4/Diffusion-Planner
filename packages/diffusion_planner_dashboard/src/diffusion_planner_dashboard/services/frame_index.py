@@ -125,7 +125,7 @@ def _load_h5_index(path: Path) -> FrameIndex:
 
 
 def _load_parquet_index(path: Path) -> FrameIndex:
-    """Load a generated Parquet index containing absolute H5 paths."""
+    """Load a generated Parquet index containing relative H5 paths."""
     parquet_file = pq.ParquetFile(path)
     column_names = set(parquet_file.schema_arrow.names)
     missing = sorted(PARQUET_REQUIRED_COLUMNS.difference(column_names))
@@ -143,15 +143,16 @@ def _load_parquet_index(path: Path) -> FrameIndex:
         return np.asarray(table[name].combine_chunks().to_numpy(zero_copy_only=False))
 
     raw_paths = column("h5_path").astype(np.str_)
-    relative_paths = [value for value in raw_paths if not Path(value).is_absolute()]
-    if relative_paths:
-        raise ValueError(f"Parquet h5_path must be absolute: {relative_paths[0]}")
+    resolved_paths = np.asarray(
+        [(path.parent / str(value)).resolve() for value in raw_paths],
+        dtype=np.str_,
+    )
     frame_indices = column("frame_index").astype(np.int64, copy=False)
     if np.any(frame_indices < 0):
         raise ValueError(f"Parquet index contains a negative frame_index: {path}")
     return FrameIndex(
         path=path,
-        h5_paths=raw_paths,
+        h5_paths=resolved_paths,
         frame_indices=frame_indices,
         frame_times_ns=column("frame_time_ns").astype(np.int64, copy=False),
         stats={

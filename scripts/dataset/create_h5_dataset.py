@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ class WorkerConfig:
     """Primitive generation settings safe to send to worker processes."""
 
     output_root: str
+    index_path: str
     frame_interval_s: float
     min_travel_distance: float
     topic_drop_thresholds: dict[str, float]
@@ -286,15 +288,15 @@ def read_existing_h5(path: Path) -> dict[str, dict[str, np.ndarray]]:
 def make_index_table(
     entry: BagEntry,
     h5_path: Path,
+    index_path: Path,
     metadata: Mapping[str, np.ndarray],
 ) -> pa.Table:
     """Build the Parquet rows corresponding exactly to one H5 shard."""
-    if not h5_path.is_absolute():
-        raise ValueError(f"H5 index path must be absolute: {h5_path}")
+    stored_h5_path = Path(os.path.relpath(h5_path, start=index_path.parent)).as_posix()
     num_frames = len(metadata["frame_time_ns"])
     return pa.table(
         {
-            "h5_path": pa.array([h5_path.as_posix()] * num_frames, pa.string()),
+            "h5_path": pa.array([stored_h5_path] * num_frames, pa.string()),
             "frame_index": pa.array(np.arange(num_frames, dtype=np.int64)),
             "frame_time_ns": pa.array(metadata["frame_time_ns"], pa.int64()),
             "ego_speed_mps": pa.array(metadata["ego_speed_mps"], pa.float32()),
@@ -318,12 +320,15 @@ def process_bag(
     entry, vehicle, config = packed
     relative_h5 = h5_relative_path(entry)
     output_path = Path(config.output_root) / relative_h5
+    index_path = Path(config.index_path)
     if output_path.exists():
         if config.overwrite:
             pass
         elif config.resume:
             existing = read_existing_h5(output_path)
-            table = make_index_table(entry, output_path, existing["metadata"])
+            table = make_index_table(
+                entry, output_path, index_path, existing["metadata"]
+            )
             return BagResult(table, [], 0, 0, table.num_rows, 0, False, True)
         else:
             raise FileExistsError(f"H5 output already exists: {output_path}")
@@ -353,7 +358,7 @@ def process_bag(
             False,
         )
     write_h5(output_path, entry, result, config)
-    table = make_index_table(entry, output_path, result["metadata"])
+    table = make_index_table(entry, output_path, index_path, result["metadata"])
     return BagResult(
         table,
         list(result["warnings"]),
@@ -399,6 +404,7 @@ def main(config: DictConfig) -> None:
 
     worker_config = WorkerConfig(
         output_root=str(output_root),
+        index_path=str(index_output),
         frame_interval_s=float(config.frame_interval),
         min_travel_distance=float(config.min_travel_distance),
         topic_drop_thresholds={

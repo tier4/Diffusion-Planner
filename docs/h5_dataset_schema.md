@@ -163,7 +163,7 @@ Each Parquet row addresses exactly one H5 frame.
 
 | Column | Type | Description |
 |---|---|---|
-| `h5_path` | string | Absolute path to `frames.h5` |
+| `h5_path` | string | Relative POSIX path from the Parquet index directory to `frames.h5` |
 | `frame_index` | int64 | Index into the first dimension of every H5 dataset |
 | `frame_time_ns` | int64 | Source frame timestamp |
 | `ego_speed_mps` | float32 | Copied frame metadata |

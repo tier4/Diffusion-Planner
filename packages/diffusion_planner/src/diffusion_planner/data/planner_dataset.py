@@ -48,12 +48,14 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
         if table.num_rows == 0:
             raise ValueError(f"Frame index is empty: {self._index_path}")
 
-        self._h5_paths = _column(table, "h5_path")
-        relative_paths = [
-            str(value) for value in self._h5_paths if not Path(str(value)).is_absolute()
-        ]
-        if relative_paths:
-            raise ValueError(f"Parquet h5_path must be absolute: {relative_paths[0]}")
+        relative_h5_paths = _column(table, "h5_path")
+        self._h5_paths = np.asarray(
+            [
+                str((self._index_path.parent / str(value)).resolve())
+                for value in relative_h5_paths
+            ],
+            dtype=np.str_,
+        )
         self._frame_indices = _column(table, "frame_index").astype(np.int64, copy=False)
         self._frame_times_ns = _column(table, "frame_time_ns").astype(
             np.int64, copy=False
