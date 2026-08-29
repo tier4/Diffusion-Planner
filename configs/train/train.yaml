@@ -3,6 +3,7 @@
 # be nested under `train`. The group name would also resolve under configs/train, so the
 # leading slash makes it absolute against configs/ and @ binds it to a short key.
 defaults:
+  - /train/accelerator@accelerator: default
   - /train/dataloader@dataloader: default
   - /train/model@model: large_33m
   - /train/optimizer@optimizer: default
@@ -14,10 +15,6 @@ experiment_name: ???
 
 training:
   total_epochs: 50
-  cpu: false
-  mixed_precision: bf16
-  compile: true
-  compile_backend: inductor
   max_grad_norm: 1.0
   time_mean: -0.4
   time_std: 1.0
@@ -27,6 +24,7 @@ training:
   neighbor_loss_weight: 1.0
   turn_indicator_transition_loss_weight: 100.0
   log_interval: 200
+  checkpoint_interval: 2000
   checkpoint_dir: checkpoints
   resume_from: null
   warm_start: false

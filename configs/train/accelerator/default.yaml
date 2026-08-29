@@ -1,0 +1,19 @@
+_target_: diffusion_planner.utils.accelerator.build_accelerator
+
+cpu: false
+mixed_precision: bf16
+split_batches: false
+
+compile: true
+compile_backend: inductor
+compile_mode: reduce-overhead
+compile_dynamic: false
+
+dataloader_dispatch_batches: false
+dataloader_non_blocking: true
+
+ddp_broadcast_buffers: false
+ddp_bucket_cap_mb: 25
+ddp_find_unused_parameters: false
+ddp_gradient_as_bucket_view: true
+ddp_static_graph: true

@@ -25,15 +25,8 @@ from diffusion_planner.utils.lr_scheduler import (
 @hydra.main(version_base=None, config_path="../../configs", config_name="train/train")
 def main(config: DictConfig) -> None:
     """Train on one or more devices managed by Accelerate."""
-    dynamo_backend = (
-        str(config.training.compile_backend) if bool(config.training.compile) else "no"
-    )
-    accelerator = Accelerator(
-        cpu=bool(config.training.cpu),
-        mixed_precision=str(config.training.mixed_precision),
-        split_batches=False,
-        dynamo_backend=dynamo_backend,
-    )
+    compile_enabled = bool(config.accelerator.compile)
+    accelerator: Accelerator = hydra.utils.instantiate(config.accelerator)
     set_seed(int(config.seed), device_specific=True)
 
     run_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{config.experiment_name}"
@@ -99,6 +92,10 @@ def main(config: DictConfig) -> None:
             warm_start=bool(config.training.warm_start),
         )
 
+    @torch.compile(fullgraph=False, disable=not compile_enabled)
+    def optimizer_step() -> None:
+        optimizer.step()
+
     if accelerator.is_main_process:
         print(
             f"training {len(loader.dataset)} frames on "
@@ -109,13 +106,20 @@ def main(config: DictConfig) -> None:
             f"epochs={total_epochs} steps_per_epoch={steps_per_epoch} "
             f"total_steps={total_steps}"
         )
-        print(f"torch_compile={bool(config.training.compile)} backend={dynamo_backend}")
+        print(
+            f"torch_compile={compile_enabled} "
+            f"backend={config.accelerator.compile_backend} "
+            f"mode={config.accelerator.compile_mode} "
+            f"dynamic={bool(config.accelerator.compile_dynamic)} "
+            f"optimizer_compiled={compile_enabled}"
+        )
         print(describe_lr_scheduler(config.scheduler, total_steps))
         print(f"run_name={run_name} checkpoint_dir={checkpoint_dir}")
 
     planner.train()
     optimizer.zero_grad(set_to_none=True)
     log_interval = int(config.training.log_interval)
+    checkpoint_interval = int(config.training.checkpoint_interval)
     for epoch in range(start_epoch, total_epochs):
         if hasattr(loader, "set_epoch"):
             loader.set_epoch(epoch)
@@ -144,7 +148,7 @@ def main(config: DictConfig) -> None:
             gradient_norm = accelerator.clip_grad_norm_(
                 planner.parameters(), float(config.training.max_grad_norm)
             )
-            optimizer.step()
+            optimizer_step()
             optimizer.zero_grad(set_to_none=True)
             if accelerator.optimizer_step_was_skipped:
                 continue
@@ -160,6 +164,7 @@ def main(config: DictConfig) -> None:
                 metrics = accelerator.reduce(
                     torch.stack(
                         (
+                            losses["total"].detach().float(),
                             losses["trajectory"].detach().float(),
                             losses["turn_indicator"].detach().float(),
                             gradient_norm_value,
@@ -177,27 +182,28 @@ def main(config: DictConfig) -> None:
                     reduction="sum",
                 )
                 metric_values = {
-                    "train/loss": metrics[0].item(),
-                    "train/turn_indicator_loss": metrics[1].item(),
+                    "train/loss/total": metrics[0].item(),
+                    "train/loss/trajectory": metrics[1].item(),
+                    "train/loss/turn_indicator": metrics[2].item(),
                     "train/turn_indicator_accuracy": (
                         turn_counts[0] / turn_counts[1].clamp_min(1)
                     ).item(),
-                    "train/grad_norm": metrics[2].item(),
+                    "train/grad_norm": metrics[3].item(),
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                 }
                 if accelerator.is_main_process:
                     progress.set_postfix(
-                        loss=f"{metric_values['train/loss']:.5f}",
+                        loss=f"{metric_values['train/loss/total']:.5f}",
                         lr=f"{metric_values['train/learning_rate']:.2e}",
                     )
                     wandb.log(metric_values, step=global_step)
                     print(
                         f"step={global_step}/{total_steps} "
-                        f"loss={metric_values['train/loss']:.5f} "
+                        f"loss={metric_values['train/loss/total']:.5f} "
                         f"grad_norm={metric_values['train/grad_norm']:.3f} "
                         f"lr={metric_values['train/learning_rate']:.2e}"
                     )
-            if accelerator.is_main_process and global_step % log_interval == 0:
+            if accelerator.is_main_process and global_step % checkpoint_interval == 0:
                 save_checkpoint(
                     accelerator,
                     checkpoint_dir / "latest.pth",
