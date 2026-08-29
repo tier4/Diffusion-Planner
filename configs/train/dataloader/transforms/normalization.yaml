@@ -1,0 +1,4 @@
+_target_: diffusion_planner.data.transforms.PlannerDataNormalizer
+position_scale: 50.0
+speed_scale: 15.0
+vehicle_shape_scale: 10.0

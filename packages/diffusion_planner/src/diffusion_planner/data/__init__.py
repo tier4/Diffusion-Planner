@@ -1,17 +1,27 @@
 """Data loading for diffusion planner training."""
 
-from .data_augmentation import PlannerDataAugmentation
-from .normalization import PlannerDataNormalizer
 from .planner_dataset import (
     PlannerDataset,
     build_dataloader,
 )
-from .traffic_light import fill_unknown_traffic_light_futures
+from .transforms import (
+    FillUnknownTrafficLightFutures,
+    PlannerDataNormalizer,
+    PlannerQuinticHermiteAugmentation,
+    PlannerRigidDataAugmentation,
+    PlannerSpeedAugmentation,
+    Transform,
+    fill_unknown_traffic_light_futures,
+)
 
 __all__ = [
-    "PlannerDataAugmentation",
+    "FillUnknownTrafficLightFutures",
     "PlannerDataNormalizer",
+    "PlannerQuinticHermiteAugmentation",
+    "PlannerRigidDataAugmentation",
+    "PlannerSpeedAugmentation",
     "PlannerDataset",
+    "Transform",
     "build_dataloader",
     "fill_unknown_traffic_light_futures",
 ]

@@ -10,7 +10,11 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-from diffusion_planner.data import PlannerDataNormalizer, PlannerDataset
+from diffusion_planner.data import (
+    FillUnknownTrafficLightFutures,
+    PlannerDataNormalizer,
+    PlannerDataset,
+)
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.onnx import (
@@ -52,7 +56,7 @@ def _load_frame(parquet_path: Path, frame_index: int) -> dict[str, torch.Tensor]
     dataset = PlannerDataset(
         parquet_path,
         file_capacity=1,
-        data_normalizer=PlannerDataNormalizer(),
+        transforms=[FillUnknownTrafficLightFutures(), PlannerDataNormalizer()],
     )
     try:
         if not 0 <= frame_index < len(dataset):

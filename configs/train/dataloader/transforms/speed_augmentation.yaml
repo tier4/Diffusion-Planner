@@ -1,0 +1,3 @@
+_target_: diffusion_planner.data.transforms.PlannerSpeedAugmentation
+speed_scale_range: [0.5, 1.5]
+probability: 0.5
