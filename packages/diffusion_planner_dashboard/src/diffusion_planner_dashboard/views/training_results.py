@@ -11,7 +11,7 @@ import streamlit as st
 import torch
 
 from diffusion_planner.data import (
-    PlannerQuinticHermiteAugmentation,
+    PlannerRigidDataAugmentation,
     PlannerSpeedAugmentation,
     fill_unknown_traffic_light_futures,
 )
@@ -91,6 +91,8 @@ def _cached_prediction(
     yaw_offset: float,
     ego_speed_scale: float,
     remove_neighbor_agents: bool,
+    remove_pedestrians: bool,
+    remove_bikes: bool,
     infer_future_traffic_lights: bool,
 ):
     planner = _cached_planner(model_path, model_modification_time_ns, device)
@@ -102,6 +104,8 @@ def _cached_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
+    elif remove_pedestrians or remove_bikes:
+        frame_data = _remove_agent_types(frame_data, remove_pedestrians, remove_bikes)
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
     frame_data = _fill_unknown_traffic_lights(frame_data)
@@ -146,6 +150,8 @@ def _cached_turn_indicator_prediction(
     yaw_offset: float,
     ego_speed_scale: float,
     remove_neighbor_agents: bool,
+    remove_pedestrians: bool,
+    remove_bikes: bool,
     infer_future_traffic_lights: bool,
 ):
     loaded = _cached_planner(model_path, model_modification_time_ns, device)
@@ -159,6 +165,8 @@ def _cached_turn_indicator_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
+    elif remove_pedestrians or remove_bikes:
+        frame_data = _remove_agent_types(frame_data, remove_pedestrians, remove_bikes)
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
     frame_data = _fill_unknown_traffic_lights(frame_data)
@@ -185,7 +193,7 @@ def _augment_frame(
         speed_scale_range=(ego_speed_scale, ego_speed_scale),
         probability=1.0,
     )
-    pose_augmentation = PlannerQuinticHermiteAugmentation(
+    pose_augmentation = PlannerRigidDataAugmentation(
         longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
@@ -205,6 +213,33 @@ def _remove_neighbor_agents(frame_data: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in result:
             result[key] = np.zeros_like(np.asarray(result[key]))
+    return result
+
+
+def _remove_agent_types(
+    frame_data: dict[str, Any],
+    remove_pedestrians: bool,
+    remove_bikes: bool,
+) -> dict[str, Any]:
+    """Zero neighbor-agent rows matching the selected label types."""
+    labels = np.asarray(frame_data["agent_label"])
+    remove_mask = np.zeros(labels.shape[0], dtype=bool)
+    if remove_pedestrians:
+        remove_mask |= labels[:, 1] > 0.5
+    if remove_bikes:
+        remove_mask |= labels[:, 2] > 0.5
+
+    result = dict(frame_data)
+    for key in (
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "agent_shape",
+        "agent_label",
+    ):
+        if key in result:
+            values = np.asarray(result[key]).copy()
+            values[remove_mask] = 0
+            result[key] = values
     return result
 
 
@@ -362,17 +397,21 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float, float]:
     )
 
 
-def _render_input_options() -> tuple[bool, bool]:
+def _render_input_options() -> tuple[bool, bool, bool, bool]:
     """Render optional input transformations."""
     st.sidebar.subheader("Input options")
     remove_neighbor_agents = st.sidebar.checkbox(
         "Remove all neighbor agents", value=False
     )
+    remove_pedestrians = st.sidebar.checkbox("Remove pedestrians", value=False)
+    remove_bikes = st.sidebar.checkbox("Remove bikes", value=False)
     infer_future_traffic_lights = st.sidebar.checkbox(
         "Infer traffic light future from past", value=False
     )
     return (
         remove_neighbor_agents,
+        remove_pedestrians,
+        remove_bikes,
         infer_future_traffic_lights,
     )
 
@@ -394,6 +433,8 @@ def render_training_results() -> None:
     ) = _render_augmentation_settings()
     (
         remove_neighbor_agents,
+        remove_pedestrians,
+        remove_bikes,
         infer_future_traffic_lights,
     ) = _render_input_options()
     if source_path_text is None or checkpoint_path_text is None:
@@ -448,11 +489,14 @@ def render_training_results() -> None:
             row.frame_time_ns,
             h5_modification_time_ns,
         )
-        visualized_frame = (
-            _remove_neighbor_agents(frame_data)
-            if remove_neighbor_agents
-            else frame_data
-        )
+        if remove_neighbor_agents:
+            visualized_frame = _remove_neighbor_agents(frame_data)
+        elif remove_pedestrians or remove_bikes:
+            visualized_frame = _remove_agent_types(
+                frame_data, remove_pedestrians, remove_bikes
+            )
+        else:
+            visualized_frame = frame_data
         if infer_future_traffic_lights:
             visualized_frame = _infer_future_traffic_lights(visualized_frame)
         visualized_frame = _fill_unknown_traffic_lights(visualized_frame)
@@ -482,6 +526,8 @@ def render_training_results() -> None:
             yaw_offset,
             ego_speed_scale,
             remove_neighbor_agents,
+            remove_pedestrians,
+            remove_bikes,
             infer_future_traffic_lights,
         )
         turn_indicator_result = None
@@ -500,6 +546,8 @@ def render_training_results() -> None:
                 yaw_offset,
                 ego_speed_scale,
                 remove_neighbor_agents,
+                remove_pedestrians,
+                remove_bikes,
                 infer_future_traffic_lights,
             )
     except Exception as error:
@@ -519,6 +567,11 @@ def render_training_results() -> None:
         )
     if remove_neighbor_agents:
         st.caption("Input option: all neighbor agents removed")
+    else:
+        if remove_pedestrians:
+            st.caption("Input option: pedestrians removed")
+        if remove_bikes:
+            st.caption("Input option: bikes removed")
     if infer_future_traffic_lights:
         st.caption("Input option: traffic light future inferred from past")
     if turn_indicator_result is not None and isinstance(planner, LoadedPlanner):
@@ -562,7 +615,7 @@ def render_training_results() -> None:
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
         f"{noise_scale}::{seed}::{apply_augmentation}::{longitudinal_offset}::"
         f"{lateral_offset}::{yaw_offset}::{ego_speed_scale}::"
-        f"{remove_neighbor_agents}::"
+        f"{remove_neighbor_agents}::{remove_pedestrians}::{remove_bikes}::"
         f"{infer_future_traffic_lights}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)
