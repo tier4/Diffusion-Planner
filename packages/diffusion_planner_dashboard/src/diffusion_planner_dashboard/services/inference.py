@@ -14,7 +14,7 @@ from numpy.typing import NDArray
 from diffusion_planner.data import PlannerDataNormalizer
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
-from diffusion_planner.models.onnx import SCENE_INPUT_NAMES
+from diffusion_planner.models.onnx import PLANNER_INPUT_NAMES
 
 
 def run_inference(
@@ -85,14 +85,10 @@ def run_onnx_inference(
     available_inputs = {value.name for value in session.get_inputs()}
     inputs = {
         name: np.asarray(normalized_frame[name], dtype=np.float32)[None]
-        for name in SCENE_INPUT_NAMES
+        for name in PLANNER_INPUT_NAMES
         if name in available_inputs
     }
     inputs["initial_noise"] = initial_noise
-    if "turn_indicators" in available_inputs:
-        inputs["turn_indicators"] = np.asarray(
-            normalized_frame["turn_indicators"], dtype=np.float32
-        )[None]
 
     start = perf_counter()
     prediction = session.run(None, inputs)[0]

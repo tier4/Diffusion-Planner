@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a training checkpoint into scene-encoder and trajectory-decoder ONNX."""
+"""Export a training checkpoint as a complete planner sampler ONNX model."""
 
 from __future__ import annotations
 
@@ -10,69 +10,89 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-from diffusion_planner.data import (
-    FillUnknownTrafficLightFutures,
-    PlannerDataNormalizer,
-    PlannerDataset,
+from diffusion_planner.data.dimensions import (
+    MAX_NUM_NEIGHBORS,
+    PLANNER_INPUT_SHAPES,
+    TRAJECTORY_DIM,
+    TRAJECTORY_LENGTH,
 )
-from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.onnx import (
-    SCENE_INPUT_NAMES,
-    DiffusionPlannerSamplerOnnxWrapper,
-    SceneEncoderOnnxWrapper,
-    TrajectoryDecoderOnnxWrapper,
+    PLANNER_INPUT_NAMES,
+    DiffusionPlannerOnnxWrapper,
 )
 from diffusion_planner.utils.checkpoint import load_model
 
-SCENE_OUTPUT_NAMES = ("scene", "scene_mask", "agent_pose", "agent_mask")
-DECODER_INPUT_NAMES = (
-    "x",
-    "x_mask",
-    "scene",
-    "scene_mask",
-    "agent_pose",
-    "time",
-)
-SAMPLER_INPUT_NAMES = ("initial_noise", *SCENE_INPUT_NAMES, "turn_indicators")
+SAMPLER_INPUT_NAMES = ("initial_noise", *PLANNER_INPUT_NAMES)
+VALIDATION_FRAME_PATH = Path(__file__).resolve().parent / "fixtures" / "frame.npz"
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
-    parser.add_argument(
-        "--parquet-path",
-        type=Path,
-        required=True,
-        help="Training dataset Parquet index used to create representative inputs.",
-    )
-    parser.add_argument("--frame-index", type=int, default=0)
     parser.add_argument("--opset-version", type=int, default=20)
     parser.add_argument("--skip-validation", action="store_true")
     return parser.parse_args()
 
 
-def _load_frame(parquet_path: Path, frame_index: int) -> dict[str, torch.Tensor]:
-    dataset = PlannerDataset(
-        parquet_path,
-        file_capacity=1,
-        transforms=[FillUnknownTrafficLightFutures(), PlannerDataNormalizer()],
-    )
-    try:
-        if not 0 <= frame_index < len(dataset):
-            raise IndexError(
-                f"frame-index {frame_index} is outside dataset with {len(dataset)} rows"
+def _load_validation_inputs(batch_size: int = 2) -> tuple[torch.Tensor, ...]:
+    """Load the repository fixture and replicate its frame along the batch axis."""
+    with np.load(VALIDATION_FRAME_PATH) as fixture:
+        missing = set(PLANNER_INPUT_NAMES).difference(fixture.files)
+        if missing:
+            raise ValueError(
+                f"Validation fixture is missing tensors: {', '.join(sorted(missing))}"
             )
-        return dataset[frame_index]
-    finally:
-        dataset.close()
+        inputs: list[torch.Tensor] = []
+        for name in PLANNER_INPUT_NAMES:
+            array = np.asarray(fixture[name], dtype=np.float32)
+            expected_shape = PLANNER_INPUT_SHAPES[name]
+            if array.shape != expected_shape:
+                raise ValueError(
+                    f"Validation tensor {name!r} has shape {array.shape}, "
+                    f"expected {expected_shape}"
+                )
+            inputs.append(
+                torch.from_numpy(array)
+                .unsqueeze(0)
+                .repeat((batch_size,) + (1,) * array.ndim)
+            )
+        return tuple(inputs)
 
 
-def _scene_inputs(frame: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
-    return tuple(
-        frame[name].unsqueeze(0).repeat((2,) + (1,) * frame[name].ndim)
-        for name in SCENE_INPUT_NAMES
+def _make_onnx_inputs(
+    *, batch_size: int = 2, seed: int = 0
+) -> tuple[torch.Tensor, ...]:
+    """Create every export input randomly from the canonical shape definitions."""
+    generator = torch.Generator().manual_seed(seed)
+    initial_noise = torch.randn(
+        batch_size,
+        MAX_NUM_NEIGHBORS + 1,
+        TRAJECTORY_LENGTH,
+        TRAJECTORY_DIM,
+        generator=generator,
     )
+    planner_inputs = tuple(
+        torch.randn(batch_size, *PLANNER_INPUT_SHAPES[name], generator=generator)
+        for name in PLANNER_INPUT_NAMES
+    )
+    return (initial_noise, *planner_inputs)
+
+
+def _make_validation_inputs(
+    planner_inputs: tuple[torch.Tensor, ...], *, seed: int = 1
+) -> tuple[torch.Tensor, ...]:
+    """Combine the real validation frame with deterministic random noise."""
+    batch_size = planner_inputs[0].shape[0]
+    generator = torch.Generator().manual_seed(seed)
+    initial_noise = torch.randn(
+        batch_size,
+        MAX_NUM_NEIGHBORS + 1,
+        TRAJECTORY_LENGTH,
+        TRAJECTORY_DIM,
+        generator=generator,
+    )
+    return (initial_noise, *planner_inputs)
 
 
 def _export(
@@ -136,109 +156,35 @@ def _validate(
     print(f"validated: {path}")
 
 
-def _validate_all(
-    validations: list[
-        tuple[
-            Path,
-            tuple[str, ...],
-            tuple[torch.Tensor, ...],
-            tuple[torch.Tensor, ...],
-        ]
-    ],
-) -> None:
-    """Run every ONNX validation before reporting collected failures."""
-    failures: list[tuple[Path, Exception]] = []
-    for path, input_names, inputs, expected in validations:
-        try:
-            _validate(path, input_names, inputs, expected)
-        except Exception as error:
-            failures.append((path, error))
-            print(f"validation failed: {path}\n{error}")
-
-    if failures:
-        failed_paths = ", ".join(str(path) for path, _ in failures)
-        raise RuntimeError(
-            f"{len(failures)} ONNX validation(s) failed after all validations ran: "
-            f"{failed_paths}"
-        ) from failures[0][1]
-
-
 def main() -> None:
     args = _parse_args()
     torch.backends.mha.set_fastpath_enabled(False)
     checkpoint_path = args.checkpoint.expanduser().resolve()
     model = load_model(checkpoint_path, DiffusionPlanner).eval()
-    frame = _load_frame(args.parquet_path, args.frame_index)
-    scene_inputs = _scene_inputs(frame)
-    scene_wrapper = SceneEncoderOnnxWrapper(model.scene_encoder).eval()
-    with torch.no_grad():
-        scene_outputs = scene_wrapper(*scene_inputs)
-
-    scene, scene_mask, agent_pose, agent_mask = scene_outputs
-    batch_size, agents = agent_mask.shape
-    decoder_inputs = (
-        torch.randn(batch_size, agents, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
-        agent_mask,
-        scene,
-        scene_mask,
-        agent_pose,
-        torch.full((batch_size,), 0.5),
-    )
-    decoder_wrapper = TrajectoryDecoderOnnxWrapper(model.trajectory_decoder).eval()
-    with torch.no_grad():
-        decoder_output = decoder_wrapper(*decoder_inputs)
-    turn_indicators = frame["turn_indicators"].unsqueeze(0).repeat(batch_size, 1)
-    sampler_inputs = (decoder_inputs[0], *scene_inputs, turn_indicators)
-    sampler_wrapper = DiffusionPlannerSamplerOnnxWrapper(model).eval()
-    with torch.no_grad():
-        sampler_output = sampler_wrapper(*sampler_inputs)
+    export_inputs = _make_onnx_inputs()
+    sampler_wrapper = DiffusionPlannerOnnxWrapper(model).eval()
 
     output_dir = checkpoint_path.parent / "onnx" / checkpoint_path.stem
     output_dir.mkdir(parents=True, exist_ok=True)
-    scene_path = output_dir / "scene_encoder.onnx"
-    decoder_path = output_dir / "trajectory_decoder.onnx"
-    sampler_path = output_dir / "diffusion_planner_sampler.onnx"
-    _export(
-        scene_wrapper,
-        scene_inputs,
-        scene_path,
-        SCENE_INPUT_NAMES,
-        SCENE_OUTPUT_NAMES,
-        args.opset_version,
-    )
-    _export(
-        decoder_wrapper,
-        decoder_inputs,
-        decoder_path,
-        DECODER_INPUT_NAMES,
-        ("x0_prediction",),
-        args.opset_version,
-    )
+    sampler_path = output_dir / "ml_planner.onnx"
     _export(
         sampler_wrapper,
-        sampler_inputs,
+        export_inputs,
         sampler_path,
         SAMPLER_INPUT_NAMES,
         ("trajectory", "turn_indicator_logits"),
         args.opset_version,
     )
     if not args.skip_validation:
-        _validate_all(
-            [
-                (scene_path, SCENE_INPUT_NAMES, scene_inputs, scene_outputs),
-                (
-                    decoder_path,
-                    DECODER_INPUT_NAMES,
-                    decoder_inputs,
-                    (decoder_output,),
-                ),
-                (
-                    sampler_path,
-                    SAMPLER_INPUT_NAMES,
-                    sampler_inputs,
-                    (sampler_output,),
-                ),
-            ]
+        validation_planner_inputs = _load_validation_inputs()
+        validation_inputs = _make_validation_inputs(validation_planner_inputs)
+        with torch.no_grad():
+            expected_outputs = sampler_wrapper(*validation_inputs)
+        _validate(
+            sampler_path,
+            SAMPLER_INPUT_NAMES,
+            validation_inputs,
+            expected_outputs,
         )
 
 

@@ -10,6 +10,13 @@ INTERSECTION_AREA_LENGTH = 40
 STOP_LINE_LENGTH = 2
 ROAD_BORDER_LENGTH = 20
 
+MAX_NUM_NEIGHBORS = 320
+NUM_LANE_SEGMENTS = 140
+NUM_ROUTE_SEGMENTS = 25
+NUM_INTERSECTION_AREAS = 10
+NUM_STOP_LINES = 30
+NUM_ROAD_BORDERS = 30
+
 TRAJECTORY_DIM = 4
 LANE_GEOMETRY_DIM = 6
 LANE_TYPE_DIM = 20
@@ -21,3 +28,46 @@ EGO_STATE_DIM = 6
 EGO_VELOCITY_INDEX = 4
 GOAL_POSE_DIM = 4
 EGO_SHAPE_DIM = 3
+
+PLANNER_INPUT_SHAPES: dict[str, tuple[int, ...]] = {
+    "ego_agent_past": (EGO_HISTORY_LENGTH, EGO_STATE_DIM),
+    "neighbor_agents_past": (
+        MAX_NUM_NEIGHBORS,
+        EGO_HISTORY_LENGTH,
+        AGENT_POSE_DIM,
+    ),
+    "agent_shape": (MAX_NUM_NEIGHBORS, AGENT_SHAPE_DIM),
+    "agent_label": (MAX_NUM_NEIGHBORS, AGENT_LABEL_DIM),
+    "lanes": (NUM_LANE_SEGMENTS, LANE_LENGTH, LANE_GEOMETRY_DIM),
+    "lane_types": (NUM_LANE_SEGMENTS, LANE_TYPE_DIM),
+    "lanes_speed_limit": (NUM_LANE_SEGMENTS, 1),
+    "lane_traffic_light_past": (
+        NUM_LANE_SEGMENTS,
+        TRAFFIC_LIGHT_PAST_LENGTH,
+        TRAFFIC_LIGHT_DIM,
+    ),
+    "lane_traffic_light_future": (
+        NUM_LANE_SEGMENTS,
+        TRAFFIC_LIGHT_FUTURE_LENGTH,
+        TRAFFIC_LIGHT_DIM,
+    ),
+    "route_lanes": (NUM_ROUTE_SEGMENTS, LANE_LENGTH, LANE_GEOMETRY_DIM),
+    "route_lane_types": (NUM_ROUTE_SEGMENTS, LANE_TYPE_DIM),
+    "route_lanes_speed_limit": (NUM_ROUTE_SEGMENTS, 1),
+    "route_traffic_light_past": (
+        NUM_ROUTE_SEGMENTS,
+        TRAFFIC_LIGHT_PAST_LENGTH,
+        TRAFFIC_LIGHT_DIM,
+    ),
+    "route_traffic_light_future": (
+        NUM_ROUTE_SEGMENTS,
+        TRAFFIC_LIGHT_FUTURE_LENGTH,
+        TRAFFIC_LIGHT_DIM,
+    ),
+    "intersection_area": (NUM_INTERSECTION_AREAS, INTERSECTION_AREA_LENGTH, 2),
+    "stop_lines": (NUM_STOP_LINES, STOP_LINE_LENGTH, 2),
+    "road_borders": (NUM_ROAD_BORDERS, ROAD_BORDER_LENGTH, 2),
+    "goal_pose": (GOAL_POSE_DIM,),
+    "ego_shape": (EGO_SHAPE_DIM,),
+    "turn_indicators": (TURN_INDICATOR_HISTORY_LENGTH,),
+}

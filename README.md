@@ -91,8 +91,7 @@ Export a checkpoint for runtime inference with:
 
 ```bash
 uv run --package diffusion-planner python scripts/export/export_onnx.py \
-  checkpoints/<checkpoint> \
-  --parquet-path /data/diffusion_planner_h5/indexes/train.parquet
+  checkpoints/<checkpoint>
 ```
 
 The exporter validates the generated ONNX models with ONNX Runtime. For ROS 2 node
