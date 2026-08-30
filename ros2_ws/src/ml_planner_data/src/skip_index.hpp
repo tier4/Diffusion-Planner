@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SKIP_INDEX_HPP_
-#define SKIP_INDEX_HPP_
+#ifndef ML_PLANNER_DATA__SRC__SKIP_INDEX_HPP_
+#define ML_PLANNER_DATA__SRC__SKIP_INDEX_HPP_
 
 #include <cstddef>
 #include <optional>
@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 struct DatasetBuilderParam;
 struct TopicConfig;
@@ -55,6 +55,6 @@ std::optional<std::string> check_min_travel_distance(
     const std::vector<std::pair<double, double>> &ego_positions,
     double min_travel_distance);
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data
 
-#endif // SKIP_INDEX_HPP_
+#endif // ML_PLANNER_DATA__SRC__SKIP_INDEX_HPP_

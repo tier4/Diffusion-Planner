@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef TOPIC_CONFIG_HPP_
-#define TOPIC_CONFIG_HPP_
+#ifndef ML_PLANNER_DATA__SRC__TOPIC_CONFIG_HPP_
+#define ML_PLANNER_DATA__SRC__TOPIC_CONFIG_HPP_
 
 #include <string>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 struct TopicConfig {
   std::string kinematic_state;
@@ -29,10 +29,11 @@ struct TopicConfig {
 
 /**
  * @brief Load the topic configuration from the installed package share
- * directory (config/data_tools.param.yaml). Throws on missing file or keys.
+ * directory (config/ml_planner_data.param.yaml). Throws on missing file or
+ * keys.
  */
 TopicConfig load_topic_config();
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data
 
-#endif // TOPIC_CONFIG_HPP_
+#endif // ML_PLANNER_DATA__SRC__TOPIC_CONFIG_HPP_

@@ -69,5 +69,5 @@ reportUnusedImport = "warning"
 reportUnusedVariable = "warning"
 
 extraPaths = [
-    "ros2_ws/install/diffusion_planner_data_tools/local/lib/python3.10/dist-packages",
+    "ros2_ws/install/ml_planner_data/local/lib/python3.10/dist-packages",
 ]

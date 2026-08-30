@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef LABEL_BUILDER_HPP_
-#define LABEL_BUILDER_HPP_
+#ifndef ML_PLANNER_DATA__SRC__LABEL_BUILDER_HPP_
+#define ML_PLANNER_DATA__SRC__LABEL_BUILDER_HPP_
 
-#include "autoware/diffusion_planner/preprocessing/input_builder.hpp"
-#include "autoware/diffusion_planner/preprocessing/preprocessing_utils.hpp"
+#include "autoware/ml_planner/preprocessing/input_builder.hpp"
+#include "autoware/ml_planner/preprocessing/preprocessing_utils.hpp"
 
 #include <rclcpp/time.hpp>
 
@@ -30,7 +30,7 @@
 #include <deque>
 #include <vector>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 struct LabelBuilderParams {
   /// Future grid: frame_time + (i + 1) * time_step_s, i = 0 .. num_future_steps
@@ -71,10 +71,10 @@ struct LabelBuilderParams {
  *       rows are selected at frame_time and ordered identically to the
  *       "lanes" / "route_lanes" inputs.
  *
- * @throws std::runtime_error if the ego odometry does not cover the full
- *         future horizon (the frame should be treated as invalid).
+ * Returns an error if ego odometry does not cover the full future horizon or
+ * no ego odometry is available at or before the frame time.
  */
-preprocess::InputDataMap create_label_data_map(
+preprocess::TensorMapResult create_label_data_map(
     const rclcpp::Time &frame_time,
     const preprocess::MessageView<nav_msgs::msg::Odometry> &ego_msgs,
     const preprocess::MessageView<autoware_perception_msgs::msg::TrackedObjects>
@@ -89,6 +89,6 @@ preprocess::InputDataMap create_label_data_map(
     const std::vector<preprocess::SelectedAgent> &selected_agents,
     const LabelBuilderParams &params);
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data
 
-#endif // LABEL_BUILDER_HPP_
+#endif // ML_PLANNER_DATA__SRC__LABEL_BUILDER_HPP_

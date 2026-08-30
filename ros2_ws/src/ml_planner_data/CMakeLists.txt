@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(diffusion_planner_data_tools)
+project(ml_planner_data)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
@@ -19,7 +19,7 @@ find_package(pybind11 REQUIRED)
 ament_python_install_package(${PROJECT_NAME})
 
 # Python bindings (FrameDataCache)
-pybind11_add_module(_diffusion_planner_data_tools
+pybind11_add_module(_ml_planner_data
   src/pybind_module.cpp
   src/bag_dataset_builder.cpp
   src/skip_index.cpp
@@ -28,10 +28,10 @@ pybind11_add_module(_diffusion_planner_data_tools
   src/label_builder.cpp
   src/topic_config.cpp
 )
-ament_target_dependencies(_diffusion_planner_data_tools PUBLIC
+ament_target_dependencies(_ml_planner_data PUBLIC
   ${${PROJECT_NAME}_FOUND_BUILD_DEPENDS}
 )
-install(TARGETS _diffusion_planner_data_tools
+install(TARGETS _ml_planner_data
   DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}"
 )
 

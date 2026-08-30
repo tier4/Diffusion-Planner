@@ -12,10 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import diffusion_planner_data_tools as dpt
 import h5py
 import hdf5plugin
 import hydra
+import ml_planner_data as mpd
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -107,13 +107,13 @@ def build_builder_param(config: WorkerConfig) -> Any:
             f"min_travel_distance must be finite and non-negative: {config.min_travel_distance}"
         )
 
-    thresholds = dpt.TopicDropThresholds()
+    thresholds = mpd.TopicDropThresholds()
     for topic, limit in config.topic_drop_thresholds.items():
         if not hasattr(thresholds, topic):
             raise ValueError(f"unknown topic in topic_drop_thresholds: {topic}")
         setattr(thresholds, topic, float(limit))
 
-    param = dpt.DatasetBuilderParam()
+    param = mpd.DatasetBuilderParam()
     param.frame_interval_s = config.frame_interval_s
     param.min_travel_distance = config.min_travel_distance
     param.topic_drop_thresholds = thresholds
@@ -333,12 +333,12 @@ def process_bag(
         else:
             raise FileExistsError(f"H5 output already exists: {output_path}")
 
-    spec = dpt.VehicleSpec(
+    spec = mpd.VehicleSpec(
         base_link_to_front=vehicle.base_link_to_front,
         vehicle_length=vehicle.vehicle_length,
         vehicle_width=vehicle.vehicle_width,
     )
-    result = dpt.create_bag_frame_data(
+    result = mpd.create_bag_frame_data(
         bag_path=entry.bag_path,
         map_path=entry.map_path,
         vehicle_spec=spec,

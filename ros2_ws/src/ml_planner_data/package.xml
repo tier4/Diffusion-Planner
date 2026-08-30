@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>diffusion_planner_data_tools</name>
+  <name>ml_planner_data</name>
   <version>0.2.0</version>
-  <description>Tools to build diffusion planner training data directly from rosbags</description>
+  <description>Tools to build ML planner training data directly from rosbags</description>
   <maintainer email="yukinari.hisaki.2@tier4.jp">Yukinari Hisaki</maintainer>
   <license>Apache License 2.0</license>
 
@@ -11,7 +11,7 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>ament_index_cpp</depend>
-  <depend>autoware_diffusion_planner</depend>
+  <depend>autoware_ml_planner</depend>
   <depend>autoware_geography_utils</depend>
   <depend>autoware_lanelet2_extension</depend>
   <depend>autoware_map_projection_loader</depend>

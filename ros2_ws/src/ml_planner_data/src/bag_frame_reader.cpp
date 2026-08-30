@@ -21,7 +21,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 BagFrameReader::BagFrameReader(const std::string &bag_path,
                                const TopicConfig &topics)
@@ -46,12 +46,11 @@ BagFrameReader::BagFrameReader(const std::string &bag_path,
   open_main_reader();
 }
 
-preprocess::InputDataResult BagFrameReader::create_input_data(
+preprocess::InputBuilderResult BagFrameReader::create_input_data(
     const rclcpp::Time &frame_time,
     const preprocess::LaneSegmentContext &map_context,
     const VehicleSpec &vehicle_spec,
-    const preprocess::InputBuilderParams &params,
-    std::vector<preprocess::SelectedAgent> &selected_agents) {
+    const preprocess::InputBuilderParams &params) {
   const double frame_sec = frame_time.seconds();
   ensure_read_until(frame_sec);
 
@@ -74,11 +73,11 @@ preprocess::InputDataResult BagFrameReader::create_input_data(
       window_of(traffic_signals_buffer_, frame_sec),
       *route};
 
-  return preprocess::create_input_data_map(
-      frame_inputs, map_context, vehicle_spec, params, &selected_agents);
+  return preprocess::create_input_data_map(frame_inputs, map_context,
+                                           vehicle_spec, params);
 }
 
-preprocess::InputDataMap BagFrameReader::create_label_data(
+preprocess::TensorMapResult BagFrameReader::create_label_data(
     const rclcpp::Time &frame_time,
     const preprocess::LaneSegmentContext &map_context,
     const LabelBuilderParams &params,
@@ -90,7 +89,7 @@ preprocess::InputDataMap BagFrameReader::create_label_data(
 
   const LaneletRoute *route = route_at(frame_sec);
   if (route == nullptr) {
-    throw std::runtime_error("No route message in " + bag_path_);
+    return tl::unexpected("No route message in " + bag_path_);
   }
 
   // Windows must reach the end of the future grid; a small margin keeps the
@@ -173,4 +172,4 @@ BagFrameReader::route_at(const double frame_sec) const {
   return result;
 }
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data

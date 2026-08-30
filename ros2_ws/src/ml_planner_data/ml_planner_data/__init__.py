@@ -1,10 +1,10 @@
-"""Build diffusion planner model inputs directly from rosbags.
+"""Build ML planner model inputs directly from rosbags.
 
 The heavy lifting is done in C++ (the exact preprocessing code used at
 inference time); this package exposes it to Python DataLoaders.
 """
 
-from ._diffusion_planner_data_tools import (  # noqa: F401
+from ._ml_planner_data import (  # noqa: F401
     HISTORY_WINDOW_S,
     DatasetBuilderParam,
     FrameDataCache,

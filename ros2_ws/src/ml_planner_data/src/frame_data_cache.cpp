@@ -30,9 +30,8 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <vector>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 namespace {
 
 class LocalProjector : public lanelet::Projector {
@@ -102,7 +101,7 @@ BagFrameReader &FrameDataCache::reader_for(const std::string &bag_path) {
   });
 }
 
-preprocess::InputDataResult FrameDataCache::create_frame_data(
+FrameDataResult FrameDataCache::create_frame_data(
     const std::string &bag_path, const std::string &map_path,
     const int64_t frame_time_ns, const VehicleSpec &vehicle_spec,
     const double traffic_light_timeout_s, const int64_t num_future_steps,
@@ -119,28 +118,27 @@ preprocess::InputDataResult FrameDataCache::create_frame_data(
   preprocess::InputBuilderParams input_params;
   input_params.traffic_light_group_msg_timeout_seconds =
       traffic_light_timeout_s;
-  std::vector<preprocess::SelectedAgent> selected_agents;
-  preprocess::InputDataResult result = reader.create_input_data(
-      frame_time, *map_context, vehicle_spec, input_params, selected_agents);
-  if (!result) {
-    return result;
+  preprocess::InputBuilderResult input_result = reader.create_input_data(
+      frame_time, *map_context, vehicle_spec, input_params);
+  if (!input_result) {
+    return tl::unexpected(input_result.error());
   }
+  auto input_output = std::move(input_result.value());
 
   LabelBuilderParams label_params;
   label_params.num_future_steps = num_future_steps;
   label_params.neighbor_observation_timeout_s = neighbor_observation_timeout_s;
   label_params.traffic_light_timeout_s = traffic_light_timeout_s;
-  try {
-    preprocess::InputDataMap label_data_map = reader.create_label_data(
-        frame_time, *map_context, label_params, selected_agents);
-    for (auto &[key, value] : label_data_map) {
-      result.value()[key] = std::move(value);
-    }
-  } catch (const std::exception &e) {
-    return tl::unexpected(std::string{e.what()});
+  preprocess::TensorMapResult label_result = reader.create_label_data(
+      frame_time, *map_context, label_params, input_output.selected_agents);
+  if (!label_result) {
+    return label_result;
+  }
+  for (auto &[key, value] : label_result.value()) {
+    input_output.tensors[key] = std::move(value);
   }
 
-  return result;
+  return std::move(input_output.tensors);
 }
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data

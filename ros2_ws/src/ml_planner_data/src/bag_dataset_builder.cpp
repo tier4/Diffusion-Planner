@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 namespace {
 
 template <typename SampleT>
@@ -254,7 +254,7 @@ BagDataResult create_bag_frame_data(const std::string &bag_path,
   result.frames.reserve(candidates.frames.size());
   result.metadata.reserve(candidates.frames.size());
   for (const CandidateFrame &candidate : candidates.frames) {
-    preprocess::InputDataResult frame = cache.create_frame_data(
+    FrameDataResult frame = cache.create_frame_data(
         bag_path, map_path, candidate.metadata.frame_time_ns, vehicle_spec,
         param.traffic_light_timeout_s, param.num_future_steps,
         param.neighbor_observation_timeout_s);
@@ -271,4 +271,4 @@ BagDataResult create_bag_frame_data(const std::string &bag_path,
   return result;
 }
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data

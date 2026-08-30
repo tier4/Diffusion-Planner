@@ -18,12 +18,12 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 TopicConfig load_topic_config() {
-  const std::string path = ament_index_cpp::get_package_share_directory(
-                               "diffusion_planner_data_tools") +
-                           "/config/data_tools.param.yaml";
+  const std::string path =
+      ament_index_cpp::get_package_share_directory("ml_planner_data") +
+      "/config/ml_planner_data.param.yaml";
   const YAML::Node topics = YAML::LoadFile(path)["topics"];
 
   TopicConfig config;
@@ -35,4 +35,4 @@ TopicConfig load_topic_config() {
   return config;
 }
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data

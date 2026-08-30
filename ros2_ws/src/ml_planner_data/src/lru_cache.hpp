@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef LRU_CACHE_HPP_
-#define LRU_CACHE_HPP_
+#ifndef ML_PLANNER_DATA__SRC__LRU_CACHE_HPP_
+#define ML_PLANNER_DATA__SRC__LRU_CACHE_HPP_
 
 #include <cstddef>
 #include <list>
@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 /**
  * @brief Simple LRU cache keyed by string.
@@ -53,6 +53,6 @@ private:
   std::unordered_map<std::string, typename decltype(entries_)::iterator> index_;
 };
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data
 
-#endif // LRU_CACHE_HPP_
+#endif // ML_PLANNER_DATA__SRC__LRU_CACHE_HPP_

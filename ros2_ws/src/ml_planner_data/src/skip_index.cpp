@@ -17,8 +17,8 @@
 #include "bag_dataset_builder.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/diffusion_planner/constants.hpp"
-#include "autoware/diffusion_planner/dimensions.hpp"
+#include "autoware/ml_planner/constants.hpp"
+#include "autoware/ml_planner/dimensions.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,7 +29,7 @@
 #include <sstream>
 #include <utility>
 
-namespace autoware::diffusion_planner::data_tools {
+namespace autoware::ml_planner::data {
 
 namespace {
 
@@ -218,4 +218,4 @@ std::optional<std::string> check_min_travel_distance(
   return message.str();
 }
 
-} // namespace autoware::diffusion_planner::data_tools
+} // namespace autoware::ml_planner::data

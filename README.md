@@ -14,8 +14,8 @@ visualization dashboard, ONNX export tools, and the ROS 2 inference node.
 | `scripts/train/` | Hydra-based training |
 | `scripts/export/` | ONNX export and validation |
 | `configs/` | Dataset and training configuration |
-| `ros2_ws/src/diffusion_planner_data_tools/` | Rosbag preprocessing and label generation |
-| `ros2_ws/src/deps/autoware_universe/planning/autoware_diffusion_planner/` | Autoware ROS 2 inference node |
+| `ros2_ws/src/ml_planner_data/` | Rosbag preprocessing and label generation |
+| `ros2_ws/src/deps/autoware_universe/planning/autoware_ml_planner/` | Autoware ROS 2 inference node |
 
 The dataset tools and ROS 2 node share their C++ preprocessing implementation so
 that training and inference use the same model inputs.
@@ -97,4 +97,4 @@ uv run --package diffusion-planner python scripts/export/export_onnx.py \
 
 The exporter validates the generated ONNX models with ONNX Runtime. For ROS 2 node
 parameters, topics, model compatibility, and launch instructions, see
-`ros2_ws/src/deps/autoware_universe/planning/autoware_diffusion_planner/README.md`.
+`ros2_ws/src/deps/autoware_universe/planning/autoware_ml_planner/README.md`.

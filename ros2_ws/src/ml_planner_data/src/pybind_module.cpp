@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Python bindings to build diffusion planner model inputs directly from
+// Python bindings to build ML planner model inputs directly from
 // rosbags, sharing the exact preprocessing code used at inference time
-// (autoware::diffusion_planner::preprocess::create_input_data_map).
+// (autoware::ml_planner::preprocess::create_input_data_map).
 
 #include "bag_dataset_builder.hpp"
 #include "frame_data_cache.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/diffusion_planner/dimensions.hpp"
+#include "autoware/ml_planner/dimensions.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -38,11 +38,11 @@ namespace py = pybind11;
 
 namespace {
 
-namespace ddt = autoware::diffusion_planner::data_tools;
-using autoware::diffusion_planner::VehicleSpec;
-namespace preprocess = autoware::diffusion_planner::preprocess;
+namespace mpd = autoware::ml_planner::data;
+using autoware::ml_planner::VehicleSpec;
+namespace preprocess = autoware::ml_planner::preprocess;
 
-py::dict to_numpy_dict(const preprocess::InputDataMap &input_data_map) {
+py::dict to_numpy_dict(const preprocess::TensorMap &input_data_map) {
   py::dict result;
   for (const auto &[key, value] : input_data_map) {
     std::vector<py::ssize_t> shape;
@@ -57,7 +57,7 @@ py::dict to_numpy_dict(const preprocess::InputDataMap &input_data_map) {
   return result;
 }
 
-py::dict stack_frames(const std::vector<preprocess::InputDataMap> &frames) {
+py::dict stack_frames(const std::vector<mpd::FrameData> &frames) {
   py::dict result;
   if (frames.empty()) {
     return result;
@@ -89,7 +89,7 @@ py::dict stack_frames(const std::vector<preprocess::InputDataMap> &frames) {
   return result;
 }
 
-py::dict metadata_to_numpy(const std::vector<ddt::BagFrameMetadata> &metadata) {
+py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   const std::vector<py::ssize_t> shape{
       static_cast<py::ssize_t>(metadata.size())};
   py::array_t<int64_t> frame_time_ns(shape);
@@ -113,7 +113,7 @@ py::dict metadata_to_numpy(const std::vector<ddt::BagFrameMetadata> &metadata) {
   return result;
 }
 
-py::object create_frame_data(ddt::FrameDataCache &cache,
+py::object create_frame_data(mpd::FrameDataCache &cache,
                              const std::string &bag_path,
                              const std::string &map_path,
                              const int64_t frame_time_ns,
@@ -121,8 +121,7 @@ py::object create_frame_data(ddt::FrameDataCache &cache,
                              const double traffic_light_timeout_s,
                              const int64_t num_future_steps,
                              const double neighbor_observation_timeout_s) {
-  preprocess::InputDataResult result =
-      tl::unexpected(std::string{"not created"});
+  mpd::FrameDataResult result = tl::unexpected(std::string{"not created"});
   {
     py::gil_scoped_release release;
     result =
@@ -139,12 +138,12 @@ py::object create_frame_data(ddt::FrameDataCache &cache,
 py::dict create_bag_frame_data(const std::string &bag_path,
                                const std::string &map_path,
                                const VehicleSpec &vehicle_spec,
-                               const ddt::DatasetBuilderParam &param,
-                               const ddt::TopicConfig &topics) {
-  ddt::BagDataResult bag_result;
+                               const mpd::DatasetBuilderParam &param,
+                               const mpd::TopicConfig &topics) {
+  mpd::BagDataResult bag_result;
   {
     py::gil_scoped_release release;
-    bag_result = ddt::create_bag_frame_data(bag_path, map_path, vehicle_spec,
+    bag_result = mpd::create_bag_frame_data(bag_path, map_path, vehicle_spec,
                                             param, topics);
   }
   py::dict stats;
@@ -163,11 +162,11 @@ py::dict create_bag_frame_data(const std::string &bag_path,
 
 } // namespace
 
-PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
-  using autoware::diffusion_planner::HISTORY_WINDOW_S;
-  using autoware::diffusion_planner::OUTPUT_T;
+PYBIND11_MODULE(_ml_planner_data, m) {
+  using autoware::ml_planner::HISTORY_WINDOW_S;
+  using autoware::ml_planner::OUTPUT_T;
 
-  m.doc() = "Build diffusion planner model inputs directly from rosbags";
+  m.doc() = "Build ML planner model inputs directly from rosbags";
 
   // Silence the per-file "Opened database ..." INFO logs from rosbag2.
   (void)rcutils_logging_initialize();
@@ -176,39 +175,39 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
 
   m.attr("HISTORY_WINDOW_S") = HISTORY_WINDOW_S;
 
-  py::class_<ddt::TopicConfig>(m, "TopicConfig")
+  py::class_<mpd::TopicConfig>(m, "TopicConfig")
       .def(py::init<>())
-      .def_readwrite("kinematic_state", &ddt::TopicConfig::kinematic_state)
-      .def_readwrite("tracked_objects", &ddt::TopicConfig::tracked_objects)
-      .def_readwrite("turn_indicators", &ddt::TopicConfig::turn_indicators)
-      .def_readwrite("traffic_signals", &ddt::TopicConfig::traffic_signals)
-      .def_readwrite("route", &ddt::TopicConfig::route);
+      .def_readwrite("kinematic_state", &mpd::TopicConfig::kinematic_state)
+      .def_readwrite("tracked_objects", &mpd::TopicConfig::tracked_objects)
+      .def_readwrite("turn_indicators", &mpd::TopicConfig::turn_indicators)
+      .def_readwrite("traffic_signals", &mpd::TopicConfig::traffic_signals)
+      .def_readwrite("route", &mpd::TopicConfig::route);
 
-  py::class_<ddt::TopicDropThresholds>(m, "TopicDropThresholds")
+  py::class_<mpd::TopicDropThresholds>(m, "TopicDropThresholds")
       .def(py::init<>())
       .def_readwrite("kinematic_state",
-                     &ddt::TopicDropThresholds::kinematic_state)
+                     &mpd::TopicDropThresholds::kinematic_state)
       .def_readwrite("tracked_objects",
-                     &ddt::TopicDropThresholds::tracked_objects)
+                     &mpd::TopicDropThresholds::tracked_objects)
       .def_readwrite("turn_indicators",
-                     &ddt::TopicDropThresholds::turn_indicators)
+                     &mpd::TopicDropThresholds::turn_indicators)
       .def_readwrite("traffic_signals",
-                     &ddt::TopicDropThresholds::traffic_signals);
+                     &mpd::TopicDropThresholds::traffic_signals);
 
-  py::class_<ddt::DatasetBuilderParam>(m, "DatasetBuilderParam")
+  py::class_<mpd::DatasetBuilderParam>(m, "DatasetBuilderParam")
       .def(py::init<>())
       .def_readwrite("frame_interval_s",
-                     &ddt::DatasetBuilderParam::frame_interval_s)
+                     &mpd::DatasetBuilderParam::frame_interval_s)
       .def_readwrite("min_travel_distance",
-                     &ddt::DatasetBuilderParam::min_travel_distance)
+                     &mpd::DatasetBuilderParam::min_travel_distance)
       .def_readwrite("topic_drop_thresholds",
-                     &ddt::DatasetBuilderParam::topic_drop_thresholds)
+                     &mpd::DatasetBuilderParam::topic_drop_thresholds)
       .def_readwrite("traffic_light_timeout_s",
-                     &ddt::DatasetBuilderParam::traffic_light_timeout_s)
+                     &mpd::DatasetBuilderParam::traffic_light_timeout_s)
       .def_readwrite("neighbor_observation_timeout_s",
-                     &ddt::DatasetBuilderParam::neighbor_observation_timeout_s)
+                     &mpd::DatasetBuilderParam::neighbor_observation_timeout_s)
       .def_readwrite("num_future_steps",
-                     &ddt::DatasetBuilderParam::num_future_steps);
+                     &mpd::DatasetBuilderParam::num_future_steps);
 
   py::class_<VehicleSpec>(m, "VehicleSpec")
       .def(py::init<double, double, double>(), py::arg("base_link_to_front"),
@@ -219,15 +218,15 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
 
   m.def("create_bag_frame_data", &create_bag_frame_data, py::arg("bag_path"),
         py::arg("map_path"), py::arg("vehicle_spec"),
-        py::arg("param") = ddt::DatasetBuilderParam{},
-        py::arg("topics") = ddt::load_topic_config(),
+        py::arg("param") = mpd::DatasetBuilderParam{},
+        py::arg("topics") = mpd::load_topic_config(),
         "Build all usable model inputs and labels in one bag as stacked "
         "NumPy arrays");
 
-  py::class_<ddt::FrameDataCache>(m, "FrameDataCache")
-      .def(py::init<size_t, size_t, ddt::TopicConfig, double>(),
+  py::class_<mpd::FrameDataCache>(m, "FrameDataCache")
+      .def(py::init<size_t, size_t, mpd::TopicConfig, double>(),
            py::arg("reader_capacity") = 16, py::arg("map_capacity") = 4,
-           py::arg("topics") = ddt::load_topic_config(),
+           py::arg("topics") = mpd::load_topic_config(),
            py::arg("line_string_max_step_m") = 5.0)
       .def("create_frame_data", &create_frame_data, py::arg("bag_path"),
            py::arg("map_path"), py::arg("frame_time_ns"),

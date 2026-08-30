@@ -15,14 +15,14 @@ Diffusion Planner is an autonomous-driving planner using diffusion models for tr
 - packages/diffusion_planner_dashboard/
     - Streamlit dashboard for visualization.
 
-- ros2_ws/src/deps/autoware_universe/planning/autoware_diffusion_planner/
+- ros2_ws/src/deps/autoware_universe/planning/autoware_ml_planner/
     - ROS 2 data processing and inference package. Git repository root of this package is `ros2_ws/src/deps/autoware_universe/`
 
-- ros2_ws/src/diffusion_planner_data_tools/
+- ros2_ws/src/ml_planner_data/
     - C++/pybind11 tools for generating model inputs and labels from rosbags.
 
 
-The ROS 2 inference node and `diffusion_planner_data_tools` share preprocessing logic. When changing model inputs, feature definitions, normalization, tensor shapes, or preprocessing behavior, check both sides for consistency.
+The ROS 2 inference node and `ml_planner_data` share preprocessing logic. When changing model inputs, feature definitions, normalization, tensor shapes, or preprocessing behavior, check both sides for consistency.
 
 ## Rules
 

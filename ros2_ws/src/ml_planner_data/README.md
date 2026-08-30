@@ -1,8 +1,8 @@
-# diffusion_planner_data_tools
+# ml_planner_data
 
-Python bindings that build diffusion-planner model inputs and training labels directly
+Python bindings that build ML planner model inputs and training labels directly
 from rosbags. Input preprocessing is shared with the ROS 2 inference node through
-`autoware::diffusion_planner::preprocess::create_input_data_map`.
+`autoware::ml_planner::preprocess::create_input_data_map`.
 
 ## Whole-bag dataset generation
 
@@ -10,21 +10,21 @@ from rosbags. Input preprocessing is shared with the ROS 2 inference node throug
 and future labels, and returns arrays stacked on the leading frame dimension.
 
 ```python
-import diffusion_planner_data_tools as dpt
+import ml_planner_data as mpd
 
-spec = dpt.VehicleSpec(
+spec = mpd.VehicleSpec(
     base_link_to_front=3.55,
     vehicle_length=4.65,
     vehicle_width=1.85,
 )
 
-param = dpt.DatasetBuilderParam()
+param = mpd.DatasetBuilderParam()
 param.frame_interval_s = 0.5
 param.min_travel_distance = 1000.0
 param.traffic_light_timeout_s = 0.2
 param.neighbor_observation_timeout_s = 0.3
 
-result = dpt.create_bag_frame_data(
+result = mpd.create_bag_frame_data(
     bag_path="path/to/bag",
     map_path="path/to/lanelet2_map.osm",
     vehicle_spec=spec,
@@ -61,7 +61,7 @@ uv run python scripts/dataset/create_h5_dataset.py \
 Training does not use this API after the H5 dataset has been generated.
 
 ```python
-cache = dpt.FrameDataCache(reader_capacity=16, map_capacity=4)
+cache = mpd.FrameDataCache(reader_capacity=16, map_capacity=4)
 frame = cache.create_frame_data(
     bag_path="path/to/bag",
     map_path="path/to/lanelet2_map.osm",
