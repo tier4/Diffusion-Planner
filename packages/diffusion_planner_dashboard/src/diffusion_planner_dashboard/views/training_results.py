@@ -86,6 +86,7 @@ def _cached_prediction(
     noise_scale: float,
     seed: int,
     apply_augmentation: bool,
+    longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
@@ -106,7 +107,11 @@ def _cached_prediction(
     frame_data = _fill_unknown_traffic_lights(frame_data)
     if apply_augmentation:
         frame_data = _augment_frame(
-            frame_data, lateral_offset, yaw_offset, ego_speed_scale
+            frame_data,
+            longitudinal_offset,
+            lateral_offset,
+            yaw_offset,
+            ego_speed_scale,
         )
     if isinstance(planner, LoadedOnnxPlanner):
         return run_onnx_inference(
@@ -136,6 +141,7 @@ def _cached_turn_indicator_prediction(
     h5_modification_time_ns: int,
     device: str,
     apply_augmentation: bool,
+    longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
@@ -158,13 +164,18 @@ def _cached_turn_indicator_prediction(
     frame_data = _fill_unknown_traffic_lights(frame_data)
     if apply_augmentation:
         frame_data = _augment_frame(
-            frame_data, lateral_offset, yaw_offset, ego_speed_scale
+            frame_data,
+            longitudinal_offset,
+            lateral_offset,
+            yaw_offset,
+            ego_speed_scale,
         )
     return run_turn_indicator_inference(loaded.model, frame_data, device=device)
 
 
 def _augment_frame(
     frame_data: dict[str, Any],
+    longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
@@ -175,6 +186,7 @@ def _augment_frame(
         probability=1.0,
     )
     pose_augmentation = PlannerQuinticHermiteAugmentation(
+        longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
         pose_probability=1.0,
@@ -297,10 +309,20 @@ def _render_inference_settings(onnx_model: bool) -> tuple[str, int, float, float
     return device, num_steps, time_epsilon, noise_scale, seed
 
 
-def _render_augmentation_settings() -> tuple[bool, float, float, float]:
+def _render_augmentation_settings() -> tuple[bool, float, float, float, float]:
     """Render deterministic augmentation controls for checkpoint inference."""
     st.sidebar.subheader("Data augmentation")
     enabled = st.sidebar.checkbox("Apply augmentation", value=False)
+    longitudinal_offset = float(
+        st.sidebar.slider(
+            "Longitudinal offset [m]",
+            min_value=-5.0,
+            max_value=5.0,
+            value=0.0,
+            step=0.1,
+            disabled=not enabled,
+        )
+    )
     lateral_offset = float(
         st.sidebar.slider(
             "Lateral offset [m]",
@@ -331,7 +353,13 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float]:
             disabled=not enabled,
         )
     )
-    return enabled, lateral_offset, math.radians(yaw_offset_degrees), ego_speed_scale
+    return (
+        enabled,
+        longitudinal_offset,
+        lateral_offset,
+        math.radians(yaw_offset_degrees),
+        ego_speed_scale,
+    )
 
 
 def _render_input_options() -> tuple[bool, bool]:
@@ -357,9 +385,13 @@ def render_training_results() -> None:
         checkpoint_path_text is not None
         and Path(checkpoint_path_text).suffix.lower() == ".onnx"
     )
-    apply_augmentation, lateral_offset, yaw_offset, ego_speed_scale = (
-        _render_augmentation_settings()
-    )
+    (
+        apply_augmentation,
+        longitudinal_offset,
+        lateral_offset,
+        yaw_offset,
+        ego_speed_scale,
+    ) = _render_augmentation_settings()
     (
         remove_neighbor_agents,
         infer_future_traffic_lights,
@@ -426,7 +458,11 @@ def render_training_results() -> None:
         visualized_frame = _fill_unknown_traffic_lights(visualized_frame)
         if apply_augmentation:
             visualized_frame = _augment_frame(
-                visualized_frame, lateral_offset, yaw_offset, ego_speed_scale
+                visualized_frame,
+                longitudinal_offset,
+                lateral_offset,
+                yaw_offset,
+                ego_speed_scale,
             )
         prediction, inference_seconds = _cached_prediction(
             str(checkpoint_path),
@@ -441,6 +477,7 @@ def render_training_results() -> None:
             noise_scale,
             seed,
             apply_augmentation,
+            longitudinal_offset,
             lateral_offset,
             yaw_offset,
             ego_speed_scale,
@@ -458,6 +495,7 @@ def render_training_results() -> None:
                 h5_modification_time_ns,
                 device,
                 apply_augmentation,
+                longitudinal_offset,
                 lateral_offset,
                 yaw_offset,
                 ego_speed_scale,
@@ -474,7 +512,8 @@ def render_training_results() -> None:
     )
     if apply_augmentation:
         st.caption(
-            f"Augmentation: lateral offset {lateral_offset:.2f} m · "
+            f"Augmentation: longitudinal offset {longitudinal_offset:.2f} m · "
+            f"lateral offset {lateral_offset:.2f} m · "
             f"yaw offset {math.degrees(yaw_offset):.2f} deg · "
             f"ego history speed scale {ego_speed_scale:.2f}"
         )
@@ -521,8 +560,9 @@ def render_training_results() -> None:
     chart_key = (
         f"training-result::{checkpoint_path}::{checkpoint_modification_time_ns}::"
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
-        f"{noise_scale}::{seed}::{apply_augmentation}::{lateral_offset}::"
-        f"{yaw_offset}::{ego_speed_scale}::{remove_neighbor_agents}::"
+        f"{noise_scale}::{seed}::{apply_augmentation}::{longitudinal_offset}::"
+        f"{lateral_offset}::{yaw_offset}::{ego_speed_scale}::"
+        f"{remove_neighbor_agents}::"
         f"{infer_future_traffic_lights}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)

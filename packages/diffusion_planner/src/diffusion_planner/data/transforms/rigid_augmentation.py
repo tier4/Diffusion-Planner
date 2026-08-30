@@ -16,10 +16,12 @@ class PlannerRigidDataAugmentation:
 
     def __init__(
         self,
+        longitudinal_offset_range: tuple[float, float] = (0.0, 0.0),
         lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
         yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
         pose_probability: float = 0.5,
     ) -> None:
+        self.longitudinal_offset_range = longitudinal_offset_range
         self.lateral_offset_range = lateral_offset_range
         self.yaw_offset_range = yaw_offset_range
         self.pose_probability = pose_probability
@@ -28,16 +30,20 @@ class PlannerRigidDataAugmentation:
         """Apply the pre-refinement pose augmentation behavior."""
         if np.random.random() >= self.pose_probability:
             return dict(input_data)
+        longitudinal_offset = 0.0
+        if any(value != 0.0 for value in self.longitudinal_offset_range):
+            longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
+        lateral_offset = np.random.uniform(*self.lateral_offset_range)
+        yaw_offset = np.random.uniform(*self.yaw_offset_range)
         output, _ = _apply_rigid_pose_augmentation(
-            input_data,
-            np.random.uniform(*self.lateral_offset_range),
-            np.random.uniform(*self.yaw_offset_range),
+            input_data, longitudinal_offset, lateral_offset, yaw_offset
         )
         return output
 
 
 def _apply_rigid_pose_augmentation(
     input_data: FrameLike,
+    longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
 ) -> tuple[Frame, NDArray[Any] | None]:
@@ -47,6 +53,7 @@ def _apply_rigid_pose_augmentation(
     ego_position = ego_current[:2]
     ego_heading = _normalize(ego_current[2:4])
     augmented_position = ego_position.copy()
+    augmented_position[0] += longitudinal_offset
     augmented_position[1] += lateral_offset
     augmented_heading = _rotate(ego_heading, yaw_offset)
 

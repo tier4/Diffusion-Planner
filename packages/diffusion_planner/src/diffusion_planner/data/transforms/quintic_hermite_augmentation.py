@@ -18,6 +18,7 @@ class PlannerQuinticHermiteAugmentation:
 
     def __init__(
         self,
+        longitudinal_offset_range: tuple[float, float] = (0.0, 0.0),
         lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
         yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
         pose_probability: float = 0.5,
@@ -25,6 +26,7 @@ class PlannerQuinticHermiteAugmentation:
         time_step_s: float = 0.1,
         pose_augmentation_speed_threshold: float = 0.1,
     ) -> None:
+        self.longitudinal_offset_range = longitudinal_offset_range
         self.lateral_offset_range = lateral_offset_range
         self.yaw_offset_range = yaw_offset_range
         self.pose_probability = pose_probability
@@ -41,10 +43,13 @@ class PlannerQuinticHermiteAugmentation:
             current_speed >= self.pose_augmentation_speed_threshold
             and np.random.random() < self.pose_probability
         ):
+            longitudinal_offset = 0.0
+            if any(value != 0.0 for value in self.longitudinal_offset_range):
+                longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
             lateral_offset = np.random.uniform(*self.lateral_offset_range)
             yaw_offset = np.random.uniform(*self.yaw_offset_range)
             output, transformed_ego_future = _apply_rigid_pose_augmentation(
-                input_data, lateral_offset, yaw_offset
+                input_data, longitudinal_offset, lateral_offset, yaw_offset
             )
 
         if transformed_ego_future is not None:
