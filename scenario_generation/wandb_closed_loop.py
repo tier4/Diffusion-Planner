@@ -29,9 +29,9 @@ Prerequisites:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 import wandb
-
 from scenario_generation.closed_loop_score_keys import extract_score
 
 # (display column name, source key in a per-group summary dict)
@@ -631,8 +631,22 @@ def log_cross_run_charts(
         print(f"wandb: logged Closed-Loop-{json_label}/cross_run_chart")
 
 
+def _cfg_field(cfg: object | None, field: str) -> str:
+    """Read ``field`` off a config that may be a dataclass, a mapping, or ``None``.
+
+    ``run_all_groups_closed_loop`` and ``train.py`` both hand us a
+    ``ClosedLoopConfig`` dataclass, while older callers passed a plain dict, so
+    read through both rather than assuming ``.get``.
+    """
+    if cfg is None:
+        return ""
+    if isinstance(cfg, Mapping):
+        return cfg.get(field) or ""
+    return getattr(cfg, field, "") or ""
+
+
 def log_closed_loop_to_wandb(
-    cfg: "dict | None",
+    cfg: "object | dict | None",
     group_names: list[str],
     group_summaries: dict[str, dict],
     run: "wandb.sdk.wandb_run.Run | None" = None,
@@ -643,8 +657,9 @@ def log_closed_loop_to_wandb(
     Sets up W&B Custom Chart presets for cross-run comparison.
 
     Args:
-        cfg: Config dict with ``wandb_project_name`` and ``exp_name`` fields.
-             If None, uses defaults.
+        cfg: ``ClosedLoopConfig`` (or a dict) carrying ``wandb_project_name`` and
+             ``exp_name``. If None, or if ``wandb_project_name`` is empty and no
+             ``run`` was supplied, the upload is skipped.
         group_names: List of group keys.
         group_summaries: Dict mapping group key -> summary dict.
         run: W&B run instance. If None, starts a new one.
@@ -653,9 +668,15 @@ def log_closed_loop_to_wandb(
         return
 
     if run is None:
-        project = (cfg or {}).get("wandb_project_name") or None
-        name = (cfg or {}).get("exp_name") or None
-        run = wandb.init(project=project, name=name)
+        project = _cfg_field(cfg, "wandb_project_name")
+        if not project:
+            # ``wandb_project_name`` is documented as "empty = disabled". Without this
+            # guard we would wandb.init(project=None) and either create a run in the
+            # default project or block on a missing API key -- after the evaluation
+            # has already finished, which is the worst possible place to fail.
+            print("wandb: wandb_project_name is empty, skipping closed-loop upload")
+            return
+        run = wandb.init(project=project, name=_cfg_field(cfg, "exp_name") or None)
         own_run = True
     else:
         own_run = False
