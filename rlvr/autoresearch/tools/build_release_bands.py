@@ -118,6 +118,24 @@ def _route_tl_state(d: np.lib.npyio.NpzFile) -> tuple[bool, bool]:
     return green, red
 
 
+def _frame_is_band_row(path: str, min_takeoff_m: float) -> bool:
+    """Keep a frame as red-hold patience or a genuine recorded departure.
+
+    RED-and-not-green frames are patience evidence regardless of motion;
+    everything else must show a real recorded departure over its valid
+    waypoints — keeping creeps would re-teach the deceleration bias.
+    """
+    try:
+        with np.load(path) as d:
+            green, red = _route_tl_state(d)
+            if red and not green:
+                return True
+            fut = valid_future_pathlen(d["ego_agent_future"])
+    except Exception:
+        return False
+    return fut >= min_takeoff_m
+
+
 def _band_worker(
     args: tuple[str, list[int], int, int, float],
 ) -> list[str]:
@@ -135,16 +153,7 @@ def _band_worker(
                 continue
             kept_until = f + stride_frames
             p = idx[f]
-            try:
-                with np.load(p) as d:
-                    green, red = _route_tl_state(d)
-                    if red and not green:
-                        out.append(p)
-                        continue
-                    fut = valid_future_pathlen(d["ego_agent_future"])
-            except Exception:
-                continue
-            if fut >= min_takeoff_m:
+            if _frame_is_band_row(p, min_takeoff_m):
                 out.append(p)
     return out
 
@@ -178,6 +187,32 @@ def _load_event_offenses(credit_windows: Path) -> dict[str, set[int]]:
     return events
 
 
+def _validate_band_params(
+    post_window_s: float,
+    stride_s: float,
+    min_takeoff_travel_m: float,
+    frame_hz: float,
+    workers: int,
+) -> None:
+    if post_window_s <= 0 or stride_s <= 0 or frame_hz <= 0:
+        raise ValueError("post_window_s, stride_s and frame_hz must be > 0")
+    if min_takeoff_travel_m <= 0:
+        raise ValueError(f"min_takeoff_travel_m must be > 0: {min_takeoff_travel_m}")
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1: {workers}")
+
+
+def _validated_post_frames(post_window_s: float, frame_hz: float) -> int:
+    post_frames = int(round(post_window_s * frame_hz))
+    if post_frames < 1:
+        raise ValueError(
+            f"post_window_s={post_window_s} at frame_hz={frame_hz} rounds to zero "
+            "post-offense frames — the band would degenerate to the offense frame "
+            "itself, silently disabling the two-sided teacher"
+        )
+    return post_frames
+
+
 def build_release_bands(
     credit_windows: Path,
     chunk_manifest: Path,
@@ -189,12 +224,7 @@ def build_release_bands(
     frame_hz: float,
     workers: int,
 ) -> list[str]:
-    if post_window_s <= 0 or stride_s <= 0 or frame_hz <= 0:
-        raise ValueError("post_window_s, stride_s and frame_hz must be > 0")
-    if min_takeoff_travel_m <= 0:
-        raise ValueError(f"min_takeoff_travel_m must be > 0: {min_takeoff_travel_m}")
-    if workers < 1:
-        raise ValueError(f"workers must be >= 1: {workers}")
+    _validate_band_params(post_window_s, stride_s, min_takeoff_travel_m, frame_hz, workers)
 
     manifest = _load_chunk_manifest(chunk_manifest)
     events = _load_event_offenses(credit_windows)
@@ -205,13 +235,7 @@ def build_release_bands(
             f"{chunk_manifest} (first: {unmatched[0]!r}) — wrong manifest for this run?"
         )
 
-    post_frames = int(round(post_window_s * frame_hz))
-    if post_frames < 1:
-        raise ValueError(
-            f"post_window_s={post_window_s} at frame_hz={frame_hz} rounds to zero "
-            "post-offense frames — the band would degenerate to the offense frame "
-            "itself, silently disabling the two-sided teacher"
-        )
+    post_frames = _validated_post_frames(post_window_s, frame_hz)
     stride_frames = max(1, int(round(stride_s * frame_hz)))
     jobs = [
         (manifest[key], sorted(frames), post_frames, stride_frames, min_takeoff_travel_m)

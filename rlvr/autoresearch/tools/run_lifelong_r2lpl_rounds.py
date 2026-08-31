@@ -1201,6 +1201,30 @@ def _anchor_stratum(anchor_cfg: dict[str, Any], name: str) -> tuple[list[str], f
     return pool, frac
 
 
+def _validated_anchor_strata(
+    anchor_cfg: dict[str, Any],
+) -> tuple[float, list[tuple[list[str], float]]]:
+    """Validate ``training.anchor`` and resolve its special strata (fail loudly)."""
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    ratio = float(anchor_cfg["ratio"])
+    if ratio <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
+    strata = [
+        stratum
+        for name in ("waits", "takeoff")
+        if (stratum := _anchor_stratum(anchor_cfg, name)) is not None
+    ]
+    fractions = [frac for _, frac in strata]
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {fractions}"
+        )
+    return ratio, strata
+
+
 def _anchor_slice_paths(
     anchor_cfg: dict[str, Any] | None, n_focus: int, round_idx: int
 ) -> list[str]:
@@ -1224,23 +1248,7 @@ def _anchor_slice_paths(
     """
     if not anchor_cfg:
         return []
-    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
-    if missing:
-        raise ValueError(f"training.anchor is missing required fields: {missing}")
-    ratio = float(anchor_cfg["ratio"])
-    if ratio <= 0.0:
-        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
-    strata = [
-        stratum
-        for name in ("waits", "takeoff")
-        if (stratum := _anchor_stratum(anchor_cfg, name)) is not None
-    ]
-    fractions = [frac for _, frac in strata]
-    if len(fractions) > 1 and sum(fractions) >= 1.0:
-        raise ValueError(
-            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
-            f"normal slice (< 1.0): {fractions}"
-        )
+    ratio, strata = _validated_anchor_strata(anchor_cfg)
 
     import math as _math
     import random as _random
@@ -1608,6 +1616,24 @@ def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
         )
     if not bands_cfg:
         return
+    _validate_release_bands_knobs(bands_cfg)
+    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
+        raise ValueError(
+            "release_bands is only wired into the base_sft training backend; "
+            f"got training_backend={cfg.get('training_backend')!r}"
+        )
+    manifest = _release_bands_manifest(cfg)
+    if manifest is None:
+        raise ValueError(
+            "release_bands requires a chunk manifest (event -> source sequence "
+            "provenance); scene_list-only mining cannot locate post-offense frames"
+        )
+    if not Path(manifest).is_file():
+        raise ValueError(f"release_bands chunk manifest does not exist: {manifest}")
+
+
+def _validate_release_bands_knobs(bands_cfg: dict[str, Any]) -> None:
+    """Per-knob checks for a non-empty release_bands section (fail loudly)."""
     missing = [k for k in _RELEASE_BANDS_REQUIRED if bands_cfg.get(k) is None]
     if missing:
         raise ValueError(f"release_bands is missing required fields: {missing}")
@@ -1622,19 +1648,6 @@ def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
             f"frame_hz={bands_cfg['frame_hz']} rounds to zero post-offense frames — "
             "the band would degenerate to the offense frame itself"
         )
-    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
-        raise ValueError(
-            "release_bands is only wired into the base_sft training backend; "
-            f"got training_backend={cfg.get('training_backend')!r}"
-        )
-    manifest = _release_bands_manifest(cfg)
-    if manifest is None:
-        raise ValueError(
-            "release_bands requires a chunk manifest (event -> source sequence "
-            "provenance); scene_list-only mining cannot locate post-offense frames"
-        )
-    if not Path(manifest).is_file():
-        raise ValueError(f"release_bands chunk manifest does not exist: {manifest}")
 
 
 def _release_bands_manifest(cfg: dict[str, Any]) -> str | None:
