@@ -209,13 +209,13 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self._nbr_st = self._nbr_valid = self._nbr_near = None
         B, T, _ = xy.shape
         dev, dtype = xy.device, xy.dtype
-        # A candidate's lateral extent is |L| <= dy_max plus the rotation margin
-        # (half_l * 0.35, see the in_corr test), so a bound wider than that can
-        # never change an acceptance. Capping here keeps the test identical and
-        # lets the border search look only that far instead of 20 m.
-        cap = self.dy_max + 0.35 * half_l + 1e-3  # (B,)
-        lo = -cap[:, None].expand(B, T).clone()
-        hi = cap[:, None].expand(B, T).clone()
+        # Unconstrained until a border or neighbor cuts them. NOTE: do not try to
+        # cap these by dy_max — dy is the offset at t=0, not a bound on the
+        # quintic, which overshoots it when the draw has an initial heading
+        # slope (measured |L| = 3.39 m for dy = 1.98 m). A cap like that silently
+        # rejects feasible perturbations.
+        lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
+        hi = torch.full((B, T), 20.0, device=dev, dtype=dtype)
 
         ls = inputs.get("line_strings")
         if ls is not None and ls.shape[-1] < 4:
@@ -228,8 +228,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             # path point can never tighten them; the shared builder drops those
             # before the ray math (~180 of 1140 slots survive on the pipeline
             # set) and pads to the batch maximum, so the bounds are unchanged.
-            reach = float(cap.amax()) + float(half_w.amax()) + 1.0
-            a, e, sv = build_road_border_segments(ls, xy, reach=reach)
+            a, e, sv = build_road_border_segments(ls, xy, reach=25.0)
             d = e - a
             nx, ny = nrm[..., 0:1], nrm[..., 1:2]  # (B, T, 1)
             dx = d[:, None, :, 0]  # (B, 1, S)

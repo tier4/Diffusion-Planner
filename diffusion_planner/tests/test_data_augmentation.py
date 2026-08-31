@@ -1166,11 +1166,49 @@ def test_frenet_low_speed_gate():
     print("  [PASS] frenet low-speed / reverse gate")
 
 
+def test_frenet_corridor_unconstrained_without_obstacles():
+    """With no borders and no neighbors the corridor must not constrain anything.
+
+    Guards a regression that pruned the bounds to dy_max plus the rotation
+    margin. dy is the offset at t=0, NOT a bound on the quintic: a draw with an
+    initial heading slope overshoots it (measured |L| = 3.39 m for dy = 1.98 m),
+    so such a cap silently rejects feasible perturbations even on an empty road.
+    Any future pruning must be checked against the profiles themselves, not dy.
+    """
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=4, vx=10.0)
+    inputs["line_strings"] = torch.zeros_like(inputs["line_strings"])  # no borders
+    inputs["neighbor_agents_past"] = torch.zeros_like(inputs["neighbor_agents_past"])
+    inputs["neighbor_agents_future"] = torch.zeros_like(inputs["neighbor_agents_future"])
+
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    P = inputs["ego_agent_past"].shape[1]
+    xy = torch.cat([inputs["ego_agent_past"][..., :2], ego_future[..., :2]], dim=1)
+    tan = torch.cat(
+        [
+            inputs["ego_agent_past"][..., 2:4],
+            torch.stack([ego_future[..., 2].cos(), ego_future[..., 2].sin()], dim=-1),
+        ],
+        dim=1,
+    )
+    nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
+    wb, ego_l, ego_w = (inputs["ego_shape"][:, i] for i in range(3))
+    lo, hi = aug._corridor(inputs, xy, tan, nrm, ego_w / 2, ego_l / 2, wb)
+
+    assert float(lo.max()) <= -20.0 + ATOL, f"corridor cut from below with no obstacles: {lo.max()}"
+    assert float(hi.min()) >= 20.0 - ATOL, f"corridor cut from above with no obstacles: {hi.min()}"
+    assert P > 0
+    print("  [PASS] frenet corridor unconstrained without obstacles")
+
+
 ALL_TESTS = [
     test_frenet_handles_3col_neighbor_future,
     test_frenet_handles_4col_futures,
     test_frenet_cli_selection,
     test_frenet_low_speed_gate,
+    test_frenet_corridor_unconstrained_without_obstacles,
     # ── vector_transform ──
     test_vector_transform_identity,
     test_vector_transform_rotation_90,
