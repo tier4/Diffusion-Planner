@@ -8,6 +8,13 @@ harness alone cannot see it: it reports ``|ego_lat| / side_hw``, which is
 identical for an in-cut of 0.4 m and an out-swing of 0.4 m. Measuring the
 absolute offset and calling it in-cut invalidated a whole earlier round.
 
+One signed curvature is taken per start WINDOW (mean over its 80 frames), so a window that
+changes hand mid-rollout is labelled by whichever bend dominates, and an in-cut on the other
+bend is recorded with the wrong sign. Keep ``--min_kappa`` high enough that the windows it
+admits are single bends, and read a near-zero ``incut_mean_m`` as possibly diluted rather than
+as evidence of neutrality. (The per-step realized pose is stored, so a per-step curvature can
+be recomputed from the output without re-running.)
+
 Sign convention (defined and unit-tested in
 :mod:`rlvr.autoresearch.tools.incut_geometry`): ``incut_m > 0`` means the ego sits
 toward the **inside** of the bend, i.e. cutting the corner.
@@ -45,6 +52,7 @@ import planner_metrics.subscores as subscores
 from rlvr.autoresearch.tools.eval_centerline_metrics import lat_offset_and_naive_score
 from rlvr.autoresearch.tools.eval_recovery_route import (
     _OFFSET,
+    ROUTE_COVERAGE_RADIUS_M,
     _offset_ego_state,
     add_common_args,
     candidate_starts,
@@ -53,9 +61,12 @@ from rlvr.autoresearch.tools.eval_recovery_route import (
     drive_rollout,
     expand_offsets,
     in_process_draw_pool,
+    json_safe,
     open_routes,
+    require_deployable_checkpoint,
     route_distance_m,
     summarize_rollout,
+    write_results,
 )
 from rlvr.autoresearch.tools.incut_geometry import (
     incut_from_signed_lat,
@@ -97,8 +108,9 @@ def _pre_step_record_pose(s, gpu_transform: bool = False):
     pre = _ORIG_PRE_STEP(s, gpu_transform)
     if pre is None:
         return None
-    if getattr(s, "live_pose", None) is not None:
-        _POSES.append(np.asarray(s.live_pose, dtype=float).copy())
+    # `live_pose` is a non-optional field of the rollout state, set at seed and on every
+    # advance, so it is read directly: a `getattr` default here could only hide a real bug.
+    _POSES.append(np.asarray(s.live_pose, dtype=float).copy())
     return pre
 
 
@@ -118,7 +130,7 @@ def curve_starts(tl: RouteTimeline, args) -> list[tuple[int, float]]:
 
 def incut_block(signed_lat: np.ndarray, route_dist: np.ndarray, kappa: float) -> dict:
     """In-cut statistics for one rollout, gated on the pose being near the route."""
-    near = route_dist <= 5.0
+    near = route_dist <= ROUTE_COVERAGE_RADIUS_M
     incut = incut_from_signed_lat(signed_lat, kappa)
     fin = incut[near][np.isfinite(incut[near])] if near.any() else np.array([])
     tail = incut[-10:][near[-10:]]
@@ -136,7 +148,8 @@ def _turn_side(kept: list[dict], sel) -> dict:
     bias would otherwise read as in-cut on whichever direction the route favours."""
     v = np.array([r["incut_mean_m"] for r in kept if sel(r["kappa"])])
     if not v.size:
-        return dict(n=0)
+        # Same keys either way: an aggregator indexing incut_mean_m must see None, not KeyError.
+        return dict(n=0, incut_mean_m=None, frac_incut=None)
     return dict(n=int(v.size), incut_mean_m=float(v.mean()), frac_incut=float((v > 0).mean()))
 
 
@@ -152,7 +165,24 @@ def summarize_model(label: str, rows: list[dict]) -> dict:
     no meaningful lateral offset -- and surface instead as ``lost_rate``.
     """
     kept = [r for r in rows if not r["lost"] and r["incut_mean_m"] is not None]
-    inc = np.array([r["incut_mean_m"] for r in kept]) if kept else np.array([np.nan])
+    if not kept:
+        # No scored curve rollout. `frac_incut` over an all-NaN array would evaluate to 0.0 and
+        # read as "this model never cuts corners", which is a fabricated result, not a no-op.
+        return dict(
+            label=label,
+            n_rollouts=len(rows),
+            lost_rate=_mean_or_none([r["lost"] for r in rows]),
+            recovered_rate=_mean_or_none([r["recovered"] for r in rows]),
+            settle_mean=None,
+            incut_mean_m=None,
+            incut_p50_m=None,
+            incut_p95_m=None,
+            frac_incut=None,
+            left_turns=dict(n=0, incut_mean_m=None, frac_incut=None),
+            right_turns=dict(n=0, incut_mean_m=None, frac_incut=None),
+            n_scored=0,
+        )
+    inc = np.array([r["incut_mean_m"] for r in kept])
     return dict(
         label=label,
         n_rollouts=len(rows),
@@ -186,7 +216,7 @@ def score_rollout(
     for buf in (_CL_SCORES, _ROUTE_DIST, _SIGNED_LAT):
         buf.clear()
     _POSES.clear()
-    drive_rollout(model, model_args, tl, st, args, draw_pool, out_dir)
+    terminated = drive_rollout(model, model_args, tl, st, args, draw_pool, out_dir)
     rec = collect_usage(_CL_SCORES, _ROUTE_DIST)
     if rec is None:
         return None
@@ -196,6 +226,7 @@ def score_rollout(
         start=st,
         offset=off,
         kappa=round(kappa, 5),
+        terminated=terminated,
         **summarize_rollout(usage, rd),
         **incut_block(slat, rd, kappa),
         per_step=[round(float(x), 4) for x in usage],
@@ -230,6 +261,7 @@ def main():
     draw_pool = in_process_draw_pool()
     for label_path in args.models:
         label, model_path = label_path.split(":", 1)
+        require_deployable_checkpoint(model_path)
         model, model_args = load_model(model_path, args.device)
         for key in sorted(routes):
             tl = RouteTimeline(routes[key], sidecar_dir=Path(args.npz_root))
@@ -255,11 +287,13 @@ def main():
                     if row is not None:
                         results.append(dict(label=label, route=key, **row))
         print(
-            json.dumps(summarize_model(label, [r for r in results if r["label"] == label])),
+            json.dumps(
+                json_safe(summarize_model(label, [r for r in results if r["label"] == label]))
+            ),
             flush=True,
         )
     draw_pool.shutdown(wait=True)
-    out_json.write_text(json.dumps(results))
+    write_results(out_json, results, args)
 
 
 if __name__ == "__main__":

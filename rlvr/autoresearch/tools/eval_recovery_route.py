@@ -2,9 +2,9 @@
 
 The question it answers: **put the ego somewhere it should not be, and does the
 model drive back to the lane centre?** Open-loop validation loss cannot answer it
--- a recipe change has improved val loss monotonically while its closed-loop
-recovery collapsed -- so this is the headline metric for judging a training-recipe
-A/B (augmentation, LR schedule, loss weights, data mix).
+-- it measures agreement with a recorded future from an on-distribution state,
+which is a different question -- so this is the headline metric for judging a
+training-recipe A/B (augmentation, LR schedule, loss weights, data mix).
 
 Per (model, start frame, lateral offset): rigidly shift the initial ego pose AND
 its world-frame history sideways -- a pure-lateral perturbation with no kinematic
@@ -14,28 +14,38 @@ every step, and score every REALIZED pose with the canonical
 ``compute_centerline_score_batch(usage_mode="baselink")``.
 
 Reported per model: ``recovered_rate``, ``lost_rate``, and the settle
-distribution. **Both rates are needed.** The centerline scorer's coverage-gap
-branch returns exactly 0 for a pose more than 5 m from any valid route-lane
-centre, so a rollout that wanders off the map scores as PERFECTLY centred; this
-tool records each pose's distance to the route alongside the score so "recovered
-to the centreline" and "left the route" cannot be confused. Reading a
-``settle_mean`` without its ``lost_rate`` has produced two wrong conclusions.
+distribution. **Both rates are needed, and that is not decoration.** Because
+these tools score ONE pose per call, ``compute_centerline_score_batch`` takes its
+coverage-gap branch and returns exactly 0 for a pose further than
+``subscores._PROXIMITY`` from any valid route-lane centre -- so a rollout that
+wanders off the map scores as PERFECTLY centred. This tool therefore records each
+pose's distance to the route alongside the score and gates every usage statistic
+on it, so "recovered to the centreline" and "left the route" cannot be confused.
+Never read a settle number without its ``lost_rate`` beside it.
 
 Notes on use:
 
-* Evaluate **EMA weights**, not the raw optimizer iterates (extract
-  ``ema_state_dict`` into a ``{"model": ...}`` checkpoint first).
+* Point ``--models`` at a **deployable checkpoint**: one whose weights are the
+  EMA copy, not the raw optimizer iterates. A training milestone holds both, and
+  ``simulate.load_model`` would silently take the raw ones, so this tool refuses
+  a checkpoint that still carries ``ema_state_dict`` and tells you how to
+  convert it.
 * Shard by ``--start_begin`` / ``--start_end`` and run several shards in
-  parallel; each uses well under 1 GB of GPU. Aggregate the shard JSONs, and
-  report only complete rows -- shard-level swings of +/-10 points are routine.
+  parallel; a rollout needs little GPU memory. Aggregate the shard JSONs and
+  report only complete rows: a single shard is not a result.
 * ``--drop_objects`` gives the empty-world ablation (no other traffic, map
   intact), which separates "reacts badly to traffic" from "cannot follow the
   route".
 
 Implementation: the rollout driver is used unmodified; two module-level hooks in
-``scenario_generation.reproducer_rollout`` are swapped for the duration of the
-run -- ``_ego_state_from_frame`` (inject the offset) and ``_draw_step`` (score
-instead of writing a PNG).
+``scenario_generation.reproducer_rollout`` are replaced for the process --
+``_ego_state_from_frame`` (inject the offset) and ``_draw_step`` (score instead
+of writing a PNG). They are not restored, so import this module for its helpers,
+never for a side-effect-free call.
+
+Alongside ``--out_json`` the tool writes ``<out_json>.meta.json`` recording the
+argv, the resolved checkpoints, the rollout settings and how many rollouts were
+skipped -- so a number in a write-up can always be traced back to its run.
 
 Usage:
     python -m rlvr.autoresearch.tools.eval_recovery_route \\
@@ -48,6 +58,7 @@ Usage:
 import argparse
 import json
 import math
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -65,6 +76,12 @@ from scenario_generation.simulate import load_model
 _CL_SCORES: dict[int, float] = {}
 _ROUTE_DIST: dict[int, float] = {}
 _OFFSET = {"v": 0.0}
+
+# The radius inside which the centerline scorer actually scores. Mirrors the local
+# `_PROXIMITY` in subscores.compute_centerline_score_batch, which is not importable;
+# if that value ever changes, this must change with it or the gate and the score
+# will disagree about which poses count.
+ROUTE_COVERAGE_RADIUS_M = 5.0
 _ORIG_EGO_STATE = reproducer_rollout._ego_state_from_frame
 
 
@@ -118,21 +135,50 @@ ROLLOUT_SETTINGS = dict(
 def in_process_draw_pool() -> ThreadPoolExecutor:
     """The executor the per-step hook MUST run on: one worker, in this process.
 
-    ``render_segment``'s own default (``draw_pool=None``) builds a **spawn
+    Passing ``draw_pool=None`` makes ``render_segment`` build a **spawn
     ProcessPoolExecutor** -- right for matplotlib, fatal here. The hook would be
     pickled by module+qualname, re-imported in a child interpreter, and would
-    append its scores to that child's copy of the records, so the parent would
-    collect nothing and report zero rollouts with no error at all. One in-process
-    worker also keeps the hook in step order.
+    record its scores in that child's copy of the records, so the parent would
+    collect nothing at all (``collect_usage`` raises on exactly that). One
+    in-process worker also keeps the hook in step order.
     """
     return ThreadPoolExecutor(max_workers=1)
 
 
+def require_deployable_checkpoint(model_path: str) -> None:
+    """Refuse a training milestone that still carries raw optimizer iterates.
+
+    ``simulate.load_model`` does ``ckpt.get("model", ckpt)``, and a milestone saved
+    by the trainer holds BOTH ``model`` (the raw iterates, which at a live learning
+    rate are one arbitrary sample of a random walk) and ``ema_state_dict`` (the
+    deployable copy). Loading the raw ones produces a plausible-looking but wrong
+    verdict with no warning at all, so this fails loudly instead.
+    """
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict) and "ema_state_dict" in ckpt:
+        raise SystemExit(
+            f"{model_path} is a training milestone carrying both raw and EMA weights; "
+            "load_model would silently use the RAW iterates. Convert it first:\n"
+            '  ck = torch.load(src, map_location="cpu", weights_only=False)\n'
+            '  ema = {k.removeprefix("module."): v for k, v in ck["ema_state_dict"].items()}\n'
+            '  torch.save({"model": ema}, dst)   # and copy args.json next to dst'
+        )
+
+
 def route_distance_m(data: dict) -> float:
-    """Distance from the ego (at the origin of this frame) to the nearest route point."""
+    """Distance from the ego (at the origin of this frame) to the nearest route point.
+
+    ``route_lanes`` with a ``lanes`` fallback mirrors what the scorer itself does
+    (``subscores.compute_centerline_score_batch``); the gate has to be computed off
+    the same geometry the score was, or the two halves of the metric disagree. A
+    frame carrying neither is not a route frame, and raises.
+    """
     lanes = data.get("route_lanes", data.get("lanes"))
     if lanes is None:
-        return float("inf")
+        raise KeyError(
+            "frame carries neither 'route_lanes' nor 'lanes'; the route-distance gate "
+            "cannot be computed, and without it every rollout would score as lost"
+        )
     if lanes.dim() == 4:
         lanes = lanes[0]
     centers = lanes[..., :2].reshape(-1, 2)
@@ -173,7 +219,7 @@ def summarize_rollout(usage: np.ndarray, route_dist: np.ndarray) -> dict:
     scorer's 5 m coverage radius, so an off-route rollout cannot borrow the
     coverage-gap zero and read as perfectly centred.
     """
-    near = route_dist <= 5.0
+    near = route_dist <= ROUTE_COVERAGE_RADIUS_M
     settle_near = usage[-10:][near[-10:]]
     off_frac = float((~near).mean())
     lost = bool(off_frac > 0.5 or not near[-10:].any())
@@ -225,7 +271,13 @@ def add_common_args(ap: argparse.ArgumentParser, *, start_stride: int, offsets: 
     """The arguments both route evals share. Only the two defaults differ between them."""
     ap.add_argument("--models", nargs="+", required=True, help="label:model.pth (args.json beside)")
     ap.add_argument("--npz_root", required=True, help="recorded route NPZ dir (with sidecars)")
-    ap.add_argument("--start_stride", type=int, default=start_stride, help="a start every N frames")
+    ap.add_argument(
+        "--start_stride",
+        type=int,
+        default=start_stride,
+        help="test a start every N frames; the defaults are the protocol these tools were "
+        "calibrated on, so changing one changes the sample size and the noise floor with it",
+    )
     ap.add_argument("--min_speed", type=float, default=4.0, help="skip starts slower than this m/s")
     ap.add_argument(
         "--offsets",
@@ -248,11 +300,9 @@ def add_common_args(ap: argparse.ArgumentParser, *, start_stride: int, offsets: 
 
 
 def open_routes(npz_root: str) -> dict:
-    """Routes under ``npz_root``, or a loud failure -- an empty eval must not look like a pass."""
-    routes = enumerate_routes(Path(npz_root))
-    if not routes:
-        raise SystemExit(f"no routes found under {npz_root}")
-    return routes
+    """Routes under ``npz_root``. ``enumerate_routes`` itself raises on an empty tree, so an
+    eval can never quietly score zero scenes and look like a pass."""
+    return enumerate_routes(Path(npz_root))
 
 
 def candidate_starts(tl: RouteTimeline, args) -> list[int]:
@@ -282,11 +332,20 @@ def drive_rollout(
     )
 
 
+MIN_SCORED_STEPS = 10
+
+# Rollouts dropped for being shorter than MIN_SCORED_STEPS, so the count can be reported
+# rather than quietly shrinking the denominator.
+SKIPPED: dict[str, int] = {"short_rollouts": 0}
+
+
 def collect_usage(scores: dict[int, float], dists: dict[int, float]) -> tuple | None:
     """Per-step records in step order as ``(usage, route_dist)``, or None for a too-short rollout.
 
     Usage is LINEAR: the raw centerline score is a squared penalty. An empty record means the
-    hook never ran in this process, which is a bug, not a short rollout -- so it raises.
+    hook never ran in this process, which is a bug, not a short rollout -- so it raises. A
+    rollout with 1..MIN_SCORED_STEPS-1 steps IS dropped (its settle window would be the
+    perturbation itself) but counted in ``SKIPPED`` and reported, never silently.
     """
     steps = sorted(scores)
     if not steps:
@@ -294,15 +353,53 @@ def collect_usage(scores: dict[int, float], dists: dict[int, float]) -> tuple | 
             "the scoring hook recorded nothing for a completed rollout -- it did not run in "
             "this process (see in_process_draw_pool)"
         )
-    if len(steps) < 10:
+    if len(steps) < MIN_SCORED_STEPS:
+        SKIPPED["short_rollouts"] += 1
         return None
     usage = np.sqrt(np.abs(np.array([scores[k] for k in steps])))
     return usage, np.array([dists[k] for k in steps])
 
 
+def json_safe(obj):
+    """Replace every non-finite float with None.
+
+    ``json.dumps`` emits the bare literal ``NaN``, which no strict JSON reader accepts --
+    and these files exist to be aggregated across shards.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
+def write_results(out_json: Path, results: list[dict], args) -> None:
+    """Write the rows, plus a sidecar recording what produced them.
+
+    The rows stay a bare list so existing aggregators keep working; the provenance goes
+    beside them, because a results file nobody can trace back to a checkpoint and a shard
+    range is the problem this tool exists to fix.
+    """
+    out_json.write_text(json.dumps(json_safe(results)))
+    meta = dict(
+        argv=sys.argv,
+        models=args.models,
+        npz_root=args.npz_root,
+        n_rows=len(results),
+        skipped=dict(SKIPPED),
+        rollout_settings=ROLLOUT_SETTINGS,
+        args={k: v for k, v in vars(args).items() if k != "models"},
+    )
+    out_json.with_suffix(out_json.suffix + ".meta.json").write_text(
+        json.dumps(json_safe(meta), indent=1, default=str)
+    )
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    add_common_args(ap, start_stride=300, offsets="0.5,0.75,1.0")
+    add_common_args(ap, start_stride=4, offsets="1.0")
     args = ap.parse_args()
 
     reproducer_rollout._ego_state_from_frame = _offset_ego_state
@@ -317,6 +414,7 @@ def main():
     draw_pool = in_process_draw_pool()
     for label_path in args.models:
         label, model_path = label_path.split(":", 1)
+        require_deployable_checkpoint(model_path)
         model, model_args = load_model(model_path, args.device)
         for key in sorted(routes):
             tl = RouteTimeline(routes[key], sidecar_dir=Path(args.npz_root))
@@ -327,7 +425,7 @@ def main():
                     _OFFSET["v"] = off
                     _CL_SCORES.clear()
                     _ROUTE_DIST.clear()
-                    drive_rollout(
+                    terminated = drive_rollout(
                         model, model_args, tl, st, args, draw_pool, out_json.parent / "noop"
                     )
                     rec = collect_usage(_CL_SCORES, _ROUTE_DIST)
@@ -340,17 +438,17 @@ def main():
                             route=key,
                             start=st,
                             offset=off,
+                            terminated=terminated,
                             **summarize_rollout(usage, rd),
                             per_step=[round(float(x), 4) for x in usage],
                             per_step_route_dist=[round(float(x), 2) for x in rd],
                         )
                     )
-        print(
-            json.dumps(summarize_model(label, [r for r in results if r["label"] == label])),
-            flush=True,
-        )
+        summary = summarize_model(label, [r for r in results if r["label"] == label])
+        summary["skipped_short_rollouts"] = SKIPPED["short_rollouts"]
+        print(json.dumps(json_safe(summary)), flush=True)
     draw_pool.shutdown(wait=True)
-    out_json.write_text(json.dumps(results))
+    write_results(out_json, results, args)
 
 
 if __name__ == "__main__":
