@@ -33,6 +33,7 @@ import numpy as np
 import torch
 
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from planner_metrics.geometry import build_road_border_segments
 from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 
 DT = 0.1
@@ -130,6 +131,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # rows augmented in the most recent __call__; centric_transform re-projects
         # velocity/accel to base_link (vy = ay = 0) for exactly these rows
         self._aug_rows = None
+        self._nbr_near = None
         self.n_draws = n_draws
         self.dy_max = dy_max
         self.dth_max = dth_max
@@ -184,7 +186,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # ---------- corridor, fully batched ----------
     def _corridor(self, inputs, xy, tan, nrm, half_w, half_l, wb):
         # reset per batch so a neighbor-less batch never sees a stale tensor
-        self._nbr_st = self._nbr_valid = None
+        self._nbr_st = self._nbr_valid = self._nbr_near = None
         B, T, _ = xy.shape
         dev, dtype = xy.device, xy.dtype
         lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
@@ -197,12 +199,11 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 "channel 3 (road-border flag) to constrain the corridor"
             )
         if ls is not None:
-            pts = ls[..., :2]  # (B, L, P, 2)
-            is_border = (ls[..., 3] > 0.5).any(-1)  # (B, L)
-            pv = pts.norm(dim=-1) > 1e-6
-            a = pts[:, :, :-1, :].flatten(1, 2)  # (B, S, 2)
-            e = pts[:, :, 1:, :].flatten(1, 2)
-            sv = (pv[:, :, :-1] & pv[:, :, 1:] & is_border[:, :, None]).flatten(1, 2)  # (B, S)
+            # lo/hi start at +-20 m, so a border further than that from every
+            # path point can never tighten them; the shared builder drops those
+            # before the ray math (~180 of 1140 slots survive on the pipeline
+            # set) and pads to the batch maximum, so the bounds are unchanged.
+            a, e, sv = build_road_border_segments(ls, xy, reach=25.0)
             d = e - a
             nx, ny = nrm[..., 0:1], nrm[..., 1:2]  # (B, T, 1)
             dx = d[:, None, :, 0]  # (B, 1, S)
@@ -254,6 +255,18 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 (nrm[:, None] * axi).sum(-1).abs() * l_n + (nrm[:, None] * per).sum(-1).abs() * w_n
             ) / 2
             near = valid & (lon.abs() <= half_l[:, None, None] + ext_lon)
+            # Same longitudinal test, padded, kept for the exact-OBB veto so it
+            # only pairs neighbors that can actually reach the ego box. The
+            # augmentation is a lateral offset, so a candidate's longitudinal
+            # coordinate in this frame is the GT one; the pad covers the ego's
+            # longitudinal half-extent growing under the heading change
+            # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre
+            # shift. Pairs outside it cannot overlap, so the verdicts are
+            # unchanged — the canonical OBB check still decides every one.
+            self._nbr_near = valid & (
+                lon.abs()
+                <= half_l[:, None, None] + ext_lon + half_w[:, None, None] + wb[:, None, None] / 2
+            )
             cut_hi = torch.where(
                 near & (lat > 0),
                 lat - ext_lat - half_w[:, None, None],
@@ -289,7 +302,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # kernel each, so their launch overhead dominated training (228 ms/batch
         # at B=512, several times the rest of the augmenter) to reject the ~1.4%
         # of winners that truly overlap.
-        pairs = upd[:, None] & self._nbr_valid.any(-1)  # (B, N) scene x neighbor
+        pairs = upd[:, None] & self._nbr_near.any(-1)  # (B, N) scene x neighbor
         bi, ni = torch.nonzero(pairs, as_tuple=True)
         if bi.numel() == 0:
             return upd
@@ -423,23 +436,34 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             yaw_rate = lat_a / sp
             return lat_a, lat_j, yaw_rate, sp
 
-        cand_xy = xy[:, None, None] + L[..., None] * nrm[:, None, None]  # (B, K, C, T, 2)
-        laC, ljC, yrC, spC = _exact_metrics(cand_xy)  # each (B, K, C, T)
+        # Only candidates that already clear the corridor can end up feasible, so
+        # build the exact polylines for those alone — the rest would be discarded
+        # by the `in_corr &` below anyway, and they are ~40% of the grid.
+        BIG = torch.tensor(1e9, device=L.device, dtype=L.dtype)
+        feasible = torch.zeros_like(in_corr)
+        jerk_fut_peak = torch.full(in_corr.shape, BIG.item(), device=L.device, dtype=L.dtype)
+        b_i, k_i, c_i = torch.nonzero(in_corr, as_tuple=True)
+        if b_i.numel() == 0:
+            return feasible, jerk_fut_peak
+
+        cand_xy = xy[b_i] + L[b_i, k_i, c_i][..., None] * nrm[b_i]  # (M, T, 2)
+        laC, ljC, yrC, spC = _exact_metrics(cand_xy)  # each (M, T)
         laG, ljG, yrG, spG = _exact_metrics(xy)  # GT reference, (B, T)
-        stC = torch.atan(wb[:, None, None, None] * yrC / spC).abs()
+        stC = torch.atan(wb[b_i, None] * yrC / spC).abs()
         stG = torch.atan(wb[:, None] * yrG / spG).abs()
 
         def _allow(gt_max, limit):
-            return torch.clamp(gt_max, min=limit)[:, None, None]  # (B, 1, 1)
+            return torch.clamp(gt_max, min=limit)[b_i]  # (M,)
 
-        jerk_fut_peak = ljC[..., P:].abs().amax(-1)  # (B, K, C) — also the tiebreak
+        peak = ljC[:, P:].abs().amax(-1)  # (M,) — also the tiebreak
         a_ok = laC.abs().amax(-1) <= _allow(laG.abs().amax(-1), LIMITS["lat_acc"])
-        j_ok = (jerk_fut_peak <= _allow(ljG[:, P:].abs().amax(-1), LIMITS["jerk"])) & (
-            ljC[..., :P].abs().amax(-1) <= _allow(ljG[:, :P].abs().amax(-1), LIMITS["jerk_history"])
+        j_ok = (peak <= _allow(ljG[:, P:].abs().amax(-1), LIMITS["jerk"])) & (
+            ljC[:, :P].abs().amax(-1) <= _allow(ljG[:, :P].abs().amax(-1), LIMITS["jerk_history"])
         )
         y_ok = yrC.abs().amax(-1) <= _allow(yrG.abs().amax(-1), LIMITS["yaw_rate"])
         s_ok = stC.amax(-1) <= _allow(stG.amax(-1), LIMITS["steer"])
-        feasible = in_corr & a_ok & j_ok & y_ok & s_ok  # (B, K, C)
+        feasible[b_i, k_i, c_i] = a_ok & j_ok & y_ok & s_ok
+        jerk_fut_peak[b_i, k_i, c_i] = peak
         return feasible, jerk_fut_peak
 
     def _select_candidate(
