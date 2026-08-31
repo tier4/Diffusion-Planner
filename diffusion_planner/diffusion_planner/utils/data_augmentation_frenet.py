@@ -27,6 +27,7 @@ plain GT on a true neighbor overlap (~1% of winners). Scenes with no feasible
 draw train on plain GT.
 """
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,6 +57,9 @@ LIMITS = {
     # steering angle delta = atan(WB * kappa), kappa = yaw_rate / speed.
     "steer": 0.61,  # rad (~35 deg), typical passenger-car lock
 }
+
+# the steering test runs in tan space (see _feasibility), so cache tan(limit)
+_TAN_STEER = math.tan(LIMITS["steer"])
 
 
 def _ddt(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -454,13 +458,15 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # glitches), the candidate only has to stay within the GT's own maximum.
         def _exact_metrics(poly_xy):
             v = _ddt(poly_xy, -2)
-            sp = v.norm(dim=-1).clamp(min=0.5)
+            # speed is clamped away from zero, so one reciprocal serves the three
+            # divisions below (a multiply is cheaper than a divide on 22M values)
+            inv_sp = v.norm(dim=-1).clamp(min=0.5).reciprocal()
             a = _ddt(v, -2)
-            lat_a = (v[..., 0] * a[..., 1] - v[..., 1] * a[..., 0]) / sp
+            lat_a = (v[..., 0] * a[..., 1] - v[..., 1] * a[..., 0]) * inv_sp
             jk = _ddt(a, -2)
-            lat_j = (v[..., 0] * jk[..., 1] - v[..., 1] * jk[..., 0]) / sp
-            yaw_rate = lat_a / sp
-            return lat_a, lat_j, yaw_rate, sp
+            lat_j = (v[..., 0] * jk[..., 1] - v[..., 1] * jk[..., 0]) * inv_sp
+            yaw_rate = lat_a * inv_sp
+            return lat_a, lat_j, yaw_rate, inv_sp
 
         # Only candidates that already clear the corridor can end up feasible, so
         # build the exact polylines for those alone — the rest would be discarded
@@ -473,10 +479,14 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             return feasible, jerk_fut_peak
 
         cand_xy = xy[b_i] + L[b_i, k_i, c_i][..., None] * nrm[b_i]  # (M, T, 2)
-        laC, ljC, yrC, spC = _exact_metrics(cand_xy)  # each (M, T)
-        laG, ljG, yrG, spG = _exact_metrics(xy)  # GT reference, (B, T)
-        stC = torch.atan(wb[b_i, None] * yrC / spC).abs()
-        stG = torch.atan(wb[:, None] * yrG / spG).abs()
+        laC, ljC, yrC, ivC = _exact_metrics(cand_xy)  # each (M, T)
+        laG, ljG, yrG, ivG = _exact_metrics(xy)  # GT reference, (B, T)
+        # Steering is compared in tan space: the limit test is
+        # atan(x) <= max(atan(g), STEER), and atan is monotonic, so it is
+        # equivalent to x <= max(g, tan(STEER)) — same verdict, no atan over the
+        # candidate tensor.
+        stC = (wb[b_i, None] * yrC * ivC).abs()
+        stG = (wb[:, None] * yrG * ivG).abs()
 
         def _allow(gt_max, limit):
             return torch.clamp(gt_max, min=limit)[b_i]  # (M,)
@@ -487,7 +497,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             ljC[:, :P].abs().amax(-1) <= _allow(ljG[:, :P].abs().amax(-1), LIMITS["jerk_history"])
         )
         y_ok = yrC.abs().amax(-1) <= _allow(yrG.abs().amax(-1), LIMITS["yaw_rate"])
-        s_ok = stC.amax(-1) <= _allow(stG.amax(-1), LIMITS["steer"])
+        s_ok = stC.amax(-1) <= _allow(stG.amax(-1), _TAN_STEER)
         feasible[b_i, k_i, c_i] = a_ok & j_ok & y_ok & s_ok
         jerk_fut_peak[b_i, k_i, c_i] = peak
         return feasible, jerk_fut_peak
