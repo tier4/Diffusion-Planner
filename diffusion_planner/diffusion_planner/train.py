@@ -23,7 +23,10 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+from diffusion_planner.utils.data_augmentation_frenet import (
+    FrenetStatePerturbationTensor,
+    KnobGrid,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -263,7 +266,21 @@ def model_training(args: TrainConfig):
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
         elif args.augment_type == "frenet":
-            aug = FrenetStatePerturbationTensor(augment_prob=args.augment_prob, device=args.device)
+            # argparse hands list fields back as strings, so coerce before use
+            aug = FrenetStatePerturbationTensor(
+                augment_prob=args.augment_prob,
+                device=args.device,
+                n_draws=int(args.frenet_n_draws),
+                dy_max=float(args.frenet_dy_max),
+                dth_max=float(args.frenet_dth_max),
+                knobs=KnobGrid(
+                    merge_times=tuple(float(v) for v in args.frenet_merge_times),
+                    anchors=tuple(float(v) for v in args.frenet_anchors),
+                    acc0_fracs=tuple(float(v) for v in args.frenet_acc0_fracs),
+                ),
+                seed=int(args.frenet_seed),
+                ranked_temp_s=float(args.frenet_ranked_temp_s),
+            )
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
