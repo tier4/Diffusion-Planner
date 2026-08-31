@@ -346,6 +346,31 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         dy = (r[:, :K] * 2 - 1) * self.dy_max
         dth = (r[:, K : 2 * K] * 2 - 1) * self.dth_max
 
+        L, in_corr, merges = self._candidate_profiles(
+            combos, dy, dth, v0, speed, half_l, lo, hi, dev, dtype
+        )
+
+        feasible, jerk_fut_peak = self._feasibility(xy, nrm, L, in_corr, wb, P)
+
+        feasible &= do_aug[:, None, None]
+        draw_ok = feasible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
+        has = draw_ok.any(-1)  # (B,)
+        first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
+
+        if not bool(has.any()):
+            # nothing feasible this batch: every row trains on plain GT
+            self._aug_rows = has
+            return self.centric_transform(inputs, ego_future, neighbors_future)
+
+        aug_xy = self._select_candidate(
+            feasible, jerk_fut_peak, first, merges, has, L, xy, nrm, B, dev, dtype
+        )
+
+        self._write_back(inputs, ego_future, aug_xy, xy, tan, wb, has, P)
+        return self.centric_transform(inputs, ego_future, neighbors_future)
+
+    def _candidate_profiles(self, combos, dy, dth, v0, speed, half_l, lo, hi, dev, dtype):
+        """Lateral-offset profile of every (draw, knob-combo) pair + corridor test."""
         slope = v0[:, None] * torch.tan(dth)
         # NO combo loop: stack every combo's basis/mask once, then evaluate all
         # (draw, combo) pairs in one einsum per derivative. (C=40 tiny GEMMs in
@@ -371,6 +396,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         in_corr = ((L - rot >= lo[:, None, None]) & (L + rot <= hi[:, None, None]) | ~m).all(
             -1
         )  # (B, K, C)
+        return L, in_corr, merges
+
+    def _feasibility(self, xy, nrm, L, in_corr, wb, P):
+        """Physical-limit screen on the exact candidate polylines."""
 
         # Feasibility on the EXACT candidate polylines, not the lateral-delta
         # profile: build every candidate's xy and finite-difference it at DT.
@@ -406,17 +435,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         y_ok = yrC.abs().amax(-1) <= _allow(yrG.abs().amax(-1), LIMITS["yaw_rate"])
         s_ok = stC.amax(-1) <= _allow(stG.amax(-1), LIMITS["steer"])
         feasible = in_corr & a_ok & j_ok & y_ok & s_ok  # (B, K, C)
+        return feasible, jerk_fut_peak
 
-        feasible &= do_aug[:, None, None]
-        draw_ok = feasible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
-        has = draw_ok.any(-1)  # (B,)
-        first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
-
-        if not bool(has.any()):
-            # nothing feasible this batch: every row trains on plain GT
-            self._aug_rows = has
-            return self.centric_transform(inputs, ego_future, neighbors_future)
-
+    def _select_candidate(
+        self, feasible, jerk_fut_peak, first, merges, has, L, xy, nrm, B, dev, dtype
+    ):
+        """Sample a merge horizon per scene, take its lowest-jerk combo, build the polyline."""
         bi = torch.arange(B, device=dev)
         feas_k = feasible[bi, first]  # (B, C) — valid combos for the chosen draw
         jerk_k = jerk_fut_peak[bi, first]  # (B, C)
@@ -434,7 +458,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         combo_idx = torch.where(same_m, jerk_k, BIG).argmin(-1)
         Lw = L[bi, first, combo_idx]  # (B, T)
         aug_xy = xy + Lw[..., None] * nrm
+        return aug_xy
 
+    def _write_back(self, inputs, ego_future, aug_xy, xy, tan, wb, has, P):
+        """Veto true overlaps, then write history / future / current state in place."""
         g = torch.gradient(aug_xy, spacing=DT, dim=1)[0]
         gs = g.norm(dim=-1)
         hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
@@ -479,4 +506,3 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         n_cols = min(new_cur.shape[-1], cur.shape[-1])
         cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
         self._aug_rows = upd
-        return self.centric_transform(inputs, ego_future, neighbors_future)
