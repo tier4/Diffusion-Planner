@@ -285,19 +285,24 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         hd_cs = torch.stack([heading.cos(), heading.sin()], dim=-1)
         tr_aug = torch.cat([aug_xy, hd_cs], dim=-1)  # (B, T, 4)
         past_n = inputs["neighbor_agents_past"]
-        for i in torch.nonzero(upd).flatten().tolist():
-            keep = self._nbr_valid[i].any(-1)
-            if not bool(keep.any()):
-                continue
-            clr = compute_ego_neighbor_signed_clearance(
-                tr_aug[i : i + 1],
-                inputs["ego_shape"][i],
-                self._nbr_st[i, keep],
-                past_n[i, keep, -1][:, [6, 7]],  # width, length
-                self._nbr_valid[i, keep],
-            )
-            if float(clr.min()) < 0.0:
-                upd[i] = False
+        # One paired call for the whole batch. Per-scene calls were one tiny
+        # kernel each, so their launch overhead dominated training (228 ms/batch
+        # at B=512, several times the rest of the augmenter) to reject the ~1.4%
+        # of winners that truly overlap.
+        pairs = upd[:, None] & self._nbr_valid.any(-1)  # (B, N) scene x neighbor
+        bi, ni = torch.nonzero(pairs, as_tuple=True)
+        if bi.numel() == 0:
+            return upd
+        clr = compute_ego_neighbor_signed_clearance(
+            tr_aug[bi],
+            inputs["ego_shape"][bi],
+            self._nbr_st[bi, ni],
+            past_n[bi, ni, -1][:, [6, 7]],  # width, length
+            self._nbr_valid[bi, ni],
+            paired=True,
+        )  # (M, T)
+        overlapping = bi[clr.amin(-1) < 0.0]
+        upd[overlapping] = False
         return upd
 
     # ---------- the augmentation ----------

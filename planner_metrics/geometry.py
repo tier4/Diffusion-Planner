@@ -32,16 +32,18 @@ def _build_ego_bbox_corners(
     heading_unit = heading / heading.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     ego_xy = ego_trajs[..., :2]
 
-    wheel_base = ego_shape[0]
-    ego_length = ego_shape[1]
-    ego_width = ego_shape[2]
+    # (3,) = one shape for every trajectory; (N, 3) = a shape per trajectory, so
+    # a batch mixing vehicle types can be measured in a single call.
+    shape = ego_shape if ego_shape.dim() > 1 else ego_shape[None]
+    wheel_base = shape[:, 0]
+    ego_length = shape[:, 1]
+    ego_width = shape[:, 2]
 
-    cog_to_rear = 0.5 * wheel_base
+    cog_to_rear = (0.5 * wheel_base)[:, None, None]
     ego_center_xy = ego_xy + heading_unit * cog_to_rear
 
-    half_length = ego_length / 2.0
-    half_width = ego_width / 2.0
-    half_sizes = torch.tensor([half_length, half_width], device=device, dtype=dtype).expand(N, T, 2)
+    half_sizes = torch.stack([ego_length / 2.0, ego_width / 2.0], dim=-1)  # (N or 1, 2)
+    half_sizes = half_sizes.to(device=device, dtype=dtype)[:, None, :].expand(N, T, 2)
 
     corner_signs = torch.tensor(
         [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]],
