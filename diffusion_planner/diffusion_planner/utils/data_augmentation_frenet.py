@@ -27,55 +27,25 @@ plain GT on a true neighbor overlap (~1% of winners). Scenes with no feasible
 draw train on plain GT.
 """
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
+from diffusion_planner.utils.augmentation_checks import (
+    DT,
+    border_lateral_bounds,
+    ddt,
+    kinematic_feasibility,
+    neighbor_lateral_bounds,
+    time_aligned_neighbor_tracks,
+    unconstrained_bounds,
+    veto_overlapping,
+)
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from planner_metrics.geometry import build_road_border_segments
-from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 
-DT = 0.1
+# extra half-width the corridor keeps from borders and neighbors
 CORRIDOR_MARGIN = 0.10
-
-# Feasibility limits: candidates violating these are REJECTED (never clipped).
-LIMITS = {
-    "lat_acc": 3.0,  # m/s^2
-    "yaw_rate": 0.6,  # rad/s  (~34 deg/s)
-    # Comfort jerk, applied to the FUTURE segment only - that is what the model
-    # learns to output. (Peak lateral jerk of a quintic ~ 60*dy/T^3: a comfortable
-    # recovery from dy=0.75 m needs T >= 2.8 s, so at M=2 s most realistic offsets
-    # are correctly REJECTED. The production 2 s quintic bridge teaches ~6 m/s^3.)
-    "jerk": 2.0,  # m/s^3
-    # The HISTORY segment is context, not a target: it only has to be a plausible
-    # (possibly uncomfortable) way to have arrived at the perturbed pose. The 3 s
-    # past window would otherwise cap |dy| at 27*jerk/60 ~ 0.9 m.
-    "jerk_history": 5.0,  # m/s^3
-    # Ackermann / kinematic-bicycle feasibility (needs wheelbase from ego_shape):
-    # steering angle delta = atan(WB * kappa), kappa = yaw_rate / speed.
-    "steer": 0.61,  # rad (~35 deg), typical passenger-car lock
-}
-
-# the steering test runs in tan space (see _feasibility), so cache tan(limit)
-_TAN_STEER = math.tan(LIMITS["steer"])
-
-
-def _ddt(x: torch.Tensor, dim: int) -> torch.Tensor:
-    """d/dt along `dim` on the fixed DT grid.
-
-    Same arithmetic as torch.gradient(x, spacing=DT, dim=dim) — central
-    differences inside, one-sided at the ends — written out because the library
-    call costs ~7x more on the candidate tensors (3.5 ms vs 0.5 ms for the three
-    derivatives at B=512). Verified bit-identical to torch.gradient.
-    """
-    lo = x.narrow(dim, 0, 1)
-    lo2 = x.narrow(dim, 1, 1)
-    hi2 = x.narrow(dim, x.shape[dim] - 2, 1)
-    hi = x.narrow(dim, x.shape[dim] - 1, 1)
-    mid = (x.narrow(dim, 2, x.shape[dim] - 2) - x.narrow(dim, 0, x.shape[dim] - 2)) / (2 * DT)
-    return torch.cat([(lo2 - lo) / DT, mid, (hi - hi2) / DT], dim=dim)
 
 
 def quintic_basis(t0: float, t1: float, t: np.ndarray):
@@ -205,147 +175,41 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
     # ---------- corridor, fully batched ----------
     def _corridor(self, inputs, xy, tan, nrm, half_w, half_l, wb):
+        """Lateral free space per timestep: where can this ego go sideways."""
         # reset per batch so a neighbor-less batch never sees a stale tensor
         self._nbr_st = self._nbr_valid = self._nbr_near = None
         B, T, _ = xy.shape
-        dev, dtype = xy.device, xy.dtype
-        # Unconstrained until a border or neighbor cuts them. NOTE: do not try to
-        # cap these by dy_max — dy is the offset at t=0, not a bound on the
-        # quintic, which overshoots it when the draw has an initial heading
-        # slope (measured |L| = 3.39 m for dy = 1.98 m). A cap like that silently
-        # rejects feasible perturbations.
-        lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
-        hi = torch.full((B, T), 20.0, device=dev, dtype=dtype)
+        lo, hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
 
         ls = inputs.get("line_strings")
-        if ls is not None and ls.shape[-1] < 4:
-            raise ValueError(
-                f"line_strings has {ls.shape[-1]} channels; frenet augmentation needs "
-                "channel 3 (road-border flag) to constrain the corridor"
-            )
         if ls is not None:
-            # lo/hi start at +-20 m, so a border further than that from every
-            # path point can never tighten them; the shared builder drops those
-            # before the ray math (~180 of 1140 slots survive on the pipeline
-            # set) and pads to the batch maximum, so the bounds are unchanged.
-            a, e, sv = build_road_border_segments(ls, xy, reach=25.0)
-            d = e - a
-            nx, ny = nrm[..., 0:1], nrm[..., 1:2]  # (B, T, 1)
-            dx = d[:, None, :, 0]  # (B, 1, S)
-            dy_ = d[:, None, :, 1]
-            det = nx * (-dy_) - ny * (-dx)  # (B, T, S)
-            rx = a[:, None, :, 0] - xy[..., 0:1]
-            ry = a[:, None, :, 1] - xy[..., 1:2]
-            s = (rx * (-dy_) - ry * (-dx)) / det
-            u = (nx * ry - ny * rx) / det
-            ok = torch.isfinite(s) & (u >= 0) & (u <= 1) & sv[:, None, :]
-            pos = torch.where(ok & (s > 0), s, torch.full_like(s, torch.inf))
-            neg = torch.where(ok & (s < 0), s, torch.full_like(s, -torch.inf))
-            hi = torch.minimum(hi, pos.amin(-1) - half_w[:, None])
-            lo = torch.maximum(lo, neg.amax(-1) + half_w[:, None])
+            lo, hi = border_lateral_bounds(ls, xy, nrm, half_w, lo, hi)
 
         past = inputs.get("neighbor_agents_past")
         fut = inputs.get("neighbor_agents_future")
         if past is not None and fut is not None:
-            # time-aligned neighbor states on the SAME grid as the ego polyline.
-            # Futures come in two layouts: 4-col (x, y, cos, sin) or the canonical
-            # 3-col (x, y, heading) — train_epoch only converts to cos/sin AFTER
-            # augmentation, so handle both here.
-            if fut.shape[-1] >= 4:
-                fut4 = fut[..., :4]
-            else:
-                fut4 = torch.cat([fut[..., :2], fut[..., 2:3].cos(), fut[..., 2:3].sin()], dim=-1)
-                # keep padded rows padded: an all-zero 3-col row must not become
-                # (0, 0, 1, 0) after cos/sin
-                fut4 = fut4 * (fut.abs().sum(-1, keepdim=True) > 0)
-            st = torch.cat([past[..., :4], fut4], dim=2)  # (B, N, T, 4)
-            valid = st.abs().sum(-1) > 0  # (B, N, T)
+            st, valid = time_aligned_neighbor_tracks(past, fut)
             self._nbr_st, self._nbr_valid = st, valid  # reused by the exact-OBB veto
-            # Only slots holding a real track can cut the corridor, and they are
-            # ~31 of the 320 padded slots. Flatten to the valid (scene, neighbor)
-            # pairs so the projections below run over those alone, then reduce
-            # back per scene; padding contributed +-inf, i.e. nothing.
-            vb, vn = torch.nonzero(valid.any(-1), as_tuple=True)  # (M,)
-            if vb.numel() == 0:
-                self._nbr_near = valid
-                return lo, hi
-            valid_m = valid[vb, vn]  # (M, T)
-            l_n = past[vb, vn, -1, 7][:, None]  # (M, 1)
-            w_n = past[vb, vn, -1, 6][:, None]
-            c = st[vb, vn, :, :2]  # (M, T, 2)
-            axi = st[vb, vn, :, 2:4]
-            per = torch.stack([-axi[..., 1], axi[..., 0]], dim=-1)
-            tan_m, nrm_m = tan[vb], nrm[vb]  # (M, T, 2)
-            half_l_m, half_w_m, wb_m = half_l[vb, None], half_w[vb, None], wb[vb, None]
-            rel = c - xy[vb]  # (M, T, 2)
-            # ego xy is base_link (rear axle); the footprint CENTER sits wb/2
-            # ahead along the tangent, so shift the longitudinal window there —
-            # otherwise a transient neighbor overlapping only the front bumper
-            # imposes no lateral cut.
-            lon = (rel * tan_m).sum(-1)  # rear-axle window (validated semantics)
-            lat = (rel * nrm_m).sum(-1)
-            ext_lon = ((tan_m * axi).sum(-1).abs() * l_n + (tan_m * per).sum(-1).abs() * w_n) / 2
-            ext_lat = ((nrm_m * axi).sum(-1).abs() * l_n + (nrm_m * per).sum(-1).abs() * w_n) / 2
-            near = valid_m & (lon.abs() <= half_l_m + ext_lon)
-            # Same longitudinal test, padded, kept for the exact-OBB veto so it
-            # only pairs neighbors that can actually reach the ego box. The
-            # augmentation is a lateral offset, so a candidate's longitudinal
-            # coordinate in this frame is the GT one; the pad covers the ego's
-            # longitudinal half-extent growing under the heading change
-            # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre
-            # shift. Pairs outside it cannot overlap, so the verdicts are
-            # unchanged — the canonical OBB check still decides every one.
-            near_pad = valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2)
-            self._nbr_near = torch.zeros_like(valid)
-            self._nbr_near[vb, vn] = near_pad
-            cut_hi = torch.where(
-                near & (lat > 0), lat - ext_lat - half_w_m, torch.full_like(lat, torch.inf)
+            shapes_wl = past[:, :, -1][..., [6, 7]]  # width, length
+            lo, hi, self._nbr_near = neighbor_lateral_bounds(
+                st, valid, shapes_wl, xy, tan, nrm, half_l, half_w, wb, lo, hi
             )
-            cut_lo = torch.where(
-                near & (lat < 0), lat + ext_lat + half_w_m, torch.full_like(lat, -torch.inf)
-            )
-            idx = vb[:, None].expand_as(cut_hi)
-            hi = hi.scatter_reduce(0, idx, cut_hi, reduce="amin")
-            lo = lo.scatter_reduce(0, idx, cut_lo, reduce="amax")
         return lo, hi
 
     def _veto_true_overlaps(self, inputs, upd, aug_xy, heading):
-        """Exact-OBB veto on the winning candidates.
-
-        The corridor is a fast approximation (path-normal ray-cast with
-        half-width margins around the rear-axle polyline) and is measured to
-        accept ~1.4% of winners whose TRUE footprint overlaps a recorded
-        neighbor box. Re-check each winner with the canonical signed OBB
-        clearance (rear-axle ego convention, centroid neighbors) and train
-        vetoed rows on plain GT. Borders are left to the corridor: the recorded
-        drives themselves touch the mapped borders (GT corner distance reaches
-        0.0), so an OBB border veto would reject GT-like data.
-        """
-        if self._nbr_st is None or not bool(upd.any()):
+        """Drop winners whose footprint truly overlaps a recorded neighbor."""
+        if self._nbr_st is None:
             return upd
         hd_cs = torch.stack([heading.cos(), heading.sin()], dim=-1)
-        tr_aug = torch.cat([aug_xy, hd_cs], dim=-1)  # (B, T, 4)
-        past_n = inputs["neighbor_agents_past"]
-        # One paired call for the whole batch. Per-scene calls were one tiny
-        # kernel each, so their launch overhead dominated training (228 ms/batch
-        # at B=512, several times the rest of the augmenter) to reject the ~1.4%
-        # of winners that truly overlap.
-        pairs = upd[:, None] & self._nbr_near.any(-1)  # (B, N) scene x neighbor
-        bi, ni = torch.nonzero(pairs, as_tuple=True)
-        if bi.numel() == 0:
-            return upd
-        clr = compute_ego_neighbor_signed_clearance(
-            tr_aug[bi],
-            inputs["ego_shape"][bi],
-            self._nbr_st[bi, ni],
-            past_n[bi, ni, -1][:, [6, 7]],  # width, length
-            self._nbr_valid[bi, ni],
-            paired=True,
-            overlap_only=True,  # the veto only asks whether they overlap
-        )  # (M, T)
-        overlapping = bi[clr.amin(-1) < 0.0]
-        upd[overlapping] = False
-        return upd
+        return veto_overlapping(
+            upd,
+            torch.cat([aug_xy, hd_cs], dim=-1),  # (B, T, 4)
+            inputs["ego_shape"],
+            self._nbr_st,
+            self._nbr_valid,
+            inputs["neighbor_agents_past"][:, :, -1][..., [6, 7]],
+            self._nbr_near,
+        )
 
     # ---------- the augmentation ----------
     @torch.no_grad()
@@ -373,7 +237,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         xy = torch.cat([past4[..., :2], ego_future[..., :2]], dim=1)  # (B, T, 2)
         tan = torch.cat([past4[..., 2:4], fut_cs], dim=1)
         nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
-        speed = _ddt(xy, 1).norm(dim=-1).clamp(min=0.5)  # (B, T)
+        speed = ddt(xy, 1).norm(dim=-1).clamp(min=0.5)  # (B, T)
         v0 = speed[:, P - 1]
         wb = inputs["ego_shape"][:, 0]
         half_w = inputs["ego_shape"][:, 2] / 2 + CORRIDOR_MARGIN
@@ -446,58 +310,20 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         return L, in_corr, merges
 
     def _feasibility(self, xy, nrm, L, in_corr, wb, P):
-        """Physical-limit screen on the exact candidate polylines."""
-
-        # Feasibility on the EXACT candidate polylines, not the lateral-delta
-        # profile: build every candidate's xy and finite-difference it at DT.
-        # The L(t)-only check misses the coupling between the lateral swing and
-        # the GT path's own curvature (audited: ~1/3 of its accepts exceeded the
-        # comfort jerk on the exact polyline, worst 2.6 vs 2.0 m/s^3). Limits are
-        # GT-relative: where the recorded drive itself exceeds a limit (data
-        # glitches), the candidate only has to stay within the GT's own maximum.
-        def _exact_metrics(poly_xy):
-            v = _ddt(poly_xy, -2)
-            # speed is clamped away from zero, so one reciprocal serves the three
-            # divisions below (a multiply is cheaper than a divide on 22M values)
-            inv_sp = v.norm(dim=-1).clamp(min=0.5).reciprocal()
-            a = _ddt(v, -2)
-            lat_a = (v[..., 0] * a[..., 1] - v[..., 1] * a[..., 0]) * inv_sp
-            jk = _ddt(a, -2)
-            lat_j = (v[..., 0] * jk[..., 1] - v[..., 1] * jk[..., 0]) * inv_sp
-            yaw_rate = lat_a * inv_sp
-            return lat_a, lat_j, yaw_rate, inv_sp
-
+        """Screen corridor-passing candidates on the exact rebuilt polylines."""
         # Only candidates that already clear the corridor can end up feasible, so
         # build the exact polylines for those alone — the rest would be discarded
-        # by the `in_corr &` below anyway, and they are ~40% of the grid.
-        BIG = torch.tensor(1e9, device=L.device, dtype=L.dtype)
+        # by the `in_corr &` anyway, and they are ~40% of the grid.
+        BIG = 1e9
         feasible = torch.zeros_like(in_corr)
-        jerk_fut_peak = torch.full(in_corr.shape, BIG.item(), device=L.device, dtype=L.dtype)
+        jerk_fut_peak = torch.full(in_corr.shape, BIG, device=L.device, dtype=L.dtype)
         b_i, k_i, c_i = torch.nonzero(in_corr, as_tuple=True)
         if b_i.numel() == 0:
             return feasible, jerk_fut_peak
 
         cand_xy = xy[b_i] + L[b_i, k_i, c_i][..., None] * nrm[b_i]  # (M, T, 2)
-        laC, ljC, yrC, ivC = _exact_metrics(cand_xy)  # each (M, T)
-        laG, ljG, yrG, ivG = _exact_metrics(xy)  # GT reference, (B, T)
-        # Steering is compared in tan space: the limit test is
-        # atan(x) <= max(atan(g), STEER), and atan is monotonic, so it is
-        # equivalent to x <= max(g, tan(STEER)) — same verdict, no atan over the
-        # candidate tensor.
-        stC = (wb[b_i, None] * yrC * ivC).abs()
-        stG = (wb[:, None] * yrG * ivG).abs()
-
-        def _allow(gt_max, limit):
-            return torch.clamp(gt_max, min=limit)[b_i]  # (M,)
-
-        peak = ljC[:, P:].abs().amax(-1)  # (M,) — also the tiebreak
-        a_ok = laC.abs().amax(-1) <= _allow(laG.abs().amax(-1), LIMITS["lat_acc"])
-        j_ok = (peak <= _allow(ljG[:, P:].abs().amax(-1), LIMITS["jerk"])) & (
-            ljC[:, :P].abs().amax(-1) <= _allow(ljG[:, :P].abs().amax(-1), LIMITS["jerk_history"])
-        )
-        y_ok = yrC.abs().amax(-1) <= _allow(yrG.abs().amax(-1), LIMITS["yaw_rate"])
-        s_ok = stC.amax(-1) <= _allow(stG.amax(-1), _TAN_STEER)
-        feasible[b_i, k_i, c_i] = a_ok & j_ok & y_ok & s_ok
+        ok, peak = kinematic_feasibility(cand_xy, b_i, xy, wb, P)
+        feasible[b_i, k_i, c_i] = ok
         jerk_fut_peak[b_i, k_i, c_i] = peak
         return feasible, jerk_fut_peak
 
@@ -526,7 +352,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
     def _write_back(self, inputs, ego_future, aug_xy, xy, tan, wb, has, P):
         """Veto true overlaps, then write history / future / current state in place."""
-        g = _ddt(aug_xy, 1)
+        g = ddt(aug_xy, 1)
         gs = g.norm(dim=-1)
         hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
         heading = torch.where(gs > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
@@ -546,8 +372,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         i0 = P - 1
         cur = inputs["ego_current_state"]
         vel = g[:, i0]
-        acc = _ddt(g, 1)[:, i0]
-        yaw_rate = _ddt(torch.stack([heading.cos(), heading.sin()], -1), 1)[:, i0]
+        acc = ddt(g, 1)[:, i0]
+        yaw_rate = ddt(torch.stack([heading.cos(), heading.sin()], -1), 1)[:, i0]
         yaw_rate = heading.cos()[:, i0] * yaw_rate[..., 1] - heading.sin()[:, i0] * yaw_rate[..., 0]
         steer = torch.atan(wb * yaw_rate / gs[:, i0].clamp(min=0.5))
         new_cur = torch.stack(
