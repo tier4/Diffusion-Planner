@@ -22,21 +22,21 @@ from typing import Any
 
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_eval import (
-    evaluate_segment_pass,
     aggregate,
     build_mp4,
     enumerate_multi_root_routes,
+    evaluate_segment_pass,
     format_summary_lines,
     load_segment_rows_with_tdigests,
     segment_row_for_json,
     tdigest_sidecar_row,
 )
-from tag_toolkit import TagStore
 from scenario_generation.inference_compile import compiled_for_inference
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
+from tag_toolkit import TagStore
 
 
 @dataclass

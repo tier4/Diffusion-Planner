@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,16 +20,22 @@ class ClosedLoopPassCondition:
     road_border: bool = True  # road_border.collision_count == 0
     red_light_violation: bool = True  # red_light_violation.count == 0
     strong_brake: bool = True  # strong_brake.count == 0
-    goal_reach: bool = True 
-    snap: bool = True 
-
+    goal_reach: bool = True
+    snap: bool = True
 
     def to_dict(self) -> dict[str, bool]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ClosedLoopPassCondition":
-        valid_fields = {"collision", "road_border", "red_light_violation", "strong_brake", "goal_reach", "snap"}
+        valid_fields = {
+            "collision",
+            "road_border",
+            "red_light_violation",
+            "strong_brake",
+            "goal_reach",
+            "snap",
+        }
         filtered = {k: v for k, v in d.items() if k in valid_fields}
         return cls(**filtered)
 
@@ -206,7 +212,9 @@ class ClosedLoopConfig:
         default="",
         path=True,
     )
-    _closed_loop_pass_conditions_loaded: ClosedLoopPassConditionGroups | None = field(default=None, repr=False)
+    _closed_loop_pass_conditions_loaded: ClosedLoopPassConditionGroups | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         """Auto-load ``closed_loop_pass_conditions`` (a YAML path) into the object form.

@@ -23,7 +23,9 @@ class _IndexMixin:
     """Mixin providing index management methods for TagStore."""
 
     @staticmethod
-    def from_source(source: str | Path, *, save: bool = False, force_rebuild: bool = False) -> "TagStore":
+    def from_source(
+        source: str | Path, *, save: bool = False, force_rebuild: bool = False
+    ) -> "TagStore":
         """Load a TagStore for *source*, auto-building the index from sidecars.
 
         By default this is read-only and in-memory: it tries to open a same-named

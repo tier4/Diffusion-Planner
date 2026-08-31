@@ -24,11 +24,11 @@ from diffusion_planner.config.closed_loop_config import (
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
 from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
-from tag_toolkit.store import TagStore
 
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
 )
+from tag_toolkit.store import TagStore
 
 
 def resolve_closed_loop_inputs(
@@ -91,7 +91,14 @@ def resolve_closed_loop_inputs(
             print(f"Warning: {input_path} has unsupported extension, skipping", file=sys.stderr)
             continue
 
-        entries.append({"name": p.stem if p.suffix else p.name, "groups": groups, "mode": mode, "tag_store": tag_store})
+        entries.append(
+            {
+                "name": p.stem if p.suffix else p.name,
+                "groups": groups,
+                "mode": mode,
+                "tag_store": tag_store,
+            }
+        )
 
     return entries
 

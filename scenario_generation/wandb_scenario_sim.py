@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import wandb
+
 from scenario_generation.scenario_sim_viewer_export import (
     FAILURE_CATEGORIES,
     ViewerTree,
@@ -136,18 +137,42 @@ def _mean(values: list[float]) -> float:
 _METRICS: tuple[tuple[str, str, str | None, Any], ...] = (
     ("total_cases", "Cases", None, len),
     ("passed_cases", "Passed", None, lambda vs: sum(1 for v in vs if v.is_pass)),
-    ("pass_rate", "Pass rate", "{:.2f}%",
-     lambda vs: _ratio(sum(1 for v in vs if v.is_pass), len(vs))),
-    ("collision_cases", "Cases with an object collision", None,
-     lambda vs: sum(1 for v in vs if v.obj_cols > 0)),
-    ("road_border_cases", "Cases touching a road border", None,
-     lambda vs: sum(1 for v in vs if v.rb_cols > 0)),
-    ("strong_brake_cases", "Cases braking hard", None,
-     lambda vs: sum(1 for v in vs if v.sb_count > 0)),
-    ("mean_case_min_clearance_m", "Mean of per-case min clearance (m)", "{:.2f}",
-     lambda vs: _mean([v.clearance for v in vs if v.clearance is not None and v.clearance >= 0])),
-    ("mean_progress_m", "Mean progress (m)", None,
-     lambda vs: _mean([v.progress for v in vs if v.progress is not None])),
+    (
+        "pass_rate",
+        "Pass rate",
+        "{:.2f}%",
+        lambda vs: _ratio(sum(1 for v in vs if v.is_pass), len(vs)),
+    ),
+    (
+        "collision_cases",
+        "Cases with an object collision",
+        None,
+        lambda vs: sum(1 for v in vs if v.obj_cols > 0),
+    ),
+    (
+        "road_border_cases",
+        "Cases touching a road border",
+        None,
+        lambda vs: sum(1 for v in vs if v.rb_cols > 0),
+    ),
+    (
+        "strong_brake_cases",
+        "Cases braking hard",
+        None,
+        lambda vs: sum(1 for v in vs if v.sb_count > 0),
+    ),
+    (
+        "mean_case_min_clearance_m",
+        "Mean of per-case min clearance (m)",
+        "{:.2f}",
+        lambda vs: _mean([v.clearance for v in vs if v.clearance is not None and v.clearance >= 0]),
+    ),
+    (
+        "mean_progress_m",
+        "Mean progress (m)",
+        None,
+        lambda vs: _mean([v.progress for v in vs if v.progress is not None]),
+    ),
 )
 
 
@@ -220,16 +245,18 @@ def build_scenario_sim_wandb_payload(
 
     table_rows = []
     for v in map(_view, rows):
-        table_rows.append([
-            _case_name(v.row),
-            v.row["result_kind"],
-            v.category,
-            v.obj_cols > 0,
-            v.rb_cols > 0,
-            v.sb_count > 0,
-            f"{v.clearance:.2f}" if v.clearance is not None else "-",
-            f"{v.progress:.1f}" if v.progress is not None else "-",
-        ])
+        table_rows.append(
+            [
+                _case_name(v.row),
+                v.row["result_kind"],
+                v.category,
+                v.obj_cols > 0,
+                v.rb_cols > 0,
+                v.sb_count > 0,
+                f"{v.clearance:.2f}" if v.clearance is not None else "-",
+                f"{v.progress:.1f}" if v.progress is not None else "-",
+            ]
+        )
 
     payload[f"{prefix}/cases_table"] = wandb.Table(columns=_TABLE_COLUMNS, data=table_rows)
     return payload

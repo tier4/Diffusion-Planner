@@ -689,7 +689,9 @@ def _wrap_pi(a):
     return (a + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def _gt_deviation_m(tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cursor_idx: int) -> float:
+def _gt_deviation_m(
+    tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cursor_idx: int
+) -> float:
     """Min yaw-gated point-to-polyline distance from ``live_xy`` to a ±15 s window of
     recorded poses centered on ``cursor_idx``.
 
@@ -1948,7 +1950,7 @@ def run_segments_batched(
                     replay_mode=timeline_progress_mode,
                     strong_brake_mps2=strong_brake_mps2,
                     yaw_gate=yaw_gate,
-                    goal_mode=goal_mode
+                    goal_mode=goal_mode,
                 )
                 for (tl, start, end) in chunk
             ]

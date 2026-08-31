@@ -46,8 +46,8 @@ def test_bucket_selection():
     """Distinct failure modes get their own bucket; a count-defined bucket ranks by that count;
     an unmeasured clearance is not evidence of danger; braking hard is not a failure."""
     rows = [
-        _case("err", terminated="worker_failed"),                    # never ran
-        _case("frozen", max_speed_mps=0.1, progress=3.0),            # ran and stopped dead
+        _case("err", terminated="worker_failed"),  # never ran
+        _case("frozen", max_speed_mps=0.1, progress=3.0),  # ran and stopped dead
         _case("collision", collisions=1, clearance=0.0, progress=20.0),
         _case("unmeasured", collisions=1, clearance=None, progress=1.0),
         _case("rb_few", borders=1, clearance=0.5),
@@ -98,8 +98,12 @@ def test_build_scenario_sim_wandb_payload(tmp_path):
 
     rows = [
         _case(
-            "ego_speed2p7778", collisions=1, clearance=0.0, progress=10.0,
-            case_key="uuid123_route0", scenario="uuid123",
+            "ego_speed2p7778",
+            collisions=1,
+            clearance=0.0,
+            progress=10.0,
+            case_key="uuid123_route0",
+            scenario="uuid123",
         )
     ]
 

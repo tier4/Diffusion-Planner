@@ -1,7 +1,7 @@
-from dataclasses import fields
-from typing import Any
 import json
+from dataclasses import fields
 from pathlib import Path
+from typing import Any
 
 
 def save_config(cfg: Any, out_root: str | Path, filename: str) -> None:

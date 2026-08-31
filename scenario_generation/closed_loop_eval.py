@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-
 from diffusion_planner.config.closed_loop_config import ClosedLoopPassCondition
+
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool

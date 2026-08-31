@@ -252,17 +252,28 @@ def classify_failure(row: dict[str, Any], verdict: dict[str, Any] | None = None)
     trigger = (verdict.get("trigger") or "") if verdict else ""
     trigger_lower = trigger.lower()
 
-    if (vmax is not None and vmax < 0.5) or "standstill" in trigger_lower or "stand_still" in trigger_lower:
+    if (
+        (vmax is not None and vmax < 0.5)
+        or "standstill" in trigger_lower
+        or "stand_still" in trigger_lower
+    ):
         return "FROZEN_STANDSTILL"
 
-    if any(k in trigger_lower for k in ("lateral_check", "longitudinal_check", "relativedistance", "obstacle_distance")):
+    if any(
+        k in trigger_lower
+        for k in ("lateral_check", "longitudinal_check", "relativedistance", "obstacle_distance")
+    ):
         return "PROXIMITY_DEPARTURE"
 
     unmet = verdict.get("unmet", []) if verdict else []
     if "goal_position" in unmet:
         return "GOAL_STOP_FAILURE"
 
-    if term in ("max_steps", "sim_terminated") or "simulationtime" in trigger_lower or "timeout" in trigger_lower:
+    if (
+        term in ("max_steps", "sim_terminated")
+        or "simulationtime" in trigger_lower
+        or "timeout" in trigger_lower
+    ):
         return "SPEED_TIMEOUT"
 
     if unmet or trigger:
@@ -514,8 +525,7 @@ def write_viewer_tree(
         }
 
     meta["verdicts"] = {
-        key: sum(e["verdicts"][key] for e in scenarios.values())
-        for key in _TALLY_KEYS
+        key: sum(e["verdicts"][key] for e in scenarios.values()) for key in _TALLY_KEYS
     }
 
     tree.cases.write_text("\n".join(case_lines) + "\n", encoding="utf-8")
