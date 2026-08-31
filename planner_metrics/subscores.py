@@ -34,6 +34,7 @@ def compute_ego_neighbor_signed_clearance(
     *,
     return_closest_points: bool = False,
     paired: bool = False,
+    overlap_only: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Signed OBB clearance between ego trajectories and neighbor futures.
 
@@ -46,6 +47,14 @@ def compute_ego_neighbor_signed_clearance(
     ``ego_shape`` is ``(3,)`` for one vehicle, or ``(N, 3)`` to give every
     trajectory its own wheel_base/length/width, so a batch mixing vehicle types
     is a single call.
+
+    With ``overlap_only=True`` the closest-point refinement is skipped and the
+    separating-axis distance is returned as-is. Its SIGN is the same — negative
+    exactly when the boxes overlap, with the same penetration depth — but a
+    non-negative value is then the separating-axis gap, which under-reports the
+    true clearance for diagonal cases. Only for callers that just ask "do these
+    overlap"; never for a reported distance. Cannot be combined with
+    ``return_closest_points``.
 
     With ``paired=True`` trajectory ``m`` is measured against neighbor ``m``
     only, instead of against every neighbor: ``neighbor_futures`` is ``(N, T, 4)``,
@@ -103,10 +112,15 @@ def compute_ego_neighbor_signed_clearance(
         npc_flat = npc_exp.reshape(-1, 4, 2)
         out_shape = (N, N_nb, T)
 
+    if overlap_only and return_closest_points:
+        raise ValueError("overlap_only returns no closest points")
     sat_dist_flat = batch_signed_distance_rect(ego_flat, npc_flat)
-    pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)
-    euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)
-    signed_dist_flat = torch.where(sat_dist_flat < 0, sat_dist_flat, euclid_dist_flat)
+    if overlap_only:
+        signed_dist_flat = sat_dist_flat
+    else:
+        pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)
+        euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)
+        signed_dist_flat = torch.where(sat_dist_flat < 0, sat_dist_flat, euclid_dist_flat)
 
     distances = signed_dist_flat.reshape(*out_shape).masked_fill(~nv_exp, 1e6)
     if not return_closest_points:
