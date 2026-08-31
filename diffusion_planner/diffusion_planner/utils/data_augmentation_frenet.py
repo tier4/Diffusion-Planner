@@ -189,8 +189,13 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self._nbr_st = self._nbr_valid = self._nbr_near = None
         B, T, _ = xy.shape
         dev, dtype = xy.device, xy.dtype
-        lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
-        hi = torch.full((B, T), 20.0, device=dev, dtype=dtype)
+        # A candidate's lateral extent is |L| <= dy_max plus the rotation margin
+        # (half_l * 0.35, see the in_corr test), so a bound wider than that can
+        # never change an acceptance. Capping here keeps the test identical and
+        # lets the border search look only that far instead of 20 m.
+        cap = self.dy_max + 0.35 * half_l + 1e-3  # (B,)
+        lo = -cap[:, None].expand(B, T).clone()
+        hi = cap[:, None].expand(B, T).clone()
 
         ls = inputs.get("line_strings")
         if ls is not None and ls.shape[-1] < 4:
@@ -203,7 +208,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             # path point can never tighten them; the shared builder drops those
             # before the ray math (~180 of 1140 slots survive on the pipeline
             # set) and pads to the batch maximum, so the bounds are unchanged.
-            a, e, sv = build_road_border_segments(ls, xy, reach=25.0)
+            reach = float(cap.amax()) + float(half_w.amax()) + 1.0
+            a, e, sv = build_road_border_segments(ls, xy, reach=reach)
             d = e - a
             nx, ny = nrm[..., 0:1], nrm[..., 1:2]  # (B, T, 1)
             dx = d[:, None, :, 0]  # (B, 1, S)
@@ -236,25 +242,32 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             st = torch.cat([past[..., :4], fut4], dim=2)  # (B, N, T, 4)
             valid = st.abs().sum(-1) > 0  # (B, N, T)
             self._nbr_st, self._nbr_valid = st, valid  # reused by the exact-OBB veto
-            l_n = past[:, :, -1, 7][..., None]  # (B, N, 1)
-            w_n = past[:, :, -1, 6][..., None]
-            c = st[..., :2]
-            axi = st[..., 2:4]
+            # Only slots holding a real track can cut the corridor, and they are
+            # ~31 of the 320 padded slots. Flatten to the valid (scene, neighbor)
+            # pairs so the projections below run over those alone, then reduce
+            # back per scene; padding contributed +-inf, i.e. nothing.
+            vb, vn = torch.nonzero(valid.any(-1), as_tuple=True)  # (M,)
+            if vb.numel() == 0:
+                self._nbr_near = valid
+                return lo, hi
+            valid_m = valid[vb, vn]  # (M, T)
+            l_n = past[vb, vn, -1, 7][:, None]  # (M, 1)
+            w_n = past[vb, vn, -1, 6][:, None]
+            c = st[vb, vn, :, :2]  # (M, T, 2)
+            axi = st[vb, vn, :, 2:4]
             per = torch.stack([-axi[..., 1], axi[..., 0]], dim=-1)
-            rel = c - xy[:, None]  # (B, N, T, 2)
+            tan_m, nrm_m = tan[vb], nrm[vb]  # (M, T, 2)
+            half_l_m, half_w_m, wb_m = half_l[vb, None], half_w[vb, None], wb[vb, None]
+            rel = c - xy[vb]  # (M, T, 2)
             # ego xy is base_link (rear axle); the footprint CENTER sits wb/2
             # ahead along the tangent, so shift the longitudinal window there —
             # otherwise a transient neighbor overlapping only the front bumper
             # imposes no lateral cut.
-            lon = (rel * tan[:, None]).sum(-1)  # rear-axle window (validated semantics)
-            lat = (rel * nrm[:, None]).sum(-1)
-            ext_lon = (
-                (tan[:, None] * axi).sum(-1).abs() * l_n + (tan[:, None] * per).sum(-1).abs() * w_n
-            ) / 2
-            ext_lat = (
-                (nrm[:, None] * axi).sum(-1).abs() * l_n + (nrm[:, None] * per).sum(-1).abs() * w_n
-            ) / 2
-            near = valid & (lon.abs() <= half_l[:, None, None] + ext_lon)
+            lon = (rel * tan_m).sum(-1)  # rear-axle window (validated semantics)
+            lat = (rel * nrm_m).sum(-1)
+            ext_lon = ((tan_m * axi).sum(-1).abs() * l_n + (tan_m * per).sum(-1).abs() * w_n) / 2
+            ext_lat = ((nrm_m * axi).sum(-1).abs() * l_n + (nrm_m * per).sum(-1).abs() * w_n) / 2
+            near = valid_m & (lon.abs() <= half_l_m + ext_lon)
             # Same longitudinal test, padded, kept for the exact-OBB veto so it
             # only pairs neighbors that can actually reach the ego box. The
             # augmentation is a lateral offset, so a candidate's longitudinal
@@ -263,22 +276,18 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre
             # shift. Pairs outside it cannot overlap, so the verdicts are
             # unchanged — the canonical OBB check still decides every one.
-            self._nbr_near = valid & (
-                lon.abs()
-                <= half_l[:, None, None] + ext_lon + half_w[:, None, None] + wb[:, None, None] / 2
-            )
+            near_pad = valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2)
+            self._nbr_near = torch.zeros_like(valid)
+            self._nbr_near[vb, vn] = near_pad
             cut_hi = torch.where(
-                near & (lat > 0),
-                lat - ext_lat - half_w[:, None, None],
-                torch.full_like(lat, torch.inf),
+                near & (lat > 0), lat - ext_lat - half_w_m, torch.full_like(lat, torch.inf)
             )
             cut_lo = torch.where(
-                near & (lat < 0),
-                lat + ext_lat + half_w[:, None, None],
-                torch.full_like(lat, -torch.inf),
+                near & (lat < 0), lat + ext_lat + half_w_m, torch.full_like(lat, -torch.inf)
             )
-            hi = torch.minimum(hi, cut_hi.amin(1))
-            lo = torch.maximum(lo, cut_lo.amax(1))
+            idx = vb[:, None].expand_as(cut_hi)
+            hi = hi.scatter_reduce(0, idx, cut_hi, reduce="amin")
+            lo = lo.scatter_reduce(0, idx, cut_lo, reduce="amax")
         return lo, hi
 
     def _veto_true_overlaps(self, inputs, upd, aug_xy, heading):
