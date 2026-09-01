@@ -394,3 +394,30 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         n_cols = min(new_cur.shape[-1], cur.shape[-1])
         cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
         self._aug_rows = upd
+
+
+def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
+    """Build the augmenter from a parsed config, for EVERY entrypoint that trains with it.
+
+    One factory rather than a construction per entrypoint: the GRPO path used to build this
+    with only ``augment_prob`` and ``device``, so it accepted every ``--frenet_*`` flag and
+    then silently trained at the defaults. A run's recorded configuration has to be the
+    configuration it actually used, and that only holds if there is a single place where the
+    flags become an augmenter.
+
+    ``argparse`` hands list fields back as strings, so the numeric coercion lives here too.
+    """
+    return FrenetStatePerturbationTensor(
+        augment_prob=args.augment_prob,
+        device=args.device,
+        n_draws=int(args.frenet_n_draws),
+        dy_max=float(args.frenet_dy_max),
+        dth_max=float(args.frenet_dth_max),
+        knobs=KnobGrid(
+            merge_times=tuple(float(v) for v in args.frenet_merge_times),
+            anchors=tuple(float(v) for v in args.frenet_anchors),
+            acc0_fracs=tuple(float(v) for v in args.frenet_acc0_fracs),
+        ),
+        seed=int(args.frenet_seed),
+        ranked_temp_s=float(args.frenet_ranked_temp_s),
+    )
