@@ -5,7 +5,7 @@
 defaults:
   - /train/accelerator@accelerator: default
   - /train/dataloader@dataloader: default
-  - /train/model@model: large_33m
+  - /train/model@model: xlarge_66m
   - /train/optimizer@optimizer: default
   - /train/scheduler@scheduler: default
   - _self_
