@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from diffusion_planner.data.transforms import (
     PlannerGoalTransform,
     PlannerQuinticHermiteAugmentation,
+    PlannerRigidDataAugmentation,
     PlannerSpeedAugmentation,
 )
 
@@ -129,6 +130,48 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
             result["neighbor_agents_past"], frame["neighbor_agents_past"]
         )
         np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
+
+    def test_pose_augmentation_checks_future_speed_without_current_speed(self) -> None:
+        for augmentation_type in (
+            PlannerRigidDataAugmentation,
+            PlannerQuinticHermiteAugmentation,
+        ):
+            with self.subTest(augmentation_type=augmentation_type.__name__):
+                frame = _frame()
+                frame["ego_agent_past"][-1, 4] = 0.0
+                augmentation = augmentation_type(
+                    lateral_offset_range=(1.0, 1.0),
+                    yaw_offset_range=(0.0, 0.0),
+                    pose_probability=1.0,
+                    pose_augmentation_speed_threshold=0.5,
+                    pose_augmentation_speed_check_index=1,
+                )
+
+                result = augmentation(frame)
+
+                self.assertFalse(
+                    np.array_equal(result["goal_pose"], frame["goal_pose"])
+                )
+
+    def test_pose_augmentation_skips_when_speed_before_index_is_too_low(self) -> None:
+        for augmentation_type in (
+            PlannerRigidDataAugmentation,
+            PlannerQuinticHermiteAugmentation,
+        ):
+            with self.subTest(augmentation_type=augmentation_type.__name__):
+                frame = _frame()
+                frame["ego_agent_future"][1, 4] = 0.4
+                augmentation = augmentation_type(
+                    lateral_offset_range=(1.0, 1.0),
+                    yaw_offset_range=(0.0, 0.0),
+                    pose_probability=1.0,
+                    pose_augmentation_speed_threshold=0.5,
+                    pose_augmentation_speed_check_index=1,
+                )
+
+                result = augmentation(frame)
+
+                self.assertIs(result["goal_pose"], frame["goal_pose"])
 
 
 class PlannerGoalTransformTest(unittest.TestCase):

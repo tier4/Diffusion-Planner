@@ -8,9 +8,11 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
-from .rigid_augmentation import apply_rigid_pose_augmentation
+from .rigid_augmentation import (
+    apply_rigid_pose_augmentation,
+    has_sufficient_future_speed,
+)
 
 
 class PlannerQuinticHermiteAugmentation:
@@ -25,6 +27,7 @@ class PlannerQuinticHermiteAugmentation:
         num_refine: int = 10,
         time_step_s: float = 0.1,
         pose_augmentation_speed_threshold: float = 0.1,
+        pose_augmentation_speed_check_index: int = 20,
     ) -> None:
         self.longitudinal_offset_range = longitudinal_offset_range
         self.lateral_offset_range = lateral_offset_range
@@ -33,14 +36,18 @@ class PlannerQuinticHermiteAugmentation:
         self.num_refine = num_refine
         self.time_step_s = time_step_s
         self.pose_augmentation_speed_threshold = pose_augmentation_speed_threshold
+        self.pose_augmentation_speed_check_index = pose_augmentation_speed_check_index
 
     def __call__(self, input_data: FrameLike) -> Frame:
         """Apply pose augmentation and smoothly reconnect the ego future."""
         output = dict(input_data)
         transformed_ego_future: NDArray[Any] | None = None
-        current_speed = float(input_data["ego_agent_past"][-1, EGO_VELOCITY_INDEX])
         if (
-            current_speed >= self.pose_augmentation_speed_threshold
+            has_sufficient_future_speed(
+                input_data,
+                self.pose_augmentation_speed_check_index,
+                self.pose_augmentation_speed_threshold,
+            )
             and np.random.random() < self.pose_probability
         ):
             longitudinal_offset = 0.0
