@@ -6333,3 +6333,58 @@ def test_direct_config_rejects_removed_knobs(tmp_path):
     path.write_text(_json.dumps(cfg))
     with pytest.raises(ValueError, match="state_class_mode"):
         round_runner._load_config(path)
+
+
+def test_ego_dims_filter_splits_platforms(tmp_path):
+    import json as _json
+
+    from rlvr.autoresearch.tools.build_r2lpl_pools import _ego_dims_worker
+    from rlvr.autoresearch.tools.build_r2lpl_pools import main as pools_main
+
+    def scene(name, wheelbase):
+        p = tmp_path / name
+        np.savez(p, ego_shape=np.array([wheelbase, 7.24, 2.29], dtype=np.float32))
+        return str(p)
+
+    big = scene("big.npz", 4.76)
+    small = scene("small.npz", 2.79)
+    no_shape = tmp_path / "no_shape.npz"
+    np.savez(no_shape, ego_agent_future=np.zeros((80, 3), dtype=np.float32))
+
+    assert _ego_dims_worker((big, 4.0)) == (big, True)
+    assert _ego_dims_worker((small, 4.0)) == (small, False)
+    assert _ego_dims_worker((str(no_shape), 4.0)) is None  # unreadable, not a crash
+
+    scene_list = tmp_path / "pool.json"
+    scene_list.write_text(_json.dumps([big, small, str(no_shape)]))
+    out = tmp_path / "j6_only.json"
+    pools_main(
+        [
+            "ego-dims",
+            "--scene_list",
+            str(scene_list),
+            "--min_wheelbase_m",
+            "4.0",
+            "--workers",
+            "1",
+            "--out",
+            str(out),
+        ]
+    )
+    assert _json.loads(out.read_text()) == [big]
+
+    # a threshold no platform clears must fail loudly, never emit an empty pool
+    with pytest.raises(RuntimeError, match="ego-dims filter kept 0"):
+        pools_main(
+            [
+                "ego-dims",
+                "--scene_list",
+                str(scene_list),
+                "--min_wheelbase_m",
+                "99.0",
+                "--workers",
+                "1",
+                "--out",
+                str(tmp_path / "never.json"),
+            ]
+        )

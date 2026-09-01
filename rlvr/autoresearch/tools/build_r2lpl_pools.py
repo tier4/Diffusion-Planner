@@ -15,6 +15,8 @@ ad-hoc job scripts. Stages (each a subcommand, chainable via files):
   arc-exclude  drop scenes whose recorded pose lies within radius of a region
   takeoff      stopped-input + route-green + departing-future pool (release
                evidence; see build_release_bands for the per-event variant)
+  ego-dims     platform slice: keep scenes whose ego_shape wheelbase exceeds
+               a threshold (geometry-sensitive pools must not mix platforms)
 
 Every threshold is an explicit required argument — there are no defaults for
 values that change the output, so a config cannot silently drift from the
@@ -195,6 +197,47 @@ def cmd_takeoff(args: argparse.Namespace) -> None:
     _write_list(keep, args.out)
 
 
+def _ego_dims_worker(args: tuple[str, float]) -> tuple[str, bool] | None:
+    path, min_wheelbase_m = args
+    try:
+        with np.load(path) as d:
+            wheelbase = float(np.asarray(d["ego_shape"]).reshape(-1)[0])
+    except Exception:
+        return None
+    return (path, wheelbase > min_wheelbase_m)
+
+
+def cmd_ego_dims(args: argparse.Namespace) -> None:
+    """Platform slice by recorded ego dimensions (``ego_shape[0]`` = wheelbase).
+
+    Mixed catalogs interleave platforms, and geometry-sensitive slices
+    (take-off pools, anchors) must not mix them: a row recorded by a smaller
+    vehicle is geometrically invalid for a larger one. Strictly-greater
+    comparison, so the threshold sits BETWEEN the platform wheelbases.
+    """
+    paths = _read_list(args.scene_list)
+    keep: list[str] = []
+    unreadable = 0
+    jobs = ((p, args.min_wheelbase_m) for p in paths)
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        for result in ex.map(_ego_dims_worker, jobs, chunksize=256):
+            if result is None:
+                unreadable += 1
+            elif result[1]:
+                keep.append(result[0])
+    if paths and not keep:
+        raise RuntimeError(
+            f"ego-dims filter kept 0 of {len(paths)} scenes ({unreadable} unreadable) — "
+            "wrong dataset root, NPZs without ego_shape, or a threshold above every "
+            "platform in the catalog"
+        )
+    print(
+        f"[ego-dims] kept {len(keep)}/{len(paths)} "
+        f"(wheelbase > {args.min_wheelbase_m} m; {unreadable} unreadable)"
+    )
+    _write_list(keep, args.out)
+
+
 def cmd_stopgo(args: argparse.Namespace) -> None:
     pool = _read_list(args.stop_pool)
     keep, unreadable = _moving_filter(pool, args.min_end_displacement_m, args.workers)
@@ -364,6 +407,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--workers", type=int, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_takeoff)
+
+    p = sub.add_parser("ego-dims", help="keep scenes whose ego_shape wheelbase exceeds a threshold")
+    p.add_argument("--scene_list", type=Path, required=True)
+    p.add_argument("--min_wheelbase_m", type=float, required=True)
+    p.add_argument("--workers", type=int, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=cmd_ego_dims)
 
     p = sub.add_parser("stopgo", help="moving filter over a stop-events pool (+ optional union)")
     p.add_argument(
