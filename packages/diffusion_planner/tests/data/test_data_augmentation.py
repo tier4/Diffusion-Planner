@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from diffusion_planner.data.transforms import (
+    PlannerEgoShapeAugmentation,
     PlannerGoalTransform,
     PlannerQuinticHermiteAugmentation,
     PlannerRigidDataAugmentation,
@@ -37,6 +38,7 @@ def _frame() -> dict[str, NDArray[np.float32]]:
         "stop_lines": np.zeros((2, 2, 2), dtype=np.float32),
         "road_borders": np.zeros((2, 3, 2), dtype=np.float32),
         "agent_shape": np.ones((2, 2), dtype=np.float32),
+        "ego_shape": np.asarray([3.5, 4.8, 1.8], dtype=np.float32),
     }
     frame["neighbor_agents_past"][0] = np.tile(_pose(3.0, 2.0), (2, 1))
     frame["neighbor_agents_future"][0] = np.tile(_pose(3.0, 2.0), (2, 1))
@@ -257,6 +259,31 @@ class PlannerGoalTransformTest(unittest.TestCase):
         result = transform(frame)
 
         self.assertIs(result["ego_agent_future"], frame["ego_agent_future"])
+
+
+class PlannerEgoShapeAugmentationTest(unittest.TestCase):
+    def test_reduces_ego_shape_without_mutating_input(self) -> None:
+        frame = _frame()
+        original_shape = frame["ego_shape"].copy()
+        augmentation = PlannerEgoShapeAugmentation(probability=1.0)
+
+        with patch(
+            "numpy.random.uniform",
+            return_value=np.asarray([0.9, 0.95, 0.85], dtype=np.float32),
+        ):
+            result = augmentation(frame)
+
+        np.testing.assert_allclose(
+            result["ego_shape"], frame["ego_shape"] * [0.9, 0.95, 0.85]
+        )
+        np.testing.assert_array_equal(frame["ego_shape"], original_shape)
+
+    def test_keeps_ego_shape_when_skipped(self) -> None:
+        frame = _frame()
+
+        result = PlannerEgoShapeAugmentation(probability=0.0)(frame)
+
+        self.assertIs(result["ego_shape"], frame["ego_shape"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from .planner_dataset import (
 from .transforms import (
     FillUnknownTrafficLightFutures,
     PlannerDataNormalizer,
+    PlannerEgoShapeAugmentation,
     PlannerGoalTransform,
     PlannerQuinticHermiteAugmentation,
     PlannerRigidDataAugmentation,
@@ -19,6 +20,7 @@ from .transforms import (
 __all__ = [
     "FillUnknownTrafficLightFutures",
     "PlannerDataNormalizer",
+    "PlannerEgoShapeAugmentation",
     "PlannerGoalTransform",
     "PlannerQuinticHermiteAugmentation",
     "PlannerRigidDataAugmentation",

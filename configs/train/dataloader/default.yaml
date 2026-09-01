@@ -4,6 +4,7 @@ defaults:
   - /train/dataloader/transforms@_global_.transform_configs.speed_augmentation: speed_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.quintic_hermite_augmentation: quintic_hermite_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.goal: goal
+  - /train/dataloader/transforms@_global_.transform_configs.ego_shape_augmentation: ego_shape_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.traffic_light: traffic_light
   - /train/dataloader/transforms@_global_.transform_configs.normalization: normalization
   - _self_
@@ -18,6 +19,7 @@ dataset:
     - ${transform_configs.speed_augmentation}
     - ${transform_configs.quintic_hermite_augmentation}
     - ${transform_configs.goal}
+    - ${transform_configs.ego_shape_augmentation}
     - ${transform_configs.traffic_light}
     - ${transform_configs.normalization}
 # This batch size applies to each process/GPU.

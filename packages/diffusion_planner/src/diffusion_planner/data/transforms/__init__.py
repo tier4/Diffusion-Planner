@@ -1,6 +1,7 @@
 """Ordered NumPy transforms for planner dataset frames."""
 
 from .base import Frame, FrameLike, Transform
+from .ego_shape_augmentation import PlannerEgoShapeAugmentation
 from .goal import PlannerGoalTransform
 from .normalization import PlannerDataNormalizer
 from .quintic_hermite_augmentation import PlannerQuinticHermiteAugmentation
@@ -19,6 +20,7 @@ __all__ = [
     "Frame",
     "FrameLike",
     "PlannerDataNormalizer",
+    "PlannerEgoShapeAugmentation",
     "PlannerGoalTransform",
     "PlannerQuinticHermiteAugmentation",
     "PlannerRigidDataAugmentation",
