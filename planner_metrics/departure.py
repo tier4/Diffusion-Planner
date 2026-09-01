@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from planner_metrics.evaluation import MetricEvaluation
+from planner_metrics.horizon import resolve_horizon_steps
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
 
@@ -77,11 +78,12 @@ def evaluate_departure_with_details(
     """
     horizon_seconds = float(parameters["horizon_seconds"])
     minimum = float(parameters["minimum_displacement_m"])
-    if horizon_seconds <= 0:
-        raise ValueError("departure horizon_seconds must be positive")
-    steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), ego_trajs.shape[1])
-    if steps < 1:
-        raise ValueError("departure horizon selects zero prediction steps")
+    steps = resolve_horizon_steps(
+        horizon_seconds,
+        ego_trajs.shape[1],
+        label="departure",
+        timestep_seconds=_PREDICTION_TIMESTEP_SECONDS,
+    )
     maximum = compute_max_displacement_batch(ego_trajs, data, steps)
     return MetricEvaluation(
         scores={"failure_rate_percent": (maximum < minimum).to(ego_trajs.dtype) * 100.0},

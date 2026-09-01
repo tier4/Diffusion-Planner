@@ -187,11 +187,44 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_centerline_horizon_seconds=getattr(
                     config_obj, "scenario_centerline_horizon_seconds", 8.0
                 ),
+                scenario_simple_turn_horizon_seconds=getattr(
+                    config_obj, "scenario_simple_turn_horizon_seconds", 8.0
+                ),
                 scenario_departure_horizon_seconds=getattr(
                     config_obj, "scenario_departure_horizon_seconds", 3.0
                 ),
                 scenario_departure_minimum_displacement_m=getattr(
                     config_obj, "scenario_departure_minimum_displacement_m", 2.0
+                ),
+                scenario_traffic_light_go_horizon_seconds=getattr(
+                    config_obj, "scenario_traffic_light_go_horizon_seconds", 3.0
+                ),
+                scenario_traffic_light_go_minimum_displacement_m=getattr(
+                    config_obj, "scenario_traffic_light_go_minimum_displacement_m", 2.0
+                ),
+                scenario_pedestrian_yield_horizon_seconds=getattr(
+                    config_obj, "scenario_pedestrian_yield_horizon_seconds", 3.0
+                ),
+                scenario_pedestrian_yield_maximum_forward_progress_m=getattr(
+                    config_obj, "scenario_pedestrian_yield_maximum_forward_progress_m", 0.5
+                ),
+                scenario_vehicle_yield_horizon_seconds=getattr(
+                    config_obj, "scenario_vehicle_yield_horizon_seconds", 3.0
+                ),
+                scenario_vehicle_yield_maximum_forward_progress_m=getattr(
+                    config_obj, "scenario_vehicle_yield_maximum_forward_progress_m", 0.5
+                ),
+                scenario_temporal_stop_horizon_seconds=getattr(
+                    config_obj, "scenario_temporal_stop_horizon_seconds", 3.0
+                ),
+                scenario_temporal_stop_maximum_forward_progress_m=getattr(
+                    config_obj, "scenario_temporal_stop_maximum_forward_progress_m", 0.5
+                ),
+                scenario_obstacle_stop_tolerance_m=getattr(
+                    config_obj, "scenario_obstacle_stop_tolerance_m", 0.5
+                ),
+                scenario_traffic_light_stop_tolerance_m=getattr(
+                    config_obj, "scenario_traffic_light_stop_tolerance_m", 0.5
                 ),
                 batch_size=valid_cfg.batch_size,
                 num_workers=valid_cfg.num_workers,

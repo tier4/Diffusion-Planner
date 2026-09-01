@@ -54,8 +54,19 @@ def test_scenario_based_open_loop_rejects_unknown_metric(tmp_path):
 
 
 def test_scenario_metric_registry_has_initial_metrics():
-    """Keep the initial centerline and departure registry entries explicit."""
-    assert set(METRICS) == {"centerline", "departure", "pedestrian_stop_safety"}
+    """Keep the full registered metric-name set explicit."""
+    assert set(METRICS) == {
+        "centerline",
+        "departure",
+        "traffic_light_go",
+        "simple_turn",
+        "object_avoidance",
+        "pedestrian_yield",
+        "vehicle_yield",
+        "temporal_stop",
+        "obstacle_stop",
+        "traffic_light_stop",
+    }
 
 
 def test_metric_parameters_are_derived_from_train_config_field_names():
@@ -64,11 +75,29 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
     class Args:
         def __init__(self):
             self.scenario_centerline_horizon_seconds = 8.0
+            self.scenario_simple_turn_horizon_seconds = 8.0
             self.scenario_departure_horizon_seconds = 3.0
             self.scenario_departure_minimum_displacement_m = 2.0
+            self.scenario_traffic_light_go_horizon_seconds = 3.0
+            self.scenario_traffic_light_go_minimum_displacement_m = 2.0
+            self.scenario_pedestrian_yield_horizon_seconds = 3.0
+            self.scenario_pedestrian_yield_maximum_forward_progress_m = 0.5
+            self.scenario_vehicle_yield_horizon_seconds = 3.0
+            self.scenario_vehicle_yield_maximum_forward_progress_m = 0.5
+            self.scenario_temporal_stop_horizon_seconds = 3.0
+            self.scenario_temporal_stop_maximum_forward_progress_m = 0.5
+            self.scenario_obstacle_stop_tolerance_m = 0.5
+            self.scenario_traffic_light_stop_tolerance_m = 0.5
 
     assert _metric_parameters_from_args(Args()) == {
         "centerline": {"horizon_seconds": 8.0},
+        "simple_turn": {"horizon_seconds": 8.0},
         "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
-        "pedestrian_stop_safety": {},
+        "traffic_light_go": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
+        "object_avoidance": {},
+        "pedestrian_yield": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
+        "vehicle_yield": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
+        "temporal_stop": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
+        "obstacle_stop": {"tolerance_m": 0.5},
+        "traffic_light_stop": {"tolerance_m": 0.5},
     }

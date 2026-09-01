@@ -13,7 +13,13 @@ The JSON maps each metric name to a list of NPZ files:
 }
 ```
 
-Supported metrics are `centerline`, `departure`, and `pedestrian_stop_safety`. The NPZ files must use the standard planner input format; centerline evaluation requires `route_lanes` or `lanes`, departure evaluation requires `ego_current_state`, and pedestrian-stop safety requires `neighbor_agents_future`, `neighbor_agents_past`, and `ego_shape` in the OR-interval-start NPZ.
+Supported metrics: `centerline`, `departure`, `traffic_light_go`, `simple_turn`, `object_avoidance`, `pedestrian_yield`, `vehicle_yield`, `temporal_stop`, `obstacle_stop`, `traffic_light_stop`. The NPZ files must use the standard planner input format.
+
+- `centerline`, `departure`, `traffic_light_go` require `route_lanes`/`lanes` or `ego_current_state` as documented in `planner_metrics/centerline.py` and `planner_metrics/departure.py`. `traffic_light_go` reuses the `departure` scorer (predicted forward progress must clear a minimum within a horizon) under its own list key/parameters, for scenes where the ego is released from a red light rather than departing from a stop.
+- `simple_turn` requires `ego_agent_future`: same lateral/longitudinal error decomposition as `centerline`, but measured against the GT trajectory instead of the route-lane centerline (route-lane geometry is coarser than the recorded turn shape).
+- `object_avoidance` requires `neighbor_agents_future`, `neighbor_agents_past`, and `ego_shape` in the OR-interval-start NPZ, with at least one valid neighbor of any type.
+- `pedestrian_yield`, `vehicle_yield`, and `temporal_stop` require no extra keys beyond the predicted ego trajectory: the predicted ego must not advance more than a configured forward-progress tolerance within a horizon. `pedestrian_yield`/`vehicle_yield` scenes put a pedestrian/cyclist or vehicle in the ego's path; `temporal_stop` reuses the same scorer under its own list key/parameters for scenes defined by a time-based (rather than actor-based) stop requirement.
+- `obstacle_stop` and `traffic_light_stop` require `route_lanes`/`lanes` and `ego_agent_future`: the predicted stop position along the route must not overshoot the GT stop position by more than a configured tolerance.
 
 Pass the file with:
 

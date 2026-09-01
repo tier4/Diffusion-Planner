@@ -13,12 +13,22 @@ from torch.utils.data import DataLoader
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
-from planner_metrics.pedestrian_stop_safety import evaluate_pedestrian_stop_safety_with_details
+from planner_metrics.gt_lateral_deviation import evaluate_gt_lateral_deviation_with_details
+from planner_metrics.object_avoidance import evaluate_object_avoidance_with_details
+from planner_metrics.stop_overshoot import evaluate_stop_overshoot_with_details
+from planner_metrics.yield_progress import evaluate_yield_progress_with_details
 
 METRICS = {
     "centerline": evaluate_centerline_with_details,
     "departure": evaluate_departure_with_details,
-    "pedestrian_stop_safety": evaluate_pedestrian_stop_safety_with_details,
+    "traffic_light_go": evaluate_departure_with_details,
+    "simple_turn": evaluate_gt_lateral_deviation_with_details,
+    "object_avoidance": evaluate_object_avoidance_with_details,
+    "pedestrian_yield": evaluate_yield_progress_with_details,
+    "vehicle_yield": evaluate_yield_progress_with_details,
+    "temporal_stop": evaluate_yield_progress_with_details,
+    "obstacle_stop": evaluate_stop_overshoot_with_details,
+    "traffic_light_stop": evaluate_stop_overshoot_with_details,
 }
 
 
