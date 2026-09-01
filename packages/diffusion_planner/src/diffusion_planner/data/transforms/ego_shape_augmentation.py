@@ -26,5 +26,8 @@ class PlannerEgoShapeAugmentation:
         scales = np.random.uniform(
             *self.scale_range, size=input_data["ego_shape"].shape
         )
-        output["ego_shape"] = input_data["ego_shape"] * scales
+        output["ego_shape"] = (input_data["ego_shape"] * scales).astype(
+            input_data["ego_shape"].dtype,
+            copy=False,
+        )
         return output

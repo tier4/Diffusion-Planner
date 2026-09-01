@@ -276,6 +276,7 @@ class PlannerEgoShapeAugmentationTest(unittest.TestCase):
         np.testing.assert_allclose(
             result["ego_shape"], frame["ego_shape"] * [0.9, 0.95, 0.85]
         )
+        self.assertEqual(result["ego_shape"].dtype, frame["ego_shape"].dtype)
         np.testing.assert_array_equal(frame["ego_shape"], original_shape)
 
     def test_keeps_ego_shape_when_skipped(self) -> None:
