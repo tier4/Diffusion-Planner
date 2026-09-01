@@ -10,7 +10,7 @@ Ported near-verbatim (numpy) from the reference open-loop analysis script:
 the lane-chaining/arclength-projection geometry is inherently per-sample
 (variable lane count/connectivity) and not easily vectorized across a batch
 — the same reasoning behind the per-sample loop in
-``planner_metrics/neighbor_clearance.py``.
+``planner_metrics/object_avoidance.py``.
 """
 
 from __future__ import annotations
@@ -183,7 +183,7 @@ def evaluate_stop_overshoot_with_details(
 
     passed = overshoot <= tolerance
     return MetricEvaluation(
-        scores={"failure_rate_percent": (~passed).to(ego_trajs.dtype) * 100.0},
+        scores={"success_rate_percent": passed.to(ego_trajs.dtype) * 100.0},
         details={
             "stop_overshoot": {
                 "overshoot_m": overshoot,

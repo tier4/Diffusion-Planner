@@ -38,7 +38,7 @@ def test_stop_overshoot_passes_when_prediction_stops_at_gt_position():
     )
 
     details = result.details["stop_overshoot"]
-    assert result.scores["failure_rate_percent"].tolist() == [0.0]
+    assert result.scores["success_rate_percent"].tolist() == [100.0]
     assert details["overshoot_m"].item() < 1e-3
     assert details["gt_sustained_stop"].tolist() == [1.0]
     assert details["predicted_sustained_stop"].tolist() == [1.0]
@@ -53,7 +53,7 @@ def test_stop_overshoot_fails_when_prediction_overshoots_gt_position():
     )
 
     details = result.details["stop_overshoot"]
-    assert result.scores["failure_rate_percent"].tolist() == [100.0]
+    assert result.scores["success_rate_percent"].tolist() == [0.0]
     assert details["overshoot_m"].item() > 1.5
 
 

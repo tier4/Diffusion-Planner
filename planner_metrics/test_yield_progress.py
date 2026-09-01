@@ -25,7 +25,7 @@ def test_yield_progress_passes_when_ego_stays_within_tolerance():
     ego = _ego_trajs(max_x=0.4)
     result = evaluate_yield_progress_with_details(ego, {}, _PARAMETERS)
 
-    assert result.scores["failure_rate_percent"].tolist() == [0.0]
+    assert result.scores["success_rate_percent"].tolist() == [100.0]
     assert result.details["yield_progress"]["yielded"].tolist() == [True]
 
 
@@ -33,5 +33,5 @@ def test_yield_progress_fails_when_ego_advances_past_tolerance():
     ego = _ego_trajs(max_x=5.0)
     result = evaluate_yield_progress_with_details(ego, {}, _PARAMETERS)
 
-    assert result.scores["failure_rate_percent"].tolist() == [100.0]
+    assert result.scores["success_rate_percent"].tolist() == [0.0]
     assert result.details["yield_progress"]["yielded"].tolist() == [False]

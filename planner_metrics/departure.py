@@ -60,7 +60,7 @@ def evaluate_departure(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> dict[str, torch.Tensor]:
-    """Return departure failure as 0 or 100 percent per trajectory."""
+    """Return departure success as 0 or 100 percent per trajectory."""
     return evaluate_departure_with_details(ego_trajs, data, parameters).scores
 
 
@@ -71,7 +71,7 @@ def evaluate_departure_with_details(
 ) -> MetricEvaluation:
     """Evaluate departure metrics and return per-sample diagnostic details.
 
-    The aggregate score is the departure failure rate in percent. The detail
+    The aggregate score is the departure success rate in percent. The detail
     section additionally records the configured threshold and horizon, the
     maximum displacement observed for each sample, and the resulting departure
     decision.
@@ -86,7 +86,7 @@ def evaluate_departure_with_details(
     )
     maximum = compute_max_displacement_batch(ego_trajs, data, steps)
     return MetricEvaluation(
-        scores={"failure_rate_percent": (maximum < minimum).to(ego_trajs.dtype) * 100.0},
+        scores={"success_rate_percent": (maximum >= minimum).to(ego_trajs.dtype) * 100.0},
         details={
             "departure": {
                 "horizon_seconds": torch.full_like(maximum, horizon_seconds),

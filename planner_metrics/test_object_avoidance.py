@@ -24,7 +24,7 @@ def test_object_avoidance_reports_safe_clearance():
     result = evaluate_object_avoidance_with_details(ego, _data(3.0), {})
 
     assert result.details["object_avoidance"]["collision"].tolist() == [0.0]
-    assert result.scores["failure_rate_percent"].tolist() == [0.0]
+    assert result.scores["success_rate_percent"].tolist() == [100.0]
 
 
 def test_object_avoidance_reports_collision_for_any_neighbor_type():
@@ -33,7 +33,7 @@ def test_object_avoidance_reports_collision_for_any_neighbor_type():
     result = evaluate_object_avoidance_with_details(ego, _data(0.5, vehicle=True), {})
 
     assert result.details["object_avoidance"]["collision"].tolist() == [1.0]
-    assert result.scores["failure_rate_percent"].tolist() == [100.0]
+    assert result.scores["success_rate_percent"].tolist() == [0.0]
 
 
 def test_object_avoidance_rejects_missing_neighbor():

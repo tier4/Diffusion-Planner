@@ -37,7 +37,10 @@ def evaluate_object_avoidance_with_details(
 
     collision = torch.zeros(batch_size, dtype=torch.bool, device=ego_trajs.device)
     clearance = torch.zeros(batch_size, dtype=ego_trajs.dtype, device=ego_trajs.device)
-    failure_rate = torch.zeros(batch_size, dtype=ego_trajs.dtype, device=ego_trajs.device)
+    # Samples skipped below (malformed/missing per-sample data) keep this
+    # default, matching their default collision=False (no clearance evidence
+    # of a collision, so not counted against the success rate).
+    success_rate = torch.full((batch_size,), 100.0, dtype=ego_trajs.dtype, device=ego_trajs.device)
     status = torch.full((batch_size,), 2, dtype=torch.int64, device=ego_trajs.device)
 
     future_all = data["neighbor_agents_future"]
@@ -78,11 +81,11 @@ def evaluate_object_avoidance_with_details(
         clearance[index] = minimum
         collision[index] = minimum <= 0.0
         status[index] = 1 if collision[index] else 0
-        failure_rate[index] = collision[index].to(ego_trajs.dtype) * 100.0
+        success_rate[index] = (~collision[index]).to(ego_trajs.dtype) * 100.0
 
     return MetricEvaluation(
         scores={
-            "failure_rate_percent": failure_rate,
+            "success_rate_percent": success_rate,
         },
         details={
             "object_avoidance": {

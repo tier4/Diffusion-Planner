@@ -184,9 +184,10 @@ def run_scenario_based_open_loop_validation(
 
                 for batch_index in range(batch_size):
                     sample_index = batch_start + batch_index
+                    source_npz = paths[sample_index]
                     detail = {
                         "sample_index": sample_index,
-                        "source_npz": str(paths[sample_index]),
+                        "source_npz": str(source_npz),
                         "metrics": {
                             key: float(value[batch_index].detach().float().item())
                             for key, value in per_sample_scores.items()
@@ -203,19 +204,20 @@ def run_scenario_based_open_loop_validation(
                             else value
                             for key, value in raw_inputs.items()
                         }
+                        # Named after the source NPZ (rather than a bare sample
+                        # index) so the PNG is identifiable without cross-
+                        # referencing details.jsonl; the title matches.
+                        npz_stem = Path(source_npz).stem
+                        png_path = visualization_root / metric_name / f"{npz_stem}.png"
                         visualize_scenario_prediction(
                             sample_inputs,
                             ego_prediction[batch_index],
-                            visualization_root
-                            / metric_name
-                            / f"sample_{batch_start + batch_index:08d}.png",
-                            f"{metric_name} sample {sample_index}",
+                            png_path,
+                            npz_stem,
                             show_neighbors=True,
                             view_range=60.0,
                         )
-                        detail["visualization_png"] = str(
-                            visualization_root / metric_name / f"sample_{sample_index:08d}.png"
-                        )
+                        detail["visualization_png"] = str(png_path)
                     details.append(detail)
 
             if details_root is not None:

@@ -38,11 +38,11 @@ def evaluate_yield_progress_with_details(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> MetricEvaluation:
-    """Evaluate yield failure and return per-sample diagnostic details.
+    """Evaluate yield success and return per-sample diagnostic details.
 
-    The aggregate score is the yield failure rate in percent: a sample fails
-    when the ego's maximum forward progress within ``horizon_seconds``
-    exceeds ``maximum_forward_progress_m``.
+    The aggregate score is the yield success rate in percent: a sample fails
+    to yield when the ego's maximum forward progress within
+    ``horizon_seconds`` exceeds ``maximum_forward_progress_m``.
     """
     del data
     horizon_seconds = float(parameters["horizon_seconds"])
@@ -58,7 +58,7 @@ def evaluate_yield_progress_with_details(
     maximum = compute_max_forward_progress_batch(ego_trajs, steps)
     yielded = maximum <= tolerance
     return MetricEvaluation(
-        scores={"failure_rate_percent": (~yielded).to(ego_trajs.dtype) * 100.0},
+        scores={"success_rate_percent": yielded.to(ego_trajs.dtype) * 100.0},
         details={
             "yield_progress": {
                 "horizon_seconds": torch.full_like(maximum, horizon_seconds),

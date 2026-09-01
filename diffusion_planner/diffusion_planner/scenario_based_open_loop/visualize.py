@@ -53,7 +53,7 @@ def visualize_scenario_prediction(
         prediction_xy[:, 1],
         color="orange",
         linewidth=2,
-        label="scenario-based prediction",
+        label="Diffusion Planner output",
     )
     ax.scatter(
         prediction_xy[-1, 0],
