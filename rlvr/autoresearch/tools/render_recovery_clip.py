@@ -17,7 +17,7 @@ Usage:
     python -m rlvr.autoresearch.tools.render_recovery_clip \\
         --models incumbent:$OUT_A/epoch0200_ema/best_model.pth \\
                  treated:$OUT_B/epoch0200_ema/best_model.pth \\
-        --npz_root <route NPZ dir> --start 1206 --offset 1.0 \\
+        --npz_root <route NPZ dir> --route <key> --start 1206 --offset 1.0 \\
         --drop_objects --hstack --out_dir clips/
 """
 
@@ -125,7 +125,33 @@ def hstack_webm(left: Path, right: Path, out_webm: Path) -> None:
     )
 
 
-def render_one(label, model_path, tl, args, out_root, stem, draw_pool) -> tuple[Path, dict]:
+def select_route(routes: dict, requested: str | None) -> str:
+    """The route key to render, or a loud failure.
+
+    ``find_disagreeing_starts`` keys every pick by ``(route, start, offset)`` because start
+    indices collide between the recorded drives an eval spans. Picking a route here on the
+    tool's own initiative would therefore render a *different place* at the same start index
+    and caption it with the other drive's numbers, so a multi-route root demands ``--route``
+    rather than defaulting to one.
+    """
+    if requested is not None:
+        if requested not in routes:
+            raise SystemExit(
+                f"route {requested!r} not found under --npz_root; available: {sorted(routes)}"
+            )
+        return requested
+    if len(routes) == 1:
+        return next(iter(routes))
+    raise SystemExit(
+        "--npz_root holds more than one route "
+        f"({sorted(routes)}); pass --route with the key find_disagreeing_starts printed, "
+        "because start indices collide between routes"
+    )
+
+
+def render_one(
+    label, model_path, tl, args, out_root, stem, draw_pool, stem_route
+) -> tuple[Path, dict]:
     """One arm's clip plus the verdict for its caption."""
     model, model_args = load_model(model_path, args.device)
     png_dir = out_root / f"{stem}_{label}"
@@ -137,7 +163,7 @@ def render_one(label, model_path, tl, args, out_root, stem, draw_pool) -> tuple[
     settings = dict(ROLLOUT_SETTINGS)
     sign = "L" if args.offset > 0 else "R"
     settings["title_prefix"] = (
-        f"{label}  |  start {args.start}  {sign}{abs(args.offset):g}m"
+        f"{label}  |  {stem_route}  start {args.start}  {sign}{abs(args.offset):g}m"
         f"  |  {'no traffic' if args.drop_objects else 'with traffic'}"
     )
     reproducer_rollout.render_segment(
@@ -172,6 +198,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--models", nargs="+", required=True, help="label:model.pth (1 or 2)")
     ap.add_argument("--npz_root", required=True, help="recorded route NPZ dir (with sidecars)")
+    ap.add_argument(
+        "--route",
+        default=None,
+        help="route key from find_disagreeing_starts; required when --npz_root holds more "
+        "than one recorded drive, since start indices collide between them",
+    )
     ap.add_argument("--start", type=int, required=True, help="start frame")
     ap.add_argument("--offset", type=float, required=True, help="lateral shift, m (sign matters)")
     ap.add_argument("--steps", type=int, default=80)
@@ -187,20 +219,21 @@ def main():
     reproducer_rollout._draw_step = _scoring_draw_step
 
     routes = enumerate_routes(Path(args.npz_root))
-    key = sorted(routes)[0]
+    key = select_route(routes, args.route)
     tl = RouteTimeline(routes[key], sidecar_dir=Path(args.npz_root))
     out_root = Path(args.out_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     sign = "L" if args.offset > 0 else "R"
     world = "notraffic" if args.drop_objects else "traffic"
-    stem = f"start{args.start}_{sign}{abs(args.offset):g}m_{world}"
+    # the route is in the filename so two drives' clips can never be confused
+    stem = f"{key}_start{args.start}_{sign}{abs(args.offset):g}m_{world}"
 
     draw_pool = in_process_draw_pool()
     clips, report = [], {}
     for spec in args.models:
         label, model_path = spec.split(":", 1)
         require_deployable_checkpoint(model_path)
-        webm, verdict = render_one(label, model_path, tl, args, out_root, stem, draw_pool)
+        webm, verdict = render_one(label, model_path, tl, args, out_root, stem, draw_pool, key)
         clips.append(webm)
         report[label] = verdict
         print(
@@ -217,7 +250,11 @@ def main():
         hstack_webm(clips[0], clips[1], pair)
         print("pair:", pair)
 
-    (out_root / f"{stem}_report.json").write_text(json.dumps(report, indent=1))
+    (out_root / f"{stem}_report.json").write_text(
+        json.dumps(
+            {"route": key, "start": args.start, "offset": args.offset, "arms": report}, indent=1
+        )
+    )
 
 
 if __name__ == "__main__":

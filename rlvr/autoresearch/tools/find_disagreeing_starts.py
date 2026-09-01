@@ -91,10 +91,12 @@ def main():
         f"and {args.lose} {'lost' if not args.any_non_recovery else 'not recovering'}"
     )
     for route, start, offset in keys[: args.limit]:
+        # printed in the renderer's own flag form, --route first: start indices collide
+        # between routes, so a pick is only meaningful together with its route
         print(
-            f"  --start {start:<5} --offset {offset:+.1f}   "
-            f"{args.win} {describe(win_rows[(route, start, offset)]):>5} | "
-            f"{args.lose} {describe(lose_rows[(route, start, offset)]):>5}   route={route}"
+            f"  --route {route} --start {start} --offset {offset:+.1f}"
+            f"   # {args.win} {describe(win_rows[(route, start, offset)])}"
+            f" | {args.lose} {describe(lose_rows[(route, start, offset)])}"
         )
 
     if args.out_json:
