@@ -57,16 +57,23 @@ class DiffusionPlanner(nn.Module):
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             dropout=dropout,
+            trajectory_encoder_depth=trajectory_encoder_depth,
+            trajectory_mixer_hidden_dim=trajectory_mixer_hidden_dim,
         )
 
     def predict_turn_indicator(
-        self, input_data: dict[str, torch.Tensor]
+        self,
+        input_data: dict[str, torch.Tensor],
+        trajectory: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict next-indicator logits without training the scene encoder."""
+        """Predict next-indicator logits from a predicted ego trajectory."""
         with torch.no_grad():
             scene, scene_mask = self.scene_encoder(input_data)
         return self.turn_indicator_decoder(
-            scene.detach(), scene_mask, input_data["turn_indicators"][:, -1]
+            scene.detach(),
+            scene_mask,
+            input_data["turn_indicators"][:, -1],
+            trajectory,
         )
 
     @staticmethod
@@ -103,7 +110,10 @@ class DiffusionPlanner(nn.Module):
             x, x_mask, scene, scene_mask, agent_pose, time
         )
         turn_indicator_logits = self.turn_indicator_decoder(
-            scene.detach(), scene_mask, input_data["turn_indicators"][:, -1]
+            scene.detach(),
+            scene_mask,
+            input_data["turn_indicators"][:, -1],
+            input_data["ego_agent_future"][..., :TRAJECTORY_DIM],
         )
         return trajectory, turn_indicator_logits
 
@@ -147,6 +157,9 @@ class DiffusionPlanner(nn.Module):
         trajectory = torch.cat((trajectory[..., :2], yaw), dim=-1)
         trajectory = trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)
         turn_indicator_logits = self.turn_indicator_decoder(
-            scene, scene_mask, input_data["turn_indicators"][:, -1]
+            scene,
+            scene_mask,
+            input_data["turn_indicators"][:, -1],
+            trajectory[:, 0],
         )
         return trajectory, turn_indicator_logits
