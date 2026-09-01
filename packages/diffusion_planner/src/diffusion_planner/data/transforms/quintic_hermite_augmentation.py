@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
-from .rigid_augmentation import _apply_rigid_pose_augmentation
+from .rigid_augmentation import apply_rigid_pose_augmentation
 
 
 class PlannerQuinticHermiteAugmentation:
@@ -48,7 +48,7 @@ class PlannerQuinticHermiteAugmentation:
                 longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
             lateral_offset = np.random.uniform(*self.lateral_offset_range)
             yaw_offset = np.random.uniform(*self.yaw_offset_range)
-            output, transformed_ego_future = _apply_rigid_pose_augmentation(
+            output, transformed_ego_future = apply_rigid_pose_augmentation(
                 input_data, longitudinal_offset, lateral_offset, yaw_offset
             )
 

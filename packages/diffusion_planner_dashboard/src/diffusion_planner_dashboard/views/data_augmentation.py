@@ -112,6 +112,7 @@ def _augment_frame(
 ) -> dict[str, Any]:
     speed_augmentation = PlannerSpeedAugmentation(
         speed_scale_range=(ego_speed_scale, ego_speed_scale),
+        speed_noise_range=(0.0, 0.0),
         probability=1.0,
     )
     pose_augmentation = PlannerQuinticHermiteAugmentation(

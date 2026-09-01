@@ -35,60 +35,67 @@ class PlannerRigidDataAugmentation:
             longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
         lateral_offset = np.random.uniform(*self.lateral_offset_range)
         yaw_offset = np.random.uniform(*self.yaw_offset_range)
-        output, _ = _apply_rigid_pose_augmentation(
+        output, _ = apply_rigid_pose_augmentation(
             input_data, longitudinal_offset, lateral_offset, yaw_offset
         )
         return output
 
 
-def _apply_rigid_pose_augmentation(
+def apply_rigid_pose_augmentation(
     input_data: FrameLike,
     longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
 ) -> tuple[Frame, NDArray[Any] | None]:
     """Move the ego pose and rigidly recenter every spatial scene tensor."""
-    output = dict(input_data)
-    ego_current = input_data["ego_agent_past"][-1, :4]
-    ego_position = ego_current[:2]
-    ego_heading = _normalize(ego_current[2:4])
-    augmented_position = ego_position.copy()
-    augmented_position[0] += longitudinal_offset
-    augmented_position[1] += lateral_offset
-    augmented_heading = _rotate(ego_heading, yaw_offset)
-
+    ego_pose = input_data["ego_agent_past"][-1, :4]
+    shifted_pose = get_shifted_pose(
+        ego_pose, longitudinal_offset, lateral_offset, yaw_offset
+    )
+    output = recenter_frame_to_pose(input_data, shifted_pose[:2], shifted_pose[2:4])
     output["ego_agent_past"] = _transform_pose_tensor(
-        input_data["ego_agent_past"], ego_position, ego_heading
+        input_data["ego_agent_past"], ego_pose[:2], _normalize(ego_pose[2:4])
     )
-    transformed_ego_future: NDArray[Any] | None = None
-    if "ego_agent_future" in input_data:
-        transformed_ego_future = _transform_pose_tensor(
-            input_data["ego_agent_future"], augmented_position, augmented_heading
-        )
-        output["ego_agent_future"] = transformed_ego_future
-    output["neighbor_agents_past"] = _transform_pose_tensor(
-        input_data["neighbor_agents_past"], augmented_position, augmented_heading
-    )
-    if "neighbor_agents_future" in input_data:
-        output["neighbor_agents_future"] = _transform_pose_tensor(
-            input_data["neighbor_agents_future"],
-            augmented_position,
-            augmented_heading,
-        )
-    output["goal_pose"] = _transform_pose_tensor(
-        input_data["goal_pose"], augmented_position, augmented_heading
-    )
-    output["lanes"] = _transform_lane_tensor(
-        input_data["lanes"], augmented_position, augmented_heading
-    )
-    output["route_lanes"] = _transform_lane_tensor(
-        input_data["route_lanes"], augmented_position, augmented_heading
-    )
+    return output, output.get("ego_agent_future")
+
+
+def get_shifted_pose(
+    ego_pose: NDArray[Any],
+    longitudinal_offset: float,
+    lateral_offset: float,
+    yaw_offset: float,
+) -> NDArray[Any]:
+    """Return ego xy and heading after applying local pose offsets."""
+    shifted_pose = np.array(ego_pose, copy=True)
+    shifted_pose[0] += longitudinal_offset
+    shifted_pose[1] += lateral_offset
+    shifted_pose[2:4] = _rotate(_normalize(ego_pose[2:4]), yaw_offset)
+    return shifted_pose
+
+
+def recenter_frame_to_pose(
+    input_data: FrameLike,
+    position: NDArray[Any],
+    heading: NDArray[Any],
+) -> Frame:
+    """Express every spatial frame tensor relative to one ego pose."""
+    output = dict(input_data)
+    for key in (
+        "ego_agent_past",
+        "ego_agent_future",
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "goal_pose",
+    ):
+        if key in input_data:
+            output[key] = _transform_pose_tensor(input_data[key], position, heading)
+    for key in ("lanes", "route_lanes"):
+        if key in input_data:
+            output[key] = _transform_lane_tensor(input_data[key], position, heading)
     for key in ("intersection_area", "stop_lines", "road_borders"):
-        output[key] = _transform_point_tensor(
-            input_data[key], augmented_position, augmented_heading
-        )
-    return output, transformed_ego_future
+        if key in input_data:
+            output[key] = _transform_point_tensor(input_data[key], position, heading)
+    return output
 
 
 def _normalize(vector: NDArray[Any]) -> NDArray[Any]:
