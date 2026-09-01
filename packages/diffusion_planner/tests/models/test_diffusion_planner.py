@@ -125,6 +125,39 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.assertFalse(missing_future[:, 1].any())
         self.assertTrue(missing_future[:, 2].all())
 
+    def test_turn_indicator_loss_backpropagates_into_scene_encoder(self) -> None:
+        agent_count = self.input_data["neighbor_agents_past"].shape[1] + 1
+        trajectory, logits = self.model(
+            torch.randn(1, agent_count, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+            torch.zeros(1, agent_count, dtype=torch.bool),
+            self.input_data,
+            torch.full((1,), 0.5),
+        )
+        del trajectory
+
+        logits.sum().backward()
+
+        self.assertTrue(
+            any(
+                parameter.grad is not None
+                and torch.count_nonzero(parameter.grad).item() > 0
+                for parameter in self.model.scene_encoder.parameters()
+            )
+        )
+
+    def test_turn_indicator_loss_weight_controls_total_loss(self) -> None:
+        losses = compute_diffusion_planner_loss(
+            self.model,
+            self.input_data,
+            time_mean=-0.4,
+            time_std=1.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+            turn_indicator_loss_weight=0.0,
+        )
+
+        torch.testing.assert_close(losses["total"], losses["trajectory"])
+
     def test_position_error_uses_target_longitudinal_lateral_frame(self) -> None:
         error = torch.tensor([[[[1.0, 0.0, 0.25, -0.5]]]])
         target = torch.tensor([[[[0.0, 0.0, 0.0, 1.0]]]])

@@ -110,7 +110,7 @@ class DiffusionPlanner(nn.Module):
             x, x_mask, scene, scene_mask, agent_pose, time
         )
         turn_indicator_logits = self.turn_indicator_decoder(
-            scene.detach(),
+            scene,
             scene_mask,
             input_data["turn_indicators"][:, -1],
             input_data["ego_agent_future"][..., :TRAJECTORY_DIM],

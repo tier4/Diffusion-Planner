@@ -139,6 +139,9 @@ def main(config: DictConfig) -> None:
                 noise_scale=float(config.training.noise_scale),
                 ego_loss_weight=float(config.training.ego_loss_weight),
                 neighbor_loss_weight=float(config.training.neighbor_loss_weight),
+                turn_indicator_loss_weight=float(
+                    config.training.turn_indicator_loss_weight
+                ),
                 turn_indicator_transition_loss_weight=float(
                     config.training.turn_indicator_transition_loss_weight
                 ),
