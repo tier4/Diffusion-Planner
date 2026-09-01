@@ -314,9 +314,14 @@ def candidate_starts(tl: RouteTimeline, args) -> list[int]:
 
 def drive_rollout(
     model, model_args, tl: RouteTimeline, start: int, args, draw_pool, out_dir
-) -> None:
-    """One closed-loop rollout; the per-step hook fills the module's records."""
-    reproducer_rollout.render_segment(
+) -> str:
+    """One closed-loop rollout; the per-step hook fills the module's records.
+
+    Returns how it ended (``goal`` / ``stuck`` / ``diverged`` / ``max_steps``): a rollout
+    cut short for a reason is not the same result as one that ran its full budget, so the
+    row records it.
+    """
+    outcome = reproducer_rollout.render_segment(
         model,
         model_args,
         tl,
@@ -330,6 +335,7 @@ def drive_rollout(
         draw_pool=draw_pool,
         **ROLLOUT_SETTINGS,
     )
+    return str(outcome["terminated"])
 
 
 MIN_SCORED_STEPS = 10
