@@ -165,30 +165,36 @@ def summarize_model(label: str, rows: list[dict]) -> dict:
     no meaningful lateral offset -- and surface instead as ``lost_rate``.
     """
     kept = [r for r in rows if not r["lost"] and r["incut_mean_m"] is not None]
-    if not kept:
-        # No scored curve rollout. `frac_incut` over an all-NaN array would evaluate to 0.0 and
-        # read as "this model never cuts corners", which is a fabricated result, not a no-op.
-        return dict(
-            label=label,
-            n_rollouts=len(rows),
-            lost_rate=_mean_or_none([r["lost"] for r in rows]),
-            recovered_rate=_mean_or_none([r["recovered"] for r in rows]),
-            settle_mean=None,
-            incut_mean_m=None,
-            incut_p50_m=None,
-            incut_p95_m=None,
-            frac_incut=None,
-            left_turns=dict(n=0, incut_mean_m=None, frac_incut=None),
-            right_turns=dict(n=0, incut_mean_m=None, frac_incut=None),
-            n_scored=0,
-        )
-    inc = np.array([r["incut_mean_m"] for r in kept])
     return dict(
         label=label,
         n_rollouts=len(rows),
         lost_rate=_mean_or_none([r["lost"] for r in rows]),
         recovered_rate=_mean_or_none([r["recovered"] for r in rows]),
         settle_mean=_mean_or_none([None if r["lost"] else r["usage_settle"] for r in rows]),
+        n_scored=len(kept),
+        **_incut_summary(kept),
+    )
+
+
+def _incut_summary(kept: list[dict]) -> dict:
+    """The in-cut half of the summary, or all-None when nothing was scored.
+
+    With no scored curve rollout there is no in-cut to report. Computing it anyway over an
+    all-NaN array makes ``frac_incut`` evaluate to 0.0, which reads as "this model never cuts
+    corners" — a fabricated result rather than a missing one.
+    """
+    if not kept:
+        empty = dict(n=0, incut_mean_m=None, frac_incut=None)
+        return dict(
+            incut_mean_m=None,
+            incut_p50_m=None,
+            incut_p95_m=None,
+            frac_incut=None,
+            left_turns=empty,
+            right_turns=dict(empty),
+        )
+    inc = np.array([r["incut_mean_m"] for r in kept])
+    return dict(
         # + = the model sits toward the inside of bends on average
         incut_mean_m=float(inc.mean()),
         incut_p50_m=float(np.percentile(inc, 50)),
@@ -196,7 +202,6 @@ def summarize_model(label: str, rows: list[dict]) -> dict:
         frac_incut=float(np.mean(inc > 0)),
         left_turns=_turn_side(kept, lambda k: k > 0),
         right_turns=_turn_side(kept, lambda k: k < 0),
-        n_scored=len(kept),
     )
 
 
