@@ -25,6 +25,35 @@ class ShardReader:
         self._files = manifest_files(self.root, self.version)
         self._con = duckdb.connect()
 
+    @property
+    def files(self) -> tuple[str, ...]:
+        """The version's manifest parquet paths (read-only public view of the private file list)."""
+        return tuple(self._files)
+
+    def execute(self, sql: str, params: list | None = None) -> pa.Table:
+        """Run a single read-only SQL statement against this reader's DuckDB connection.
+
+        This is the public, guarded way to run SQL against the manifest (e.g. queries needing
+        window functions that `query`'s WHERE-only surface cannot express) — callers must not
+        reach into `_con`/`_files` directly.
+
+        Args:
+            sql: SQL text; `;` is forbidden (single statement only)
+            params: positional parameters for `?` placeholders in `sql`
+
+        Raises:
+            PlanError: if `sql` contains `;` or if DuckDB raises a parser/binder/catalog error
+                (likely a reserved column name not quoted, e.g. `"offset"`)
+        """
+        if ";" in sql:
+            raise PlanError("SQL must be a single statement (no ';')")
+        try:
+            return self._con.execute(sql, params or []).arrow().read_all()
+        except (duckdb.ParserException, duckdb.BinderException, duckdb.CatalogException) as e:
+            raise PlanError(
+                f'invalid SQL ({e}); double-quote reserved column names, e.g. "offset"'
+            ) from e
+
     def query(self, where: str, columns: list[str] | None = None) -> pa.Table:
         """Query manifest with WHERE clause; reserved column names (offset, size) must be double-quoted in WHERE.
 
@@ -35,24 +64,13 @@ class ShardReader:
         Raises:
             PlanError: if WHERE contains `;` or if DuckDB syntax error occurs (likely reserved column not quoted)
         """
-        if ";" in where:
-            raise PlanError("WHERE clause must be a single expression (no ';')")
         if columns:
             cols = ", ".join(f'"{c}"' if c in ("offset", "size") else c for c in columns)
         else:
             cols = "*"
-        try:
-            return (
-                self._con.execute(
-                    f"SELECT {cols} FROM read_parquet(?) WHERE {where} ORDER BY key", [self._files]
-                )
-                .arrow()
-                .read_all()
-            )
-        except (duckdb.ParserException, duckdb.BinderException, duckdb.CatalogException) as e:
-            raise PlanError(
-                f'invalid WHERE clause ({e}); double-quote reserved column names, e.g. "offset"'
-            ) from e
+        return self.execute(
+            f"SELECT {cols} FROM read_parquet(?) WHERE {where} ORDER BY key", [self._files]
+        )
 
     def shard_path(self, partition_id: str, shard_id: int) -> Path:
         e = self.version.partitions[partition_id]

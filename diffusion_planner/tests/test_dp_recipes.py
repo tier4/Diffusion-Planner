@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from diffusion_planner.data_pipeline import packer as PK
 from diffusion_planner.data_pipeline import recipes as R
+from diffusion_planner.data_pipeline.errors import PlanError
 from diffusion_planner.data_pipeline.partition import PartitionRule
 from diffusion_planner.data_pipeline.reader import ShardReader
 from tests.dp_fixtures import make_tree
@@ -76,3 +77,24 @@ def test_psim_per_location_and_concat_keep_duplicates(world, tmp_path):
     assert R.legacy_keys(both, src) == R.keys_for_all(
         rd, [R.root_filter("psim"), R.root_filter("psim")]
     )  # duplicates preserved
+
+
+def test_ranked_handle_composition_is_guarded():
+    """every_n/head_n/psim_per_location take a plain WHERE clause, not a ranked handle: composing
+    them (`every_n(head_n(...), n)`) or colliding with the internal `:::` separator must raise
+    ValueError rather than silently misparsing into wrong SQL.
+    """
+    with pytest.raises(ValueError):
+        R.every_n(R.head_n(R.root_filter("pA"), 4), 3)
+    with pytest.raises(ValueError):
+        R.every_n("a:::b", 2)
+
+
+def test_keys_for_routes_through_reader_guard(world):
+    """keys_for must go through ShardReader's public, guarded execute()/query() — proven here by
+    the `;` guard now firing for a plain WHERE passed straight through.
+    """
+    src, dst = world
+    rd = ShardReader(dst, "v1")
+    with pytest.raises(PlanError):
+        R.keys_for(rd, "1=1; DROP TABLE x")

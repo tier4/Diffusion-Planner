@@ -38,13 +38,27 @@ def root_filter(rel_root: str) -> str:
     return f"(rel_dir LIKE '{rel_root}/%' OR rel_dir = '{rel_root}') AND is_skipped IS NOT TRUE"
 
 
+def _require_plain_where(where: str, fn_name: str) -> None:
+    """Guard against composing ranked handles (`every_n(head_n(...), n)`) or colliding with the
+    internal separator: `where` must be a plain WHERE clause, e.g. from `root_filter` or hand-written
+    SQL — never the string returned by `every_n`/`head_n`/`psim_per_location` themselves.
+    """
+    if where.startswith(_RANKED) or where.startswith(_RANKED_PART) or _SEP in where:
+        raise ValueError(f"{fn_name} takes a plain WHERE clause, not a ranked handle")
+
+
 def every_n(where: str, n: int) -> str:
     """Mirror `filter_json.py <json> --num_filter N --num_filter_mode interval`.
 
     The legacy script keeps `files[::n]` of the (already sorted-by-glob) list — i.e. 0-based
     indices `0, n, 2n, …`. With a 1-based `row_number() OVER (ORDER BY key)` as `rn`, index `0`
     is `rn == 1`, so the kept set is `rn IN {1, n+1, 2n+1, …}`, i.e. `(rn - 1) % n == 0`.
+
+    `where` must be a plain WHERE clause (e.g. from `root_filter`) — this does not compose with
+    `every_n`/`head_n`/`psim_per_location`'s own return values; raises `ValueError` if it looks
+    like one of those ranked handles.
     """
+    _require_plain_where(where, "every_n")
     return f"{_RANKED}{where}{_SEP}(rn - 1) % {n} = 0"
 
 
@@ -54,7 +68,12 @@ def head_n(where: str, n: int) -> str:
     The legacy script keeps `files[: len(files) // n]` — the first `count // n` elements using
     *floor* (integer) division, not ceiling. `count_all // n` below is DuckDB integer division,
     matching Python's `//` for the non-negative counts involved here.
+
+    `where` must be a plain WHERE clause (e.g. from `root_filter`) — this does not compose with
+    `every_n`/`head_n`/`psim_per_location`'s own return values; raises `ValueError` if it looks
+    like one of those ranked handles.
     """
+    _require_plain_where(where, "head_n")
     return f"{_RANKED}{where}{_SEP}rn <= count_all // {n}"
 
 
@@ -67,7 +86,12 @@ def psim_per_location(where: str, n: int, component_k: int) -> str:
     location bucket, sorts the paths and keeps the first `count // n` (floor division, like
     `head_n`). `component_k` is the 1-based `string_split(rel_dir, '/')` index of that directory
     component (e.g. `psim/<location>_seed_.../<bag>` -> `component_k=2`).
+
+    `where` must be a plain WHERE clause (e.g. from `root_filter`) — this does not compose with
+    `every_n`/`head_n`/`psim_per_location`'s own return values; raises `ValueError` if it looks
+    like one of those ranked handles.
     """
+    _require_plain_where(where, "psim_per_location")
     loc = f"regexp_extract(string_split(rel_dir, '/')[{component_k}], '^(.*)_seed_', 1)"
     return f"{_RANKED_PART}{loc}:{where}{_SEP}rn <= count_part // {n}"
 
@@ -80,8 +104,12 @@ def concat(*wheres: str) -> list[str]:
 
 
 def keys_for(reader: ShardReader, where: str) -> list[str]:
-    """Resolve one `where` (or adapter handle) to its ordered list of keys (`ORDER BY key`)."""
-    files = reader._files
+    """Resolve one `where` (or adapter handle) to its ordered list of keys (`ORDER BY key`).
+
+    Routes exclusively through `ShardReader`'s public surface (`query`/`execute`/`files`) so the
+    `;` guard and DuckDB parser/binder/catalog -> `PlanError` wrapping apply uniformly, including
+    to the ranked-handle branches below; no private `_con`/`_files` access.
+    """
     if where.startswith(_RANKED):
         inner, cond = where[len(_RANKED) :].split(_SEP, 1)
         sql = (
@@ -89,6 +117,7 @@ def keys_for(reader: ShardReader, where: str) -> list[str]:
             "count(*) OVER () AS count_all FROM read_parquet(?) WHERE " + inner + ") "
             "WHERE " + cond + " ORDER BY key"
         )
+        table = reader.execute(sql, [list(reader.files)])
     elif where.startswith(_RANKED_PART):
         rest = where[len(_RANKED_PART) :]
         loc, rest = rest.split(":", 1)
@@ -104,9 +133,10 @@ def keys_for(reader: ShardReader, where: str) -> list[str]:
             + cond
             + " ORDER BY key"
         )
+        table = reader.execute(sql, [list(reader.files)])
     else:
-        sql = f"SELECT key FROM read_parquet(?) WHERE {where} ORDER BY key"
-    return [k for (k,) in reader._con.execute(sql, [files]).fetchall()]
+        table = reader.query(where, ["key"])
+    return table.column("key").to_pylist()
 
 
 def keys_for_all(reader: ShardReader, wheres: list[str]) -> list[str]:
