@@ -103,9 +103,11 @@ def test_mixing_statistic_runs_on_fixture(packed):
         seeds=(0, 1),
         epochs=1,
         baseline_seeds=3,
+        max_pad_fraction=1.0,  # tiny fixture: 500 samples in a single slot pads past the 1% default
     )
     assert (
         set(rep["per_C"]) == {1, 4}
         and "js_mean" in rep["per_C"][1]
+        and "pad_fraction" in rep
         and isinstance(rep["pass"], bool)
     )

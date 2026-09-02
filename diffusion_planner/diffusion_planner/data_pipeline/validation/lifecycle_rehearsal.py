@@ -49,14 +49,29 @@ def main(argv=None) -> int:
     )
     results["gc deletes nothing while v1 exists"] = V.gc(root, dry_run=True) == []
     changed = {p for p in v2.partitions if v2.partitions[p].data_rev != v1.partitions[p].data_rev}
+    # `gc` returns shard dirs, manifest files, AND stale build dirs — the only artifacts that
+    # become unreferenced by pruning v1 are the pre-image (v1) shard dir and manifest for each
+    # partition that v2 actually changed (an unchanged partition still points at the same
+    # data_rev/meta_rev from v2, so it stays referenced).
+    expected = set()
+    for p in changed:
+        e1 = v1.partitions[p]
+        expected.add(root.shards_dir_for(e1.pid, e1.data_rev))
+        expected.add(root.manifest_path_for(e1.pid, e1.data_rev, e1.meta_rev))
     V.prune_version(root, "v1")
-    deleted = V.gc(root, dry_run=False)
-    only_v1 = {
-        root.shards_dir_for(v1.partitions[p].pid, v1.partitions[p].data_rev) for p in changed
-    }
-    results["gc after prune deletes exactly v1-only revisions"] = (
-        set(d for d in deleted if d.parent == root.shards_dir) == only_v1
-    )
+    deleted = set(V.gc(root, dry_run=False))
+    unexpected = deleted - expected
+    missing = expected - deleted
+    if unexpected:
+        print(f"  unexpected deletions: {sorted(str(p) for p in unexpected)}")
+    if missing:
+        print(f"  expected deletions that did not happen: {sorted(str(p) for p in missing)}")
+    results["gc after prune deletes exactly v1-only revisions"] = deleted == expected
+    v2_paths = set()
+    for p, e in v2.partitions.items():
+        v2_paths.add(root.shards_dir_for(e.pid, e.data_rev))
+        v2_paths.add(root.manifest_path_for(e.pid, e.data_rev, e.meta_rev))
+    results["v2 shard dirs and manifests still exist after gc"] = all(p.exists() for p in v2_paths)
     ok = all(results.values())
     for k, v in results.items():
         print(f"{'PASS' if v else 'FAIL'}  {k}")
