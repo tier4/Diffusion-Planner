@@ -289,8 +289,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
         feasible, jerk_fut_peak = self._feasibility(xy, nrm, L, in_corr, wb, P)
 
-        feasible &= do_aug[:, None, None]
-        draw_ok = feasible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
+        # `feasible` is physics only: can a car drive this candidate. `admissible` adds the
+        # two reasons a scene may be left alone regardless of physics -- it lost the
+        # augment_prob coin, or it is below the low-speed gate -- so the two questions stay
+        # separable when reading the selection below.
+        admissible = feasible & do_aug[:, None, None]
+        draw_ok = admissible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
         has = draw_ok.any(-1)  # (B,)
         first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
 
@@ -300,7 +304,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             return self.centric_transform(inputs, ego_future, neighbors_future)
 
         aug_xy = self._select_candidate(
-            feasible, jerk_fut_peak, first, merges, has, L, xy, nrm, B, dev, dtype
+            admissible, jerk_fut_peak, first, merges, has, L, xy, nrm, B, dev, dtype
         )
 
         self._write_back(inputs, ego_future, aug_xy, xy, tan, wb, has, P)
