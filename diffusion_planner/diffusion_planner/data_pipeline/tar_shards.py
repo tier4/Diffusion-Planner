@@ -109,13 +109,43 @@ def _index_of(name: str) -> int:
     return int(m.group(1))
 
 
-def iter_members(tar_path: Path) -> Iterator[tuple[int, bytes]]:
-    with tarfile.open(tar_path, mode="r|") as t:
-        for info in t:
-            f = t.extractfile(info)
-            if f is None:
-                raise IntegrityError(f"non-regular member {info.name!r}")
-            yield _index_of(info.name), f.read()
+def iter_members(tar_path: Path, expected_count: int | None = None) -> Iterator[tuple[int, bytes]]:
+    count = 0
+    try:
+        with tarfile.open(tar_path, mode="r|") as t:
+            for info in t:
+                f = t.extractfile(info)
+                if f is None:
+                    raise IntegrityError(f"non-regular member {info.name!r}")
+                payload = f.read()
+                if len(payload) != info.size:
+                    raise IntegrityError(
+                        f"short member {info.name!r}: {len(payload)} of {info.size} bytes"
+                    )
+                yield _index_of(info.name), payload
+                count += 1
+    except tarfile.TarError as e:
+        raise IntegrityError(f"invalid tar archive: {e}") from e
+    except EOFError as e:
+        raise IntegrityError(f"truncated tar archive: {e}") from e
+    except OSError as e:
+        raise IntegrityError(f"i/o error reading tar: {e}") from e
+
+    size = os.path.getsize(tar_path)
+    if size % 512 != 0:
+        raise IntegrityError(f"truncated tar: size {size} not multiple of 512")
+
+    if size >= 1024:
+        with open(tar_path, "rb") as f:
+            f.seek(size - 1024)
+            marker = f.read(1024)
+            if marker != b"\x00" * 1024:
+                raise IntegrityError("missing end-of-archive marker")
+    elif size > 0:
+        raise IntegrityError("tar too small for end-of-archive marker")
+
+    if expected_count is not None and count != expected_count:
+        raise IntegrityError(f"member count mismatch: got {count}, expected {expected_count}")
 
 
 def list_members(tar_path: Path) -> list[tuple[int, int, int]]:

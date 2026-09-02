@@ -59,3 +59,60 @@ def test_short_read_is_integrity_error(tmp_path):
     (name,) = w.close()
     with open(tmp_path / name, "rb") as f, pytest.raises(IntegrityError):
         T.read_member(f, r.offset, r.size + 10_000_000)
+
+
+def test_truncated_mid_payload_raises_integrity_error(tmp_path):
+    payloads = _payloads(3)
+    w = T.ShardWriter(tmp_path, shard_size_bytes=1 << 30)
+    recs = [w.add(p) for p in payloads]
+    (name,) = w.close()
+    tar_path = tmp_path / name
+
+    member1_offset = recs[1].offset
+    truncate_pos = member1_offset + 10
+
+    with open(tar_path, "r+b") as f:
+        f.truncate(truncate_pos)
+
+    with pytest.raises(IntegrityError):
+        list(T.iter_members(tar_path))
+
+
+def test_truncated_mid_header_raises_integrity_error(tmp_path):
+    payloads = _payloads(3)
+    w = T.ShardWriter(tmp_path, shard_size_bytes=1 << 30)
+    recs = [w.add(p) for p in payloads]
+    (name,) = w.close()
+    tar_path = tmp_path / name
+
+    member1_offset = recs[1].offset
+    truncate_pos = member1_offset - 512 + 100
+
+    with open(tar_path, "r+b") as f:
+        f.truncate(truncate_pos)
+
+    with pytest.raises(IntegrityError):
+        list(T.iter_members(tar_path))
+
+    member0_padded_end = recs[0].offset + recs[0].size
+    padded_size = recs[0].size + (-recs[0].size % 512)
+    clean_cut = recs[0].offset - 512 + padded_size
+
+    with open(tar_path, "r+b") as f:
+        f.truncate(clean_cut)
+
+    with pytest.raises(IntegrityError):
+        list(T.iter_members(tar_path))
+
+
+def test_expected_count_mismatch_raises(tmp_path):
+    payloads = _payloads(5)
+    w = T.ShardWriter(tmp_path, shard_size_bytes=1 << 30)
+    [w.add(p) for p in payloads]
+    (name,) = w.close()
+    tar_path = tmp_path / name
+
+    with pytest.raises(IntegrityError, match="member count mismatch"):
+        list(T.iter_members(tar_path, expected_count=99))
+
+    list(T.iter_members(tar_path, expected_count=5))
