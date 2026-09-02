@@ -72,6 +72,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "naturally takes for the drawn offset and horizon.",
         default_factory=lambda: [0.0, -0.5, 0.5, -1.0, 1.0],
     )
+    frenet_recovery_rounds: int = cli(
+        "frenet: rounds of re-selection allowed after a candidate is vetoed for truly "
+        "overlapping a recorded neighbour. Each round burns the losing draw and tries "
+        "the next one. 0 (default) leaves a vetoed scene on plain ground truth.",
+        default=0,
+    )
     frenet_ranked_temp_s: float = cli(
         "frenet: time constant (s) of the merge-horizon sampling; smaller favours "
         "faster convergence more strongly.",
