@@ -132,19 +132,27 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "remove":
             PK.remove(a.dest, a.base, a.tag, a.partitions)
         elif a.cmd == "prune-version":
-            with V.writer_lock(V.DatasetRoot(a.dest)):
-                V.prune_version(V.DatasetRoot(a.dest), a.tag)
+            root = V.DatasetRoot(a.dest)
+            with V.writer_lock(root):
+                V.prune_version(root, a.tag)
         elif a.cmd == "gc":
-            with V.writer_lock(V.DatasetRoot(a.dest)):
-                for p in V.gc(V.DatasetRoot(a.dest), a.dry_run):
+            root = V.DatasetRoot(a.dest)
+            with V.writer_lock(root):
+                for p in V.gc(root, a.dry_run):
                     print(("would delete " if a.dry_run else "deleted ") + str(p))
         elif a.cmd == "scrub":
-            print(PK.scrub(a.dest, a.tag))
+            result = PK.scrub(a.dest, a.tag)
+            print(
+                f"scrub OK: {result['members']} members in {result['shards']} shards, "
+                f"{result['mismatches']} mismatches"
+            )
         elif a.cmd == "export":
             print(f"exported {E.export(a.dest, a.tag, a.where, a.out)} samples to {a.out}")
         elif a.cmd == "keyset":
             root = V.DatasetRoot(a.dest)
-            if a.where:
+            if a.where is not None:
+                if not a.where.strip():
+                    raise ValueError("--where must not be empty")
                 K.materialize_keyset(root, a.tag, a.where, a.out)
             else:
                 K.keyset_from_keys(root, a.tag, json.loads(a.keys_json.read_text()), a.out)

@@ -140,3 +140,28 @@ def test_pack_refuses_existing_tag_with_different_content(tmp_path):
     assert (
         CLI.main(["pack", *common, "--base", "none", "--tag", "v1", "--seed", "7"]) == 1
     )  # different shuffle → different content
+
+
+def test_keyset_empty_where_error(tmp_path, capsys):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    common = ["--source", str(src), "--dest", str(dst), "--partition-depth", "4"]
+    CLI.main(["pack", *common, "--base", "none", "--tag", "v1"])
+    assert (
+        CLI.main(
+            [
+                "keyset",
+                "--dest",
+                str(dst),
+                "--tag",
+                "v1",
+                "--where",
+                "",
+                "--out",
+                str(tmp_path / "ks.parquet"),
+            ]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
