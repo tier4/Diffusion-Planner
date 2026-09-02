@@ -15,6 +15,7 @@ from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
 from planner_metrics.gt_lateral_deviation import evaluate_gt_lateral_deviation_with_details
 from planner_metrics.object_avoidance import evaluate_object_avoidance_with_details
+from planner_metrics.scene_data import extract_metric_scene_data
 from planner_metrics.stop_overshoot import evaluate_stop_overshoot_with_details
 from planner_metrics.yield_progress import evaluate_yield_progress_with_details
 
@@ -161,9 +162,11 @@ def run_scenario_based_open_loop_validation(
                 }
                 prepared = _prepare_validation_inputs(inputs, args, args.device)
                 _, outputs = model(prepared.inputs)
-                # Match validate_model's convention: predictions are physical
-                # coordinates and metric inputs are denormalized.
-                metric_inputs = args.observation_normalizer.inverse(prepared.inputs)
+                # Scorers see only the raw scene fields they declare needing
+                # (planner_metrics.scene_data), never the model's prepared/
+                # normalized batch — this keeps metric evaluation decoupled
+                # from the NPZ-driven model-input pipeline.
+                metric_inputs = extract_metric_scene_data(raw_inputs)
                 batch_size = int(outputs["prediction"].shape[0])
                 ego_prediction = outputs["prediction"][:, 0]
                 batch_start = count

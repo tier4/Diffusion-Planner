@@ -21,6 +21,13 @@ Supported metrics: `centerline`, `departure`, `traffic_light_go`, `simple_turn`,
 - `pedestrian_yield`, `vehicle_yield`, and `temporal_stop` require no extra keys beyond the predicted ego trajectory: the predicted ego must not advance more than a configured forward-progress tolerance within a horizon. `pedestrian_yield`/`vehicle_yield` scenes put a pedestrian/cyclist or vehicle in the ego's path; `temporal_stop` reuses the same scorer under its own list key/parameters for scenes defined by a time-based (rather than actor-based) stop requirement.
 - `obstacle_stop` and `traffic_light_stop` require `route_lanes`/`lanes` and `ego_agent_future`: the predicted stop position along the route must not overshoot the GT stop position by more than a configured tolerance.
 
+Scorers never see the NPZ files or the model's prepared/normalized batch directly.
+`open_loop.py` extracts exactly the fields each scorer needs via
+`planner_metrics.scene_data.extract_metric_scene_data`, so the field-name
+contract listed above is the whole interface — any data source (not just an
+NPZ loader) that supplies a mapping with these keys can be scored the same
+way.
+
 Pass the file with:
 
 ```bash
