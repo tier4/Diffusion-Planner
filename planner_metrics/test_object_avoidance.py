@@ -47,6 +47,17 @@ def test_object_avoidance_converts_legacy_heading_future():
     assert result.details["object_avoidance"]["collision"].tolist() == [1.0]
 
 
+def test_object_avoidance_ignores_padded_neighbor_timesteps():
+    ego = torch.zeros(1, 4, 4)
+    ego[:, :, 2] = 1.0
+    data = _data(3.0)
+    data["neighbor_agents_future"][0, 0, 2:] = 0.0
+
+    result = evaluate_object_avoidance_with_details(ego, data, {})
+
+    assert result.details["object_avoidance"]["collision"].tolist() == [0.0]
+
+
 def test_object_avoidance_rejects_missing_neighbor():
     ego = torch.zeros(1, 4, 4)
     ego[:, :, 2] = 1.0

@@ -72,17 +72,17 @@ def evaluate_object_avoidance_with_details(
             device=ego_trajs.device, dtype=ego_trajs.dtype
         )
         past = past.to(device=ego_trajs.device)
-        nonzero_future = future[..., :2].abs().sum(dim=-1).gt(0).any(dim=-1)
+        neighbor_valid = future[..., :2].abs().sum(dim=-1).gt(0)
+        nonzero_future = neighbor_valid.any(dim=-1)
         if not nonzero_future.any():
             raise ValueError(f"object_avoidance found no valid neighbor for sample {index}")
 
         future = future[nonzero_future]
+        neighbor_valid = neighbor_valid[nonzero_future]
         neighbor_shapes = past[nonzero_future, -1, 6:8].to(
             device=ego_trajs.device, dtype=ego_trajs.dtype
         )
-        neighbor_valid = torch.ones(
-            future.shape[0], steps, dtype=torch.bool, device=ego_trajs.device
-        )
+        neighbor_valid = neighbor_valid.to(device=ego_trajs.device)
         distances = compute_ego_neighbor_signed_clearance(
             ego_trajs[index : index + 1, :steps, :4],
             ego_shape[:3].to(device=ego_trajs.device, dtype=ego_trajs.dtype),
