@@ -66,9 +66,15 @@ def parse_sidecar(raw: bytes | None) -> dict[str, object]:
         if not isinstance(obj["is_skipped"], bool):
             raise SidecarError("is_skipped must be bool")
         fields["is_skipped"] = obj["is_skipped"]
-    info = obj.get("skipping_info")
-    if isinstance(info, dict) and isinstance(info.get("label"), int):
-        fields["skip_label"] = int(info["label"])
+    if "skipping_info" in obj:
+        info = obj["skipping_info"]
+        if not isinstance(info, dict):
+            raise SidecarError("skipping_info must be a dict")
+        if "label" in info:
+            label = info["label"]
+            if isinstance(label, bool) or not isinstance(label, int):
+                raise SidecarError("skip_label must be int")
+            fields["skip_label"] = int(label)
     if "timestamp" in obj:
         if isinstance(obj["timestamp"], bool) or not isinstance(obj["timestamp"], int):
             raise SidecarError("timestamp must be int")

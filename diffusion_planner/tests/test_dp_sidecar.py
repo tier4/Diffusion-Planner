@@ -48,3 +48,51 @@ def test_sidecar_path_and_neighbor_ids(tmp_path):
         "id0b",
     ]
     assert sidecar.neighbor_ids_of(json.dumps(make_sidecar("psim", 0)).encode()) is None
+
+
+def test_bool_rejection_in_numeric_fields():
+    """Bools must be rejected in int/float fields, even though bool is subclass of int."""
+    # timestamp as bool
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"timestamp": True}).encode())
+
+    # float field as bool
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"x": False}).encode())
+
+
+def test_is_skipped_must_be_bool():
+    """is_skipped rejects non-bool values including ints."""
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"is_skipped": 1}).encode())
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"is_skipped": 0}).encode())
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"is_skipped": "yes"}).encode())
+
+
+def test_skip_label_strict_parsing():
+    """skip_label must be an int, not bool or other types."""
+    # bool value for label raises
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"skipping_info": {"label": True}}).encode())
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"skipping_info": {"label": False}}).encode())
+
+    # string value for label raises
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"skipping_info": {"label": "bad"}}).encode())
+
+    # float value for label raises (int guard, not numeric guard)
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"skipping_info": {"label": 1.5}}).encode())
+
+    # missing label in dict is fine (skip_label remains None)
+    f = sidecar.parse_sidecar(json.dumps({"skipping_info": {}}).encode())
+    assert f["skip_label"] is None
+
+    # skipping_info not a dict raises
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"skipping_info": "not-a-dict"}).encode())
+    with pytest.raises(SidecarError):
+        sidecar.parse_sidecar(json.dumps({"skipping_info": [1, 2]}).encode())
