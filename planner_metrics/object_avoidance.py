@@ -12,6 +12,17 @@ def _sample_tensor(value: torch.Tensor, index: int, *, batched: bool) -> torch.T
     return value[index] if batched else value
 
 
+def _future_to_4col(future: torch.Tensor) -> torch.Tensor:
+    if future.shape[-1] == 4:
+        return future
+    if future.shape[-1] != 3:
+        raise ValueError(f"neighbor future must have 3 or 4 columns, got {tuple(future.shape)}")
+    xy = future[..., :2]
+    heading = future[..., 2]
+    widened = torch.cat((xy, heading.cos().unsqueeze(-1), heading.sin().unsqueeze(-1)), dim=-1)
+    return widened.masked_fill(xy.abs().sum(dim=-1, keepdim=True).eq(0), 0.0)
+
+
 @torch.no_grad()
 def evaluate_object_avoidance_with_details(
     ego_trajs: torch.Tensor,
@@ -51,13 +62,15 @@ def evaluate_object_avoidance_with_details(
         future = _sample_tensor(future_all, index, batched=future_all.ndim == 4)
         past = _sample_tensor(past_all, index, batched=past_all.ndim == 4)
         ego_shape = _sample_tensor(shape_all, index, batched=shape_all.ndim == 2)
-        if future.ndim != 3 or future.shape[-1] < 4 or past.ndim != 3:
+        if future.ndim != 3 or future.shape[-1] not in (3, 4) or past.ndim != 3:
             continue
         if past.shape[-1] < 10 or past.shape[1] < 1 or ego_shape.numel() < 3:
             continue
 
         steps = min(prediction_steps, future.shape[1])
-        future = future[:, :steps, :4].to(device=ego_trajs.device, dtype=ego_trajs.dtype)
+        future = _future_to_4col(future[:, :steps]).to(
+            device=ego_trajs.device, dtype=ego_trajs.dtype
+        )
         past = past.to(device=ego_trajs.device)
         nonzero_future = future[..., :2].abs().sum(dim=-1).gt(0).any(dim=-1)
         if not nonzero_future.any():

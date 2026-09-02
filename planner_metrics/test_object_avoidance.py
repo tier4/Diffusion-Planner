@@ -36,6 +36,17 @@ def test_object_avoidance_reports_collision_for_any_neighbor_type():
     assert result.scores["success_rate_percent"].tolist() == [0.0]
 
 
+def test_object_avoidance_converts_legacy_heading_future():
+    ego = torch.zeros(1, 4, 4)
+    ego[:, :, 2] = 1.0
+    data = _data(0.5)
+    data["neighbor_agents_future"] = data["neighbor_agents_future"][..., :3]
+
+    result = evaluate_object_avoidance_with_details(ego, data, {})
+
+    assert result.details["object_avoidance"]["collision"].tolist() == [1.0]
+
+
 def test_object_avoidance_rejects_missing_neighbor():
     ego = torch.zeros(1, 4, 4)
     ego[:, :, 2] = 1.0
