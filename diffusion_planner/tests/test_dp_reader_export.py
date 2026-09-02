@@ -1,9 +1,11 @@
 import json
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 from diffusion_planner.data_pipeline import packer as PK
 from diffusion_planner.data_pipeline.encoding import arrays_bitexact, load_npz_bytes
+from diffusion_planner.data_pipeline.errors import PlanError
 from diffusion_planner.data_pipeline.export import export
 from diffusion_planner.data_pipeline.partition import PartitionRule
 from diffusion_planner.data_pipeline.reader import ShardReader
@@ -41,9 +43,7 @@ def test_query_get_iter_agree(packed):
     assert arrays_bitexact(rd.get(k0), load_npz_bytes((src / f"{k0}.npz").read_bytes()))
     with pytest.raises(KeyError):
         rd.get("nope/x")
-    seen = dict(
-        rd.iter("project_id IS NULL")
-    )  # psim rows have no project_id → seek/skim path both exercised
+    seen = dict(rd.iter("project_id IS NULL"))
     assert set(seen) == {k for k in keys if k.startswith("pB")}
     for k, arrays in seen.items():
         assert arrays_bitexact(arrays, load_npz_bytes((src / f"{k}.npz").read_bytes()))
@@ -71,3 +71,81 @@ def test_export_roundtrip_for_legacy_tools(packed, tmp_path):
             and js["skipping_info"]["label"] == orig["skipping_info"]["label"]
         )
         assert "neighbor_count" not in js
+
+
+def test_query_reserved_column_protection(packed):
+    """Unquoted reserved column name in WHERE raises PlanError; quoted works."""
+    src, dst, keys = packed
+    rd = ShardReader(dst, "latest")
+    # Unquoted "offset" should raise PlanError
+    with pytest.raises(PlanError):
+        rd.query("offset > 0")
+    # Quoted "offset" should work and return all rows (all offsets > 0)
+    t = rd.query('"offset" > 0', ["key"])
+    assert t.num_rows == len(keys)
+
+
+def test_query_rejects_semicolon(packed):
+    """WHERE clause with ; is rejected as PlanError."""
+    src, dst, keys = packed
+    rd = ShardReader(dst, "latest")
+    with pytest.raises(PlanError):
+        rd.query("1=1; DROP TABLE x")
+
+
+def test_iter_seek_and_skim_both_exercised(packed):
+    """Verify iter() uses seek path for low selectivity and skim path for high selectivity."""
+    from diffusion_planner.data_pipeline import defaults as DP_DEFAULTS
+    from diffusion_planner.data_pipeline import tar_shards as T
+
+    src, dst, keys = packed
+    rd = ShardReader(dst, "latest")
+
+    # Find all keys and group by shard
+    all_rows = rd.query("1=1", ["key", "partition_id", "shard_id"]).to_pylist()
+    by_shard: dict[tuple[str, int], list[str]] = {}
+    by_shard_full: dict[tuple[str, int], list[dict]] = {}
+    for r in all_rows:
+        by_shard.setdefault((r["partition_id"], r["shard_id"]), []).append(r["key"])
+        by_shard_full.setdefault((r["partition_id"], r["shard_id"]), []).append(r)
+
+    # Find a shard with multiple keys
+    shard_info = next(
+        ((ks, rs) for ks, rs in zip(by_shard.values(), by_shard_full.values()) if len(ks) >= 2),
+        None,
+    )
+    if shard_info is None:
+        pytest.skip("No shard with >= 2 keys for seek/skim test")
+
+    shard_with_multi, shard_rows_full = shard_info
+
+    # Get the partition and shard IDs from the first row
+    pid = shard_rows_full[0]["partition_id"]
+    sid = shard_rows_full[0]["shard_id"]
+
+    # Test seek path: select 1 key with high threshold (so 1/N < threshold), monkeypatch iter_members
+    k_single = shard_with_multi[0]
+    with patch("diffusion_planner.data_pipeline.reader.SEEK_THRESHOLD", 0.5):
+        # With threshold=0.5, selecting 1 key gives selectivity 1/N < 0.5 (for N >= 2)
+        with patch(
+            "diffusion_planner.data_pipeline.reader.T.iter_members",
+            side_effect=RuntimeError("skim should not be used"),
+        ):
+            seen = dict(rd.iter(f"key = '{k_single}'"))
+            assert set(seen) == {k_single}
+            assert arrays_bitexact(
+                seen[k_single], load_npz_bytes((src / f"{k_single}.npz").read_bytes())
+            )
+
+    # Test skim path: select all keys in shard with low threshold, monkeypatch read_member
+    key_list = ", ".join(f"'{k}'" for k in shard_with_multi)
+    with patch("diffusion_planner.data_pipeline.reader.SEEK_THRESHOLD", 0.1):
+        # With threshold=0.1, selecting all keys gives selectivity 1.0 >= 0.1 → skim
+        with patch(
+            "diffusion_planner.data_pipeline.reader.T.read_member",
+            side_effect=RuntimeError("seek should not be used"),
+        ):
+            seen = dict(rd.iter(f"key IN ({key_list})"))
+            assert set(seen) == set(shard_with_multi)
+            for k in seen:
+                assert arrays_bitexact(seen[k], load_npz_bytes((src / f"{k}.npz").read_bytes()))

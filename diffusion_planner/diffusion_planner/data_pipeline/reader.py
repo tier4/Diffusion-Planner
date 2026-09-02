@@ -26,19 +26,33 @@ class ShardReader:
         self._con = duckdb.connect()
 
     def query(self, where: str, columns: list[str] | None = None) -> pa.Table:
+        """Query manifest with WHERE clause; reserved column names (offset, size) must be double-quoted in WHERE.
+
+        Args:
+            where: WHERE clause expression; `;` is forbidden; reserved names like `offset` must be `"offset"`
+            columns: columns to select (auto-quoted if reserved); None for all
+
+        Raises:
+            PlanError: if WHERE contains `;` or if DuckDB syntax error occurs (likely reserved column not quoted)
+        """
         if ";" in where:
             raise PlanError("WHERE clause must be a single expression (no ';')")
         if columns:
             cols = ", ".join(f'"{c}"' if c in ("offset", "size") else c for c in columns)
         else:
             cols = "*"
-        return (
-            self._con.execute(
-                f"SELECT {cols} FROM read_parquet(?) WHERE {where} ORDER BY key", [self._files]
+        try:
+            return (
+                self._con.execute(
+                    f"SELECT {cols} FROM read_parquet(?) WHERE {where} ORDER BY key", [self._files]
+                )
+                .arrow()
+                .read_all()
             )
-            .arrow()
-            .read_all()
-        )
+        except duckdb.Error as e:
+            raise PlanError(
+                f'invalid WHERE clause ({e}); double-quote reserved column names, e.g. "offset"'
+            ) from e
 
     def shard_path(self, partition_id: str, shard_id: int) -> Path:
         e = self.version.partitions[partition_id]
