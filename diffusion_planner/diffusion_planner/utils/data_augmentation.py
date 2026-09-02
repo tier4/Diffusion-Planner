@@ -404,13 +404,16 @@ class StatePerturbation:
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
 
-        # ego past
-        # inputs["ego_agent_past"][..., :2] = vector_transform(
-        #     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
-        # )
-        # inputs["ego_agent_past"][..., 2:4] = vector_transform(
-        #     inputs["ego_agent_past"][..., 2:4], transform_matrix
-        # )
+        # ego past — only for augmenters that rewrite the history polyline in the
+        # pre-perturbation frame (frenet). Quintic/bridge leave the GT past untouched
+        # and rely on it staying numerically anchored at the origin.
+        if getattr(self, "_transform_ego_past", False):
+            inputs["ego_agent_past"][..., :2] = vector_transform(
+                inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+            )
+            inputs["ego_agent_past"][..., 2:4] = vector_transform(
+                inputs["ego_agent_past"][..., 2:4], transform_matrix
+            )
 
         ego_past4d = inputs["ego_agent_past"]
         ego_future4d = torch.cat(

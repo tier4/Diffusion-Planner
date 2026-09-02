@@ -32,16 +32,18 @@ def _build_ego_bbox_corners(
     heading_unit = heading / heading.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     ego_xy = ego_trajs[..., :2]
 
-    wheel_base = ego_shape[0]
-    ego_length = ego_shape[1]
-    ego_width = ego_shape[2]
+    # (3,) = one shape for every trajectory; (N, 3) = a shape per trajectory, so
+    # a batch mixing vehicle types can be measured in a single call.
+    shape = ego_shape if ego_shape.dim() > 1 else ego_shape[None]
+    wheel_base = shape[:, 0]
+    ego_length = shape[:, 1]
+    ego_width = shape[:, 2]
 
-    cog_to_rear = 0.5 * wheel_base
+    cog_to_rear = (0.5 * wheel_base)[:, None, None]
     ego_center_xy = ego_xy + heading_unit * cog_to_rear
 
-    half_length = ego_length / 2.0
-    half_width = ego_width / 2.0
-    half_sizes = torch.tensor([half_length, half_width], device=device, dtype=dtype).expand(N, T, 2)
+    half_sizes = torch.stack([ego_length / 2.0, ego_width / 2.0], dim=-1)  # (N or 1, 2)
+    half_sizes = half_sizes.to(device=device, dtype=dtype)[:, None, :].expand(N, T, 2)
 
     corner_signs = torch.tensor(
         [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]],
@@ -973,6 +975,59 @@ def _classify_outer_boundaries(
     return candidate_outer, outward
 
 
+def build_road_border_segments(
+    line_strings: torch.Tensor,
+    query_xy: torch.Tensor,
+    reach: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Road-border segments per scene, reduced to those a query can reach.
+
+    Batched over scenes, so a training batch whose rows each carry their own map
+    is one call. Segments are consecutive valid point pairs within a polyline
+    flagged as road border (channel 3), the same construction
+    ``compute_road_border_penalty`` uses; they are then reduced the same way it
+    reduces its own set, by dropping segments too far from the query to matter.
+
+    A segment is kept when its closest point lies within ``reach`` of the query
+    bounding-box centre, plus the box half-diagonal. Every query point is within
+    the half-diagonal of that centre, so a dropped segment is further than
+    ``reach`` from every query point and cannot affect a result measured within
+    ``reach``. The returned width is the batch maximum, so nothing is truncated.
+
+    Args:
+        line_strings: (B, L, P, >=4) map polylines; channel 3 flags road border.
+        query_xy: (B, Q, 2) points the caller will measure from.
+        reach: max distance from a query point at which a segment can matter.
+
+    Returns:
+        seg_a, seg_b: (B, M, 2) segment endpoints.
+        seg_valid: (B, M) True where the slot holds a usable border segment.
+    """
+    pts = line_strings[..., :2]
+    is_border = (line_strings[..., 3] > 0.5).any(-1)  # (B, L)
+    has_coords = pts.norm(dim=-1) > 1e-6
+    seg_a = pts[:, :, :-1, :].flatten(1, 2)  # (B, S, 2)
+    seg_b = pts[:, :, 1:, :].flatten(1, 2)
+    seg_valid = (has_coords[:, :, :-1] & has_coords[:, :, 1:] & is_border[:, :, None]).flatten(
+        1, 2
+    )  # (B, S)
+
+    lo, hi = query_xy.amin(1), query_xy.amax(1)  # (B, 2)
+    ctr = (lo + hi) / 2
+    span = ((hi - lo) / 2).norm(dim=-1) + reach  # (B,)
+    seg = seg_b - seg_a
+    t = (((ctr[:, None] - seg_a) * seg).sum(-1) / (seg * seg).sum(-1).clamp_min(1e-9)).clamp(0, 1)
+    dist = (seg_a + t[..., None] * seg - ctr[:, None]).norm(dim=-1)  # (B, S)
+    keep = seg_valid & (dist <= span[:, None])
+
+    width = int(keep.sum(1).amax())
+    if width == 0:
+        return seg_a[:, :1], seg_b[:, :1], keep[:, :1]
+    order = keep.to(torch.uint8).argsort(dim=1, descending=True, stable=True)[:, :width]
+    idx = order[..., None].expand(-1, -1, 2)
+    return seg_a.gather(1, idx), seg_b.gather(1, idx), keep.gather(1, order)
+
+
 __all__ = [
     "_build_ego_bbox_corners",
     "_LN_X",
@@ -997,4 +1052,5 @@ __all__ = [
     "_points_inside_intersection_areas",
     "_point_to_segments_signed_min_dist",
     "_classify_outer_boundaries",
+    "build_road_border_segments",
 ]

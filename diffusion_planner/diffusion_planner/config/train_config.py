@@ -41,10 +41,46 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
 
     use_data_augment: bool = True
     augment_prob: float = 0.5
-    augment_type: Literal["quintic", "bridge"] = "quintic"
+    augment_type: Literal["quintic", "bridge", "frenet"] = cli(
+        "data augmentation method: quintic (default) = fixed-offset quintic bridge; "
+        "bridge = extended bridge perturbation; frenet = corridor-constrained lateral "
+        "perturbation with feasibility filtering and history rewrite.",
+        default="quintic",
+    )
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True
+
+    # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---
+    # The defaults are the measured configuration: narrowing the offsets to the
+    # quintic range or dropping the ranked merge selection each cost most of the
+    # closed-loop benefit, so treat these as a sweep handle, not a tuning dial.
+    frenet_n_draws: int = cli("frenet: joint (offset, heading) draws per scene.", default=16)
+    frenet_dy_max: float = cli("frenet: maximum lateral offset in metres.", default=2.0)
+    frenet_dth_max: float = cli("frenet: maximum heading offset in radians.", default=0.17)
+    frenet_merge_times: list[float] = cli(
+        "frenet: horizons (s) at which a candidate may rejoin the recorded path; "
+        "one is sampled per scene among the feasible ones.",
+        default_factory=lambda: [2.0, 3.0, 4.0, 5.0],
+    )
+    frenet_anchors: list[float] = cli(
+        "frenet: how far back (s) the rewritten history departs from the recording.",
+        default_factory=lambda: [2.0, 3.0],
+    )
+    frenet_acc0_fracs: list[float] = cli(
+        "frenet: initial lateral curvature, as a fraction of the value a quintic "
+        "naturally takes for the drawn offset and horizon.",
+        default_factory=lambda: [0.0, -0.5, 0.5, -1.0, 1.0],
+    )
+    frenet_ranked_temp_s: float = cli(
+        "frenet: time constant (s) of the merge-horizon sampling; smaller favours "
+        "faster convergence more strongly.",
+        default=1.0,
+    )
+    frenet_seed: int = cli(
+        "frenet: base RNG seed for the augmentation draws (offset per DDP rank).",
+        default=0,
+    )
     normalization_file_path: str = "normalization.json"
 
     train_subsample_step: int = 1
