@@ -22,12 +22,23 @@ FileStat = tuple[int, int, int]
 class PartitionRule:
     depth: int | None = None
     regex: str | None = None
+    _compiled_regex: re.Pattern | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         if (self.depth is None) == (self.regex is None):
             raise ValueError("exactly one of depth / regex must be given")
         if self.depth is not None and self.depth < 1:
             raise ValueError("depth must be >= 1")
+        if self.regex is not None:
+            try:
+                compiled = re.compile(self.regex)
+            except re.error as e:
+                raise ValueError(f"invalid regex: {e}")
+            if "partition" not in compiled.groupindex and compiled.groups == 0:
+                raise ValueError(
+                    "regex must have named group 'partition' or at least one capturing group"
+                )
+            object.__setattr__(self, "_compiled_regex", compiled)
 
     def partition_of(self, key: str) -> str:
         if self.depth is not None:
@@ -35,10 +46,12 @@ class PartitionRule:
             if len(parts) - 1 < self.depth:  # key's last component is the frame stem
                 raise PlanError(f"key {key!r} shallower than partition depth {self.depth}")
             return "/".join(parts[: self.depth])
-        m = re.match(self.regex, key)
+        m = self._compiled_regex.match(key)
         if not m:
             raise PlanError(f"key {key!r} does not match partition regex")
-        return m.group("partition") if "partition" in m.groupdict() else m.group(1)
+        return (
+            m.group("partition") if "partition" in self._compiled_regex.groupindex else m.group(1)
+        )
 
     @property
     def rule_hash(self) -> str:
@@ -175,10 +188,9 @@ class InspectReport:
 def inspect_tree(source: Path, rule: PartitionRule, include, exclude) -> InspectReport:
     source = Path(source).resolve()
     rep = InspectReport()
-    npz_rels = [
-        r for r in _rel_npz_paths(source, None) if is_selected(r, list(include), list(exclude))
-    ]
-    npz_stems = {r[:-4] for r in npz_rels}
+    all_npz_rels = _rel_npz_paths(source, None)
+    npz_rels = [r for r in all_npz_rels if is_selected(r, list(include), list(exclude))]
+    npz_stems = {r[:-4] for r in all_npz_rels}
     for js in source.rglob("*.json"):
         if js.relative_to(source).as_posix()[:-5] not in npz_stems:
             rep.non_sidecar_jsons += 1

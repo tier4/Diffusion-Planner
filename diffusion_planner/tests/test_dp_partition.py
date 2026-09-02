@@ -73,3 +73,24 @@ def test_inspect_report(tmp_path):
     assert rep.partitions["projA/mapX/manual/2026-01-01"] == 3
     assert "<DATE>" in rep.dir_name_patterns[4]
     assert "npz" in rep.render() and "partitions" in rep.render()
+
+
+def test_regex_validation_requires_groups():
+    with pytest.raises(ValueError):
+        P.PartitionRule(regex=r"^[^/]+/[^/]+")
+    with pytest.raises(ValueError):
+        P.PartitionRule(regex=r"(")
+
+
+def test_discover_path_list_accepts_source_relative(tmp_path):
+    keys = make_tree(tmp_path, LAYOUT[:1])
+    rel_lst = [f"{k}.npz" for k in keys]
+    parts = P.discover(tmp_path, P.PartitionRule(depth=4), path_list=rel_lst)
+    assert sum(len(v) for v in parts.values()) == 3
+
+
+def test_inspect_tree_non_sidecar_jsons_counts_only_truly_orphan(tmp_path):
+    make_tree(tmp_path, LAYOUT[:2] + LAYOUT[2:3])
+    (tmp_path / "projA/mapX/auto/2026-01-03/t1/control_mode_4_intervals.json").write_text("{}")
+    rep = P.inspect_tree(tmp_path, P.PartitionRule(depth=4), include=["*/manual/*"], exclude=[])
+    assert rep.non_sidecar_jsons == 1
