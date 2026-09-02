@@ -165,3 +165,29 @@ def test_keyset_empty_where_error(tmp_path, capsys):
     )
     err = capsys.readouterr().err
     assert err.startswith("error:")
+
+
+def test_keyset_reserved_column_where_error(tmp_path, capsys):
+    """Finding #7: pack_shards keyset --where 'offset > 0' -> exit 1 with 'error:' on stderr."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    common = ["--source", str(src), "--dest", str(dst), "--partition-depth", "4"]
+    CLI.main(["pack", *common, "--base", "none", "--tag", "v1"])
+    assert (
+        CLI.main(
+            [
+                "keyset",
+                "--dest",
+                str(dst),
+                "--tag",
+                "v1",
+                "--where",
+                "offset > 0",
+                "--out",
+                str(tmp_path / "ks.parquet"),
+            ]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert err.startswith("error:")

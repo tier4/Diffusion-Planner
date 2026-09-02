@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import duckdb
+
 from diffusion_planner.data_pipeline import export as E
 from diffusion_planner.data_pipeline import keyset as K
 from diffusion_planner.data_pipeline import packer as PK
@@ -58,7 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replace-all", action="store_true")
     p.add_argument("--shard-size-gb", type=float, default=SHARD_SIZE_BYTES / 2**30)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--workers", type=int, default=1)
     p.add_argument(
         "--keep-skipped",
         action="store_true",
@@ -122,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
                     replace_all=a.replace_all,
                     shard_size_bytes=max(int(a.shard_size_gb * 2**30), 1),
                     seed=a.seed,
-                    workers=a.workers,
                     drop_skipped=not a.keep_skipped,
                     with_neighbor_ids=a.with_neighbor_ids,
                     force=a.force,
@@ -158,7 +158,14 @@ def main(argv: list[str] | None = None) -> int:
                 K.keyset_from_keys(root, a.tag, json.loads(a.keys_json.read_text()), a.out)
             print(f"wrote {a.out}")
         return 0
-    except (PipelineError, ValueError, FileNotFoundError, KeyError) as e:
+    except (
+        PipelineError,
+        ValueError,
+        FileNotFoundError,
+        KeyError,
+        duckdb.Error,
+        TimeoutError,
+    ) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

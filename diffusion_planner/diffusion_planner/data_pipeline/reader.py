@@ -12,6 +12,7 @@ import pyarrow as pa
 from diffusion_planner.data_pipeline import encoding
 from diffusion_planner.data_pipeline import tar_shards as T
 from diffusion_planner.data_pipeline.defaults import SEEK_THRESHOLD
+from diffusion_planner.data_pipeline.duck import run_query
 from diffusion_planner.data_pipeline.errors import PlanError
 from diffusion_planner.data_pipeline.keyset import manifest_files
 from diffusion_planner.data_pipeline.versioning import DatasetRoot
@@ -45,14 +46,7 @@ class ShardReader:
             PlanError: if `sql` contains `;` or if DuckDB raises a parser/binder/catalog error
                 (likely a reserved column name not quoted, e.g. `"offset"`)
         """
-        if ";" in sql:
-            raise PlanError("SQL must be a single statement (no ';')")
-        try:
-            return self._con.execute(sql, params or []).arrow().read_all()
-        except (duckdb.ParserException, duckdb.BinderException, duckdb.CatalogException) as e:
-            raise PlanError(
-                f'invalid SQL ({e}); double-quote reserved column names, e.g. "offset"'
-            ) from e
+        return run_query(self._con, sql, params)
 
     def query(self, where: str, columns: list[str] | None = None) -> pa.Table:
         """Query manifest with WHERE clause; reserved column names (offset, size) must be double-quoted in WHERE.
@@ -102,7 +96,7 @@ class ShardReader:
             total = len(T.list_members(path))
             if len(rows) / max(total, 1) >= SEEK_THRESHOLD:
                 wanted = {r["sample_index_in_shard"]: r["key"] for r in rows}
-                for idx, payload in T.iter_members(path):
+                for idx, _off, _sz, payload in T.iter_members(path):
                     if idx in wanted:
                         yield wanted[idx], decode(payload)
             else:

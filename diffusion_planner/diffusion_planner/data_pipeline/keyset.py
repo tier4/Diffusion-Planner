@@ -12,6 +12,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from diffusion_planner.data_pipeline.duck import run_query
 from diffusion_planner.data_pipeline.errors import KeysetMismatchError, PlanError
 from diffusion_planner.data_pipeline.versioning import DatasetRoot, Version
 
@@ -48,15 +49,11 @@ def _write(out_path: Path, table: pa.Table, root: DatasetRoot, tag: str, where: 
 
 
 def materialize_keyset(root: DatasetRoot, version_tag: str, where: str, out_path: Path) -> Path:
-    if ";" in where:
-        raise PlanError("WHERE clause must be a single expression (no ';')")
     v = root.read_version(version_tag)
     files = manifest_files(root, v)
     con = duckdb.connect()
-    table = (
-        con.execute(f"SELECT {_COLS} FROM read_parquet(?) WHERE {where} ORDER BY key", [files])
-        .arrow()
-        .read_all()
+    table = run_query(
+        con, f"SELECT {_COLS} FROM read_parquet(?) WHERE {where} ORDER BY key", [files]
     )
     return _write(Path(out_path), table, root, v.tag, where)
 
@@ -69,14 +66,11 @@ def keyset_from_keys(root: DatasetRoot, version_tag: str, keys: list[str], out_p
     con = duckdb.connect()
     con.register("wanted", pa.table({"key": pa.array(keys, pa.string())}))
     files = manifest_files(root, v)
-    table = (
-        con.execute(
-            f"SELECT m.key, {', '.join('m.' + c for c in _COLS.split(', '))} FROM read_parquet(?) m "
-            "JOIN wanted w ON m.key = w.key ORDER BY m.key",
-            [files],
-        )
-        .arrow()
-        .read_all()
+    table = run_query(
+        con,
+        f"SELECT m.key, {', '.join('m.' + c for c in _COLS.split(', '))} FROM read_parquet(?) m "
+        "JOIN wanted w ON m.key = w.key ORDER BY m.key",
+        [files],
     )
     found = set(table.column("key").to_pylist())
     unknown = [k for k in keys if k not in found][:5]
