@@ -160,3 +160,10 @@ def test_journal_phases(tmp_path):
     ]
     with pytest.raises(ValueError):
         j.advance("built")  # phases are monotonic
+
+
+def test_gc_on_empty_directory(tmp_path):
+    """gc() on a bare root should return [] without raising."""
+    root = V.DatasetRoot(tmp_path)
+    result = V.gc(root, dry_run=True)
+    assert result == []

@@ -1,4 +1,8 @@
-"""Dataset root layout, immutable versions, catalog, writer lock, journal, GC (spec §3)."""
+"""Dataset root layout, immutable versions, catalog, writer lock, journal, GC (spec §3).
+
+All mutating operations (write_version, set_latest, gc, prune_version) are performed by callers
+under the writer_lock context manager to ensure dataset consistency.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ import os
 import shutil
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from diffusion_planner.data_pipeline.errors import VersionExistsError
@@ -116,6 +120,7 @@ class DatasetRoot:
         return hashlib.sha256((self.versions_dir / f"{tag}.json").read_bytes()).hexdigest()
 
     def write_version(self, v: Version) -> None:
+        """Write a version file (create-if-absent, immutable). Caller must hold `writer_lock(root)`."""
         final = self.versions_dir / f"{v.tag}.json"
         data = v.to_json().encode()
         tmp = final.with_name(final.name + f".tmp.{os.getpid()}")
@@ -141,6 +146,7 @@ class DatasetRoot:
         _fsync_dir(self.versions_dir)
 
     def set_latest(self, tag: str) -> None:
+        """Update catalog.json to point to a version tag. Caller must hold `writer_lock(root)`."""
         if not (self.versions_dir / f"{tag}.json").exists():
             raise FileNotFoundError(tag)
         _write_atomic(self.catalog_path, (json.dumps({"latest": tag}) + "\n").encode())
@@ -211,12 +217,18 @@ def referenced_artifacts(root: DatasetRoot, tags: list[str]) -> set[Path]:
 
 
 def gc(root: DatasetRoot, dry_run: bool) -> list[Path]:
+    """Delete unreferenced shard/manifest dirs and incomplete builds. Caller must hold `writer_lock(root)`."""
+    root.ensure_layout()
     refs = referenced_artifacts(root, gc_roots(root))
-    victims = [p for p in sorted(root.shards_dir.iterdir()) if p not in refs]
-    victims += [p for p in sorted(root.manifest_dir.glob("*.parquet")) if p not in refs]
-    for b in sorted(root.builds_dir.iterdir()) if root.builds_dir.exists() else []:
-        if Journal(b).phase != "catalog_updated":
-            victims.append(b)
+    victims = []
+    if root.shards_dir.exists():
+        victims.extend([p for p in sorted(root.shards_dir.iterdir()) if p not in refs])
+    if root.manifest_dir.exists():
+        victims.extend([p for p in sorted(root.manifest_dir.glob("*.parquet")) if p not in refs])
+    if root.builds_dir.exists():
+        for b in sorted(root.builds_dir.iterdir()):
+            if Journal(b).phase != "catalog_updated":
+                victims.append(b)
     if not dry_run:
         for p in victims:
             shutil.rmtree(p) if p.is_dir() else p.unlink()
@@ -224,6 +236,7 @@ def gc(root: DatasetRoot, dry_run: bool) -> list[Path]:
 
 
 def prune_version(root: DatasetRoot, tag: str) -> None:
+    """Delete a version file (not the latest). Caller must hold `writer_lock(root)`."""
     if tag == root.latest():
         raise ValueError("refusing to prune the version catalog.latest points to")
     (root.versions_dir / f"{tag}.json").unlink()
