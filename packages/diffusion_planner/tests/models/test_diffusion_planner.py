@@ -144,6 +144,9 @@ class DiffusionPlannerTest(unittest.TestCase):
                 for parameter in self.model.scene_encoder.parameters()
             )
         )
+        self.assertIsNotNone(
+            self.model.turn_indicator_decoder.trajectory_scene_attention.in_proj_weight.grad
+        )
 
     def test_turn_indicator_loss_weight_controls_total_loss(self) -> None:
         losses = compute_diffusion_planner_loss(
