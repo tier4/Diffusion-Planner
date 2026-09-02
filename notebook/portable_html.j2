@@ -1,0 +1,85 @@
+{% extends 'basic/index.html.j2' %}
+
+{% block header %}
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diffusion Planner token analysis</title>
+<style>
+:root {
+  color-scheme: light;
+  --ink: #1a1a19;
+  --muted: #6b6a63;
+  --line: #e5e4df;
+  --paper: #ffffff;
+  --code: #f6f6f3;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+main {
+  width: min(1100px, calc(100% - 40px));
+  margin: 36px auto 80px;
+}
+h1, h2, h3 { line-height: 1.3; margin-top: 1.8em; }
+h1 { border-bottom: 2px solid var(--ink); padding-bottom: .35em; }
+h2 { border-bottom: 1px solid var(--line); padding-bottom: .25em; }
+p, li { max-width: 90ch; }
+a { color: #2a78d6; }
+pre, code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  overflow-x: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--code);
+}
+code {
+  padding: .1em .3em;
+  border-radius: 3px;
+  background: var(--code);
+}
+pre code { padding: 0; background: transparent; }
+.cell { margin: 1.2em 0; }
+.input_prompt, .output_prompt { color: var(--muted); font-size: 12px; }
+.output_area img, img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px auto;
+}
+table { border-collapse: collapse; }
+th, td { padding: 6px 10px; border: 1px solid var(--line); }
+blockquote {
+  margin-left: 0;
+  padding-left: 1em;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+@media print {
+  main { width: 100%; margin: 0; }
+  pre { white-space: pre-wrap; }
+}
+</style>
+</head>
+{% endblock header %}
+
+{% block body %}
+<body>
+<main>
+{{ super() }}
+</main>
+</body>
+{% endblock body %}
+
+{% block footer %}
+</html>
+{% endblock footer %}

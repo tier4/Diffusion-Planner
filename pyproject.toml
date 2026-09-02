@@ -16,7 +16,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pre-commit==4.6.0", "pytest>=8.0.0", "ruff==0.15.16"]
+dev = [
+    "ipykernel>=6.29",
+    "nbconvert>=7.16",
+    "pre-commit==4.6.0",
+    "pytest>=8.0.0",
+    "ruff==0.15.16",
+]
 
 [tool.uv]
 exclude-newer = "7 days"
