@@ -25,6 +25,9 @@ def _gt_segments(gt_future: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         raise ValueError(f"gt_future must have shape (T, D>=2), got {tuple(gt_future.shape)}")
     xy = gt_future[:, :2]
     valid_points = xy.abs().sum(dim=-1) > 1e-6
+    # The ego-frame GT legitimately starts at the origin; only later zero
+    # points can represent padding.
+    valid_points[0] = True
     valid_segments = valid_points[:-1] & valid_points[1:]
     segment_lengths = (xy[1:] - xy[:-1]).norm(dim=-1)
     valid_segments &= segment_lengths > _GT_SEGMENT_MIN_LENGTH

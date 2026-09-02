@@ -30,3 +30,15 @@ def test_gt_lateral_deviation_reports_constant_lateral_offset():
 
     assert abs(result.scores["average_lateral_error_m"].item() - 1.5) < 1e-3
     assert abs(result.scores["final_lateral_error_m"].item() - 1.5) < 1e-3
+
+
+def test_gt_lateral_deviation_keeps_origin_before_a_turn():
+    gt = torch.zeros(1, 3, 4)
+    gt[0, :, :2] = torch.tensor([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+    pred = gt.clone()
+
+    result = evaluate_gt_lateral_deviation_with_details(
+        pred, {"ego_agent_future": gt}, {"horizon_seconds": 0.2}
+    )
+
+    assert result.scores["average_lateral_error_m"].item() < 1e-4
