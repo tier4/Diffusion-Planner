@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def materialize_keyset(root: DatasetRoot, version_tag: str, where: str, out_path
 
 
 def keyset_from_keys(root: DatasetRoot, version_tag: str, keys: list[str], out_path: Path) -> Path:
-    dups = sorted({k for k in keys if keys.count(k) > 1})[:5] if len(set(keys)) != len(keys) else []
+    dups = sorted(k for k, c in Counter(keys).items() if c > 1)[:5]
     if dups:
         raise PlanError(f"duplicate keys in key list, e.g. {dups}")
     v = root.read_version(version_tag)

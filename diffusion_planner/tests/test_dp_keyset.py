@@ -70,3 +70,77 @@ def test_version_binding(packed, tmp_path):
     K.load_keyset(ks, root, "v1")  # still valid against v1
     with pytest.raises(KeysetMismatchError):
         K.load_keyset(ks, root, "v2")
+
+
+def test_load_rejects_duplicate_coordinates(packed, tmp_path):
+    root, v, _ = packed
+    # Write a keyset with duplicate rows by hand
+    dup_table = pa.table(
+        {
+            "partition_id": pa.array(["pA/mX/manual/2026-01-01", "pA/mX/manual/2026-01-01"]),
+            "shard_id": pa.array([0, 0], type=pa.int32()),
+            "sample_index_in_shard": pa.array([5, 5], type=pa.int32()),
+        }
+    )
+    meta = {
+        b"dp.version_tag": "v1".encode(),
+        b"dp.version_hash": root.version_hash("v1").encode(),
+        b"dp.created_at": "2026-09-02T00:00:00+00:00".encode(),
+    }
+    dup_table = dup_table.replace_schema_metadata(meta)
+    out = tmp_path / "dup.parquet"
+    pq.write_table(dup_table, out, compression="zstd")
+    with pytest.raises(PlanError):
+        K.load_keyset(out, root, "v1")
+
+
+def test_load_rejects_missing_version_metadata(packed, tmp_path):
+    root, v, _ = packed
+    # Write a keyset with valid schema but no metadata
+    table = pa.table(
+        {
+            "partition_id": pa.array(["pA/mX/manual/2026-01-01"]),
+            "shard_id": pa.array([0], type=pa.int32()),
+            "sample_index_in_shard": pa.array([5], type=pa.int32()),
+        }
+    )
+    out = tmp_path / "nometa.parquet"
+    pq.write_table(table, out, compression="zstd")
+
+    with pytest.raises(KeysetMismatchError):
+        K.load_keyset(out, root, "v1")
+
+
+def test_keyset_digest_is_stable_and_content_sensitive(packed, tmp_path):
+    root, v, _ = packed
+    # Create a keyset from materialize
+    ks1 = K.materialize_keyset(root, "v1", "is_skipped IS NOT TRUE", tmp_path / "ks1.parquet")
+    t1 = K.load_keyset(ks1, root, "v1")
+
+    # Same table twice should give same digest
+    digest1 = K.keyset_digest(t1)
+    digest1_again = K.keyset_digest(t1)
+    assert digest1 == digest1_again
+
+    # Change one coordinate and digest should differ
+    if t1.num_rows > 0:
+        rows_list = [t1.slice(i, 1) for i in range(t1.num_rows)]
+        # Modify the first row's shard_id
+        modified_first = rows_list[0]
+        modified_first = pa.table(
+            {
+                "partition_id": modified_first.column("partition_id"),
+                "shard_id": pa.array([999], type=pa.int32()),
+                "sample_index_in_shard": modified_first.column("sample_index_in_shard"),
+            }
+        )
+        t2 = pa.concat_tables([modified_first] + rows_list[1:])
+        digest2 = K.keyset_digest(t2)
+        assert digest1 != digest2
+
+        # Permuted rows should give different digest
+        if t1.num_rows > 1:
+            permuted_rows = [rows_list[1], rows_list[0]] + rows_list[2:]
+            t3 = pa.concat_tables(permuted_rows)
+            digest3 = K.keyset_digest(t3)
+            assert digest1 != digest3
