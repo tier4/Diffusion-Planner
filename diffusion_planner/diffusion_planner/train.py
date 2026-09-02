@@ -18,7 +18,7 @@ from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
 from diffusion_planner.train_epoch import train_epoch
-from diffusion_planner.utils import ddp
+from diffusion_planner.utils import ddp, shard_ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
@@ -273,39 +273,49 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    mode = shard_ddp.validate_args(args)
+    train_sampler = None
+    train_shard_ds = None
+    if mode == "npz":
+        train_set = DiffusionPlannerData(args.train_set_list)
+        valid_set = DiffusionPlannerData(args.valid_set_list)
 
-    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+        train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
-    train_sampler = DistributedSampler(
-        train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
-    )
-    train_loader = DataLoader(
-        train_set,
-        sampler=train_sampler,
-        batch_size=batch_size // ddp.get_world_size(),
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
+        train_sampler = DistributedSampler(
+            train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
+        )
+        train_loader = DataLoader(
+            train_set,
+            sampler=train_sampler,
+            batch_size=batch_size // ddp.get_world_size(),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+        )
 
-    # Validation is sharded across all ranks (DistributedSampler); each rank computes
-    # metrics on its shard and they are all-reduced via aggregate_valid_metrics.
-    valid_sampler = DistributedSampler(
-        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
-    )
-    valid_loader = DataLoader(
-        valid_set,
-        sampler=valid_sampler,
-        batch_size=batch_size // ddp.get_world_size(),
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=False,
-    )
+        # Validation is sharded across all ranks (DistributedSampler); each rank computes
+        # metrics on its shard and they are all-reduced via aggregate_valid_metrics.
+        valid_sampler = DistributedSampler(
+            valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
+        )
+        valid_loader = DataLoader(
+            valid_set,
+            sampler=valid_sampler,
+            batch_size=batch_size // ddp.get_world_size(),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False,
+        )
+    else:
+        train_loader, valid_loader, train_shard_ds, _ = shard_ddp.build_loaders(
+            args, global_rank, ddp.get_world_size(), batch_size // ddp.get_world_size(), save_path
+        )
 
     valid_pair_loader = None
     if args.enable_replan_consistency_eval:
+        if mode == "shards":
+            raise ValueError("--enable_replan_consistency_eval requires the npz path")
         expected_gap = args.replan_consistency_expected_gap or None
         valid_pair_set = DiffusionPlannerPairData(args.valid_set_list, expected_gap=expected_gap)
         if len(valid_pair_set) > 0:
@@ -325,7 +335,10 @@ def model_training(args: TrainConfig):
             )
 
     if global_rank == 0:
-        print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        if mode == "npz":
+            print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        else:
+            print("Dataset Prepared: {} train data (shard mode)\n".format(len(train_shard_ds)))
         if args.enable_replan_consistency_eval:
             print(
                 "Replan consistency validation pairs: {}".format(
@@ -481,9 +494,14 @@ def model_training(args: TrainConfig):
 
         # training step
         train_start_time = time.perf_counter()
-        train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
-        )
+        try:
+            train_loss, train_total_loss = train_epoch(
+                train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            )
+        except Exception as e:
+            if mode == "shards":
+                shard_ddp.coordinated_abort(e)
+            raise
         train_sec = time.perf_counter() - train_start_time
 
         valid_start_time = time.perf_counter()
@@ -679,7 +697,10 @@ def model_training(args: TrainConfig):
             )
 
         scheduler.step()
-        train_sampler.set_epoch(epoch + 1)
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch + 1)
+        else:
+            train_shard_ds.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()

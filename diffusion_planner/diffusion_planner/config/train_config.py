@@ -19,6 +19,32 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     valid_set_list: str = cli("JSON list of validation NPZ paths", path=True, default="")
 
     # ---------------------------------------------------------
+    # Versioned shard dataset (alternative to *_set_list; see data_pipeline/pack_shards.py)
+    # ---------------------------------------------------------
+    dataset_root: str = cli(
+        "root of a versioned shard dataset; enables the shard loader", path=True, default=""
+    )
+    dataset_version: str = cli("dataset version tag or 'latest'", default="latest")
+    train_key_set: str = cli(
+        "parquet key-set for training (pack_shards keyset)", path=True, default=""
+    )
+    valid_key_set: str = cli("parquet key-set for validation", path=True, default="")
+    train_shard_filter: str = cli(
+        "DuckDB WHERE clause, materialized to a key-set at startup", default=""
+    )
+    valid_shard_filter: str = cli("DuckDB WHERE clause for validation", default="")
+    shards_in_flight: int = 4
+    shuffle_buffer: int = 2000
+    shuffle_buffer_bytes: int = 512 << 20
+    shard_chunk_size: int = 1024
+    shard_seek_threshold: float = 0.2
+    shard_max_pad_fraction: float = 0.01
+    sample_meta_columns: list[str] = cli(
+        "existing manifest columns passed through as integer codes in batch['meta']",
+        default_factory=list,
+    )
+
+    # ---------------------------------------------------------
     # Run output
     # ---------------------------------------------------------
     output_root: str = cli(
@@ -47,7 +73,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     use_smoothing_future_trajectory: bool = True
     normalization_file_path: str = "normalization.json"
 
-    train_subsample_step: int = 1
+    train_subsample_step: int = cli("temporal subsampling step (npz path only)", default=1)
 
     # ---------------------------------------------------------
     # Training Parameters
