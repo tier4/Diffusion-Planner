@@ -34,7 +34,12 @@ from diffusion_planner.data_pipeline.manifest import (
     rows_to_table,
     write_manifest,
 )
-from diffusion_planner.data_pipeline.sidecar import is_rejected, neighbor_ids_of, parse_sidecar
+from diffusion_planner.data_pipeline.sidecar import (
+    SIDECAR_FIELDS,
+    is_rejected,
+    neighbor_ids_of,
+    parse_sidecar,
+)
 
 
 @dataclass
@@ -52,7 +57,6 @@ class PackOptions:
     replace_all: bool = False
     shard_size_bytes: int = SHARD_SIZE_BYTES
     seed: int = 42
-    workers: int = 1
     drop_skipped: bool = True
     with_neighbor_ids: bool = False
     force: bool = False
@@ -90,6 +94,7 @@ def _build_partition(
     partition_id: str,
     samples: list[P.Sample],
     base: V.Version | None,
+    root: V.DatasetRoot | None = None,
 ) -> PartitionBuild:
     # Pass 1: bounded-memory scan — hash each npz just to compute its sha256 (never retained),
     # read+parse the (tiny) sidecar, apply drop_skipped. `kept` holds only small metadata, never
@@ -114,17 +119,74 @@ def _build_partition(
             continue
         neighbor_ids = neighbor_ids_of(sc_bytes) if opts.with_neighbor_ids else None
         kept.append((s, nsha, ssha, fields, neighbor_ids))
-    fp = P.fingerprint([(s.key, nsha, ssha) for s, nsha, ssha, _, _ in kept])
-    data_rev = _data_rev(fp, opts.shard_size_bytes, opts.seed)
+    # Split fingerprints (finding #2): data_fp covers (key, npz_sha256) only,
+    # meta_fp covers (key, sidecar_sha256 or "-").
+    data_fp = hashlib.sha256(
+        "\n".join(sorted(f"{s.key}\t{nsha.hex()}" for s, nsha, _ssha, _, _ in kept)).encode()
+    ).hexdigest()
+    meta_fp = hashlib.sha256(
+        "\n".join(
+            sorted(
+                f"{s.key}\t{ssha.hex() if ssha is not None else '-'}"
+                for s, _nsha, ssha, _, _ in kept
+            )
+        ).encode()
+    ).hexdigest()
+    data_rev = _data_rev(data_fp, opts.shard_size_bytes, opts.seed)
     pid = P.pid_of(partition_id)
     base_entry = base.partitions.get(partition_id) if base else None
-    if (
-        base_entry
-        and not opts.force
-        and base_entry.source_fingerprint == fp
-        and base_entry.data_rev == data_rev
-    ):
-        return PartitionBuild(base_entry, None, None, None, True, rejected, missing)
+    if base_entry and not opts.force and base_entry.data_rev == data_rev:
+        if base_entry.meta_fingerprint == meta_fp:
+            # Full reuse: data and sidecar unchanged
+            return PartitionBuild(base_entry, None, None, None, True, rejected, missing)
+        # Meta-only update: same data_rev, different meta_fingerprint.
+        # Read the base manifest, replace sidecar columns with newly-parsed fields.
+        base_manifest = root.manifest_path_for(
+            base_entry.pid, base_entry.data_rev, base_entry.meta_rev
+        )
+        base_table = read_manifest(base_manifest)
+        # Build a key -> sidecar_fields mapping from the kept list
+        key_to_fields = {s.key: fields for s, _, _, fields, _ in kept}
+        # Keep all index columns, replace sidecar columns
+        new_cols = {}
+        for col_name in base_table.column_names:
+            if any(col_name == sf_name for sf_name, _sf_type in SIDECAR_FIELDS):
+                # Replace this sidecar column with new values
+                base_keys = base_table.column("key").to_pylist()
+                new_vals = [key_to_fields.get(k, {}).get(col_name) for k in base_keys]
+                sf_type = next(t for n, t in SIDECAR_FIELDS if n == col_name)
+                new_cols[col_name] = pa.array(new_vals, type=sf_type)
+            else:
+                new_cols[col_name] = base_table.column(col_name)
+        new_table = pa.table(new_cols, schema=base_table.schema)
+        new_mrev = meta_rev(new_table)
+        manifest_path = build_dir / "manifest" / f"{pid}@{data_rev}.{new_mrev}.parquet"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        write_manifest(
+            manifest_path,
+            new_table,
+            {
+                "format_version": str(FORMAT_VERSION),
+                "packer_version": PACKER_VERSION,
+                "recipe_hash": encoding.recipe_hash(),
+                "source_fingerprint": data_fp,
+                "data_rev": data_rev,
+                "meta_rev": new_mrev,
+                "partition_id": partition_id,
+                "shards": ",".join(base_entry.shards),
+            },
+        )
+        entry = V.PartitionEntry(
+            partition_id,
+            pid,
+            data_rev,
+            new_mrev,
+            base_entry.shards,
+            base_entry.sample_count,
+            data_fp,
+            meta_fp,
+        )
+        return PartitionBuild(entry, None, manifest_path, None, False, rejected, missing)
 
     # Pass 2: only when actually building — re-read each kept npz (one at a time, in shuffled
     # order) to encode and write it; nothing from pass 1 is held beyond the small `kept` tuples.
@@ -184,7 +246,7 @@ def _build_partition(
             "format_version": str(FORMAT_VERSION),
             "packer_version": PACKER_VERSION,
             "recipe_hash": encoding.recipe_hash(),
-            "source_fingerprint": fp,
+            "source_fingerprint": data_fp,
             "data_rev": data_rev,
             "meta_rev": mrev,
             "partition_id": partition_id,
@@ -205,7 +267,9 @@ def _build_partition(
             rel_path,
         )
     _verify_build(shards_dir, shard_names, table, key_to_path)
-    entry = V.PartitionEntry(partition_id, pid, data_rev, mrev, shard_names, len(rows), fp)
+    entry = V.PartitionEntry(
+        partition_id, pid, data_rev, mrev, shard_names, len(rows), data_fp, meta_fp
+    )
     return PartitionBuild(entry, shards_dir, manifest_path, rel_path, False, rejected, missing)
 
 
@@ -258,15 +322,32 @@ def _publish(
     for b in builds:
         if b.reused:
             continue
-        target = root.shards_dir_for(b.entry.pid, b.entry.data_rev)
-        if target.exists():
-            if sorted(p.name for p in target.iterdir()) != sorted(b.entry.shards):
-                raise IntegrityError(f"existing revision dir {target} differs from build")
-            shutil.rmtree(b.build_shards_dir)
-        else:
-            shutil.move(str(b.build_shards_dir), str(target))
+        if b.build_shards_dir is not None:
+            # Full build: move or verify shard directory
+            target = root.shards_dir_for(b.entry.pid, b.entry.data_rev)
+            if target.exists():
+                if sorted(p.name for p in target.iterdir()) != sorted(b.entry.shards):
+                    raise IntegrityError(f"existing revision dir {target} differs from build")
+                # Per-file size and sha256 comparison (finding #5)
+                for shard_name in b.entry.shards:
+                    existing = target / shard_name
+                    built = b.build_shards_dir / shard_name
+                    if existing.stat().st_size != built.stat().st_size:
+                        raise IntegrityError(
+                            f"existing shard {existing} has different size than build"
+                        )
+                    if (
+                        hashlib.sha256(existing.read_bytes()).hexdigest()
+                        != hashlib.sha256(built.read_bytes()).hexdigest()
+                    ):
+                        raise IntegrityError(
+                            f"existing shard {existing} has different sha256 than build"
+                        )
+                shutil.rmtree(b.build_shards_dir)
+            else:
+                shutil.move(str(b.build_shards_dir), str(target))
         mpath = root.manifest_path_for(b.entry.pid, b.entry.data_rev, b.entry.meta_rev)
-        if not mpath.exists():
+        if not mpath.exists() and b.build_manifest is not None:
             shutil.move(str(b.build_manifest), str(mpath))
         if b.build_relation is not None:
             (root.root / "relations").mkdir(exist_ok=True)
@@ -279,6 +360,8 @@ def _publish(
     journal.advance("version_written")
     root.set_latest(version.tag)
     journal.advance("catalog_updated")
+    # Completed builds must not accumulate; failed builds are kept for inspection (spec §4).
+    shutil.rmtree(journal.build_dir, ignore_errors=True)
 
 
 def pack(opts: PackOptions) -> V.Version:
@@ -297,20 +380,37 @@ def pack(opts: PackOptions) -> V.Version:
             raise RuleMismatchError(
                 "partition rule or source namespace differs from base; pass --replace-all"
             )
+        if opts.sync and opts.path_list is not None:
+            raise PlanError("--sync requires a full source scan; cannot be used with --path-list")
         groups = P.discover(opts.source, opts.rule, opts.include, opts.exclude, opts.path_list)
+        # The full set of partitions present in source (within include/exclude scope) —
+        # needed by --sync to decide what to drop from the base version.
+        full_source_pids = set(groups)
         if opts.partitions is not None:
+            unknown = [p for p in opts.partitions if p not in groups]
+            if unknown:
+                raise PlanError(
+                    f"--partition names not found in source: {unknown}; "
+                    f"discovered: {sorted(groups)[:20]}"
+                )
             groups = {k: v for k, v in groups.items() if k in set(opts.partitions)}
+        if not groups and not opts.sync:
+            raise PlanError("nothing to pack: selection matched no partitions in source")
         build_dir = root.builds_dir / uuid.uuid4().hex
         build_dir.mkdir(parents=True)
         journal = V.Journal(build_dir)
         builds = [
-            _build_partition(opts, build_dir, pid, samples, base) for pid, samples in groups.items()
+            _build_partition(opts, build_dir, pid, samples, base, root)
+            for pid, samples in groups.items()
         ]
         journal.advance("built")
         partitions = {} if (base is None or opts.replace_all) else dict(base.partitions)
         if opts.sync and base is not None:
+            # Drop partitions absent from the full source scan (within include/exclude scope).
+            # Partitions still present in source survive even if they were not in the --partition
+            # selection for this run.
             for pid in list(partitions):
-                if pid not in groups and P.is_selected(
+                if pid not in full_source_pids and P.is_selected(
                     pid + "/x.npz", list(opts.include), list(opts.exclude)
                 ):
                     del partitions[pid]
@@ -380,7 +480,7 @@ def scrub(dest: Path, tag: str) -> dict[str, int]:
         for sid, name in enumerate(e.shards):
             shards += 1
             shard_rows = sum(1 for (s, _) in expect if s == sid)
-            for idx, payload in T.iter_members(
+            for idx, _off, _sz, payload in T.iter_members(
                 root.shards_dir_for(e.pid, e.data_rev) / name, expected_count=shard_rows
             ):
                 members += 1

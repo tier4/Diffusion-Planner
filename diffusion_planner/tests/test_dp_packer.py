@@ -76,9 +76,8 @@ def test_pack_builds_version_bitexact(tmp_path):
         js = src / f"{k}.json"
         rejected = js.exists() and json.loads(js.read_text()).get("is_skipped") is True
         assert (k in all_keys) == (not rejected)
-    assert not list((dst / "builds").iterdir()) or all(
-        (b / "journal.json").exists() for b in (dst / "builds").iterdir()
-    )
+    # Completed build dirs are cleaned up after publish; the builds directory should be empty.
+    assert not list((dst / "builds").iterdir())
 
 
 def test_pack_is_idempotent_and_detects_changes(tmp_path):
@@ -248,3 +247,103 @@ def test_relation_move_does_not_overwrite_existing(tmp_path):
     after = rel.stat()
     # the published relation file must be untouched by the second (redundant) build
     assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
+
+
+def test_sync_with_partition_filter_keeps_unselected(tmp_path):
+    """Finding #1: --sync --partition pA must keep pB/pC; --sync --path-list -> PlanError."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT)
+    v1 = PK.pack(_opts(src, dst, "v1"))
+    assert set(v1.partitions) == {
+        "pA/mX/manual/2026-01-01",
+        "pA/mX/manual/2026-01-02",
+        "psim/loc_seed_1/manual/seed_1",
+        "pB/mY/manual/2026-01-03",
+    }
+    # --sync --partition pA/.../2026-01-01 keeps all other partitions
+    v2 = PK.pack(
+        _opts(src, dst, "v2", base="v1", sync=True, partitions=["pA/mX/manual/2026-01-01"])
+    )
+    assert "pB/mY/manual/2026-01-03" in v2.partitions
+    assert "psim/loc_seed_1/manual/seed_1" in v2.partitions
+    assert "pA/mX/manual/2026-01-02" in v2.partitions
+    # --sync --path-list -> PlanError
+    with pytest.raises(PlanError, match="--sync requires a full source scan"):
+        PK.pack(
+            _opts(
+                src,
+                dst,
+                "v3",
+                base="v2",
+                sync=True,
+                path_list=["pA/mX/manual/2026-01-01/t1/route_0/route_0_00000000.npz"],
+            )
+        )
+
+
+def test_sidecar_only_change_meta_only_update(tmp_path):
+    """Finding #2: editing one sidecar value -> v2 has same data_rev, new meta_rev,
+    no new shard dir; the new manifest has the new value; scrub passes.
+    A tensor change still produces a new data_rev."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    v1 = PK.pack(_opts(src, dst, "v1"))
+    e1 = v1.partitions["pA/mX/manual/2026-01-01"]
+    # list existing shard dirs
+    shard_dirs_v1 = set(p.name for p in (dst / "shards").iterdir())
+    # modify a sidecar field ("x") in one frame
+    js = next(src.glob("pA/mX/manual/2026-01-01/**/*.json"))
+    d = json.loads(js.read_text())
+    d["x"] = 999.999
+    js.write_text(json.dumps(d))
+    v2 = PK.pack(_opts(src, dst, "v2", base="v1"))
+    e2 = v2.partitions["pA/mX/manual/2026-01-01"]
+    assert e2.data_rev == e1.data_rev  # same data
+    assert e2.meta_rev != e1.meta_rev  # different metadata
+    # No new shard directory created
+    shard_dirs_v2 = set(p.name for p in (dst / "shards").iterdir())
+    assert shard_dirs_v2 == shard_dirs_v1
+    # scrub passes
+    rep = PK.scrub(dst, "v2")
+    assert rep["mismatches"] == 0
+    # tensor change produces new data_rev
+    target = next(src.glob("pA/mX/manual/2026-01-01/**/*.npz"))
+    arrays = load_npz_bytes(target.read_bytes())
+    arrays["goal_pose"] = arrays["goal_pose"] + 1
+    np.savez_compressed(target, **arrays)
+    v3 = PK.pack(_opts(src, dst, "v3", base="v2"))
+    e3 = v3.partitions["pA/mX/manual/2026-01-01"]
+    assert e3.data_rev != e2.data_rev
+
+
+def test_existing_shard_dir_wrong_bytes_raises(tmp_path):
+    """Finding #5: pre-create a same-named shard dir with wrong bytes -> pack raises."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    v1 = PK.pack(_opts(src, dst, "v1"))
+    e1 = v1.partitions["pA/mX/manual/2026-01-01"]
+    shard_dir = dst / "shards" / f"{e1.pid}@{e1.data_rev}"
+    # corrupt a shard file
+    shard_file = shard_dir / e1.shards[0]
+    b = bytearray(shard_file.read_bytes())
+    b[100] ^= 0xFF
+    shard_file.write_bytes(bytes(b))
+    # forced rebuild tries to publish and finds mismatching existing dir
+    with pytest.raises(IntegrityError, match="different sha256"):
+        PK.pack(_opts(src, dst, "v2", base="v1", force=True))
+
+
+def test_unknown_partition_raises(tmp_path):
+    """Finding #6: unknown --partition -> PlanError listing unknowns."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    with pytest.raises(PlanError, match="--partition names not found"):
+        PK.pack(_opts(src, dst, "v1", partitions=["does/not/exist/here"]))
+
+
+def test_empty_pack_raises(tmp_path):
+    """Finding #6: pack with empty groups (not --sync) -> PlanError."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    with pytest.raises(PlanError, match="nothing to pack"):
+        PK.pack(_opts(src, dst, "v1", include=["*/zzz_no_match/*"]))

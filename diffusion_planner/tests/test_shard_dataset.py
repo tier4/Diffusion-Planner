@@ -156,6 +156,27 @@ def test_metadata_passthrough_is_opt_in(packed):
     assert ds.meta_dictionary["project_id"][expected_value] == sample["meta"]["project_id"]
 
 
+def test_metadata_codes_built_in_main_process(packed):
+    """Finding #4: meta_dictionary is populated in __init__ (main process), so codes are
+    identical across workers/ranks/epochs. A num_workers=2 DataLoader must produce integer
+    codes that match the main-process meta_dictionary."""
+    src, dst, keys, ks = packed
+    ds = SD.ShardDataset(
+        _cfg(dst, ks, world_size=1, num_workers=2, sample_meta_columns=("project_id",))
+    )
+    assert ds.meta_dictionary  # populated before any iteration
+    assert "project_id" in ds.meta_dictionary
+    dl = DataLoader(ds, batch_size=4, num_workers=2, drop_last=True)
+    inverse = {code: val for val, code in ds.meta_dictionary["project_id"].items()}
+    seen_codes = set()
+    for batch in dl:
+        meta = batch["meta"]
+        for code in meta["project_id"].tolist():
+            seen_codes.add(code)
+            assert code in inverse
+    assert len(seen_codes) >= 1  # sanity: we actually saw some codes
+
+
 def test_persistent_read_fault_raises_after_retries(packed, monkeypatch):
     src, dst, keys, ks = packed
     calls = {"n": 0}
@@ -171,3 +192,35 @@ def test_persistent_read_fault_raises_after_retries(packed, monkeypatch):
     with pytest.raises(IntegrityError):
         list(SD._debug_iter_with_keys(ds))
     assert calls["n"] == 3  # 1 attempt + 2 retries
+
+
+def test_shard_mapping_fault_never_yields_wrong_sample(packed):
+    """Finding #3: swap two shard files of one partition on disk -> iterating (skim mode)
+    raises IntegrityError, never yields a wrong sample."""
+    import shutil
+
+    src, dst, keys, ks = packed
+    root = SD.DatasetRoot(dst)
+    v = root.read_version("v1")
+    # Find a partition with at least 2 shards
+    multi_shard_pid = None
+    for pid, e in v.partitions.items():
+        if len(e.shards) >= 2:
+            multi_shard_pid = pid
+            break
+    if multi_shard_pid is None:
+        pytest.skip("No partition with >= 2 shards for shard-mapping fault test")
+    e = v.partitions[multi_shard_pid]
+    shard_dir = root.shards_dir_for(e.pid, e.data_rev)
+    # Swap the first two shard files
+    s0, s1 = shard_dir / e.shards[0], shard_dir / e.shards[1]
+    tmp = shard_dir / "__swap_tmp__"
+    shutil.move(str(s0), str(tmp))
+    shutil.move(str(s1), str(s0))
+    shutil.move(str(tmp), str(s1))
+    # Iterate in skim mode (seek_threshold=0.0 means always skim)
+    ds = SD.ShardDataset(
+        _cfg(dst, ks, world_size=1, num_workers=0, seek_threshold=0.0, read_retries=0)
+    )
+    with pytest.raises(IntegrityError):
+        list(SD._debug_iter_with_keys(ds))

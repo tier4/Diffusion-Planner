@@ -97,7 +97,17 @@ class ShardDataset(IterableDataset):
         self._epoch = mp.Value("i", 0)
         self._sha: dict[ShardRef, dict[int, bytes]] = {}
         self._meta: dict[ShardRef, dict[int, dict[str, int]]] = {}
-        self._meta_codes: dict[str, dict] = {}  # column -> {value: code}
+        # Build code dictionaries ONCE in the main process from manifest columns,
+        # so codes are identical across workers/ranks/epochs (finding #4).
+        self._meta_codes: dict[str, dict] = {}
+        if cfg.sample_meta_columns:
+            for _pid, e in sorted(self.version.partitions.items()):
+                mpath = self.root.manifest_path_for(e.pid, e.data_rev, e.meta_rev)
+                t = read_manifest(mpath, columns=list(cfg.sample_meta_columns))
+                for col in cfg.sample_meta_columns:
+                    codes = self._meta_codes.setdefault(col, {})
+                    for v in sorted(set(t.column(col).to_pylist()), key=lambda x: (x is None, x)):
+                        codes.setdefault(v, len(codes))
 
     @property
     def meta_dictionary(self) -> dict[str, dict]:
@@ -175,12 +185,28 @@ class ShardDataset(IterableDataset):
         path, table, n_members = self._shard_table(chunk.shard)
         wanted = set(chunk.indices)
         if chunk.n / max(n_members, 1) >= self.cfg.seek_threshold:
+            # Skim path: stream the tar and assert offset/size integrity for wanted members.
+            # On OSError/IntegrityError mid-skim, fall back to _seek_read for remaining indices.
+            remaining = set(chunk.indices)
             last = chunk.indices[-1]
-            for idx, payload in T.iter_members(path):
-                if idx in wanted:
-                    yield Occurrence(chunk.shard, idx, 0), payload
-                if idx >= last:
-                    break
+            try:
+                for idx, offset_data, sz, payload in T.iter_members(path):
+                    if idx in wanted:
+                        expect_off, expect_sz = table[idx]
+                        if (offset_data, sz) != (expect_off, expect_sz):
+                            raise IntegrityError(
+                                f"skim: member {idx} offset/size ({offset_data}, {sz}) "
+                                f"!= manifest ({expect_off}, {expect_sz})"
+                            )
+                        remaining.discard(idx)
+                        yield Occurrence(chunk.shard, idx, 0), payload
+                    if idx >= last:
+                        break
+            except (OSError, IntegrityError):
+                # Fall back to seek-read for any remaining wanted indices
+                for idx in sorted(remaining):
+                    off, size = table[idx]
+                    yield Occurrence(chunk.shard, idx, 0), self._seek_read(path, off, size)
         else:
             for idx in chunk.indices:
                 off, size = table[idx]
@@ -191,9 +217,16 @@ class ShardDataset(IterableDataset):
             self._shard_table(occ.shard)
             if hashlib.sha256(payload).digest() != self._sha[occ.shard][occ.index]:
                 raise IntegrityError(f"payload sha mismatch for {occ.shard} member {occ.index}")
-        sample = encoding.decode_for_training(
-            payload
-        )  # zstd frame checksum is verified on every read
+        try:
+            sample = encoding.decode_for_training(
+                payload
+            )  # zstd frame checksum is verified on every read
+        except IntegrityError:
+            # Decode failure: re-read the member via _seek_read (which retries) and try again.
+            path, table, _ = self._shard_table(occ.shard)
+            off, size = table[occ.index]
+            payload = self._seek_read(path, off, size)
+            sample = encoding.decode_for_training(payload)
         if self.cfg.sample_meta_columns:
             self._shard_table(occ.shard)
             sample["meta"] = dict(

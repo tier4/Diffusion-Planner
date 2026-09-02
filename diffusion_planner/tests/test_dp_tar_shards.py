@@ -46,8 +46,13 @@ def test_skim_and_list_agree(tmp_path):
     w = T.ShardWriter(tmp_path, shard_size_bytes=1 << 30)
     [w.add(p) for p in payloads]
     (name,) = w.close()
-    assert [(i, p) for i, p in T.iter_members(tmp_path / name)] == list(enumerate(payloads))
+    # iter_members yields (index, offset_data, size, payload)
+    iter_result = [(i, p) for i, _o, _s, p in T.iter_members(tmp_path / name)]
+    assert iter_result == list(enumerate(payloads))
+    # offsets and sizes from iter_members match list_members
     listed = T.list_members(tmp_path / name)
+    iter_offsets = [(i, o, s) for i, o, s, _p in T.iter_members(tmp_path / name)]
+    assert iter_offsets == listed
     assert [i for i, _, _ in listed] == list(range(5))
     with open(tmp_path / name, "rb") as f:
         assert [T.read_member(f, o, s) for _, o, s in listed] == payloads

@@ -109,7 +109,10 @@ def _index_of(name: str) -> int:
     return int(m.group(1))
 
 
-def iter_members(tar_path: Path, expected_count: int | None = None) -> Iterator[tuple[int, bytes]]:
+def iter_members(
+    tar_path: Path, expected_count: int | None = None
+) -> Iterator[tuple[int, int, int, bytes]]:
+    """Yield ``(index, offset_data, size, payload)`` for each member in streaming order."""
     count = 0
     try:
         with tarfile.open(tar_path, mode="r|") as t:
@@ -122,7 +125,7 @@ def iter_members(tar_path: Path, expected_count: int | None = None) -> Iterator[
                     raise IntegrityError(
                         f"short member {info.name!r}: {len(payload)} of {info.size} bytes"
                     )
-                yield _index_of(info.name), payload
+                yield _index_of(info.name), info.offset_data, info.size, payload
                 count += 1
     except tarfile.TarError as e:
         raise IntegrityError(f"invalid tar archive: {e}") from e

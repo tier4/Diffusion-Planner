@@ -30,6 +30,7 @@ class PartitionEntry:
     shards: list[str]
     sample_count: int
     source_fingerprint: str
+    meta_fingerprint: str = ""
 
 
 @dataclass
@@ -52,8 +53,13 @@ class Version:
     @classmethod
     def from_json(cls, text: str) -> "Version":
         d = json.loads(text)
-        d["partitions"] = {k: PartitionEntry(**v) for k, v in d["partitions"].items()}
-        return cls(**d)
+        pe_fields = {f.name for f in PartitionEntry.__dataclass_fields__.values()}
+        d["partitions"] = {
+            k: PartitionEntry(**{fk: fv for fk, fv in v.items() if fk in pe_fields})
+            for k, v in d["partitions"].items()
+        }
+        v_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in v_fields})
 
     @property
     def hash(self) -> str:
