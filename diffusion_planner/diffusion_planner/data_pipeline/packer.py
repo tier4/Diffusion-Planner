@@ -278,20 +278,17 @@ def pack(opts: PackOptions) -> V.Version:
     namespace = opts.source_namespace or str(Path(opts.source).resolve())
     with V.writer_lock(root):
         base = _resolve_base(root, opts.base)
-        groups = P.discover(opts.source, opts.rule, opts.include, opts.exclude, opts.path_list)
-        if opts.partitions is not None:
-            groups = {k: v for k, v in groups.items() if k in set(opts.partitions)}
-        # only guard against a mismatched rule/namespace when it would actually build something
-        # under the new scheme; a partition-scoped pack that resolves to no groups is a no-op.
         if (
-            base
+            base is not None
             and not opts.replace_all
-            and groups
             and (base.rule_hash != opts.rule.rule_hash or base.source_namespace != namespace)
         ):
             raise RuleMismatchError(
                 "partition rule or source namespace differs from base; pass --replace-all"
             )
+        groups = P.discover(opts.source, opts.rule, opts.include, opts.exclude, opts.path_list)
+        if opts.partitions is not None:
+            groups = {k: v for k, v in groups.items() if k in set(opts.partitions)}
         build_dir = root.builds_dir / uuid.uuid4().hex
         build_dir.mkdir(parents=True)
         journal = V.Journal(build_dir)

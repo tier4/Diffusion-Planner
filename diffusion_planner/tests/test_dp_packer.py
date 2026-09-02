@@ -127,8 +127,16 @@ def test_rule_change_requires_replace_all_and_keys_stay_unique(tmp_path):
     o.replace_all = True
     v2 = PK.pack(o)
     assert all(p.count("/") == 2 for p in v2.partitions)
+    # mismatching rule + empty selection must still be refused (unconditional guard)
+    o_empty = _opts(src, dst, "v9", base="v2")
+    o_empty.rule = PartitionRule(depth=4)
+    o_empty.partitions = ["nonexistent/partition"]
+    with pytest.raises(RuleMismatchError):
+        PK.pack(o_empty)
+    assert DatasetRoot(dst).latest() == "v2"
     # a manually injected overlapping partition entry must be refused at commit
     o3 = _opts(src, dst, "v3", base="v2")
+    o3.rule = PartitionRule(depth=3)
     o3.partitions = ["pA/mX/manual"]
     v3 = PK.pack(o3)  # subset pack keeps others → still unique
     assert set(v3.partitions) == set(v2.partitions)
