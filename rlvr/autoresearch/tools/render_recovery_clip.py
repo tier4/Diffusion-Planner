@@ -149,13 +149,27 @@ def select_route(routes: dict, requested: str | None) -> str:
     )
 
 
+def fresh_frame_dir(png_dir: Path) -> Path:
+    """Start every render from an empty frame directory.
+
+    ``encode_webm`` hands ffmpeg the glob ``*.png``, so any frame left over from
+    an earlier run of the same clip identity would be encoded into the new video.
+    A shorter rerender overwrites ``00000..00049`` and leaves ``00050..00079`` in
+    place; the clip then shows 80 frames while its verdict was scored on 50. Only
+    this run's frames may reach the encoder, so stale ones are removed first.
+    """
+    png_dir.mkdir(parents=True, exist_ok=True)
+    for stale in png_dir.glob("*.png"):
+        stale.unlink()
+    return png_dir
+
+
 def render_one(
     label, model_path, tl, args, out_root, stem, draw_pool, stem_route
 ) -> tuple[Path, dict]:
     """One arm's clip plus the verdict for its caption."""
     model, model_args = load_model(model_path, args.device)
-    png_dir = out_root / f"{stem}_{label}"
-    png_dir.mkdir(parents=True, exist_ok=True)
+    png_dir = fresh_frame_dir(out_root / f"{stem}_{label}")
     _OFFSET["v"] = args.offset
     _CL_SCORES.clear()
     _ROUTE_DIST.clear()

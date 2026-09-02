@@ -13,7 +13,7 @@ cue, so nothing in the state hints that a correction is under way -- then roll
 every step, and score every REALIZED pose with the canonical
 ``compute_centerline_score_batch(usage_mode="baselink")``.
 
-Reported per model: ``recovered_rate``, ``lost_rate``, and the settle
+Reported per model: ``recovered_rate``, ``lost_rate``, ``unsettled_rate``, and the settle
 distribution. **Both rates are needed, and that is not decoration.** Because
 these tools score ONE pose per call, ``compute_centerline_score_batch`` takes its
 coverage-gap branch and returns exactly 0 for a pose further than
@@ -81,6 +81,7 @@ _OFFSET = {"v": 0.0}
 # `_PROXIMITY` in subscores.compute_centerline_score_batch, which is not importable;
 # if that value ever changes, this must change with it or the gate and the score
 # will disagree about which poses count.
+SETTLE_WINDOW = 10  # final steps (1 s) that decide lost / recovered
 ROUTE_COVERAGE_RADIUS_M = 5.0
 _ORIG_EGO_STATE = reproducer_rollout._ego_state_from_frame
 
@@ -215,25 +216,40 @@ def _scoring_draw_step(np_dict, pred, ego_shape, path, step=0, **kwargs):
 def summarize_rollout(usage: np.ndarray, route_dist: np.ndarray) -> dict:
     """Turn one rollout's per-step records into its verdict.
 
-    ``near`` gates every usage statistic on the pose actually being within the
-    scorer's 5 m coverage radius, so an off-route rollout cannot borrow the
-    coverage-gap zero and read as perfectly centred.
+    Three outcomes: ``lost`` (ended off the route), ``recovered`` (whole settle
+    window on the route and centred), or neither (``unsettled``). ``near`` gates
+    every usage statistic on the pose actually being within the scorer's 5 m
+    coverage radius, so an off-route rollout cannot borrow the coverage-gap zero
+    and read as perfectly centred.
     """
     near = route_dist <= ROUTE_COVERAGE_RADIUS_M
-    settle_near = usage[-10:][near[-10:]]
+    window = near[-SETTLE_WINDOW:]
     off_frac = float((~near).mean())
-    lost = bool(off_frac > 0.5 or not near[-10:].any())
+    # lost = ENDED off the route (or spent most of the rollout off it). This is the
+    # literal reading; a rollout that swerved out during the last second but was
+    # back inside at the final step is not lost.
+    lost = bool(off_frac > 0.5 or not near[-1])
+    # recovered = the ENTIRE settle window is on the route and the ego sits inside
+    # half a lane half-width of its centre across it. Off-route steps are never
+    # filtered out of the window: with the old ``usage[-10:][near[-10:]]`` a single
+    # near step could carry the mean while the other nine sat off-route, which is
+    # how an off-route ending used to certify as recovered.
+    settled = bool(window.all())
+    settle_usage = usage[-SETTLE_WINDOW:]
+    recovered = bool((not lost) and settled and settle_usage.mean() <= 0.5)
+    # Rollouts that are neither -- ended on-route but were still swerving through
+    # the coverage radius a second earlier -- are reported as such rather than
+    # being forced onto one side.
     return dict(
         n_steps=len(usage),
         usage_t0=float(usage[0]),
         usage_mean=float(usage[near].mean()) if near.any() else None,
-        usage_settle=float(settle_near.mean()) if settle_near.size else None,
+        usage_settle=float(settle_usage.mean()) if settled else None,
         usage_max=float(usage[near].max()) if near.any() else None,
         frac_off_route=off_frac,
         lost=lost,
-        # recovered = ended the rollout back on the route and inside half a lane
-        # half-width of its centre
-        recovered=bool((not lost) and settle_near.size and settle_near.mean() <= 0.5),
+        recovered=recovered,
+        unsettled=bool((not lost) and not recovered),
     )
 
 
@@ -260,6 +276,7 @@ def summarize_model(label: str, rows: list[dict]) -> dict:
         n_rollouts=len(rows),
         lost_rate=float(np.mean([r["lost"] for r in rows])) if rows else None,
         recovered_rate=float(np.mean([r["recovered"] for r in rows])) if rows else None,
+        unsettled_rate=float(np.mean([r["unsettled"] for r in rows])) if rows else None,
         settle_mean=float(settle.mean()),
         settle_p50=float(np.percentile(settle, 50)),
         settle_p95=float(np.percentile(settle, 95)),
