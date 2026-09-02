@@ -82,6 +82,14 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
     def centric_transform(self, inputs, ego_future, neighbors_future):
         out = super().centric_transform(inputs, ego_future, neighbors_future)
+        # Restore "no history" rows to exact zero. Both the rewrite and the parent's
+        # re-centering write real numbers into every history slot, and the encoder reads
+        # ego_agent_past directly -- a transformed pad would be presented to the model as
+        # history that never happened. Applied to the whole batch, not just augmented rows,
+        # so a future non-identity transform on untouched rows cannot reintroduce it.
+        pad = getattr(self, "_ego_past_pad", None)
+        if pad is not None and bool(pad.any()):
+            inputs["ego_agent_past"][pad] = 0.0
         # Dataset convention is base_link: velocity and acceleration are purely
         # longitudinal (raw NPZs carry vy = ay = 0.0 identically). The rebuilt
         # polyline's finite-diff velocity leaves a small tangent/heading residual
@@ -228,14 +236,32 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             )
         past4 = inputs["ego_agent_past"]  # (B, P, 4) x, y, cos, sin
         B, P, _ = past4.shape
+        # Leading history can be zero-padded when a scene starts near the beginning of a
+        # recording. Those rows mean "no history", not "the ego was at the origin facing
+        # +x", so they are remembered here and restored to exact zero after the rewrite
+        # and the re-centering (see centric_transform). Same contract as the bridge path.
+        self._ego_past_pad = torch.sum(torch.ne(past4[..., :4], 0), dim=-1) == 0  # (B, P)
         F = ego_future.shape[1]
         dev, dtype = past4.device, past4.dtype
         t, combos = self._bases(P, F, dev, dtype)
         T = P + F
 
         fut_cs = torch.stack([ego_future[..., 2].cos(), ego_future[..., 2].sin()], dim=-1)
-        xy = torch.cat([past4[..., :2], ego_future[..., :2]], dim=1)  # (B, T, 2)
-        tan = torch.cat([past4[..., 2:4], fut_cs], dim=1)
+        past_xy, past_tan = past4[..., :2], past4[..., 2:4]
+        if bool(self._ego_past_pad.any()):
+            # Hold the first real pose across the padded prefix instead of leaving it at the
+            # origin. A (0,0) position adjacent to a real one is a metres-wide phantom step:
+            # it would give the first REAL history sample a heading taken from that jump, and
+            # a speed spike the feasibility screen would then judge. Replicating makes the
+            # differences zero across the padding boundary, so the first real sample keeps its
+            # own stored heading. The padded rows themselves are zeroed again at the end.
+            first = torch.argmax((~self._ego_past_pad).to(torch.int8), dim=1)  # (B,)
+            idx = torch.arange(P, device=past4.device)[None, :]
+            src = torch.maximum(idx, first[:, None])  # pad -> first real, real -> itself
+            past_xy = torch.gather(past_xy, 1, src[..., None].expand(-1, -1, 2))
+            past_tan = torch.gather(past_tan, 1, src[..., None].expand(-1, -1, 2))
+        xy = torch.cat([past_xy, ego_future[..., :2]], dim=1)  # (B, T, 2)
+        tan = torch.cat([past_tan, fut_cs], dim=1)
         nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
         speed = ddt(xy, 1).norm(dim=-1).clamp(min=0.5)  # (B, T)
         v0 = speed[:, P - 1]

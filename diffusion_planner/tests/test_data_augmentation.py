@@ -1304,3 +1304,59 @@ if __name__ == "__main__":
         sys.exit(1)
     else:
         print("All tests passed!")
+
+
+def test_frenet_preserves_zero_padded_ego_history():
+    """Leading zero padding means "no history"; it must survive the rewrite untouched.
+
+    The augmenter rewrites every history timestep and the inherited centric_transform then
+    re-centres the whole block, so without an explicit restore the padded rows come back as
+    plausible poses. The encoder reads ego_agent_past directly, so those would be presented
+    to the model as history that never happened.
+    """
+    import torch
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=8)
+    pad = 5
+    inputs["ego_agent_past"][:, :pad, :] = 0.0
+    before = inputs["ego_agent_past"].clone()
+
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    aug(inputs, ego_future, neighbors_future)
+    past = inputs["ego_agent_past"]
+    accepted = torch.nonzero(aug._aug_rows).flatten().tolist()
+    assert accepted, "fixture should accept at least one row, or this proves nothing"
+
+    # every originally padded row is bitwise zero, on accepted and rejected rows alike
+    assert torch.equal(past[:, :pad], torch.zeros_like(past[:, :pad]))
+    # the real history is still usable and was actually rewritten where accepted
+    assert torch.isfinite(past[:, pad:]).all()
+    assert (past[accepted, pad:] != before[accepted, pad:]).any()
+    # rejected rows are untouched end to end
+    rejected = [b for b in range(past.shape[0]) if b not in accepted]
+    if rejected:
+        assert torch.equal(past[rejected], before[rejected])
+
+
+def test_frenet_padding_does_not_leak_into_the_first_real_step():
+    """A padded slot sits at the origin; the first REAL sample must not take its heading
+    from that phantom jump. The padded prefix is held at the first real pose so the
+    differences across the boundary are zero."""
+    import torch
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=4)
+    pad = 4
+    inputs["ego_agent_past"][:, :pad, :] = 0.0
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    aug(inputs, ego_future, neighbors_future)
+
+    past = inputs["ego_agent_past"]
+    for b in torch.nonzero(aug._aug_rows).flatten().tolist():
+        cos, sin = past[b, pad, 2].item(), past[b, pad, 3].item()
+        assert abs(cos * cos + sin * sin - 1.0) < 1e-3, "first real step lost a unit heading"
+        step = (past[b, pad + 1, :2] - past[b, pad, :2]).norm().item()
+        assert step < 5.0, f"first real step jumped {step:.1f} m — padding leaked in"
