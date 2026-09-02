@@ -70,7 +70,6 @@ def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, sa
         chunk_size=args.shard_chunk_size,
         seek_threshold=args.shard_seek_threshold,
         max_pad_fraction=args.shard_max_pad_fraction,
-        sample_meta_columns=tuple(getattr(args, "sample_meta_columns", ()) or ()),
     )
     train_cfg = ShardDatasetConfig(keyset_path=train_ks, shuffle=True, **common)
     valid_cfg = ShardDatasetConfig(keyset_path=valid_ks, shuffle=False, **common)

@@ -35,7 +35,8 @@ def root_filter(rel_root: str) -> str:
     on rows that reach the manifest — but it documents the same exclusion policy and keeps this
     filter correct if ever applied to an un-filtered relation.
     """
-    return f"(rel_dir LIKE '{rel_root}/%' OR rel_dir = '{rel_root}') AND is_skipped IS NOT TRUE"
+    escaped = rel_root.replace("'", "''")
+    return f"(rel_dir LIKE '{escaped}/%' OR rel_dir = '{escaped}') AND is_skipped IS NOT TRUE"
 
 
 def _require_plain_where(where: str, fn_name: str) -> None:

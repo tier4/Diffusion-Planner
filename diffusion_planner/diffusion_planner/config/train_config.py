@@ -3,6 +3,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from diffusion_planner.data_pipeline.defaults import (
+    CHUNK_SIZE,
+    MAX_PAD_FRACTION,
+    SEEK_THRESHOLD,
+    SHARDS_IN_FLIGHT,
+    SHUFFLE_BUFFER_BYTES,
+    SHUFFLE_BUFFER_ITEMS,
+)
+
 from .closed_loop_config import ClosedLoopConfig
 from .config_cli import cli
 from .model_config import ModelConfig
@@ -33,16 +42,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "DuckDB WHERE clause, materialized to a key-set at startup", default=""
     )
     valid_shard_filter: str = cli("DuckDB WHERE clause for validation", default="")
-    shards_in_flight: int = 4
-    shuffle_buffer: int = 2000
-    shuffle_buffer_bytes: int = 512 << 20
-    shard_chunk_size: int = 1024
-    shard_seek_threshold: float = 0.2
-    shard_max_pad_fraction: float = 0.01
-    sample_meta_columns: list[str] = cli(
-        "existing manifest columns passed through as integer codes in batch['meta']",
-        default_factory=list,
-    )
+    shards_in_flight: int = SHARDS_IN_FLIGHT
+    shuffle_buffer: int = SHUFFLE_BUFFER_ITEMS
+    shuffle_buffer_bytes: int = SHUFFLE_BUFFER_BYTES
+    shard_chunk_size: int = CHUNK_SIZE
+    shard_seek_threshold: float = SEEK_THRESHOLD
+    shard_max_pad_fraction: float = MAX_PAD_FRACTION
 
     # ---------------------------------------------------------
     # Run output
