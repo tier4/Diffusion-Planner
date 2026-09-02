@@ -50,6 +50,11 @@ def resolve_keysets(args, save_dir: Path, rank: int) -> tuple[Path, Path]:
 
 
 def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, save_dir: Path):
+    """Construct the train/valid ShardDatasets and their DataLoaders (spec §5/§6 preflight).
+
+    `set_epoch` must be called on the returned datasets before each epoch; persistent workers
+    read the shared epoch value at `__iter__`.
+    """
     train_ks, valid_ks = resolve_keysets(args, save_dir, rank)
     common = dict(
         root=Path(args.dataset_root),
@@ -104,13 +109,16 @@ def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, sa
 
 
 def coordinated_abort(exc: BaseException) -> None:
-    print(f"[shard loader] fatal: {exc!r} — aborting all ranks", flush=True)
+    """Log, tear down the process group best-effort, and re-raise. No collectives: a failed
+    rank cannot rendezvous with peers blocked in DDP's gradient all-reduce, and torchrun
+    terminates the remaining ranks on our non-zero exit."""
+    print(
+        f"[shard loader] fatal: {exc!r} — aborting; torchrun will terminate the other ranks",
+        flush=True,
+    )
     if _initialized():
         try:
-            flag = torch.ones(
-                1, dtype=torch.int64, device="cuda" if torch.cuda.is_available() else "cpu"
-            )
-            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
-        finally:
             dist.destroy_process_group()
+        except Exception as teardown_exc:  # never mask the original failure
+            print(f"[shard loader] destroy_process_group failed: {teardown_exc!r}", flush=True)
     raise exc

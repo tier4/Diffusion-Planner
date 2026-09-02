@@ -97,3 +97,10 @@ def test_build_loaders_single_rank(tmp_path):
     )
     assert (tmp_path / "run/train_keyset.parquet").exists() and len(tl) == tds.steps_per_epoch
     assert sum(1 for _ in vl) == len(vl) and vds.cfg.shuffle is False
+
+
+def test_coordinated_abort_reraises_without_dist():
+    boom = RuntimeError("boom")
+    with pytest.raises(RuntimeError) as exc_info:
+        shard_ddp.coordinated_abort(boom)
+    assert exc_info.value is boom
