@@ -41,6 +41,8 @@ def _args(**over):
         frenet_seed=0,
         frenet_ranked_temp_s=1.0,
         frenet_recovery_rounds=0,
+        frenet_toward_parked_prob=0.0,
+        frenet_min_clearance=0.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -141,3 +143,25 @@ def test_factory_refuses_an_unknown_augment_type():
 
     with pytest.raises(ValueError, match="unknown augment_type"):
         augmenter_from_args(_args(use_data_augment=True, augment_type="nope"))
+
+
+def test_toward_parked_and_min_clearance_default_off():
+    aug = frenet_augmenter_from_args(_args())
+    assert aug.toward_parked_prob == 0.0 and aug.min_clearance == 0.0
+
+
+def test_toward_parked_and_min_clearance_reach_the_augmenter():
+    aug = frenet_augmenter_from_args(
+        _args(frenet_toward_parked_prob="0.3", frenet_min_clearance="0.2")
+    )
+    assert aug.toward_parked_prob == 0.3 and aug.min_clearance == 0.2
+
+
+def test_toward_parked_prob_outside_unit_interval_is_refused():
+    with pytest.raises(ValueError, match="toward_parked_prob"):
+        FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", toward_parked_prob=1.5)
+
+
+def test_negative_min_clearance_is_refused():
+    with pytest.raises(ValueError, match="min_clearance"):
+        FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", min_clearance=-0.1)

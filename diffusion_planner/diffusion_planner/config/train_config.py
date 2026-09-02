@@ -72,6 +72,20 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "naturally takes for the drawn offset and horizon.",
         default_factory=lambda: [0.0, -0.5, 0.5, -1.0, 1.0],
     )
+    frenet_toward_parked_prob: float = cli(
+        "frenet: fraction of scenes where a PARKED vehicle bounds the corridor far enough "
+        "ahead that the avoidance is still in front of the ego, whose nudges are mirrored "
+        "to point AT that vehicle and the largest feasible one is taken. Makes the t=0 "
+        "state a harder avoidance than the recording's. 0 (default) leaves the uniform "
+        "draw untouched.",
+        default=0.0,
+    )
+    frenet_min_clearance: float = cli(
+        "frenet: exact footprint clearance (m) every accepted candidate must keep from "
+        "every recorded neighbour, on top of the corridor margin. Applies to all rows. "
+        "0 (default) keeps the overlap-only veto.",
+        default=0.0,
+    )
     frenet_recovery_rounds: int = cli(
         "frenet: rounds of re-selection allowed after a candidate is vetoed for truly "
         "overlapping a recorded neighbour. Each round burns the losing draw and tries "

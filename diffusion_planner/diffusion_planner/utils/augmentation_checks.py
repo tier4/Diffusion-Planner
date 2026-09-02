@@ -327,8 +327,14 @@ def veto_overlapping(
     valid: torch.Tensor,
     shapes_wl: torch.Tensor,
     near: torch.Tensor,
+    min_clearance: float = 0.0,
 ) -> torch.Tensor:
     """Clear rows whose footprint truly overlaps a recorded neighbor.
+
+    With ``min_clearance > 0`` the row must also keep at least that much exact
+    footprint clearance from every checked neighbour, not merely avoid overlap.
+    The sign-only fast path is used when the floor is 0, so the default is
+    unchanged.
 
     Lateral bounds are a fast approximation — measured to accept ~1.4% of
     winners whose TRUE footprint overlaps a neighbor box — so the accepted
@@ -347,9 +353,10 @@ def veto_overlapping(
         shapes_wl: (B, N, 2) neighbor width, length.
         near: (B, N) neighbors worth checking, from
             :func:`neighbor_lateral_bounds`.
+        min_clearance: metres of exact clearance every checked pair must keep.
 
     Returns:
-        ``rows`` with overlapping scenes set False.
+        ``rows`` with overlapping (or too-close) scenes set False.
     """
     if not bool(rows.any()):
         return rows
@@ -366,7 +373,8 @@ def veto_overlapping(
         shapes_wl[bi, ni],
         valid[bi, ni],
         paired=True,
-        overlap_only=True,  # a veto only asks whether they overlap
+        # sign alone answers "do they overlap"; a positive floor needs the true gap
+        overlap_only=min_clearance <= 0.0,
     )  # (M, T)
-    rows[bi[clr.amin(-1) < 0.0]] = False
+    rows[bi[clr.amin(-1) < min_clearance]] = False
     return rows
