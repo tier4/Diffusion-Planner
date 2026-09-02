@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from planner_metrics.scene_format import future_to_4col
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import (
     aggregate_stats,
@@ -267,7 +268,11 @@ def main():
             gt_np = None
             if args.show_gt:
                 _gt = np.load(sp, allow_pickle=True)["ego_agent_future"]
-                gt_np = _gt[:, :4] if _gt.shape[-1] >= 4 else _gt
+                # Legacy 3-col [x, y, heading] futures must be widened to the
+                # canonical [x, y, cos, sin] that draw_traj indexes.
+                gt_np = future_to_4col(
+                    _gt[:, :4] if _gt.shape[-1] > 4 else _gt, zero_rows_are_padding=False
+                )
             cached_gt.append(gt_np)
 
             if args.no_viz:
