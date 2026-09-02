@@ -211,7 +211,7 @@ def run_scenario_based_open_loop_validation(
                         # index) so the PNG is identifiable without cross-
                         # referencing details.jsonl; the title matches.
                         npz_stem = Path(source_npz).stem
-                        png_path = visualization_root / metric_name / f"{npz_stem}.png"
+                        png_path = visualization_root / metric_name / f"{sample_index:06d}_{npz_stem}.png"
                         visualize_scenario_prediction(
                             sample_inputs,
                             ego_prediction[batch_index],
