@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run closed/open-loop L2 validation across all visible GPUs (Python replacement for valid_run.sh).
 
-Thin launcher only: derives the checkpoint/config/output paths from --model_dir and runs
-valid_predictor.py under torch.distributed.run. Standard validation renders the prediction PNGs
-per-clip MP4s on rank 0 when --save_predictions_dir is set.
+Thin launcher only: derives the checkpoint/config/output paths from --model_dir and/or
+--model_path and runs valid_predictor.py under torch.distributed.run. Standard validation
+renders the prediction PNGs per-clip MP4s on rank 0 when --save_predictions_dir is set.
 """
 
 import argparse
@@ -17,11 +17,19 @@ from run_utils import gpu_count, tee_run
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model_dir", required=True, help="dir holding best_model.pth + args.json")
     p.add_argument(
-        "--checkpoint",
+        "--model_dir",
         default="",
-        help="checkpoint .pth to validate; defaults to <model_dir>/best_model.pth",
+        help="dir holding best_model.pth + args.json; defaults to --model_path's parent dir. "
+        "One of --model_dir / --model_path is required",
+    )
+    p.add_argument(
+        "--model_path",
+        default="",
+        help="checkpoint to validate: a .pth, or an exported .onnx (args.json is still read "
+        "from --model_dir, not from next to the .onnx); defaults to <model_dir>/best_model.pth "
+        "(named to match --model_path on the closed-loop side). One of --model_dir / "
+        "--model_path is required",
     )
     p.add_argument(
         "--output_dir",
@@ -45,8 +53,10 @@ def main() -> None:
         raise ValueError("--scenario_based_open_loop_only requires Scenario-based Open-loop list")
     if args.batch_size < 1:
         raise ValueError("--batch_size must be at least 1")
-    model_dir = Path(args.model_dir)
-    model_path = Path(args.checkpoint) if args.checkpoint else model_dir / "best_model.pth"
+    if not args.model_dir and not args.model_path:
+        raise ValueError("one of --model_dir or --model_path is required")
+    model_dir = Path(args.model_dir) if args.model_dir else Path(args.model_path).parent
+    model_path = Path(args.model_path) if args.model_path else model_dir / "best_model.pth"
     args_json_path = model_dir / "args.json"
     if not model_path.is_file():
         raise FileNotFoundError(f"Validation checkpoint not found: {model_path}")
