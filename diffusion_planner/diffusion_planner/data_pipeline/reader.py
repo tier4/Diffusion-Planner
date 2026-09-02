@@ -49,7 +49,7 @@ class ShardReader:
                 .arrow()
                 .read_all()
             )
-        except duckdb.Error as e:
+        except (duckdb.ParserException, duckdb.BinderException, duckdb.CatalogException) as e:
             raise PlanError(
                 f'invalid WHERE clause ({e}); double-quote reserved column names, e.g. "offset"'
             ) from e

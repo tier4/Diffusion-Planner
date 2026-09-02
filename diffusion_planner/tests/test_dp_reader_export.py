@@ -95,9 +95,6 @@ def test_query_rejects_semicolon(packed):
 
 def test_iter_seek_and_skim_both_exercised(packed):
     """Verify iter() uses seek path for low selectivity and skim path for high selectivity."""
-    from diffusion_planner.data_pipeline import defaults as DP_DEFAULTS
-    from diffusion_planner.data_pipeline import tar_shards as T
-
     src, dst, keys = packed
     rd = ShardReader(dst, "latest")
 
@@ -117,11 +114,7 @@ def test_iter_seek_and_skim_both_exercised(packed):
     if shard_info is None:
         pytest.skip("No shard with >= 2 keys for seek/skim test")
 
-    shard_with_multi, shard_rows_full = shard_info
-
-    # Get the partition and shard IDs from the first row
-    pid = shard_rows_full[0]["partition_id"]
-    sid = shard_rows_full[0]["shard_id"]
+    shard_with_multi, _ = shard_info
 
     # Test seek path: select 1 key with high threshold (so 1/N < threshold), monkeypatch iter_members
     k_single = shard_with_multi[0]
