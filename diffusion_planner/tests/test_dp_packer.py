@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from pathlib import Path
 
 import duckdb
 import numpy as np
@@ -189,3 +190,61 @@ def test_neighbor_ids_relation_optional(tmp_path):
         f"SELECT count(*) FROM read_parquet('{rel}') WHERE len(neighbor_ids) = 2"
     ).fetchone()[0]
     assert n == e.sample_count
+
+
+def test_two_pass_build_bounds_npz_reads(tmp_path, monkeypatch):
+    """Pins the two-pass build contract: `_build_partition` never holds every kept sample's
+    npz bytes in memory at once (see design note in packer.py). Pass 1 reads each npz once
+    (hash-only, then dropped); pass 2 re-reads each *kept* npz once more to encode it. A kept
+    npz is read a third time only if it happens to land at `sample_index_in_shard == 0` for its
+    shard, since spec §4.4's verify-before-commit spot-checks (1 in every 100 members, which
+    always includes index 0) re-reads the source npz fresh from disk rather than from a cached
+    copy. So: every rejected npz is read exactly once, every kept npz is read either twice, or
+    three times if it is one of the (exactly one-per-shard) spot-checked members.
+    """
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    keys = make_tree(src, LAYOUT[:2], skipped_every=4)
+    counts: dict[str, int] = {}
+    orig_read_bytes = Path.read_bytes
+
+    def counting_read_bytes(self, *a, **kw):
+        if self.suffix == ".npz":
+            counts[str(self)] = counts.get(str(self), 0) + 1
+        return orig_read_bytes(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    v = PK.pack(_opts(src, dst, "v1"))
+
+    n_shards = sum(len(e.shards) for e in v.partitions.values())
+    rejected_keys = {
+        k
+        for k in keys
+        if (src / f"{k}.json").exists()
+        and json.loads((src / f"{k}.json").read_text()).get("is_skipped") is True
+    }
+    kept_keys = set(keys) - rejected_keys
+    assert kept_keys and rejected_keys  # sanity: fixture actually exercises both paths
+
+    for k in rejected_keys:
+        assert counts[str(src / f"{k}.npz")] == 1
+    kept_counts = [counts[str(src / f"{k}.npz")] for k in kept_keys]
+    assert all(c in (2, 3) for c in kept_counts)
+    assert sum(1 for c in kept_counts if c == 3) == n_shards
+    assert sum(1 for c in kept_counts if c == 2) == len(kept_keys) - n_shards
+
+
+def test_relation_move_does_not_overwrite_existing(tmp_path):
+    """`_publish` must guard the relation-file move the same way it guards shard dirs and
+    manifests: never clobber an already-published relation file with a fresh build's copy."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    v1 = PK.pack(_opts(src, dst, "v1", with_neighbor_ids=True))
+    e1 = v1.partitions["pA/mX/manual/2026-01-01"]
+    rel = dst / "relations" / f"{e1.pid}@{e1.data_rev}.neighbor_ids.parquet"
+    before = rel.stat()
+    v2 = PK.pack(_opts(src, dst, "v2", base="v1", with_neighbor_ids=True, force=True))
+    e2 = v2.partitions["pA/mX/manual/2026-01-01"]
+    assert e2.data_rev == e1.data_rev  # forced rebuild reproduced the identical revision
+    after = rel.stat()
+    # the published relation file must be untouched by the second (redundant) build
+    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)

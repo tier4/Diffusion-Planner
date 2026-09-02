@@ -91,33 +91,30 @@ def _build_partition(
     samples: list[P.Sample],
     base: V.Version | None,
 ) -> PartitionBuild:
+    # Pass 1: bounded-memory scan — hash each npz just to compute its sha256 (never retained),
+    # read+parse the (tiny) sidecar, apply drop_skipped. `kept` holds only small metadata, never
+    # the (potentially ~160 KB each, ~19 GB per real partition) npz payload bytes.
     stats: dict[Path, P.FileStat] = {}
-    kept: list[tuple[P.Sample, bytes, bytes | None, bytes, bytes | None, dict]] = []
+    kept: list[tuple[P.Sample, bytes, bytes | None, dict, list[str] | None]] = []
     rejected = missing = 0
     for s in samples:
         stats[s.npz_path] = P.stat_of(s.npz_path)
-        npz_bytes = s.npz_path.read_bytes()
+        nsha = hashlib.sha256(s.npz_path.read_bytes()).digest()
         sc_bytes = None
+        ssha = None
         if s.sidecar_path is not None:
             stats[s.sidecar_path] = P.stat_of(s.sidecar_path)
             sc_bytes = s.sidecar_path.read_bytes()
+            ssha = hashlib.sha256(sc_bytes).digest()
         else:
             missing += 1
         fields = parse_sidecar(sc_bytes)
         if opts.drop_skipped and is_rejected(fields):
             rejected += 1
             continue
-        kept.append(
-            (
-                s,
-                npz_bytes,
-                sc_bytes,
-                hashlib.sha256(npz_bytes).digest(),
-                hashlib.sha256(sc_bytes).digest() if sc_bytes is not None else None,
-                fields,
-            )
-        )
-    fp = P.fingerprint([(s.key, nsha, ssha) for s, _, _, nsha, ssha, _ in kept])
+        neighbor_ids = neighbor_ids_of(sc_bytes) if opts.with_neighbor_ids else None
+        kept.append((s, nsha, ssha, fields, neighbor_ids))
+    fp = P.fingerprint([(s.key, nsha, ssha) for s, nsha, ssha, _, _ in kept])
     data_rev = _data_rev(fp, opts.shard_size_bytes, opts.seed)
     pid = P.pid_of(partition_id)
     base_entry = base.partitions.get(partition_id) if base else None
@@ -129,6 +126,8 @@ def _build_partition(
     ):
         return PartitionBuild(base_entry, None, None, None, True, rejected, missing)
 
+    # Pass 2: only when actually building — re-read each kept npz (one at a time, in shuffled
+    # order) to encode and write it; nothing from pass 1 is held beyond the small `kept` tuples.
     rng = np.random.default_rng(
         np.random.SeedSequence([opts.seed, zlib.crc32(partition_id.encode()), FORMAT_VERSION])
     )
@@ -137,8 +136,13 @@ def _build_partition(
     writer = T.ShardWriter(shards_dir, opts.shard_size_bytes)
     rows: list[ManifestRow] = []
     relation: list[tuple[str, list[str] | None]] = []
+    key_to_path: dict[str, Path] = {}
     for i in order:
-        s, npz_bytes, sc_bytes, nsha, _, fields = kept[i]
+        s, nsha, _, fields, neighbor_ids = kept[i]
+        key_to_path[s.key] = s.npz_path
+        npz_bytes = s.npz_path.read_bytes()
+        if hashlib.sha256(npz_bytes).digest() != nsha:
+            raise SourceChangedError(f"{s.key}: npz changed between discovery and build")
         arrays = encoding.load_npz_bytes(npz_bytes)
         payload = encoding.encode_sample(arrays)
         if not encoding.arrays_bitexact(arrays, encoding.decode_sample(payload)):
@@ -159,9 +163,10 @@ def _build_partition(
             )
         )
         if opts.with_neighbor_ids:
-            relation.append((s.key, neighbor_ids_of(sc_bytes)))
+            relation.append((s.key, neighbor_ids))
     shard_names = writer.close()
-    # quiescence check (spec §4.1)
+    # quiescence check (spec §4.1) — stat snapshot recorded before pass 1; re-checked here, after
+    # both passes have finished reading every file, so it covers all reads.
     for path, before in stats.items():
         if not path.exists() or P.stat_of(path) != before:
             raise SourceChangedError(f"source changed during pack: {path}")
@@ -199,13 +204,14 @@ def _build_partition(
             ),
             rel_path,
         )
-    _verify_build(shards_dir, shard_names, table, kept)
+    _verify_build(shards_dir, shard_names, table, key_to_path)
     entry = V.PartitionEntry(partition_id, pid, data_rev, mrev, shard_names, len(rows), fp)
     return PartitionBuild(entry, shards_dir, manifest_path, rel_path, False, rejected, missing)
 
 
-def _verify_build(shards_dir: Path, shard_names: list[str], table: pa.Table, kept) -> None:
-    by_key = {s.key: npz for s, npz, *_ in kept}
+def _verify_build(
+    shards_dir: Path, shard_names: list[str], table: pa.Table, key_to_path: dict[str, Path]
+) -> None:
     rows = table.to_pylist()
     per_shard: dict[int, list[dict]] = {}
     for r in rows:
@@ -222,8 +228,11 @@ def _verify_build(shards_dir: Path, shard_names: list[str], table: pa.Table, kep
                 payload = T.read_member(f, off, size)
                 if hashlib.sha256(payload).digest() != r["payload_sha256"]:
                     raise IntegrityError(f"{name}[{idx}]: payload sha mismatch")
+                # spot decode 1 in every 100 members against a fresh re-read of the source npz
+                # (never kept in memory) rather than a cached copy (spec §4.4).
                 if idx % 100 == 0 and not encoding.arrays_bitexact(
-                    encoding.load_npz_bytes(by_key[r["key"]]), encoding.decode_sample(payload)
+                    encoding.load_npz_bytes(key_to_path[r["key"]].read_bytes()),
+                    encoding.decode_sample(payload),
                 ):
                     raise IntegrityError(f"{name}[{idx}]: spot decode differs from source")
 
@@ -261,7 +270,9 @@ def _publish(
             shutil.move(str(b.build_manifest), str(mpath))
         if b.build_relation is not None:
             (root.root / "relations").mkdir(exist_ok=True)
-            shutil.move(str(b.build_relation), str(root.root / "relations" / b.build_relation.name))
+            rel_target = root.root / "relations" / b.build_relation.name
+            if not rel_target.exists():
+                shutil.move(str(b.build_relation), str(rel_target))
     journal.advance("moved")
     _check_unique_keys(root, version)
     root.write_version(version)
