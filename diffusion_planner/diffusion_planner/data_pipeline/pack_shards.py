@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--with-neighbor-ids", action="store_true")
     p.add_argument("--force", action="store_true")
     p.add_argument("--require-marker")
+    p.add_argument(
+        "--require-sidecars",
+        action="store_true",
+        help="refuse to publish if any sample lacks a sidecar",
+    )
 
     p = sub.add_parser("remove")
     p.add_argument("--dest", required=True, type=Path)
@@ -138,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                     with_neighbor_ids=a.with_neighbor_ids,
                     force=a.force,
                     require_marker=a.require_marker,
+                    require_sidecars=a.require_sidecars,
                 )
             )
         elif a.cmd == "remove":

@@ -65,6 +65,7 @@ class PackOptions:
     seed: int = 42
     workers: int = 1
     drop_skipped: bool = True
+    require_sidecars: bool = False
     with_neighbor_ids: bool = False
     force: bool = False
     require_marker: str | None = None
@@ -515,6 +516,13 @@ def pack(opts: PackOptions) -> V.Version:
             _job_for(opts, build_dir, base, root, pid, samples) for pid, samples in groups.items()
         ]
         builds = _run_builds(jobs, opts.workers, lambda job, build: None)
+        if opts.require_sidecars:
+            missing = sum(b.missing_sidecars for b in builds)
+            if missing:
+                raise PlanError(
+                    f"{missing} sample(s) have no sidecar and --require-sidecars was given; "
+                    "refusing to publish"
+                )
         journal.advance("built")
         partitions = {} if (base is None or opts.replace_all) else dict(base.partitions)
         if opts.sync and base is not None:

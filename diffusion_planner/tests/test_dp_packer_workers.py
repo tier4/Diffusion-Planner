@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from diffusion_planner.data_pipeline import packer as PK
-from diffusion_planner.data_pipeline.errors import PackWorkerError
+from diffusion_planner.data_pipeline.errors import PackWorkerError, PlanError
 from diffusion_planner.data_pipeline.partition import PartitionRule
 from diffusion_planner.data_pipeline.versioning import DatasetRoot
 from tests.dp_fixtures import make_tree
@@ -184,3 +184,22 @@ def test_worker_death_publishes_nothing(tmp_path, monkeypatch):
     with pytest.raises(PackWorkerError):
         PK.pack(_opts(src, dst, "v1", workers=2))
     assert not (DatasetRoot(dst).versions_dir / "v1.json").exists()
+
+
+def test_require_sidecars_fails_before_publishing(tmp_path):
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT)  # the "none" variant partition has no sidecars
+    dst = tmp_path / "dst"
+    with pytest.raises(PlanError) as ei:
+        PK.pack(_opts(src, dst, "v1", require_sidecars=True))
+    assert "sidecar" in str(ei.value)
+    root = DatasetRoot(dst)
+    assert not (root.versions_dir / "v1.json").exists()
+    assert root.latest() is None
+
+
+def test_missing_sidecars_still_allowed_by_default(tmp_path):
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT)
+    v = PK.pack(_opts(src, tmp_path / "dst", "v1"))
+    assert v.tag == "v1"
