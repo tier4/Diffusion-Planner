@@ -406,6 +406,46 @@ def test_event_count_rising_edges():
     assert _event_count(np.array([1, 0, 1, 1, 0, 1], dtype=bool)) == 1  # two short gaps
 
 
+def test_event_onset_count_gates_on_the_onset_step():
+    """``_event_onset_count`` rides ``mask``'s own event boundaries (same debounce as
+    ``_event_count``), but only counts an event if ``onset_flag`` was True on the exact
+    step the event started -- used so ``object_rear.collision_count`` reflects "did THIS
+    collision start as a rear hit," not "did the contact touch the rear edge at some point."
+    """
+    from scenario_generation.reproducer_rollout import _event_onset_count
+
+    assert _event_onset_count(np.array([], dtype=bool), np.array([], dtype=bool)) == 0
+
+    # Onset flag True at the event's first True step -> counts.
+    mask = np.array([1, 1, 1, 0, 0, 0, 0], dtype=bool)
+    onset = np.array([1, 0, 0, 0, 0, 0, 0], dtype=bool)
+    assert _event_onset_count(mask, onset) == 1
+
+    # Onset flag only True LATER in the same continuous event (e.g. the vehicle spun into
+    # the rear sliver mid-collision) -> does NOT count; the collision didn't START as rear.
+    mask = np.array([1, 1, 1, 0, 0, 0, 0], dtype=bool)
+    onset = np.array([0, 1, 1, 0, 0, 0, 0], dtype=bool)
+    assert _event_onset_count(mask, onset) == 0
+
+    # A short (< clear_frames) gap in `mask` is still the SAME event (per _event_count's
+    # debounce), so a rear onset before the gap is still the one event's onset -- a
+    # False->True->False->True wobble in onset_flag within that one event must not be
+    # double-counted or reset.
+    mask = np.array([1, 1, 0, 1, 1], dtype=bool)  # one event (gap 1 < 3)
+    onset = np.array([1, 0, 0, 0, 0], dtype=bool)
+    assert _event_onset_count(mask, onset) == 1
+
+    # Two separate mask events (gap >= clear_frames): each event's onset is judged on its
+    # own -- first started rear, second did not.
+    mask = np.array([1, 1, 0, 0, 0, 1, 1], dtype=bool)
+    onset = np.array([1, 0, 0, 0, 0, 0, 0], dtype=bool)
+    assert _event_onset_count(mask, onset) == 1
+
+    mask = np.array([1, 1, 0, 0, 0, 1, 1], dtype=bool)
+    onset = np.array([0, 0, 0, 0, 0, 1, 0], dtype=bool)
+    assert _event_onset_count(mask, onset) == 1
+
+
 def test_finalize_strong_brake_steps_and_count(tmp_path):
     """``strong_brake.steps`` needs two consecutive over-threshold frames;
     ``strong_brake.count`` is the number of discrete braking events (debounced rising edges)."""

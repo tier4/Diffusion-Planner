@@ -55,6 +55,26 @@ def test_collision_counted_even_when_ego_stopped():
     assert collision is True
 
 
+def test_diagonal_side_clip_with_center_behind_is_not_a_rear_collision():
+    """A rotated NPC whose CENTER sits behind the ego's rear face, but whose actual
+    contact point is well forward of the rear edge (a diagonal side/front clip), must
+    NOT be flagged rear_collision -- only whether the contact region touches the ego's
+    rear edge matters, not where the NPC's centroid happens to be.
+
+    A center-position-only heuristic ("NPC center behind the ego's rear face" AND
+    collided) would wrongly flag this one: the center (-3.8, 3.4) is well behind the
+    ego's rear face (rear_edge_x ~= -1.24), and the box does collide -- but the actual
+    overlap is on the ego's flank, not its back.
+    """
+    diagonal = _neighbors(
+        [[-3.8, 3.4, np.cos(-0.375), np.sin(-0.375), 0.0, 0.0, 1.75, 9.6]]
+    )
+    clr, collision, rear_collision, m = score_object_step(diagonal, EGO_SHAPE, device="cpu")
+    assert m == 1
+    assert collision is True, f"diagonal overlap not flagged (clr={clr:.3f})"
+    assert rear_collision is False, "contact away from the rear edge must not flag rear_collision"
+
+
 def test_no_valid_neighbors_returns_inf():
     clr, collision, rear_collision, m = score_object_step(
         np.zeros((3, 11), np.float32), EGO_SHAPE, "cpu"
