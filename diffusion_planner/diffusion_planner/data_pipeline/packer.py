@@ -562,6 +562,19 @@ def _run_builds(
     return [by_pid[j.partition_id] for j in jobs]
 
 
+def _check_pid_injective(partition_ids) -> None:
+    seen: dict[str, str] = {}
+    for partition_id in partition_ids:
+        h = P.pid_of(partition_id)
+        other = seen.get(h)
+        if other is not None and other != partition_id:
+            raise PlanError(
+                f"pid collision: {partition_id!r} and {other!r} both hash to {h!r}; "
+                "output paths would overwrite each other"
+            )
+        seen[h] = partition_id
+
+
 def pack(opts: PackOptions) -> V.Version:
     root = V.DatasetRoot(opts.dest)
     root.ensure_layout()
@@ -594,6 +607,7 @@ def pack(opts: PackOptions) -> V.Version:
             groups = {k: v for k, v in groups.items() if k in set(opts.partitions)}
         if not groups and not opts.sync:
             raise PlanError("nothing to pack: selection matched no partitions in source")
+        _check_pid_injective(groups)
         build_dir = root.builds_dir / uuid.uuid4().hex
         build_dir.mkdir(parents=True)
         journal = V.Journal(build_dir)

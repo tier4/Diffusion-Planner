@@ -266,3 +266,16 @@ def test_null_progress_is_safe_when_progress_disabled(tmp_path):
     make_tree(src, LAYOUT)
     v = PK.pack(_opts(src, tmp_path / "dst", "v1", progress=False))
     assert v.tag == "v1"
+
+
+def test_pid_collision_is_refused_before_packing(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT)
+    monkeypatch.setattr(PK.P, "pid_of", lambda _pid: "collide")
+    with pytest.raises(PlanError) as ei:
+        PK.pack(_opts(src, tmp_path / "dst", "v1"))
+    assert "pid collision" in str(ei.value)
+
+
+def test_pid_injective_accepts_distinct_ids():
+    PK._check_pid_injective(["a/b", "a/c", "d/e"])
