@@ -1,6 +1,9 @@
 import hashlib
+import os
 import pickle
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from diffusion_planner.data_pipeline import packer as PK
@@ -27,6 +30,39 @@ def _opts(src, dst, tag, base="none", **kw):
         shard_size_bytes=64 * 1024,
         **kw,
     )
+
+
+def _fake_job(pid: str) -> PK.WorkerJob:
+    """A minimal WorkerJob for tests that exercise `_run_builds` directly, against a
+    monkeypatched `_build_partition` that never touches the source tree."""
+    return PK.WorkerJob(
+        build_dir=Path("/unused"),
+        partition_id=pid,
+        samples=[],
+        base_entry=None,
+        base_manifest_path=None,
+        shard_size_bytes=1,
+        seed=0,
+        drop_skipped=True,
+        with_neighbor_ids=False,
+        force=False,
+    )
+
+
+def _sleepy_worker(job):
+    """Sleeps longer for earlier-indexed jobs, so completion order is the reverse of job
+    (submission) order — proving that any pass/fail of the ordering assertion downstream
+    is about `_run_builds`'s reassembly, not an accident of scheduling.
+    """
+    idx = int(job.partition_id.rsplit("-", 1)[-1])
+    time.sleep(0.2 * (3 - idx))
+    return SimpleNamespace(entry=SimpleNamespace(partition_id=job.partition_id))
+
+
+def _die_worker(job):
+    """Kills its own process hard, with no exception and no cleanup — the shape of an
+    OOM kill, as opposed to a Python exception raised inside the worker."""
+    os._exit(1)
 
 
 def _boom_worker(job):
@@ -119,3 +155,32 @@ def test_pool_uses_spawn(tmp_path, monkeypatch):
     make_tree(src, LAYOUT)
     PK.pack(_opts(src, tmp_path / "dst", "v1", workers=2))
     assert seen["ctx"] == "SpawnContext"
+
+
+def test_run_builds_returns_job_order_not_completion_order(monkeypatch):
+    """`_run_builds` must return results in job order regardless of completion order.
+
+    Nothing downstream of `pack()` would catch a regression to completion order (the
+    version's `partitions` dict is built by partition id, not position, and per-partition
+    RNG is seeded independently), so this asserts the invariant directly against
+    `_run_builds`, using jobs whose completion order is deliberately the reverse of their
+    submission order.
+    """
+    monkeypatch.setattr(PK, "_build_partition", _sleepy_worker)
+    jobs = [_fake_job(f"job-{i}") for i in range(4)]
+    out = PK._run_builds(jobs, 4, lambda job, build: None)
+    assert [b.entry.partition_id for b in out] == [j.partition_id for j in jobs]
+
+
+def test_worker_death_publishes_nothing(tmp_path, monkeypatch):
+    """A worker that dies without raising (the OOM-killer shape, via `os._exit`) must
+    surface as `PackWorkerError` through the `BrokenProcessPool` path, not hang or crash
+    the parent, and must not publish anything."""
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT)
+    dst = tmp_path / "dst"
+
+    monkeypatch.setattr(PK, "_build_partition", _die_worker)
+    with pytest.raises(PackWorkerError):
+        PK.pack(_opts(src, dst, "v1", workers=2))
+    assert not (DatasetRoot(dst).versions_dir / "v1.json").exists()

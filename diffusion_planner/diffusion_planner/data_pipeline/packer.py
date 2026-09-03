@@ -436,7 +436,6 @@ def _run_builds(
 
     ctx = multiprocessing.get_context("spawn")
     by_pid: dict[str, PartitionBuild] = {}
-    job_of: dict[str, WorkerJob] = {}
     remaining = iter(jobs)
     inflight: dict[futures.Future, WorkerJob] = {}
     ex = futures.ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
@@ -450,14 +449,20 @@ def _run_builds(
                 try:
                     build = fut.result()
                 except BrokenProcessPool as e:
+                    # `done` is a set: iteration order is not completion order, so `job` here
+                    # is not provably the partition that killed the pool. Report every
+                    # partition that was in flight (this one plus whatever else hadn't
+                    # completed yet) rather than naming one as if it were certain.
+                    pending = sorted(
+                        {job.partition_id, *(j.partition_id for j in inflight.values())}
+                    )
                     raise PackWorkerError(
                         "a pack worker died without raising (check the OOM killer and dmesg); "
-                        f"partition dispatched to it: {job.partition_id}"
+                        f"partitions in flight: {pending[:20]}"
                     ) from e
                 except Exception as e:
                     raise PackWorkerError(f"partition {job.partition_id}: {e}") from e
-                by_pid[build.entry.partition_id] = build
-                job_of[build.entry.partition_id] = job
+                by_pid[job.partition_id] = build
                 on_done(job, build)
                 for nxt in itertools.islice(remaining, 1):
                     inflight[ex.submit(_build_partition, nxt)] = nxt

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -108,6 +109,14 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd == "inspect":
             print(P.inspect_tree(a.source, _rule(a), a.include, a.exclude).render())
         elif a.cmd == "pack":
+            if a.workers < 1:
+                raise ValueError(f"--workers must be >= 1, got {a.workers}")
+            cpu_count = os.cpu_count()
+            if cpu_count and a.workers > cpu_count:
+                print(
+                    f"warning: --workers {a.workers} exceeds cpu_count ({cpu_count})",
+                    file=sys.stderr,
+                )
             path_list = json.loads(a.path_list.read_text()) if a.path_list else None
             PK.pack(
                 PK.PackOptions(
