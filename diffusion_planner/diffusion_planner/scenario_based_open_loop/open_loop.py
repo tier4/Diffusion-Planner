@@ -231,8 +231,7 @@ def run_scenario_based_open_loop_validation(
                     encoding="utf-8",
                 )
 
-            summaries[metric_name] = {"sample_count": float(count)}
-            summaries[metric_name].update(
+            summaries[metric_name] = (
                 {key: total / count for key, total in totals.items()} if count else {}
             )
     finally:

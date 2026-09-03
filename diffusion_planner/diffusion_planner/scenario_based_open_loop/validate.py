@@ -46,9 +46,6 @@ def scenario_based_open_loop_validate(
     print(
         "scenario-based-open-loop @epoch {}: {}".format(
             epoch + 1,
-            ", ".join(
-                f"{metric_name}={int(values['sample_count'])} samples"
-                for metric_name, values in summary.items()
-            ),
+            ", ".join(summary),
         )
     )
