@@ -2251,6 +2251,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             ego_shape=np.ones(3, dtype=np.float32),
             clearances=np.full(8, np.inf, dtype=np.float32),
             collisions=np.zeros(8, dtype=bool),
+            rear_collisions=np.zeros(8, dtype=bool),
             rb_dists=np.full(8, np.inf, dtype=np.float32),
             red_light=np.zeros(8, dtype=bool),
             accels=np.zeros(8, dtype=np.float32),
@@ -2293,7 +2294,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
     def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
-        return [(1.0, False, 0, -1) for _ in neighbors_list]
+        return [(1.0, False, False, 0, -1) for _ in neighbors_list]
 
     def _fake_realized_event_scorer(
         np_dict,
@@ -2416,6 +2417,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rear_collisions=np.zeros(max_steps + 1, dtype=bool),
             rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
             red_light=np.zeros(max_steps + 1, dtype=bool),
             accels=np.zeros(max_steps + 1, dtype=np.float32),
@@ -2460,7 +2462,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         score_calls["n"] += 1
         collided = score_calls["n"] >= 2
-        return [(0.0, collided, 1, 0) for _ in neighbors_list]
+        return [(0.0, collided, False, 1, 0) for _ in neighbors_list]
 
     def _fake_danger_scorer(built, preds, data, device):
         return [{"labels": ["clean"], "label": "clean"} for _ in built]
@@ -2571,6 +2573,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rear_collisions=np.zeros(max_steps + 1, dtype=bool),
             rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
             red_light=np.zeros(max_steps + 1, dtype=bool),
             accels=np.zeros(max_steps + 1, dtype=np.float32),
@@ -2611,7 +2614,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
     def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
-        return [(0.0, True, 1, 0) for _ in neighbors_list]
+        return [(0.0, True, False, 1, 0) for _ in neighbors_list]
 
     def _fake_clean_scorer(*_args, **_kwargs):
         return [{"labels": ["clean"], "label": "clean"}]

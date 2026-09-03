@@ -161,7 +161,7 @@ def _score_neighbors(scene, ego_state: dict, device: str, ego_name: str) -> tupl
     )[0, :, -1, :]
     # (box_wheelbase, length, width) -- metric geometry, so ego_metric_box and not entity_shape.
     ego_shape = np.array(ego_metric_box(ego_state), dtype=np.float32)[[2, 0, 1]]
-    min_clr, coll, _ = score_object_step(neighbors_live, ego_shape, device)
+    min_clr, coll, _rear_coll, _ = score_object_step(neighbors_live, ego_shape, device)
     return min_clr, coll
 
 

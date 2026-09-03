@@ -50,6 +50,7 @@ _ABS_COLUMNS = [
     ("Strong brakes", "total_strong_brakes"),
     ("Segs diverged", "n_segments_diverged"),
     ("Collisions", "total_collision_events"),
+    ("Rear collisions", "total_rear_collision_events"),
 ]
 
 _PER_1000STEPS_COLUMNS = [
@@ -65,6 +66,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Strong brakes / 1k steps", "total_strong_brakes"),
     ("Segs diverged / 1k steps", "n_segments_diverged"),
     ("Collisions / 1k steps", "total_collision_events"),
+    ("Rear collisions / 1k steps", "total_rear_collision_events"),
 ]
 
 
@@ -184,6 +186,9 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
         agg[k] = sum(int(extract_score(s, k) or 0) for s in values)
     agg["total_collision_events"] = sum(
         int(extract_score(s, "total_collision_events") or 0) for s in objects_only_values
+    )
+    agg["total_rear_collision_events"] = sum(
+        int(extract_score(s, "total_rear_collision_events") or 0) for s in objects_only_values
     )
     return agg
 
