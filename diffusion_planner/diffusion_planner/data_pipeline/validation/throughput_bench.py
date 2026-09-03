@@ -9,6 +9,7 @@ from pathlib import Path
 
 from torch.utils.data import DataLoader, DistributedSampler
 
+from diffusion_planner.data_pipeline.defaults import MAX_PAD_FRACTION
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.shard_dataset import ShardDatasetConfig, make_shard_dataloader
 
@@ -92,6 +93,12 @@ def main(argv=None) -> int:
     ap.add_argument("--C", default="1,2,4,8")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--legacy-path-list", help="JSON list of npz paths for the npz-path comparison")
+    ap.add_argument(
+        "--max-pad-fraction",
+        type=float,
+        default=MAX_PAD_FRACTION,
+        help="pad cap; raise for small slices",
+    )
     a = ap.parse_args(argv)
     for C in (int(c) for c in a.C.split(",")):
         cfg = ShardDatasetConfig(
@@ -104,6 +111,7 @@ def main(argv=None) -> int:
             num_workers=a.workers,
             seed=0,
             shards_in_flight=C,
+            max_pad_fraction=a.max_pad_fraction,
         )
         loader = make_shard_dataloader(cfg, pin_memory=True)
         print(f"shards C={C}:", _measure(loader, a.steps, a.batch_size))
