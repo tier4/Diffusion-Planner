@@ -158,6 +158,9 @@ def test_keyset_empty_where_error(tmp_path, capsys):
     make_tree(src, LAYOUT[:1])
     common = ["--source", str(src), "--dest", str(dst), "--partition-depth", "4"]
     CLI.main(["pack", *common, "--base", "none", "--tag", "v1"])
+    # `pack` reports progress on stderr by default (PackOptions.progress=True); drain it
+    # here so the assertion below is about the `keyset` command's own stderr only.
+    capsys.readouterr()
     assert (
         CLI.main(
             [
@@ -184,6 +187,9 @@ def test_keyset_reserved_column_where_error(tmp_path, capsys):
     make_tree(src, LAYOUT[:1])
     common = ["--source", str(src), "--dest", str(dst), "--partition-depth", "4"]
     CLI.main(["pack", *common, "--base", "none", "--tag", "v1"])
+    # `pack` reports progress on stderr by default (PackOptions.progress=True); drain it
+    # here so the assertion below is about the `keyset` command's own stderr only.
+    capsys.readouterr()
     assert (
         CLI.main(
             [

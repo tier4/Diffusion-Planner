@@ -1,6 +1,8 @@
 import hashlib
+import io
 import os
 import pickle
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -202,4 +204,65 @@ def test_missing_sidecars_still_allowed_by_default(tmp_path):
     src = tmp_path / "src"
     make_tree(src, LAYOUT)
     v = PK.pack(_opts(src, tmp_path / "dst", "v1"))
+    assert v.tag == "v1"
+
+
+def test_progress_reports_samples_and_projection():
+    buf = io.StringIO()
+    prog = PK._Progress(total_partitions=2, total_samples=10, out=buf, every_s=0.0)
+
+    class J:
+        def __init__(self, n):
+            self.samples = [None] * n
+
+    class B:
+        pass
+
+    prog(J(4), B())
+    prog(J(6), B())
+    text = buf.getvalue()
+    assert "1/2 partitions" in text
+    assert "4/10 samples" in text
+    assert "2/2 partitions" in text and "10/10 samples" in text
+    assert re.search(r"eta \d+:\d\d:\d\d", text)
+
+
+def _slow_worker(job):
+    """Sleeps longer than the short heartbeat timeout the heartbeat test injects, so
+    `_run_builds`'s `futures.wait` is guaranteed to time out at least once before this
+    worker's result arrives. Module-level (not a nested closure), same reasoning as
+    `_sleepy_worker`/`_boom_worker` above: it must survive pickling under `spawn`.
+    """
+    time.sleep(0.3)
+    return SimpleNamespace(entry=SimpleNamespace(partition_id=job.partition_id))
+
+
+def test_heartbeat_emitted_when_pool_goes_quiet(monkeypatch):
+    """A hung/slow worker must not leave `_run_builds` printing nothing: with a short
+    injected `heartbeat_timeout`, at least one heartbeat line fires on the progress object
+    before the (still correct) result comes back.
+    """
+    monkeypatch.setattr(PK, "_build_partition", _slow_worker)
+    buf = io.StringIO()
+    prog = PK._Progress(total_partitions=1, total_samples=1, out=buf, every_s=0.0)
+    jobs = [_fake_job("job-0")]
+    out = PK._run_builds(jobs, 2, prog, heartbeat_timeout=0.05)
+    text = buf.getvalue()
+    assert "HEARTBEAT" in text
+    assert text.index("HEARTBEAT") < text.index("1/1 partitions")
+    assert [b.entry.partition_id for b in out] == ["job-0"]
+
+
+def test_null_progress_is_safe_when_progress_disabled(tmp_path):
+    """`_NullProgress` (what `pack()` hands to `_run_builds` when `opts.progress` is False)
+    must tolerate both the per-partition call and the heartbeat call with no output and no
+    error — it stands in for a plain lambda that has no `heartbeat` method.
+    """
+    prog = PK._NullProgress()
+    prog(_fake_job("job-0"), object())
+    prog.heartbeat(3)
+
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT)
+    v = PK.pack(_opts(src, tmp_path / "dst", "v1", progress=False))
     assert v.tag == "v1"

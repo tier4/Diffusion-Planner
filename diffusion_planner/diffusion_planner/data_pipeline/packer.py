@@ -7,6 +7,7 @@ import itertools
 import multiprocessing
 import shutil
 import sys
+import time
 import uuid
 import zlib
 from concurrent import futures
@@ -64,6 +65,7 @@ class PackOptions:
     shard_size_bytes: int = SHARD_SIZE_BYTES
     seed: int = 42
     workers: int = 1
+    progress: bool = True
     drop_skipped: bool = True
     require_sidecars: bool = False
     with_neighbor_ids: bool = False
@@ -415,10 +417,82 @@ def _publish(
     shutil.rmtree(journal.build_dir, ignore_errors=True)
 
 
+def _hms(seconds: float) -> str:
+    s = max(int(seconds), 0)
+    return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+class _Progress:
+    """Per-partition progress on stderr, projected on samples rather than partitions."""
+
+    def __init__(self, total_partitions: int, total_samples: int, out=None, every_s: float = 5.0):
+        self.total_partitions = total_partitions
+        self.total_samples = max(total_samples, 1)
+        self.out = out if out is not None else sys.stderr
+        self.every_s = every_s
+        self.parts = 0
+        self.samples = 0
+        self.t0 = time.monotonic()
+        self._last = 0.0
+
+    def __call__(self, job, build) -> None:
+        self.parts += 1
+        self.samples += len(job.samples)
+        now = time.monotonic()
+        last = self.parts == self.total_partitions
+        if not last and (now - self._last) < self.every_s:
+            return
+        self._last = now
+        elapsed = now - self.t0
+        frac = self.samples / self.total_samples
+        eta = (elapsed / frac - elapsed) if frac > 0 else 0.0
+        print(
+            f"pack: {self.parts}/{self.total_partitions} partitions · "
+            f"{self.samples}/{self.total_samples} samples ({frac * 100:.1f}%) · "
+            f"elapsed {_hms(elapsed)} · eta {_hms(eta)}",
+            file=self.out,
+            flush=True,
+        )
+
+    def heartbeat(self, inflight_count: int) -> None:
+        """Fired when the pool has been silent for a full heartbeat interval — no partition
+        completed, so `__call__` above would not otherwise print anything. Distinguishable
+        from a normal progress line (prefixed "HEARTBEAT", no partition/sample tally) so a
+        skim of the log can't mistake a hang for ordinary progress.
+        """
+        elapsed = time.monotonic() - self.t0
+        print(
+            f"pack: HEARTBEAT · {inflight_count} partition(s) still in flight · "
+            f"{self.parts}/{self.total_partitions} partitions done so far · "
+            f"elapsed {_hms(elapsed)}",
+            file=self.out,
+            flush=True,
+        )
+
+
+class _NullProgress:
+    """No-op stand-in for `_Progress` when `opts.progress` is False.
+
+    `_run_builds` calls `on_done.heartbeat(...)` unconditionally when the pool goes quiet;
+    a bare `lambda job, build: None` has no such method, so progress-disabled callers get
+    this object instead rather than `_run_builds` needing `hasattr` checks.
+    """
+
+    def __call__(self, job, build) -> None:
+        pass
+
+    def heartbeat(self, inflight_count: int) -> None:
+        pass
+
+
+_HEARTBEAT_TIMEOUT_S = 60.0
+
+
 def _run_builds(
     jobs: list[WorkerJob],
     workers: int,
     on_done,
+    heartbeat_timeout: float = _HEARTBEAT_TIMEOUT_S,
 ) -> list[PartitionBuild]:
     """Build every job, serially or on a bounded spawn pool, and return results in job order.
 
@@ -426,6 +500,9 @@ def _run_builds(
     and their fork-safety cannot be established by testing, and spawn does not inherit the
     writer-lock descriptor (a forked child that hangs would hold a stale lock if the parent
     died abnormally).
+
+    The serial path (`workers <= 1`) has no pool and no `futures.wait`, so it cannot hang
+    there; the heartbeat below only applies to the pool path.
     """
     if workers <= 1:
         out = []
@@ -444,7 +521,15 @@ def _run_builds(
         for job in itertools.islice(remaining, workers * 2):
             inflight[ex.submit(_build_partition, job)] = job
         while inflight:
-            done, _ = futures.wait(inflight, return_when=futures.FIRST_COMPLETED)
+            done, _ = futures.wait(
+                inflight, timeout=heartbeat_timeout, return_when=futures.FIRST_COMPLETED
+            )
+            if not done:
+                # No partition finished within the timeout: a worker may simply be on a
+                # large partition, or it may have hung. Either way, say so instead of
+                # blocking silently — on a multi-hour run this is the only sign of life.
+                on_done.heartbeat(len(inflight))
+                continue
             for fut in done:
                 job = inflight.pop(fut)
                 try:
@@ -515,7 +600,12 @@ def pack(opts: PackOptions) -> V.Version:
         jobs = [
             _job_for(opts, build_dir, base, root, pid, samples) for pid, samples in groups.items()
         ]
-        builds = _run_builds(jobs, opts.workers, lambda job, build: None)
+        on_done = (
+            _Progress(len(jobs), sum(len(j.samples) for j in jobs))
+            if opts.progress
+            else _NullProgress()
+        )
+        builds = _run_builds(jobs, opts.workers, on_done)
         if opts.require_sidecars:
             missing = sum(b.missing_sidecars for b in builds)
             if missing:
