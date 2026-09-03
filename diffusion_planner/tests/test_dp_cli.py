@@ -153,6 +153,16 @@ def test_pack_rejects_workers_below_one(tmp_path, capsys):
     assert not dst.exists()
 
 
+def test_pack_quiet_suppresses_progress(tmp_path, capsys):
+    """Minor: progress was on by default with no opt-out; --quiet sets progress=False."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    make_tree(src, LAYOUT[:1])
+    common = ["--source", str(src), "--dest", str(dst), "--partition-depth", "4"]
+    assert CLI.main(["pack", *common, "--base", "none", "--tag", "v1", "--quiet"]) == 0
+    err = capsys.readouterr().err
+    assert "pack:" not in err
+
+
 def test_keyset_empty_where_error(tmp_path, capsys):
     src, dst = tmp_path / "src", tmp_path / "dst"
     make_tree(src, LAYOUT[:1])

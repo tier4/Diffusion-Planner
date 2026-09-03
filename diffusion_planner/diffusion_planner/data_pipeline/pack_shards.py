@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="refuse to publish if any sample lacks a sidecar",
     )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-partition progress reporting on stderr (default: on)",
+    )
 
     p = sub.add_parser("remove")
     p.add_argument("--dest", required=True, type=Path)
@@ -144,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                     force=a.force,
                     require_marker=a.require_marker,
                     require_sidecars=a.require_sidecars,
+                    progress=not a.quiet,
                 )
             )
         elif a.cmd == "remove":
