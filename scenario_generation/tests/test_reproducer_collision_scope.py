@@ -66,9 +66,7 @@ def test_diagonal_side_clip_with_center_behind_is_not_a_rear_collision():
     ego's rear face (rear_edge_x ~= -1.24), and the box does collide -- but the actual
     overlap is on the ego's flank, not its back.
     """
-    diagonal = _neighbors(
-        [[-3.8, 3.4, np.cos(-0.375), np.sin(-0.375), 0.0, 0.0, 1.75, 9.6]]
-    )
+    diagonal = _neighbors([[-3.8, 3.4, np.cos(-0.375), np.sin(-0.375), 0.0, 0.0, 1.75, 9.6]])
     clr, collision, rear_collision, m = score_object_step(diagonal, EGO_SHAPE, device="cpu")
     assert m == 1
     assert collision is True, f"diagonal overlap not flagged (clr={clr:.3f})"
