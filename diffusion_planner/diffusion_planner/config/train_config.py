@@ -3,6 +3,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from diffusion_planner.data_pipeline.defaults import (
+    CHUNK_SIZE,
+    MAX_PAD_FRACTION,
+    SEEK_THRESHOLD,
+    SHARDS_IN_FLIGHT,
+    SHUFFLE_BUFFER_BYTES,
+    SHUFFLE_BUFFER_ITEMS,
+)
+
 from .closed_loop_config import ClosedLoopConfig
 from .config_cli import cli
 from .model_config import ModelConfig
@@ -17,6 +26,28 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     exp_name: str = cli("name of this run; appears in the save directory and in wandb", default="")
     train_set_list: str = cli("JSON list of training NPZ paths", path=True, default="")
     valid_set_list: str = cli("JSON list of validation NPZ paths", path=True, default="")
+
+    # ---------------------------------------------------------
+    # Versioned shard dataset (alternative to *_set_list; see data_pipeline/pack_shards.py)
+    # ---------------------------------------------------------
+    dataset_root: str = cli(
+        "root of a versioned shard dataset; enables the shard loader", path=True, default=""
+    )
+    dataset_version: str = cli("dataset version tag or 'latest'", default="latest")
+    train_key_set: str = cli(
+        "parquet key-set for training (pack_shards keyset)", path=True, default=""
+    )
+    valid_key_set: str = cli("parquet key-set for validation", path=True, default="")
+    train_shard_filter: str = cli(
+        "DuckDB WHERE clause, materialized to a key-set at startup", default=""
+    )
+    valid_shard_filter: str = cli("DuckDB WHERE clause for validation", default="")
+    shards_in_flight: int = SHARDS_IN_FLIGHT
+    shuffle_buffer: int = SHUFFLE_BUFFER_ITEMS
+    shuffle_buffer_bytes: int = SHUFFLE_BUFFER_BYTES
+    shard_chunk_size: int = CHUNK_SIZE
+    shard_seek_threshold: float = SEEK_THRESHOLD
+    shard_max_pad_fraction: float = MAX_PAD_FRACTION
 
     # ---------------------------------------------------------
     # Run output
@@ -83,7 +114,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     )
     normalization_file_path: str = "normalization.json"
 
-    train_subsample_step: int = 1
+    train_subsample_step: int = cli("temporal subsampling step (npz path only)", default=1)
 
     # ---------------------------------------------------------
     # Training Parameters
