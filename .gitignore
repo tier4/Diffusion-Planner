@@ -27,3 +27,7 @@ control_panel/_dev_presets.py
 # project->vehicle mapping for closed-loop eval (--project_vehicle_map /
 # --closed_loop_project_vehicle_map): supplied at runtime, not tracked here.
 *project_vehicle_map*.json
+
+# internal design/process docs — this repo is public; never commit these
+docs/superpowers/
+.superpowers/
