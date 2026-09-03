@@ -158,7 +158,7 @@ are competing with you for, not CPU.
 
 ## 2. Preflight
 
-Two checks, both before any packing starts.
+Three steps, all before any packing starts.
 
 ### 2.1 Rewrite and validate the path list
 
@@ -180,9 +180,13 @@ input.** `entries` and `rewritten` should be equal (the rewrite aborts on the fi
 rather than silently dropping bad ones, so a smaller `rewritten` count cannot appear on its own).
 If you were given `$EXPECTED_ENTRIES` ahead of time, confirm `entries` matches it now.
 
-The rewrite only checks that every entry is a `.npz` path that exists under `--new-prefix`, with
-no duplicates after rewriting. It does **not** check that a sidecar JSON exists for each entry,
-and it does not check the count against anything external — that is what the next step is for.
+The rewrite performs **no filesystem access at all**. It only checks that every entry ends in
+`.npz`, that it lies under `--old-prefix` on a path-*component* boundary (not just a string
+prefix — `/old/rootbis/...` does not count as being under `/old/root`), and that no two entries
+rewrite to the same path. It does **not** check that the rewritten path exists on disk, it does
+**not** check that a sidecar JSON exists for each entry, and it does not check the count against
+anything external — the next step (`inspect`, against the real tree) is what actually touches
+the filesystem.
 
 ### 2.2 Confirm the partition rule against the real tree, and the pid-collision preflight
 
@@ -212,6 +216,12 @@ missing sidecars: <K>; non-sidecar jsons: <...>
   tree's actual directory shape — fix the regex (never the tool), then re-run this step.
 - Note `<K>` (missing sidecars). This is the same count `--require-sidecars` enforces at publish
   time in Phase 3; a large number here is worth investigating now, while it is still cheap.
+  **`<K>` == 0 is a hard precondition for passing `--require-sidecars` in Phase 3 (§5.3).**
+  `--require-sidecars` only aborts a batch *after* that batch's shards have been fully built —
+  many build-hours of work, not a preflight check — so if `<K> > 0`, either resolve the missing
+  sidecars first, or drop `--require-sidecars` from the batch loop and accept sidecar-less
+  samples deliberately (with whatever downstream consequences that implies), rather than
+  discovering it hours into a batch.
 
 Next, turn that report into a clean partition table and use it to run the pid-collision check
 over **every** partition in the corpus, once, up front — not per-batch. This matters because the
@@ -242,7 +252,13 @@ for line in report[start + 1:]:
         break
     rows.append((m.group(1), int(m.group(2))))
 
-Path(os.environ["PARTITIONS_TSV"]).write_text(
+# Deliberately the FULL-TREE table (every partition under $SOURCE, not just the ones named in
+# $PATH_LIST) — this collision check exists specifically to cover the whole corpus once, up
+# front, in a way no per-batch invocation ever can (see trap 3). §2.3 below builds a SEPARATE,
+# path-list-scoped table under the plain name `partitions.tsv`; every step after this one reads
+# that table, not this one, because everything after this point must agree with what will
+# actually be packed, and the production path list is a subset of this tree.
+Path(os.environ["FULLTREE_PARTITIONS_TSV"]).write_text(
     "\n".join(f"{pid}\t{n}" for pid, n in rows) + "\n"
 )
 
@@ -266,13 +282,59 @@ Run it:
 
 ```bash
 export INSPECT_REPORT="$SCRATCH/inspect_report.txt"
-export PARTITIONS_TSV="$SCRATCH/partitions.tsv"
+export FULLTREE_PARTITIONS_TSV="$SCRATCH/partitions_fulltree.tsv"
 uv run python "$SCRATCH/preflight.py"
 ```
 
 Do not proceed past a collision. It means two different partitions would overwrite each other's
 shards and manifests on disk; the only remedies are choosing a different partition rule, or
 excluding one of the colliding partitions, and either needs a human decision, not an override.
+
+### 2.3 A path-list-scoped partition table for everything downstream
+
+`inspect` (§2.2) walks `$SOURCE` directly — it has no `--path-list` flag, so its partition table
+counts every partition in the tree, including any that are not named in `$PATH_LIST` at all. The
+production pack, though, always scopes discovery to `$PATH_LIST` (directly in Phase 3, per the
+I3 fix below; sliced in Phases 1-2). Every step from here on — the calibration slicer (§3.1), the
+batch splitter (§5.2), and the bit-exact thresholds (§6.3) — needs a partition table that agrees
+with *that* scope, not the full tree, or it will select or size batches around partitions that
+were never going to be packed at all. Build that table once, from `$PATH_LIST` itself:
+
+```bash
+uv run python - <<PY
+import json
+import os
+import re
+from pathlib import Path
+
+source = Path(os.environ["SOURCE"]).resolve()
+partition_regex = re.compile(os.environ["PARTITION_REGEX"])
+entries = json.loads(Path(os.environ["PATH_LIST"]).read_text())
+
+counts = {}
+for e in entries:
+    key = Path(e).resolve().relative_to(source).as_posix()[:-4]  # strip ".npz"
+    pid = partition_regex.match(key).group("partition")
+    counts[pid] = counts.get(pid, 0) + 1
+
+Path(os.environ["PARTITIONS_TSV"]).write_text(
+    "\n".join(f"{pid}\t{n}" for pid, n in sorted(counts.items())) + "\n"
+)
+print(f"{len(counts)} path-list-scoped partitions -> {os.environ['PARTITIONS_TSV']}")
+PY
+```
+
+Run it:
+
+```bash
+export PARTITIONS_TSV="$SCRATCH/partitions.tsv"
+```
+
+(then run the inline script above with that exported). Every later section that reads
+`$PARTITIONS_TSV` — §3.1, §5.2, §6.3 — reads this table, not `$SCRATCH/partitions_fulltree.tsv`
+from §2.2. If this table's partition count differs a lot from `<M>` in §2.2's report, that is the
+same "source and path list disagree" signal §2.2 already told you to investigate, seen from the
+other side.
 
 ---
 
@@ -576,8 +638,9 @@ export ETA=<the η_W measured for that exact worker count, from this step or fro
 ## 5. Phase 3 — batched production pack
 
 Not one invocation — see trap 2 in the introduction. Pack in batches of roughly `$BATCH_SIZE`
-partitions, each batch a `pack` call selecting its own partitions with repeated `--partition`
-flags, chaining `--base` to the previous batch's tag (`none` for the very first batch).
+partitions, each batch a `pack` call scoped to its own slice of `$PATH_LIST` via `--path-list`
+(not `--partition` — see §5.2), chaining `--base` to the previous batch's tag (`none` for the
+very first batch).
 
 ### 5.1 Build expected keys for later acceptance, once, now
 
@@ -601,16 +664,31 @@ PY
 Keep in mind while reading Phase 4 later: this expected-keys file is *every* entry in the path
 list. If any samples end up dropped as `is_skipped` during packing (the default `pack` behaviour
 drops them; nothing above disables that default), those keys will be in this file but not in the
-published manifest, and the membership check in Phase 4 will report them as missing rather than
-silently accepting them — it does not know on its own that a dropped-skip is an allowed
-difference. Track the "rejected" counts each batch prints (§5.3) as you go; if Phase 4's missing
-count does not match the sum of those, that is a real problem, not an allowed one.
+published manifest, and the membership check in Phase 4 would otherwise report them as missing
+rather than silently accepting them — it does not know on its own that a dropped-skip is an
+allowed difference. Keep every batch's log (§5.3 already writes one per batch); §6.2 sums their
+"rejected" counts for you and passes that exact number to the gate, rather than asking you to
+tally it by eye. A gate that only ever demanded `missing_from_manifest == 0` could never pass on
+a real corpus with any `is_skipped` frames in it at all — every "rejected" number here is
+non-zero on real data — which is exactly the failure mode §6.2's `--allow-missing` exists to fix.
 
-### 5.2 Split the corpus into batches
+### 5.2 Split the corpus into batches — partition ids AND a matching path list, per batch
+
+`pack`'s `--partition` flags only ever select from the partitions `--path-list` (or, absent one,
+a full `--source` walk) actually discovered. Selecting batch partitions with `--partition` while
+scoping discovery with the FULL `$PATH_LIST` (as an earlier version of this section did) means
+`--partition` never rejects a partition that is not in `$PATH_LIST` at all — and since the
+production path list is a subset of the source tree, some batch, sooner or later, will contain
+such a partition and abort with `PlanError: --partition names not found in source`. The fix is to
+scope each batch's *discovery* to that batch alone: emit a per-batch path list (the subset of
+`$PATH_LIST` whose entries belong to that batch's partitions), and pass that as `--path-list` in
+§5.3, with no `--partition` flags at all — the path list itself is the only scoping a batch needs.
 
 ```bash
 uv run python - <<PY
+import json
 import os
+import re
 from pathlib import Path
 
 rows = [l.split("\t") for l in Path(os.environ["PARTITIONS_TSV"]).read_text().splitlines()]
@@ -618,25 +696,39 @@ pids = [pid for pid, _ in rows]
 batch_size = int(os.environ["BATCH_SIZE"])
 outdir = Path(os.environ["SCRATCH"]) / "batches"
 outdir.mkdir(parents=True, exist_ok=True)
+
+source = Path(os.environ["SOURCE"]).resolve()
+partition_regex = re.compile(os.environ["PARTITION_REGEX"])
+entries = json.loads(Path(os.environ["PATH_LIST"]).read_text())
+# One pass over the path list, bucketed by partition id, rather than one pass per batch —
+# on a large corpus this pays for the regex match once, not `n_batches` times.
+by_pid: dict[str, list[str]] = {}
+for e in entries:
+    key = Path(e).resolve().relative_to(source).as_posix()[:-4]
+    pid = partition_regex.match(key).group("partition")
+    by_pid.setdefault(pid, []).append(e)
+
 for i in range(0, len(pids), batch_size):
-    (outdir / f"batch_{i // batch_size:04d}.txt").write_text(
-        "\n".join(pids[i : i + batch_size]) + "\n"
-    )
+    batch_pids = pids[i : i + batch_size]
+    n = f"{i // batch_size:04d}"
+    (outdir / f"batch_{n}.txt").write_text("\n".join(batch_pids) + "\n")
+    batch_entries = [e for pid in batch_pids for e in by_pid.get(pid, [])]
+    (outdir / f"batch_{n}.path_list.json").write_text(json.dumps(batch_entries))
 print(f"{(len(pids) + batch_size - 1) // batch_size} batches written to {outdir}")
 PY
 ```
 
+`batch_NNNN.txt` (the partition-id list) is kept for the record and for §6.3's per-source
+thresholds; `batch_NNNN.path_list.json` is what §5.3 actually packs.
+
 ### 5.3 Pack each batch, chaining `--base`
 
 ```bash
+set -o pipefail   # otherwise `| tee` masks pack's exit code and the loop cannot see a failure
 prev_tag=none
 i=0
-for batch in "$SCRATCH"/batches/batch_*.txt; do
+for batch_list in "$SCRATCH"/batches/batch_*.path_list.json; do
   tag="${TAG_PREFIX}-batch-$(printf '%04d' "$i")"
-  args=()
-  while IFS= read -r pid; do
-    [ -n "$pid" ] && args+=(--partition "$pid")
-  done < "$batch"
 
   uv run python -m diffusion_planner.data_pipeline.pack_shards pack \
     --source "$SOURCE" \
@@ -644,11 +736,11 @@ for batch in "$SCRATCH"/batches/batch_*.txt; do
     --base "$prev_tag" \
     --tag "$tag" \
     --partition-regex "$PARTITION_REGEX" \
-    --path-list "$PATH_LIST" \
+    --path-list "$batch_list" \
     --workers "$WORKERS" \
     --require-sidecars \
-    "${args[@]}" \
-    2>&1 | tee "$SCRATCH/batch_${i}.log"
+    2>&1 | tee "$SCRATCH/batch_${i}.log" \
+    || { echo "batch $i ($tag) FAILED — prev_tag stays '$prev_tag', do not advance it" >&2; exit 1; }
 
   prev_tag="$tag"
   i=$((i + 1))
@@ -656,8 +748,18 @@ done
 echo "final batch tag: $prev_tag"
 ```
 
+Without `set -o pipefail` and the explicit `|| { ...; exit 1; }`, a failed batch's non-zero exit
+is masked by `| tee` (whose own exit code is `tee`'s, not `pack`'s), so the loop would silently
+advance `prev_tag` to a tag that was never actually published; every later batch would then chain
+`--base` to a version that does not exist, die on that (each only after its own full discovery
+pass), and the loop would finally print a "final batch tag" that never existed either. With the
+fix above, the loop stops immediately, at the batch that actually failed, with `prev_tag` still
+naming the last tag that really was published.
+
 `--require-sidecars` makes a batch with any sidecar-less sample fail before it publishes anything
-— this is the sidecar gate, and it only protects you if every batch actually carries the flag.
+— this is the sidecar gate, and it only protects you if every batch actually carries the flag,
+**and** if §2.2's `<K> == 0` precondition was actually satisfied before Phase 3 started (a batch
+can burn hours of build time before `--require-sidecars` even gets to reject it).
 
 **Important:** every successful `pack` call also updates the dataset's `latest` pointer to that
 call's own tag — including every intermediate batch tag, which is by construction an incomplete
@@ -696,12 +798,39 @@ means on this host), stop and investigate before continuing to spend the remaini
 is the entire point of not packing as one invocation: the course correction has to happen while
 there is still a run left to correct.
 
+**What this model does and does not include.** `r1 × W × η_W` was calibrated against
+`pack_bench` runs that, like every Phase 3 batch since the §5.2 fix above, discover only a
+`--path-list`-scoped slice — so ordinary per-batch discovery cost (stat-ing each entry in that
+batch's slice) is already reflected in `r1`/`η_W` at a comparable scale, and is not a separate
+term you need to add. What the model still does **not** include, and what `pack_bench` cannot
+measure by construction (it always packs into a fresh, empty `dest` with `--base none`), is
+`_check_unique_keys`: at the end of every batch, `pack` re-reads the `key` column of *every
+manifest in the accumulated base version* — not just this batch's own partitions — to check for
+cross-partition duplicates. That cost grows with how much of the corpus has already been packed,
+batch over batch, for the rest of the run; a flat `r1 × W × η_W` projection has no term for it at
+all. Expect the observed rate to drift below the projection more, batch after batch, as the base
+version accumulates — that drift, on its own, is an artefact of the model, not evidence of a
+problem. What *is* still worth stopping over: a shortfall present already at batch 0 (before any
+accumulation), or one that jumps sharply between adjacent batches rather than growing smoothly —
+either points at something other than `_check_unique_keys`'s expected growth.
+
 ---
 
 ## 6. Phase 4 — acceptance
 
 No dataset is handed to training before every one of the following passes and is written down.
 Use `$FINAL_TAG` = the last batch's tag from Phase 3.
+
+**This phase is the heaviest read pass in the whole procedure, and §1's host-safety measures
+still apply to it — renice it too.** §6.1's `scrub` re-hashes every payload in every published
+shard: a full re-read of the whole dataset off the shared filesystem, not a sample of it. §6.2's
+`verify_offsets` then opens every shard's tar header index and re-reads every manifest a second
+time (on top of `scrub`'s own read of them), and §6.4's loader smoke reads shards again through
+the real DDP path. §1's `nice -n 19` instruction was scoped to "every packing process" and §7's
+abort criteria to "the run" — both phrasings cover Phase 4 as written, but it is easy to read
+past that while focused on acceptance rather than packing. Renice these processes the same way,
+keep the same named observer watching other jobs' throughput, and the same abort criteria
+(including the free-space floor) still apply here, not just during Phase 3.
 
 ### 6.1 Scrub
 
@@ -717,19 +846,39 @@ member *offsets* — only payload hash and size — which is what the next step 
 
 ### 6.2 Offset integrity and two-way membership
 
+First, sum the "rejected" count each batch printed (§5.3) into one number — this, not a
+post-hoc eyeball comparison, is what the gate below is told to expect:
+
+```bash
+export TOTAL_REJECTED=$(grep -hoE '[0-9]+ rejected' "$SCRATCH"/batch_*.log \
+  | awk '{s += $1} END {print s + 0}')
+echo "total rejected across all batches: $TOTAL_REJECTED"
+```
+
+Then pass that number to `--allow-missing`, and the path-list-scoped partition count (§2.3) to
+`--expected-partitions`, so the tool — not a human summing logs by eye — makes the pass/fail
+decision:
+
 ```bash
 uv run python -m diffusion_planner.data_pipeline.validation.verify_conversion \
   --dest "$DEST" \
   --tag "$FINAL_TAG" \
-  --expected-keys-json "$SCRATCH/expected_keys.json"
+  --expected-keys-json "$SCRATCH/expected_keys.json" \
+  --allow-missing "$TOTAL_REJECTED" \
+  --expected-partitions "$(wc -l < "$SCRATCH/partitions.tsv")"
 ```
 
-On success this prints `offsets OK: {...}` then `membership OK: {...}`. On failure it prints
-`error: ...` and exits non-zero. If it fails on membership with a nonzero `missing_from_manifest`,
-compare that count against the total "rejected" count you tracked across every batch's log in
-§5.1 — an exact match means the difference is entirely accounted for by `is_skipped` drops (a
-sanctioned difference; record the count and move on), and anything else means a real integrity
-problem that must be resolved before continuing.
+On success this prints `offsets OK: {...}` then `membership OK: {...}`, and exit code 0 means
+every one of these passed: offset integrity (including the manifest-metadata cross-check),
+`missing_from_manifest` equal to `$TOTAL_REJECTED` **exactly** (not merely "at or under" — fewer
+missing than `$TOTAL_REJECTED` means the expected-keys file and the batch-log accounting
+disagree, which is its own problem), zero unexpected keys, zero duplicate manifest rows, and the
+version's partition count equal to the path-list-scoped count just passed via
+`--expected-partitions`. On failure it prints
+`error: ...`, a sample of the offending keys (from the report embedded in the error message),
+and exits non-zero. Either way, nothing after this step should re-derive that pass/fail judgement
+by hand — the exit code already is the judgement, once `--allow-missing` was given the real
+number.
 
 ### 6.3 Seeded, per-source bit-exact sample of at least `$MIN_BITEXACT_KEYS` keys
 
@@ -903,6 +1052,15 @@ for this kind of run, reproduced exactly rather than padded to a round number:
    traceback instead, something is more wrong than the tool anticipated and that is its own reason
    to stop.
 
+**Ctrl-C (SIGINT) on the coordinator drains, it does not stop immediately.** The coordinator's
+cleanup path cancels every queued-but-not-yet-started task, then calls
+`ex.shutdown(wait=True, cancel_futures=True)` — which *waits* for every already-running worker
+task to actually finish before the process exits. With `--workers W`, that means the coordinator
+can appear to hang for up to the time it takes one worker to finish its current partition,
+per worker, before it actually stops. This is expected drain, not a hang — but if you need the
+run to actually stop right away rather than finish draining, use the process-group kill below
+instead of waiting on Ctrl-C.
+
 **Emergency stop.** Killing only the coordinator process is not sufficient — worker processes are
 spawned (not forked), so they are independent OS processes that will keep running. Terminate the
 whole process group:
@@ -938,3 +1096,24 @@ If it reports still held, some process from the run survived the kill (check for
 reparented process rather than assuming the lock file itself needs deleting — deleting it while
 something still holds the underlying descriptor does not release that hold). Only resume packing
 once this reports free.
+
+**Reclaim disk before resuming or declaring the run over.** A batch that aborted — a gate
+failure (`--require-sidecars`, a pid collision, `--sync` refusing `--path-list`), a kill, or a
+crash — leaves its `build_dir` (a whole batch's worth of built shards) on the shared filesystem:
+`_publish` only removes it after a build actually completes and is fully written into the
+catalog, so an incomplete build is never cleaned up automatically. Since free space is itself one
+of this section's abort criteria, reclaiming it is part of recovering from the abort, not an
+optional tidy-up:
+
+```bash
+uv run python -m diffusion_planner.data_pipeline.pack_shards gc --dest "$DEST" --dry-run
+uv run python -m diffusion_planner.data_pipeline.pack_shards gc --dest "$DEST"
+```
+
+`gc` only removes builds and shard/manifest revisions unreferenced by any surviving version, so
+it is safe to run once the lock check above reports free. Like the rest of this run, it still
+reads and deletes across the shared filesystem, so renice it and keep it inside the same
+host-safety agreement as everything else in this section rather than treating it as a quick side
+errand. Do not run it while a `pack` invocation is still holding the writer lock (`gc` also
+takes `writer_lock`, so it would simply block behind that batch, not race it) — the lock-free
+check above is exactly the signal that it is safe to proceed.
