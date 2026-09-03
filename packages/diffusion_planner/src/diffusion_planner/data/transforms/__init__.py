@@ -14,6 +14,7 @@ from .traffic_light import (
     FillUnknownTrafficLightFutures,
     fill_unknown_traffic_light_futures,
 )
+from .turn_indicator_augmentation import PlannerTurnIndicatorAugmentation
 
 __all__ = [
     "FillUnknownTrafficLightFutures",
@@ -25,6 +26,7 @@ __all__ = [
     "PlannerQuinticHermiteAugmentation",
     "PlannerRigidDataAugmentation",
     "PlannerSpeedAugmentation",
+    "PlannerTurnIndicatorAugmentation",
     "Transform",
     "apply_rigid_pose_augmentation",
     "fill_unknown_traffic_light_futures",
