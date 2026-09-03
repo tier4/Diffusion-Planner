@@ -27,6 +27,7 @@ from diffusion_planner.utils.data_augmentation_frenet import (
     frenet_augmenter_from_args,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
+from diffusion_planner.utils.h5_dataset import H5FrameData, load_wheel_base_by_project
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
@@ -278,10 +279,32 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    # The two splits are chosen independently: both sources hand over the same canonical model
+    # inputs, so an H5 training split can be validated against an NPZ split. That is worth
+    # keeping available, because the NPZ validation split is what the closed-loop, open-loop
+    # and replan-consistency evaluations are built around.
+    wheel_base_by_project = (
+        load_wheel_base_by_project(args.h5_converter_param_path)
+        if args.h5_converter_param_path
+        else None
+    )
 
-    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+    def build_dataset(h5_index: str, path_list: str):
+        if h5_index:
+            return H5FrameData(
+                h5_index,
+                file_capacity=args.h5_file_capacity,
+                wheel_base_by_project=wheel_base_by_project,
+            )
+        return DiffusionPlannerData(path_list)
+
+    train_set = build_dataset(args.h5_train_index, args.train_set_list)
+    valid_set = build_dataset(args.h5_valid_index, args.valid_set_list)
+
+    if args.h5_train_index:
+        train_set.subsample(args.train_subsample_step)
+    else:
+        train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
@@ -311,6 +334,15 @@ def model_training(args: TrainConfig):
 
     valid_pair_loader = None
     if args.enable_replan_consistency_eval:
+        if args.h5_valid_index:
+            # The pair dataset walks consecutive NPZ frame paths to find replan pairs; H5
+            # frames are addressed by (shard, index) and carry no equivalent path ordering.
+            # Only the validation split matters here, so an H5 training split can still be
+            # paired with an NPZ validation split and keep this evaluation.
+            raise ValueError(
+                "enable_replan_consistency_eval needs an NPZ validation split; "
+                "it is not supported with h5_valid_index"
+            )
         expected_gap = args.replan_consistency_expected_gap or None
         valid_pair_set = DiffusionPlannerPairData(args.valid_set_list, expected_gap=expected_gap)
         if len(valid_pair_set) > 0:
@@ -417,7 +449,14 @@ def model_training(args: TrainConfig):
         # this function creates dataset artifacts and associate them with wandb run
         # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed
         if args.use_wandb and args.wandb_run_id is None:
-            log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
+            # Whichever manifest each split actually came from is what the lineage artifact
+            # records: the Parquet frame index for an H5 split, the path list for an NPZ one.
+            log_dataset_artifact(
+                wandb.run,
+                args.exp_name,
+                args.h5_train_index or args.train_set_list,
+                args.h5_valid_index or args.valid_set_list,
+            )
 
     if args.ddp:
         torch.distributed.barrier()
