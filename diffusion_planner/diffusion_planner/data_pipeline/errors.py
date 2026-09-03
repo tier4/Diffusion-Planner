@@ -23,3 +23,7 @@ class IntegrityError(PipelineError): ...
 
 
 class RuleMismatchError(PipelineError): ...
+
+
+class PackWorkerError(PipelineError):
+    """A pack worker raised or died. Carries the partition id where one is knowable."""

@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replace-all", action="store_true")
     p.add_argument("--shard-size-gb", type=float, default=SHARD_SIZE_BYTES / 2**30)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--workers", type=int, default=1, help="parallel partition builders")
     p.add_argument(
         "--keep-skipped",
         action="store_true",
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                     replace_all=a.replace_all,
                     shard_size_bytes=max(int(a.shard_size_gb * 2**30), 1),
                     seed=a.seed,
+                    workers=a.workers,
                     drop_skipped=not a.keep_skipped,
                     with_neighbor_ids=a.with_neighbor_ids,
                     force=a.force,

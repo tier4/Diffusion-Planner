@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
+import multiprocessing
 import shutil
+import sys
 import uuid
 import zlib
+from concurrent import futures
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +28,7 @@ from diffusion_planner.data_pipeline.defaults import SHARD_SIZE_BYTES
 from diffusion_planner.data_pipeline.errors import (
     EncodingError,
     IntegrityError,
+    PackWorkerError,
     PlanError,
     RuleMismatchError,
     SourceChangedError,
@@ -57,6 +63,7 @@ class PackOptions:
     replace_all: bool = False
     shard_size_bytes: int = SHARD_SIZE_BYTES
     seed: int = 42
+    workers: int = 1
     drop_skipped: bool = True
     with_neighbor_ids: bool = False
     force: bool = False
@@ -407,6 +414,63 @@ def _publish(
     shutil.rmtree(journal.build_dir, ignore_errors=True)
 
 
+def _run_builds(
+    jobs: list[WorkerJob],
+    workers: int,
+    on_done,
+) -> list[PartitionBuild]:
+    """Build every job, serially or on a bounded spawn pool, and return results in job order.
+
+    `spawn` is required, not preferred: pyarrow/duckdb/numpy hold native state in the parent
+    and their fork-safety cannot be established by testing, and spawn does not inherit the
+    writer-lock descriptor (a forked child that hangs would hold a stale lock if the parent
+    died abnormally).
+    """
+    if workers <= 1:
+        out = []
+        for job in jobs:
+            build = _build_partition(job)
+            on_done(job, build)
+            out.append(build)
+        return out
+
+    ctx = multiprocessing.get_context("spawn")
+    by_pid: dict[str, PartitionBuild] = {}
+    job_of: dict[str, WorkerJob] = {}
+    remaining = iter(jobs)
+    inflight: dict[futures.Future, WorkerJob] = {}
+    ex = futures.ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+    try:
+        for job in itertools.islice(remaining, workers * 2):
+            inflight[ex.submit(_build_partition, job)] = job
+        while inflight:
+            done, _ = futures.wait(inflight, return_when=futures.FIRST_COMPLETED)
+            for fut in done:
+                job = inflight.pop(fut)
+                try:
+                    build = fut.result()
+                except BrokenProcessPool as e:
+                    raise PackWorkerError(
+                        "a pack worker died without raising (check the OOM killer and dmesg); "
+                        f"partition dispatched to it: {job.partition_id}"
+                    ) from e
+                except Exception as e:
+                    raise PackWorkerError(f"partition {job.partition_id}: {e}") from e
+                by_pid[build.entry.partition_id] = build
+                job_of[build.entry.partition_id] = job
+                on_done(job, build)
+                for nxt in itertools.islice(remaining, 1):
+                    inflight[ex.submit(_build_partition, nxt)] = nxt
+    except BaseException:
+        for fut in inflight:
+            fut.cancel()
+        # Pending work is cancelled; tasks already running are NOT interrupted and drain.
+        ex.shutdown(wait=True, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
+    return [by_pid[j.partition_id] for j in jobs]
+
+
 def pack(opts: PackOptions) -> V.Version:
     root = V.DatasetRoot(opts.dest)
     root.ensure_layout()
@@ -445,7 +509,7 @@ def pack(opts: PackOptions) -> V.Version:
         jobs = [
             _job_for(opts, build_dir, base, root, pid, samples) for pid, samples in groups.items()
         ]
-        builds = [_build_partition(j) for j in jobs]
+        builds = _run_builds(jobs, opts.workers, lambda job, build: None)
         journal.advance("built")
         partitions = {} if (base is None or opts.replace_all) else dict(base.partitions)
         if opts.sync and base is not None:
