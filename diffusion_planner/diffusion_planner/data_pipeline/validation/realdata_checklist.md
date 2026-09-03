@@ -1,6 +1,6 @@
 # §7 real-data validation checklist (mechanism only — nothing in production is touched)
 
-Constraints: source tree is READ-ONLY; destination is a scratch directory on LOCAL disk (not RDMA);
+Constraints: source tree is READ-ONLY; destination is a scratch directory on LOCAL disk (never on shared network storage);
 the slice is defined by an explicit path list reviewed by a human; no npz is deleted anywhere.
 
 1. Pick the slice: write `slice_paths.json` (JSON list of absolute npz paths, a few thousand frames from ONE
