@@ -521,37 +521,53 @@ def _run_builds(
         for job in itertools.islice(remaining, workers * 2):
             inflight[ex.submit(_build_partition, job)] = job
         while inflight:
-            done, _ = futures.wait(
-                inflight, timeout=heartbeat_timeout, return_when=futures.FIRST_COMPLETED
-            )
-            if not done:
-                # No partition finished within the timeout: a worker may simply be on a
-                # large partition, or it may have hung. Either way, say so instead of
-                # blocking silently — on a multi-hour run this is the only sign of life.
-                on_done.heartbeat(len(inflight))
-                continue
-            for fut in done:
-                job = inflight.pop(fut)
-                try:
-                    build = fut.result()
-                except BrokenProcessPool as e:
-                    # `done` is a set: iteration order is not completion order, so `job` here
-                    # is not provably the partition that killed the pool. Report every
-                    # partition that was in flight (this one plus whatever else hadn't
-                    # completed yet) rather than naming one as if it were certain.
-                    pending = sorted(
-                        {job.partition_id, *(j.partition_id for j in inflight.values())}
-                    )
-                    raise PackWorkerError(
-                        "a pack worker died without raising (check the OOM killer and dmesg); "
-                        f"partitions in flight: {pending[:20]}"
-                    ) from e
-                except Exception as e:
-                    raise PackWorkerError(f"partition {job.partition_id}: {e}") from e
-                by_pid[job.partition_id] = build
-                on_done(job, build)
-                for nxt in itertools.islice(remaining, 1):
-                    inflight[ex.submit(_build_partition, nxt)] = nxt
+            try:
+                done, _ = futures.wait(
+                    inflight, timeout=heartbeat_timeout, return_when=futures.FIRST_COMPLETED
+                )
+                if not done:
+                    # No partition finished within the timeout: a worker may simply be on a
+                    # large partition, or it may have hung. Either way, say so instead of
+                    # blocking silently — on a multi-hour run this is the only sign of life.
+                    on_done.heartbeat(len(inflight))
+                    continue
+                for fut in done:
+                    job = inflight.pop(fut)
+                    try:
+                        build = fut.result()
+                    except BrokenProcessPool as e:
+                        # `done` is a set: iteration order is not completion order, so `job`
+                        # here is not provably the partition that killed the pool. Report every
+                        # partition that was in flight (this one plus whatever else hadn't
+                        # completed yet) rather than naming one as if it were certain.
+                        pending = sorted(
+                            {job.partition_id, *(j.partition_id for j in inflight.values())}
+                        )
+                        raise PackWorkerError(
+                            "a pack worker died without raising (check the OOM killer and "
+                            f"dmesg); partitions in flight: {pending[:20]}"
+                        ) from e
+                    except Exception as e:
+                        raise PackWorkerError(f"partition {job.partition_id}: {e}") from e
+                    by_pid[job.partition_id] = build
+                    on_done(job, build)
+                    for nxt in itertools.islice(remaining, 1):
+                        inflight[ex.submit(_build_partition, nxt)] = nxt
+            except BrokenProcessPool as e:
+                # Reachable from the refill `ex.submit(...)` above, not just from
+                # `fut.result()`: `done` is a set, so a sibling future's success can be popped,
+                # recorded, and refilled *before* this loop ever revisits the future that
+                # actually broke the pool. `submit()` on an already-broken pool raises
+                # BrokenProcessPool synchronously, and that call sits outside the inner
+                # try/except on purpose (it must not be attributed to `job`, the job that just
+                # succeeded) -- so it needs its own handler here, at the `while` level, applying
+                # the same PackWorkerError contract the primary path already gives the CLI and
+                # the runbook's abort criteria.
+                pending = sorted(j.partition_id for j in inflight.values())
+                raise PackWorkerError(
+                    "a pack worker died without raising (check the OOM killer and dmesg); "
+                    f"partitions in flight: {pending[:20]}"
+                ) from e
     except BaseException:
         for fut in inflight:
             fut.cancel()
@@ -576,6 +592,15 @@ def _check_pid_injective(partition_ids) -> None:
 
 
 def pack(opts: PackOptions) -> V.Version:
+    if opts.workers < 1:
+        # The CLI (pack_shards.py) already rejects this before calling in, for a clean
+        # "error: ..." message with no writer_lock or dest scaffolding touched. That check
+        # lives only there, though, so a caller that builds PackOptions directly -- pack_bench
+        # is one -- got no validation at all: `--workers 0` silently fell back to the serial
+        # path while still reporting `workers: 0`, and pack_bench's own baseline_w == 0 caused
+        # a ZeroDivisionError further down instead of a clear error at the source. Enforcing it
+        # here means every caller gets it, not just the CLI.
+        raise ValueError(f"workers must be >= 1, got {opts.workers}")
     root = V.DatasetRoot(opts.dest)
     root.ensure_layout()
     if opts.require_marker and not (Path(opts.source) / opts.require_marker).exists():

@@ -4,6 +4,7 @@ import os
 import pickle
 import re
 import time
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -279,3 +280,64 @@ def test_pid_collision_is_refused_before_packing(tmp_path, monkeypatch):
 
 def test_pid_injective_accepts_distinct_ids():
     PK._check_pid_injective(["a/b", "a/c", "d/e"])
+
+
+def test_pack_rejects_workers_below_one_at_the_api_level(tmp_path):
+    """I8: `PackOptions`/`pack()` must validate `--workers` themselves, not rely on the CLI's
+    early check alone. `pack_shards.py` rejects `workers < 1` before ever calling `pack()`,
+    but `pack_bench` builds `PackOptions` directly and got no validation at all -- `--workers 0`
+    silently ran serially while reporting `workers: 0`, and `--workers 0,8` divided by
+    `baseline_w == 0` downstream. The rejection must happen before any dest scaffolding, same
+    as the CLI's own early check.
+    """
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT[:1])
+    dst = tmp_path / "dst"
+    with pytest.raises(ValueError, match="workers"):
+        PK.pack(_opts(src, dst, "v1", workers=0))
+    assert not dst.exists()
+
+
+def _quick_worker(job):
+    """Returns immediately -- no staggered sleep needed for
+    `test_broken_pool_on_refill_submit_becomes_pack_worker_error`: with a 5-job list and
+    `workers=2`, the initial fill always consumes exactly 4 jobs (`workers * 2`) via 4
+    strictly sequential `submit()` calls made by a plain `for` loop, before the pool's own
+    concurrency can matter at all. Whichever future completes first, the *one* possible
+    refill (of the 1 job left over) is therefore always the 5th `submit()` call -- regardless
+    of completion order or scheduling.
+    """
+    return SimpleNamespace(entry=SimpleNamespace(partition_id=job.partition_id))
+
+
+def test_broken_pool_on_refill_submit_becomes_pack_worker_error(monkeypatch):
+    """I2: the refill `ex.submit(...)` inside `_run_builds`'s per-completed-future loop sits
+    outside the `try`/`except` that wraps `fut.result()`. If the pool has already broken by
+    the time a future is drained and refilled, `submit()` itself raises `BrokenProcessPool`
+    synchronously, and (before this fix) that escaped `_run_builds` entirely as a raw
+    `BrokenProcessPool`, not the `PackWorkerError` the CLI, the spec, and the runbook's abort
+    criteria all promise.
+
+    Reproduced by forcing the 5th `submit()` call to raise `BrokenProcessPool` directly (see
+    `_quick_worker` for why that call is deterministically the first refill), rather than
+    actually killing a worker -- killing a worker only reliably exercises the `fut.result()`
+    path, already covered by `test_worker_death_publishes_nothing`.
+    """
+    monkeypatch.setattr(PK, "_build_partition", _quick_worker)
+    real = PK.futures.ProcessPoolExecutor
+
+    class BreaksOnRefillSubmit(real):
+        def __init__(self, *a, **kw):
+            self._n = 0
+            super().__init__(*a, **kw)
+
+        def submit(self, *a, **kw):
+            self._n += 1
+            if self._n == 5:
+                raise BrokenProcessPool("simulated break on refill submit")
+            return super().submit(*a, **kw)
+
+    monkeypatch.setattr(PK.futures, "ProcessPoolExecutor", BreaksOnRefillSubmit)
+    jobs = [_fake_job(f"job-{i}") for i in range(5)]
+    with pytest.raises(PackWorkerError):
+        PK._run_builds(jobs, 2, lambda job, build: None)
