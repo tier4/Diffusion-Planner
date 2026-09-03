@@ -9,8 +9,8 @@ from pathlib import Path
 
 from diffusion_planner.data_pipeline import tar_shards as T
 from diffusion_planner.data_pipeline import versioning as V
-from diffusion_planner.data_pipeline.errors import IntegrityError
-from diffusion_planner.data_pipeline.manifest import read_manifest
+from diffusion_planner.data_pipeline.errors import IntegrityError, PipelineError
+from diffusion_planner.data_pipeline.manifest import read_manifest, read_metadata
 
 
 def verify_offsets(root: V.DatasetRoot, tag: str) -> dict:
@@ -37,8 +37,28 @@ def verify_offsets(root: V.DatasetRoot, tag: str) -> dict:
     members = 0
     mismatches: list[str] = []
     for e in version.partitions.values():
+        manifest_path = root.manifest_path_for(e.pid, e.data_rev, e.meta_rev)
+        # The manifest's own embedded metadata (written once, at build time) must still agree
+        # with the version entry that names this manifest -- otherwise the version and the
+        # manifest it points at have silently diverged (e.g. a manifest swapped in from a
+        # different build) and nothing else in this function would ever notice, since it reads
+        # `e.partition_id`/`e.data_rev`/`e.meta_rev`/`e.shards` only from the version entry.
+        md = read_metadata(manifest_path)
+        if (md.get("partition_id"), md.get("data_rev"), md.get("meta_rev")) != (
+            e.partition_id,
+            e.data_rev,
+            e.meta_rev,
+        ):
+            raise IntegrityError(
+                f"{e.partition_id}: manifest metadata {md} disagrees with version entry"
+            )
+        md_shards = md.get("shards", "").split(",") if md.get("shards") else []
+        if md_shards != list(e.shards):
+            raise IntegrityError(
+                f"{e.partition_id}: manifest shards {md_shards} disagree with version entry {e.shards}"
+            )
         table = read_manifest(
-            root.manifest_path_for(e.pid, e.data_rev, e.meta_rev),
+            manifest_path,
             columns=["shard_id", "sample_index_in_shard", "offset", "size"],
         )
         rows = table.to_pylist()
@@ -103,13 +123,31 @@ def manifest_keys(root: V.DatasetRoot, tag: str) -> set[str]:
     return set(_manifest_key_rows(root, tag))
 
 
-def verify_membership(root: V.DatasetRoot, tag: str, expected_keys: set[str]) -> dict:
+_SAMPLE_CAP = 20
+
+
+def verify_membership(
+    root: V.DatasetRoot,
+    tag: str,
+    expected_keys: set[str],
+    allow_missing: int = 0,
+    expected_partitions: int | None = None,
+) -> dict:
     """Cardinality is not membership. Diff both directions.
 
     `manifest_keys` collapses to a `set`, so a distinct-key comparison alone would let a
     manifest with duplicated keys (`_check_unique_keys` only runs at pack time, not
     against a manifest edited after publication) pass a membership check it should fail.
     Compare the raw row count against the distinct-key count too.
+
+    `allow_missing` exists because packing defaults to dropping `is_skipped` frames: on any
+    real corpus, `missing_from_manifest` is never zero, so a gate that demands `== 0` can
+    never pass and the decision moves to a human summing "rejected" across batch logs by eye.
+    The gate here still makes the decision -- but only once given the exact number the
+    operator's own batch-log accounting produced, not "zero or fewer". A count that differs
+    from `allow_missing` in *either* direction still fails: fewer missing than expected can
+    mean the expected-keys file and the drop accounting disagree just as much as more missing
+    can mean a real integrity problem.
     """
     rows = _manifest_key_rows(root, tag)
     got = set(rows)
@@ -122,14 +160,27 @@ def verify_membership(root: V.DatasetRoot, tag: str, expected_keys: set[str]) ->
         "in_manifest_rows": len(rows),
         "missing_from_manifest": len(missing),
         "unexpected_in_manifest": len(unexpected),
+        "allow_missing": allow_missing,
+        # Printed either way -- on a pass with allow_missing > 0 there is still a residual
+        # worth being able to spot-check, not just a count.
+        "missing_sample": sorted(missing)[:_SAMPLE_CAP],
+        "unexpected_sample": sorted(unexpected)[:_SAMPLE_CAP],
     }
     problems = []
-    if missing:
-        problems.append(f"missing {sorted(missing)[:3]}")
+    if len(missing) != allow_missing:
+        problems.append(
+            f"missing_from_manifest={len(missing)}, expected exactly allow_missing={allow_missing}"
+        )
     if unexpected:
-        problems.append(f"unexpected {sorted(unexpected)[:3]}")
+        problems.append(f"unexpected {len(unexpected)} key(s)")
     if duplicate_rows:
         problems.append(f"{duplicate_rows} duplicate key row(s) in manifest")
+    if expected_partitions is not None:
+        n_partitions = len(root.read_version(tag).partitions)
+        report["partitions"] = n_partitions
+        report["expected_partitions"] = expected_partitions
+        if n_partitions != expected_partitions:
+            problems.append(f"partition count {n_partitions} != expected {expected_partitions}")
     if problems:
         raise IntegrityError(f"membership differs: {report}; " + "; ".join(problems))
     return report
@@ -145,14 +196,37 @@ def main(argv=None) -> int:
         type=Path,
         help="JSON list of source-relative keys (path list entries minus the .npz suffix)",
     )
+    ap.add_argument(
+        "--allow-missing",
+        type=int,
+        default=0,
+        help=(
+            "exact number of expected keys allowed to be absent from the manifest (e.g. the "
+            "total is_skipped drop count the pack logs reported) -- the gate fails on any "
+            "other count, not just a larger one; default 0"
+        ),
+    )
+    ap.add_argument(
+        "--expected-partitions",
+        type=int,
+        default=None,
+        help="if given, the version's partition count must equal this exactly",
+    )
     a = ap.parse_args(argv)
     root = V.DatasetRoot(a.dest)
     try:
         offsets = verify_offsets(root, a.tag)
         print(f"offsets OK: {offsets}")
         expected = set(json.loads(a.expected_keys_json.read_text()))
-        print(f"membership OK: {verify_membership(root, a.tag, expected)}")
-    except IntegrityError as e:
+        report = verify_membership(
+            root,
+            a.tag,
+            expected,
+            allow_missing=a.allow_missing,
+            expected_partitions=a.expected_partitions,
+        )
+        print(f"membership OK: {report}")
+    except (PipelineError, ValueError, FileNotFoundError, KeyError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

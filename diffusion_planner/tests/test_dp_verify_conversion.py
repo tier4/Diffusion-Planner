@@ -134,3 +134,102 @@ def test_cli_requires_expected_keys_json(tmp_path):
     _src, root = _pack(tmp_path)
     with pytest.raises(SystemExit):
         VC.main(["--dest", str(root.root), "--tag", "v1"])
+
+
+def test_allow_missing_passes_only_on_the_exact_count(tmp_path):
+    """C1: on a real corpus, packing's default `drop_skipped=True` means
+    `missing_from_manifest` is never zero, so a gate that only ever accepts zero can never
+    pass and the decision moves to a human summing "rejected" across batch logs by eye.
+    `--allow-missing` must make the tool itself the gate: it passes only when the missing
+    count is exactly what was declared, not merely "at or under" -- fewer missing than
+    declared is just as much a real discrepancy as more.
+    """
+    _src, root = _pack(tmp_path)
+    keys = VC.manifest_keys(root, "v1")
+    expected = keys | {"dropped/key/1", "dropped/key/2"}
+
+    # Exactly 2 missing, declared as 2: passes.
+    rep = VC.verify_membership(root, "v1", expected, allow_missing=2)
+    assert rep["missing_from_manifest"] == 2 and rep["allow_missing"] == 2
+
+    # 2 missing, but declared as 0 (the default): fails -- this is the case that a real
+    # corpus's is_skipped drops would always trip before this fix.
+    with pytest.raises(IntegrityError, match="membership"):
+        VC.verify_membership(root, "v1", expected)
+
+    # 2 missing, but declared as 3: still fails -- fewer missing than declared is not "safer".
+    with pytest.raises(IntegrityError, match="membership"):
+        VC.verify_membership(root, "v1", expected, allow_missing=3)
+
+
+def test_expected_partitions_is_checked_when_given(tmp_path):
+    _src, root = _pack(tmp_path)
+    keys = VC.manifest_keys(root, "v1")
+    rep = VC.verify_membership(root, "v1", keys, expected_partitions=1)
+    assert rep["partitions"] == 1 and rep["expected_partitions"] == 1
+    with pytest.raises(IntegrityError, match="partition count"):
+        VC.verify_membership(root, "v1", keys, expected_partitions=2)
+
+
+def test_membership_report_samples_residual_keys_either_way(tmp_path):
+    """A pass with `allow_missing > 0` still leaves a residual worth spot-checking, not just
+    a bare count -- print a sample of it regardless of pass/fail."""
+    _src, root = _pack(tmp_path)
+    keys = VC.manifest_keys(root, "v1")
+    expected = keys | {"dropped/key/1"}
+    rep = VC.verify_membership(root, "v1", expected, allow_missing=1)
+    assert rep["missing_sample"] == ["dropped/key/1"]
+
+
+def test_cli_wrong_tag_is_error_not_traceback(tmp_path, capsys):
+    """Minor: verify_conversion previously caught only IntegrityError, so a wrong --tag (a
+    plain FileNotFoundError out of DatasetRoot.read_version) escaped as a raw traceback
+    instead of matching pack_shards' `error: ...` / exit-1 contract."""
+    _src, root = _pack(tmp_path)
+    keys_path = tmp_path / "keys.json"
+    keys_path.write_text("[]")
+    assert (
+        VC.main(
+            [
+                "--dest",
+                str(root.root),
+                "--tag",
+                "does-not-exist",
+                "--expected-keys-json",
+                str(keys_path),
+            ]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+
+
+def test_verify_offsets_catches_manifest_metadata_disagreeing_with_version(tmp_path):
+    """Minor: verify_offsets never cross-checked the manifest's own embedded metadata
+    (written once at build time) against the version entry that names it -- so a manifest
+    swapped in from a different build (same path, different content) went unnoticed as long
+    as it happened to keep the row/member counts consistent."""
+    from diffusion_planner.data_pipeline.manifest import write_manifest
+
+    _src, root = _pack(tmp_path)
+    v = root.read_version("v1")
+    e = next(iter(v.partitions.values()))
+    path = root.manifest_path_for(e.pid, e.data_rev, e.meta_rev)
+    table = read_manifest(path)
+    write_manifest(
+        path,
+        table,
+        {
+            "format_version": "1",
+            "packer_version": "x",
+            "recipe_hash": "x",
+            "source_fingerprint": "x",
+            "data_rev": e.data_rev,
+            "meta_rev": e.meta_rev,
+            "partition_id": "not-the-real-partition-id",
+            "shards": ",".join(e.shards),
+        },
+    )
+    with pytest.raises(IntegrityError, match="manifest metadata"):
+        VC.verify_offsets(root, "v1")

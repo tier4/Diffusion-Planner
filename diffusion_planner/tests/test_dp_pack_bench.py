@@ -79,3 +79,28 @@ def test_cli_requires_one_partition_rule_flag(tmp_path):
     argparse error, not an unhandled ValueError from PartitionRule.__post_init__."""
     with pytest.raises(SystemExit):
         PB.main(["--source", str(tmp_path), "--dest-root", str(tmp_path / "out")])
+
+
+def test_cli_reports_error_instead_of_raw_traceback(tmp_path, capsys):
+    """Minor: pack_bench previously caught nothing in main(), so any exception out of
+    bench()/pack() -- here, --workers 0, per I8 -- escaped as a raw traceback instead of
+    matching pack_shards' `error: ...` / exit-1 contract."""
+    src = tmp_path / "src"
+    make_tree(src, LAYOUT)
+    assert (
+        PB.main(
+            [
+                "--source",
+                str(src),
+                "--dest-root",
+                str(tmp_path / "out"),
+                "--workers",
+                "0",
+                "--partition-depth",
+                "4",
+            ]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "workers" in err

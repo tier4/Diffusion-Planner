@@ -9,9 +9,12 @@ import sys
 import time
 from pathlib import Path
 
+import duckdb
+
 from diffusion_planner.data_pipeline import packer as PK
 from diffusion_planner.data_pipeline import partition as P
 from diffusion_planner.data_pipeline.defaults import SHARD_SIZE_BYTES
+from diffusion_planner.data_pipeline.errors import PipelineError
 
 
 def _tree_bytes(root: Path) -> int:
@@ -143,14 +146,29 @@ def main(argv=None) -> int:
     ap.add_argument("--shard-size-gb", type=float, default=SHARD_SIZE_BYTES / 2**30)
     ap.add_argument("--json-out", type=Path)
     a = ap.parse_args(argv)
-    rows = bench(
-        source=a.source,
-        dest_root=a.dest_root,
-        worker_counts=[int(x) for x in a.workers.split(",")],
-        rule=P.PartitionRule(depth=a.partition_depth, regex=a.partition_regex),
-        path_list=json.loads(a.path_list.read_text()) if a.path_list else None,
-        shard_size_bytes=max(int(a.shard_size_gb * 2**30), 1),
-    )
+    try:
+        rows = bench(
+            source=a.source,
+            dest_root=a.dest_root,
+            worker_counts=[int(x) for x in a.workers.split(",")],
+            rule=P.PartitionRule(depth=a.partition_depth, regex=a.partition_regex),
+            path_list=json.loads(a.path_list.read_text()) if a.path_list else None,
+            shard_size_bytes=max(int(a.shard_size_gb * 2**30), 1),
+        )
+    except (
+        PipelineError,
+        ValueError,
+        FileNotFoundError,
+        KeyError,
+        duckdb.Error,
+        TimeoutError,
+    ) as e:
+        # Same contract as pack_shards: `bench()` calls straight into `PK.pack()`, which can
+        # raise any of these (a bad --workers, a bad path-list entry, a broken pool, ...), and
+        # until now nothing here caught them -- they escaped as raw tracebacks instead of the
+        # "error: ..." / exit-1 shape every other CLI in this package gives an operator.
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(render(rows))
     if a.json_out:
         a.json_out.write_text(json.dumps(rows, indent=2))
