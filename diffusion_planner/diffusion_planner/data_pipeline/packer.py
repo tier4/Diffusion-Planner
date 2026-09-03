@@ -75,6 +75,54 @@ class PartitionBuild:
     missing_sidecars: int = 0
 
 
+@dataclass(frozen=True)
+class WorkerJob:
+    """Everything `_build_partition` consumes, and nothing else.
+
+    Deliberately excludes `PackOptions.path_list` (5.4M entries, ~1 GB parsed, on the
+    production corpus) and the full base `Version`: with a process pool both would be
+    pickled once per task, 10,926 times.
+    """
+
+    build_dir: Path
+    partition_id: str
+    samples: list[P.Sample]
+    base_entry: V.PartitionEntry | None
+    base_manifest_path: Path | None
+    shard_size_bytes: int
+    seed: int
+    drop_skipped: bool
+    with_neighbor_ids: bool
+    force: bool
+
+
+def _job_for(
+    opts: PackOptions,
+    build_dir: Path,
+    base: V.Version | None,
+    root: V.DatasetRoot,
+    partition_id: str,
+    samples: list[P.Sample],
+) -> WorkerJob:
+    entry = base.partitions.get(partition_id) if base is not None else None
+    return WorkerJob(
+        build_dir=build_dir,
+        partition_id=partition_id,
+        samples=samples,
+        base_entry=entry,
+        base_manifest_path=(
+            None
+            if entry is None
+            else root.manifest_path_for(entry.pid, entry.data_rev, entry.meta_rev)
+        ),
+        shard_size_bytes=opts.shard_size_bytes,
+        seed=opts.seed,
+        drop_skipped=opts.drop_skipped,
+        with_neighbor_ids=opts.with_neighbor_ids,
+        force=opts.force,
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -88,14 +136,11 @@ def _resolve_base(root: V.DatasetRoot, base: str) -> V.Version | None:
     return None if base == "none" else root.read_version(base)
 
 
-def _build_partition(
-    opts: PackOptions,
-    build_dir: Path,
-    partition_id: str,
-    samples: list[P.Sample],
-    base: V.Version | None,
-    root: V.DatasetRoot | None = None,
-) -> PartitionBuild:
+def _build_partition(job: WorkerJob) -> PartitionBuild:
+    opts = job  # field names below match WorkerJob
+    partition_id = job.partition_id
+    samples = job.samples
+    build_dir = job.build_dir
     # Pass 1: bounded-memory scan — hash each npz just to compute its sha256 (never retained),
     # read+parse the (tiny) sidecar, apply drop_skipped. `kept` holds only small metadata, never
     # the (potentially ~160 KB each, ~19 GB per real partition) npz payload bytes.
@@ -134,16 +179,14 @@ def _build_partition(
     ).hexdigest()
     data_rev = _data_rev(data_fp, opts.shard_size_bytes, opts.seed)
     pid = P.pid_of(partition_id)
-    base_entry = base.partitions.get(partition_id) if base else None
+    base_entry = job.base_entry
     if base_entry and not opts.force and base_entry.data_rev == data_rev:
         if base_entry.meta_fingerprint == meta_fp:
             # Full reuse: data and sidecar unchanged
             return PartitionBuild(base_entry, None, None, None, True, rejected, missing)
         # Meta-only update: same data_rev, different meta_fingerprint.
         # Read the base manifest, replace sidecar columns with newly-parsed fields.
-        base_manifest = root.manifest_path_for(
-            base_entry.pid, base_entry.data_rev, base_entry.meta_rev
-        )
+        base_manifest = job.base_manifest_path
         base_table = read_manifest(base_manifest)
         # Build a key -> sidecar_fields mapping from the kept list
         key_to_fields = {s.key: fields for s, _, _, fields, _ in kept}
@@ -399,10 +442,10 @@ def pack(opts: PackOptions) -> V.Version:
         build_dir = root.builds_dir / uuid.uuid4().hex
         build_dir.mkdir(parents=True)
         journal = V.Journal(build_dir)
-        builds = [
-            _build_partition(opts, build_dir, pid, samples, base, root)
-            for pid, samples in groups.items()
+        jobs = [
+            _job_for(opts, build_dir, base, root, pid, samples) for pid, samples in groups.items()
         ]
+        builds = [_build_partition(j) for j in jobs]
         journal.advance("built")
         partitions = {} if (base is None or opts.replace_all) else dict(base.partitions)
         if opts.sync and base is not None:
