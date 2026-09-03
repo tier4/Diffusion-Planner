@@ -79,6 +79,7 @@ export CANDIDATE_WORKERS="8 16 32"   # every worker count you intend to justify 
 
 # --- production pack (Phase 3) ---
 export WORKERS=0                 # fill in only after Phase 2 justifies a number — do not guess ahead
+export ETA=0                     # the η_W Phase 2 measured for THAT worker count — not any other candidate's
 export BATCH_SIZE=750            # partitions per batch; keep it in the few-hundred-to-a-thousand range
 export TAG_PREFIX=prod           # batch tags become ${TAG_PREFIX}-batch-0000, -0001, ...
 export FINAL_TAG=""              # set once you know which batch tag you will promote after acceptance
@@ -112,12 +113,23 @@ cd diffusion_planner
 ## 1. Environment
 
 Install the toolchain on the packing host's **own local disk** — never on the shared filesystem
-that also hosts `$DEST`. A user-local `uv` and Python 3.10 are all this needs; the packer itself
-imports only `duckdb`, `numpy`, `pyarrow`, `safetensors`, and `zstandard` — no `torch`.
+that also hosts `$DEST`. A user-local `uv` and Python 3.10 are what this needs.
 
 ```bash
 uv sync
 ```
+
+**Budget local disk for the whole project, not just the packer.** This repository's
+`pyproject.toml` has a single flat dependency list — no extras, no dependency groups to opt out
+of — so the plain `uv sync` above installs everything the project depends on, `torch`,
+`pytorch-lightning`, and `onnxruntime-gpu` (with their CUDA wheels) included. There is currently
+no scoped, pack-only install target in this repo; size the packing host's local disk for the
+full install, not for the handful of packages the pack path actually touches.
+
+That said, the pack path itself stays small at runtime: `pack_shards` and `pack_bench` only ever
+import `duckdb`, `numpy`, `pyarrow`, `safetensors`, and `zstandard`. Nothing about running the
+pack requires a GPU on this host — the CUDA-capable packages installed above simply sit unused
+for this part of the procedure.
 
 Before touching any real data, run the existing test suite on this host, with this checkout, and
 confirm it is green:
@@ -130,10 +142,13 @@ Record the pass/fail count as your baseline for this host. If any `tests/test_dp
 fails, stop and resolve it before proceeding — every later step in this document assumes those
 tests pass here.
 
-One exception: the loader-smoke step in Phase 4 exercises the DDP loader, which does depend on
-`torch`. If the packing host's environment deliberately excludes `torch` (as recommended above),
-run that one step from wherever your project's normal training environment is available and can
-read `$DEST` — it does not need to run from the packing host.
+One note: the loader-smoke step in Phase 4 exercises the DDP loader, which does depend on
+`torch`. Since the `uv sync` above already installs it, that step needs no separate environment
+by default. The only case where it would is if the packing host does not actually carry this
+repo's own `uv sync` output — for instance, a deliberately trimmed environment you assembled by
+hand outside this repo's dependency list, to avoid the disk cost noted above. In that case, run
+the loader-smoke step from wherever your project's normal environment is available and can read
+`$DEST` — it does not need to run from the packing host.
 
 Renice every packing process (`nice -n 19` or your platform's equivalent) for the whole
 operation; the shared filesystem's read bandwidth and metadata rate are the resource other jobs
@@ -429,10 +444,11 @@ approximation available, not a guarantee of a genuinely cold read.
 
 ## 4. Phase 2 — parallel calibration
 
-Goal: measure scaling efficiency `η` at a real worker count, confirm determinism between the
-serial and parallel paths, and measure every additional worker count you are actually
-considering for production — each one independently, because a measurement at one worker count
-does not justify using a different one.
+Goal: measure scaling efficiency at a real worker count, confirm determinism between the serial
+and parallel paths, and measure every additional worker count you are actually considering for
+production — each one independently, with its **own** efficiency, because a measurement at one
+worker count does not justify using a different one, and its efficiency does not carry over to
+a different one either.
 
 ### 4.1 A fresh, equally unread, equally stratified slice, at a real worker count
 
@@ -454,13 +470,16 @@ uv run python -m diffusion_planner.data_pipeline.validation.pack_bench \
 
 Because this is a *different* slice from Phase 1's, matched only by construction (same slicing
 method, same target size), efficiency here is not confounded by Phase 1 having already warmed
-the page cache for these particular files. Compute:
+the page cache for these particular files. Efficiency is **per worker count**, not a single
+corpus-wide constant — compute it for this row as:
 
 ```
-η = samples_per_s(this row) / (r1 × 8)
+η_8 = samples_per_s(this row) / (r1 × 8)
 ```
 
-Record `η`, and this run's `rss_self`/`rss_children` as the parallel-run memory reading, together
+Record `η_8` (do not just call it `η`; §4.3 measures a distinct efficiency for every other
+candidate worker count, and §5.4 needs to know which one belongs to the count you actually
+chose), and this run's `rss_self`/`rss_children` as the parallel-run memory reading, together
 with whatever read-throughput and other-jobs'-throughput readings your named observer collects
 during this run — this is the run that reading §0's host-safety agreement calls for a human to
 be watching.
@@ -529,13 +548,27 @@ for W in $CANDIDATE_WORKERS; do
 done
 ```
 
-Record `samples_per_s` and `rss_self`/`rss_children` for each. A worker count you did not measure
-this way is not a worker count you are entitled to use in Phase 3 — "it should scale further" is
-not a measurement. Once every candidate is measured, choose `$WORKERS` (the value you will use
-for the production pack) from the evidence and set it now:
+For each candidate, compute its own efficiency the same way §4.1 did — `η` is a function of
+worker count, not one number that carries over from whichever count you happened to measure
+first:
+
+```
+η_W = samples_per_s(that candidate's row) / (r1 × W)
+```
+
+Record `samples_per_s`, `rss_self`/`rss_children`, and this `η_W` for every candidate, including
+the `W=8` row already recorded as `η_8` in §4.1 — you should end this step with one `η_W` per
+entry in `$CANDIDATE_WORKERS`, not one shared value. A worker count you did not measure this way
+is not a worker count you are entitled to use in Phase 3 — "it should scale further" is not a
+measurement, and neither is reusing another count's efficiency for it.
+
+Once every candidate is measured, choose `$WORKERS` (the value you will use for the production
+pack) from the evidence, set it, and record which candidate's `η_W` that decision carries
+forward — that specific number, not "the Phase 2 efficiency," is what §5.4 projects with:
 
 ```bash
 export WORKERS=<the worker count Phase 2 actually justified>
+export ETA=<the η_W measured for that exact worker count, from this step or from §4.1>
 ```
 
 ---
@@ -636,15 +669,18 @@ and only after it passes Phase 4 in full.
 
 After batch 0 finishes, and again once roughly 5% of the corpus's total samples have been
 packed, compare actual progress against Phase 1/2's cost model. The model: wall time for `S`
-samples at `W` workers is `S / (r1 × W × η)`, using the `r1`, `W`, and `η` you measured — this is
-also the number to use if anyone asks how long a full rebuild costs.
+samples at `W` workers is `S / (r1 × W × η_W)`, using `r1` from Phase 1 and, critically, the
+`η_W` that §4.3 measured **for the specific `W` you set as `$WORKERS`** — not `η_8` unless
+`$WORKERS` is actually `8`. §4.3 measured a different efficiency for every candidate precisely
+so that a projection could not silently reuse the wrong one; use `$ETA` as recorded there. This
+is also the number to use if anyone asks how long a full rebuild costs.
 
 ```bash
 python -c "
 samples_so_far = <sum of 'kept' counts from the batch logs so far>
 elapsed_so_far = <wall-clock seconds since batch 0 started>
 r1 = <from Phase 1>
-eta = <from Phase 2>
+eta = <\$ETA — the efficiency measured for \$WORKERS specifically, from §4.1 or §4.3>
 workers = <\$WORKERS>
 observed_rate = samples_so_far / elapsed_so_far
 expected_rate = r1 * workers * eta
@@ -831,7 +867,8 @@ divided by `batch_size × world_size`, and record both.
 
 Write down, in one place, for the record:
 
-- `r1` (Phase 1), the production worker count and `η` (Phase 2);
+- `r1` (Phase 1), the production worker count `$WORKERS`, and the `η_W` that specific worker
+  count measured in Phase 2 (`$ETA` — not any other candidate's efficiency);
 - the observed production rate: total kept samples across all batches ÷ total wall-clock time
   across all batches;
 - total wall-clock time for the whole production pack;
