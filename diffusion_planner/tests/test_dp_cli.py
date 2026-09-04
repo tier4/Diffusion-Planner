@@ -165,11 +165,35 @@ def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path, 
     and asserts it is never constructed during the incremental pack for the (single, fully
     reused) partition under test. --workers defaults to 1, which runs `_build_partition`
     serially in this process (see packer._run_builds), so the spy sees every call.
+
+    The spy is installed before the very FIRST pack (not just the reuse pack at the end) so
+    that this test has a positive control: that first pack has no base to reuse from, so it
+    MUST build the partition, and the assertion right after it proves the spy actually fires.
+    Without that, an accidental change to how `packer.py` imports `ShardWriter` (e.g. switching
+    to `from .tar_shards import ShardWriter`, which `monkeypatch.setattr(T, ...)` would no
+    longer intercept) would make `shard_writer_calls == []` trivially true for the wrong
+    reason, and this test would pass even though it had stopped testing anything.
     """
     src1, src2, dst = tmp_path / "src1", tmp_path / "src2", tmp_path / "dst"
     make_tree(src1, LAYOUT[:1])
+
+    shard_writer_calls = []
+    real_shard_writer = T.ShardWriter
+
+    def _spy_shard_writer(*args, **kwargs):
+        shard_writer_calls.append(args)
+        return real_shard_writer(*args, **kwargs)
+
+    monkeypatch.setattr(T, "ShardWriter", _spy_shard_writer)
+
     common1 = ["--source", str(src1), "--dest", str(dst), "--partition-depth", "4"]
     assert CLI.main(["pack", *common1, "--base", "none", "--tag", "v1"]) == 0
+    # Positive control: nothing exists to reuse yet, so this pack must actually build the
+    # partition — proving the spy fires at all before the negative assertion below relies on
+    # it staying silent.
+    assert len(shard_writer_calls) == 1
+    shard_writer_calls.clear()
+
     root = DatasetRoot(dst)
     v1 = root.read_version("v1")
     recorded_namespace = v1.source_namespace
@@ -181,15 +205,7 @@ def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path, 
     common2 = ["--source", str(src2), "--dest", str(dst), "--partition-depth", "4"]
     assert CLI.main(["pack", *common2, "--base", "v1", "--tag", "v2"]) == 1
     assert DatasetRoot(dst).latest() == "v1"  # rejected pack must not publish v2
-
-    shard_writer_calls = []
-    real_shard_writer = T.ShardWriter
-
-    def _spy_shard_writer(*args, **kwargs):
-        shard_writer_calls.append(args)
-        return real_shard_writer(*args, **kwargs)
-
-    monkeypatch.setattr(T, "ShardWriter", _spy_shard_writer)
+    shard_writer_calls.clear()  # the rejected pack is expected to have built nothing either
 
     assert (
         CLI.main(
