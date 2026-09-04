@@ -50,11 +50,18 @@ def resolve_keysets(args, save_dir: Path, rank: int) -> tuple[Path, Path]:
 
 
 def resolve_valid_num_workers(num_workers: int, valid_num_workers: int) -> int:
-    """Resolve the worker count for the VALIDATION loader.
+    """Resolve the worker count for the VALIDATION loader. Shard-loader path only — the npz
+    path (see train.py) always uses `num_workers` for both loaders and never calls this.
 
     `valid_num_workers == 0` means "inherit `num_workers`" (today's behaviour); any positive
     value overrides it for validation only. Training always uses `num_workers` unchanged.
+    A negative `valid_num_workers` is never meaningful and is rejected rather than silently
+    treated as "inherit".
     """
+    if valid_num_workers < 0:
+        raise ValueError(
+            f"--valid_num_workers must be >= 0 (0 inherits --num_workers), got {valid_num_workers}"
+        )
     return valid_num_workers if valid_num_workers > 0 else num_workers
 
 

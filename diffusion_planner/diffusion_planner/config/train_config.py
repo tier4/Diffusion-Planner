@@ -78,10 +78,17 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default=MAX_PAD_FRACTION,
     )
     valid_num_workers: int = cli(
-        "dataloader workers per rank for VALIDATION only; 0 (default) inherits "
-        "--num_workers. Plan slots = world_size * workers and each slot is padded up to a "
-        "multiple of batch_size, so a validation set much smaller than training wastes a "
-        "large, irreducible fraction unless given fewer workers than training uses",
+        "dataloader workers per rank for VALIDATION only, and only on the shard-loader path "
+        "(--dataset_root); the npz path (--train_set_list/--valid_set_list) always uses "
+        "--num_workers for both loaders, this flag has no effect there. 0 (default) inherits "
+        "--num_workers; negative values are rejected. Plan slots = world_size * workers and "
+        "each slot is padded up to a multiple of batch_size, so a validation set much "
+        "smaller than training wastes a large, irreducible fraction unless given fewer "
+        "workers than training uses. Comparability hazard: this count changes how many "
+        "padded duplicate samples validate_model.aggregate_valid_metrics double-counts into "
+        "the valid_loss_* aggregate, so two runs must use the SAME --valid_num_workers "
+        "before compare_runs can attribute a valid_loss_* difference to the model rather "
+        "than to this setting",
         default=0,
     )
 
@@ -103,7 +110,11 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # DataLoader Parameters
     # ---------------------------------------------------------
     batch_size: int = cli("batch size across all GPUs", default=512)
-    num_workers: int = 8
+    num_workers: int = cli(
+        "dataloader workers per rank for TRAINING (and, on the npz path, for validation too — "
+        "see --valid_num_workers)",
+        default=8,
+    )
     pin_mem: bool = True
 
     use_data_augment: bool = True

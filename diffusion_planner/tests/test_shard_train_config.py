@@ -120,6 +120,28 @@ def test_shard_tuning_flags_omitted_yield_previous_defaults():
     assert cfg.shard_max_pad_fraction == MAX_PAD_FRACTION
 
 
+def test_num_workers_is_cli_flag_with_unchanged_default():
+    """shard_max_pad_fraction's help text tells operators to `lower --num_workers /
+    --valid_num_workers`, but num_workers used to be a plain (non-cli()) field: build_parser
+    never emitted the flag, so `--num_workers` was rejected by argparse and the training
+    worker count was effectively pinned at 8 on the CLI path. It must now be a real flag,
+    with its default unchanged."""
+    from diffusion_planner.config import TrainConfig, build_config, build_parser
+
+    f = TrainConfig.__dataclass_fields__["num_workers"]
+    assert f.metadata.get("cli") is True, "num_workers is not cli()-marked"
+    assert f.metadata.get("help"), "num_workers has no help string"
+
+    parser = build_parser(TrainConfig, "test")
+    ns = parser.parse_args(["--exp_name", "t"])
+    cfg = build_config(TrainConfig, ns)
+    assert cfg.num_workers == 8  # default must be unchanged
+
+    ns2 = parser.parse_args(["--exp_name", "t", "--num_workers", "2"])
+    cfg2 = build_config(TrainConfig, ns2)
+    assert cfg2.num_workers == 2
+
+
 def test_valid_num_workers_defaults_to_zero_and_is_cli_flag():
     from diffusion_planner.config import TrainConfig, build_config, build_parser
 
@@ -145,6 +167,14 @@ def test_resolve_valid_num_workers_positive_overrides_for_validation_only():
     the training value."""
     assert shard_ddp.resolve_valid_num_workers(num_workers=8, valid_num_workers=1) == 1
     assert shard_ddp.resolve_valid_num_workers(num_workers=8, valid_num_workers=8) == 8
+
+
+def test_resolve_valid_num_workers_rejects_negative():
+    """`valid_num_workers < 0` used to be silently treated as "inherit --num_workers" because
+    the old code only ever tested `> 0`. A negative value is never a meaningful worker count
+    and must be rejected with a clear error, not quietly reinterpreted."""
+    with pytest.raises(ValueError, match="valid_num_workers"):
+        shard_ddp.resolve_valid_num_workers(num_workers=8, valid_num_workers=-1)
 
 
 def test_validate_args_modes():

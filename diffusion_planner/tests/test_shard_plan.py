@@ -55,7 +55,7 @@ def test_padding_gives_whole_batches_and_equal_ranks():
 
 
 def test_pad_bound_and_slot_starvation_raise():
-    with pytest.raises(PlanError, match="pad"):
+    with pytest.raises(PlanError, match="pad") as exc_info:
         SP.make_plan(
             {SP.ShardRef("p", "r", 0): np.arange(7000), SP.ShardRef("q", "r", 0): np.arange(1)},
             world_size=1,
@@ -64,7 +64,13 @@ def test_pad_bound_and_slot_starvation_raise():
             chunk_size=8192,
             max_pad_fraction=0.01,
         )
-    with pytest.raises(PlanError, match="fewer chunks"):
+    # The error must name flags that actually exist (--chunk-size does not; the real flag is
+    # --shard_chunk_size, and worker counts are set via --num_workers/--valid_num_workers).
+    msg = str(exc_info.value)
+    assert "--chunk-size" not in msg
+    assert "--shard_chunk_size" in msg
+    assert "--num_workers" in msg and "--valid_num_workers" in msg
+    with pytest.raises(PlanError, match="fewer chunks") as exc_info2:
         SP.make_plan(
             _sel([10]),
             world_size=2,
@@ -73,6 +79,10 @@ def test_pad_bound_and_slot_starvation_raise():
             chunk_size=1024,
             max_pad_fraction=1.0,
         )
+    msg2 = str(exc_info2.value)
+    assert "--chunk-size" not in msg2
+    assert "--shard_chunk_size" in msg2
+    assert "--num_workers" in msg2 and "--valid_num_workers" in msg2
 
 
 def test_num_workers_zero_is_one_slot_per_rank():

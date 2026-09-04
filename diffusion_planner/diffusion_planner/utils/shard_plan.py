@@ -55,7 +55,8 @@ def assign_slots(chunks: list[Chunk], n: int) -> list[list[Chunk]]:
     if len(chunks) < n:
         raise PlanError(
             f"fewer chunks ({len(chunks)}) than (rank, worker) slots ({n}); "
-            "use fewer workers or a smaller --chunk-size"
+            "use fewer workers (--num_workers/--valid_num_workers) or a smaller "
+            "--shard_chunk_size"
         )
     slots: list[list[Chunk]] = [[] for _ in range(n)]
     loads = [0] * n
@@ -86,7 +87,8 @@ def pad_plan(
         raise PlanError(
             f"padding would duplicate {total_pad}/{total} samples "
             f"({100 * total_pad / total:.2f}% > {100 * max_pad_fraction:.2f}% max pad fraction); "
-            "use a smaller --chunk-size, fewer workers, or a smaller batch"
+            "use a smaller --shard_chunk_size, fewer workers "
+            "(--num_workers/--valid_num_workers), or a smaller --batch_size"
         )
     return padding, target
 
