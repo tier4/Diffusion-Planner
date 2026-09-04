@@ -42,12 +42,48 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "DuckDB WHERE clause, materialized to a key-set at startup", default=""
     )
     valid_shard_filter: str = cli("DuckDB WHERE clause for validation", default="")
-    shards_in_flight: int = SHARDS_IN_FLIGHT
-    shuffle_buffer: int = SHUFFLE_BUFFER_ITEMS
-    shuffle_buffer_bytes: int = SHUFFLE_BUFFER_BYTES
-    shard_chunk_size: int = CHUNK_SIZE
-    shard_seek_threshold: float = SEEK_THRESHOLD
-    shard_max_pad_fraction: float = MAX_PAD_FRACTION
+    shards_in_flight: int = cli(
+        "number of (shard, worker) chunk streams interleaved concurrently per dataloader "
+        "worker; higher improves within-worker shuffle randomness at the cost of more open "
+        "shard file handles and memory, lower reduces IO fan-out",
+        default=SHARDS_IN_FLIGHT,
+    )
+    shuffle_buffer: int = cli(
+        "max samples held in the in-process shuffle buffer before a random one is flushed; "
+        "raise for better shuffling at the cost of memory, lower to cut startup latency",
+        default=SHUFFLE_BUFFER_ITEMS,
+    )
+    shuffle_buffer_bytes: int = cli(
+        "byte cap on the shuffle buffer (see --shuffle_buffer); whichever of the two limits "
+        "is hit first triggers a flush",
+        default=SHUFFLE_BUFFER_BYTES,
+    )
+    shard_chunk_size: int = cli(
+        "samples per (shard, worker) planning chunk; smaller chunks improve load-balancing "
+        "across (rank, worker) slots and reduce padding waste, but at least "
+        "world_size * num_workers chunks must exist. Lower this if a PlanError reports "
+        "fewer chunks than (rank, worker) slots, or too much padding",
+        default=CHUNK_SIZE,
+    )
+    shard_seek_threshold: float = cli(
+        "fraction of a shard's members that a chunk must want before the reader switches "
+        "from per-member seek reads to a single sequential skim of the whole shard file",
+        default=SEEK_THRESHOLD,
+    )
+    shard_max_pad_fraction: float = cli(
+        "max fraction of samples a (rank, worker) slot may duplicate to pad every slot up "
+        "to the same length; exceeding it raises PlanError. Raise this, shrink "
+        "--shard_chunk_size, or lower --num_workers/--valid_num_workers (fewer, larger "
+        "slots pad less) — especially for a validation set much smaller than training",
+        default=MAX_PAD_FRACTION,
+    )
+    valid_num_workers: int = cli(
+        "dataloader workers per rank for VALIDATION only; 0 (default) inherits "
+        "--num_workers. Plan slots = world_size * workers and each slot is padded up to a "
+        "multiple of batch_size, so a validation set much smaller than training wastes a "
+        "large, irreducible fraction unless given fewer workers than training uses",
+        default=0,
+    )
 
     # ---------------------------------------------------------
     # Run output

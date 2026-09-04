@@ -49,6 +49,15 @@ def resolve_keysets(args, save_dir: Path, rank: int) -> tuple[Path, Path]:
     return out[0], out[1]
 
 
+def resolve_valid_num_workers(num_workers: int, valid_num_workers: int) -> int:
+    """Resolve the worker count for the VALIDATION loader.
+
+    `valid_num_workers == 0` means "inherit `num_workers`" (today's behaviour); any positive
+    value overrides it for validation only. Training always uses `num_workers` unchanged.
+    """
+    return valid_num_workers if valid_num_workers > 0 else num_workers
+
+
 def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, save_dir: Path):
     """Construct the train/valid ShardDatasets and their DataLoaders (spec §5/§6 preflight).
 
@@ -56,13 +65,13 @@ def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, sa
     read the shared epoch value at `__iter__`.
     """
     train_ks, valid_ks = resolve_keysets(args, save_dir, rank)
+    valid_workers = resolve_valid_num_workers(args.num_workers, args.valid_num_workers)
     common = dict(
         root=Path(args.dataset_root),
         version=args.dataset_version,
         batch_size=batch_size_per_rank,
         world_size=world_size,
         rank=rank,
-        num_workers=args.num_workers,
         seed=args.seed,
         shards_in_flight=args.shards_in_flight,
         shuffle_buffer_items=args.shuffle_buffer,
@@ -71,8 +80,12 @@ def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, sa
         seek_threshold=args.shard_seek_threshold,
         max_pad_fraction=args.shard_max_pad_fraction,
     )
-    train_cfg = ShardDatasetConfig(keyset_path=train_ks, shuffle=True, **common)
-    valid_cfg = ShardDatasetConfig(keyset_path=valid_ks, shuffle=False, **common)
+    train_cfg = ShardDatasetConfig(
+        keyset_path=train_ks, shuffle=True, num_workers=args.num_workers, **common
+    )
+    valid_cfg = ShardDatasetConfig(
+        keyset_path=valid_ks, shuffle=False, num_workers=valid_workers, **common
+    )
     train_ds = ShardDataset(train_cfg)  # preflight on every rank, before any collective
     valid_ds = ShardDataset(valid_cfg)
     if _initialized():  # all ranks must have resolved the same version bytes
@@ -93,18 +106,23 @@ def build_loaders(args, rank: int, world_size: int, batch_size_per_rank: int, sa
             json.dumps(train_ds.run_record(), indent=2, default=str)
         )
 
-    def _dl(ds: ShardDataset) -> torch.utils.data.DataLoader:
+    def _dl(ds: ShardDataset, num_workers: int) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
             ds,
             batch_size=batch_size_per_rank,
-            num_workers=args.num_workers,
+            num_workers=num_workers,
             pin_memory=args.pin_mem,
             drop_last=True,
             in_order=True,
-            persistent_workers=args.num_workers > 0,
+            persistent_workers=num_workers > 0,
         )
 
-    return _dl(train_ds), _dl(valid_ds), train_ds, valid_ds
+    return (
+        _dl(train_ds, args.num_workers),
+        _dl(valid_ds, valid_workers),
+        train_ds,
+        valid_ds,
+    )
 
 
 def coordinated_abort(exc: BaseException) -> None:
