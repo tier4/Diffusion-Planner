@@ -20,6 +20,7 @@
 #include "processing/ego_sequence.hpp"
 #include "processing/frame_skip_decision.hpp"
 #include "processing/neighbor_processor.hpp"
+#include "processing/stopped_tail.hpp"
 #include "types/skipping_info.hpp"
 #include "utils/timestamp_utils.hpp"
 
@@ -111,15 +112,16 @@ void process_sequence(
     return;
   }
 
-  bool goal_pose_overwritten = false;
-  {
-    const auto & last_state = seq.data_list.back().kinematic_state;
-    const double last_speed = std::abs(last_state.twist.twist.linear.x);
-    if (last_speed < 0.5) {
-      seq.route.goal_pose = last_state.pose.pose;
-      goal_pose_overwritten = true;
-    }
+  // A sequence that ends standing still ended where the ego meant to stop, so the final pose is
+  // taken as the goal — and, below, may be held for the part of the GT future that reaches past
+  // the last frame, so that the stop itself is converted instead of the loop giving up OUTPUT_T
+  // ticks early.
+  const bool ends_stopped = stopped_tail::ends_stopped(seq.data_list);
+  if (ends_stopped) {
+    seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
   }
+  const bool goal_pose_overwritten = ends_stopped;
+  std::cout << "Ends stopped: " << (ends_stopped ? "yes" : "no") << std::endl;
 
   save_route_json(
     route_save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
@@ -148,7 +150,7 @@ void process_sequence(
     const rclcpp::Time past_reference_time(seq.data_list[i].kinematic_state.header.stamp);
     const auto ego_past_opt = create_ego_sequence(
       seq.data_list, i - INPUT_T_WITH_CURRENT + 1, INPUT_T_WITH_CURRENT, map2bl,
-      past_reference_time, options.use_interpolation);
+      past_reference_time, options.use_interpolation, false);
     if (!ego_past_opt) {
       std::cout << "Failed to create ego past at frame " << i << std::endl;
       break;
@@ -159,8 +161,11 @@ void process_sequence(
       past_reference_time +
       rclcpp::Duration::from_seconds(OUTPUT_T * constants::PREDICTION_TIME_STEP_S);
     const auto ego_future_opt = create_ego_sequence(
-      seq.data_list, i + 1, OUTPUT_T, map2bl, future_reference_time, options.use_interpolation);
+      seq.data_list, i + 1, OUTPUT_T, map2bl, future_reference_time, options.use_interpolation,
+      ends_stopped);
     if (!ego_future_opt) {
+      // Only reachable when the sequence does not end standing still; otherwise the final pose
+      // is held and the loop runs to the last frame.
       std::cout << "Reached end of sequence at frame " << i << "/" << n << std::endl;
       break;
     }

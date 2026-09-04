@@ -6,6 +6,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import init_process_group
 
+from diffusion_planner.utils.dist_init import dist_init_file_path
+
 
 def ddp_setup_universal(verbose=False, args=None):
     if args.ddp == False:
@@ -39,7 +41,7 @@ def ddp_setup_universal(verbose=False, args=None):
     dist_backend = "nccl"
     # I don't know why but this is needed for DDP to work instead of 'env://'
     dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
+    file_path = str(dist_init_file_path())
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
         init_method=f"{dist_url}{file_path}",

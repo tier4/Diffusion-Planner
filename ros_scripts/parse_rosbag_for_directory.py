@@ -2,11 +2,14 @@ import argparse
 import logging
 import os
 import shutil
+import sys
 import time
+from collections import Counter
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 from parse_rosbag_by_cpp import main as parse_rosbag_main_cpp
+from parse_rosbag_by_cpp import write_conversion_manifest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CPP_BINARY = (
@@ -41,6 +44,11 @@ def parse_args():
     parser.add_argument("--offlane_time_stride", type=int, default=1)
     parser.add_argument("--write_skipped_npz", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=os.cpu_count() // 2)
+    parser.add_argument(
+        "--conversion_manifest_path",
+        type=Path,
+        help="Write one record per attempted ROSBAG conversion as JSON.",
+    )
     return parser.parse_args()
 
 
@@ -83,7 +91,14 @@ def process_single_bag(args_tuple):
             f"Unexpected bag path layout for {bag_path}: expected "
             f"<proj_id>/<map_id>/<split>/<date>/<time>. Skipping."
         )
-        return f"Skipped (unexpected layout): {bag_path}"
+        return {
+            "status": "skipped",
+            "mode": None,
+            "bag_path": str(bag_path),
+            "output_dir": None,
+            "reason": "unexpected_layout",
+            "error": None,
+        }
 
     # split が train/valid/auto のいずれでもない場合 (例: psim) は manual にフォールバック
     mode = SPLIT_TO_MODE.get(split, "manual")
@@ -97,9 +112,18 @@ def process_single_bag(args_tuple):
 
     save_dir = (save_root / proj_id / map_id / mode / date / time).resolve()
 
-    if save_dir.is_dir():
+    has_npz = save_dir.is_dir() and any(save_dir.rglob("*.npz"))
+    has_override_json = mode != "auto" or (save_dir / "control_mode_4_intervals.json").is_file()
+    if has_npz and has_override_json:
         logging.info(f"Already exists: {save_dir}")
-        return f"Skipped (already exists): {save_dir}"
+        return {
+            "status": "skipped",
+            "mode": mode,
+            "reason": "already_exists",
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+            "error": None,
+        }
 
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,11 +151,19 @@ def process_single_bag(args_tuple):
             offlane_max_score=offlane_max_score,
             offlane_time_stride=offlane_time_stride,
             write_skipped_npz=write_skipped_npz,
+            extract_override_segments=(mode == "auto"),
         )
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
         logging.error(error_msg)
-        return error_msg
+        return {
+            "status": "failed",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+            "reason": "conversion_failed",
+            "error": str(e),
+        }
 
     # The C++ converter writes the per-frame npz/json directly under save_dir but
     # emits the per-sequence route json into a nested "routes" subdir. Flatten it
@@ -147,9 +179,24 @@ def process_single_bag(args_tuple):
     except Exception as e:
         error_msg = f"Error flattening routes for {save_dir}: {str(e)}"
         logging.error(error_msg)
-        return error_msg
+        return {
+            "status": "failed",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+            "reason": "postprocess_failed",
+            "error": str(e),
+        }
 
     logging.info(f"Completed: {save_dir}")
+    return {
+        "status": "converted",
+        "mode": mode,
+        "bag_path": str(bag_path),
+        "output_dir": str(save_dir),
+        "reason": None,
+        "error": None,
+    }
 
 
 if __name__ == "__main__":
@@ -234,6 +281,26 @@ if __name__ == "__main__":
     with Pool(processes=num_workers) as pool:
         results = pool.map(process_single_bag, process_args)
 
+    status_counts = Counter(result["status"] for result in results)
+    converted_count = status_counts["converted"]
+    skipped_count = status_counts["skipped"]
+    failed_count = status_counts["failed"]
+    logging.info(
+        "Conversion summary: converted=%d, skipped=%d, failed=%d",
+        converted_count,
+        skipped_count,
+        failed_count,
+    )
+
+    if args.conversion_manifest_path is not None:
+        write_conversion_manifest(
+            args.conversion_manifest_path,
+            results,
+            converted_count,
+            skipped_count,
+            failed_count,
+        )
+
     elapsed_seconds = int(time.perf_counter() - start_time)
     hours = elapsed_seconds // 3600
     minutes = (elapsed_seconds % 3600) // 60
@@ -243,3 +310,7 @@ if __name__ == "__main__":
 
     with open(save_root / "processing_time.txt", "w") as summary_file:
         summary_file.write(f"Total elapsed time: {time_str}\n")
+
+    if converted_count == 0 and failed_count > 0:
+        logging.error("No bags were converted successfully.")
+        sys.exit(1)

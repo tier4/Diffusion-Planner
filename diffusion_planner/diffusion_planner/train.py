@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -12,17 +13,21 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+from diffusion_planner.config import TrainConfig
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_config import TrainConfig
+from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
+from diffusion_planner.utils.data_augmentation_frenet import (
+    frenet_augmenter_from_args,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
@@ -125,89 +130,99 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
-    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+def closed_loop_validate(model, args: TrainConfig, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + videos to wandb."""
+    import os
 
-    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
-    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
-    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
-    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
-    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
-    and restored afterwards.
-    """
     if not args.closed_loop_npz_root:
         return
-    import math
 
-    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+    from run_all_groups_closed_loop import _load_group_results, run_closed_loop_main
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
+
     try:
-        summary = run_closed_loop_eval(
-            net,
-            args,
-            args.closed_loop_npz_root,
-            out_dir,
-            device=args.device,
-            near_miss_thresh=args.closed_loop_near_miss_thresh,
-            search_radius=args.closed_loop_search_radius,
-            warmup_steps=args.closed_loop_warmup_steps,
-            unstick_after=args.closed_loop_unstick_after,
-            unstick_advance_m=args.closed_loop_unstick_advance_m,
-            fps=args.closed_loop_fps,
-            replan_interval=args.closed_loop_replan_interval,
-            draw_every=args.closed_loop_draw_every,
-            neighbor_history_mode="recorded",
-            verbose=False,
+        run_closed_loop_main(
+            model=net,
+            model_args=args,
+            cfg=args,
+            out_root=out_dir,
+            wandb_run=wandb.run,
+            only_json=None,
+            render_media=args.render_media,
         )
+
+        if ddp.get_rank() == 0:
+            for group_key, summary in _load_group_results(out_dir).items():
+                print(
+                    f"closed-loop [{group_key}] @epoch {epoch + 1}: {summary.get('n_segments', 0)} seg in "
+                    f"{summary.get('elapsed_sec', 0):.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                    f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+                    f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+                    f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+                    f"{len(summary.get('video_mp4s', []))} video(s)"
+                )
+
     finally:
         net.train(was_training)
 
-    # Scalar metrics from nested summary (skip non-finite clearances).
-    def _flat_scalars(node: dict, prefix: str = "") -> dict[str, float | int]:
-        out: dict[str, float | int] = {}
-        for k, v in node.items():
-            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
-            if isinstance(v, dict):
-                out.update(_flat_scalars(v, key))
-            elif isinstance(v, (int,)) or (isinstance(v, float) and math.isfinite(v)):
-                out[key] = v
-        return out
 
-    log = {
-        f"closed_loop/{k}": v
-        for k, v in _flat_scalars(
-            {
-                "n_segments": summary["n_segments"],
-                "total_steps": summary["total_steps"],
-                "object": summary["object"],
-                "road_border": summary["road_border"],
-                "red_light_violation": summary["red_light_violation"],
-                "strong_brake": summary["strong_brake"],
-                "reproducer": summary["reproducer"],
-            }
-        ).items()
-    }
-    for mp4 in summary["video_mp4s"]:
-        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
-    wandb.log(log, step=epoch + 1)
-    from scenario_generation.closed_loop_eval import format_summary_lines
+def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> None:
+    """Evaluate a just-saved checkpoint against the OpenSCENARIO suite, out of process.
 
-    print(
-        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
-    )
-    for line in format_summary_lines(summary):
-        print(f"  {line}")
+    Rank 0 only, on the checkpoint-save cadence. The other ranks wait at the next epoch's
+    ``torch.distributed.barrier()``, which inherits the process group's timeout.
+
+    The driver fans out one process per scenario, which is the configuration the suite's
+    throughput was measured with: the rollout saturates the GPUs in time only near 96-way
+    concurrency, so sharding one scenario per rank inside this process would leave most of that
+    throughput unused. It also keeps the ROS overlay out of the training process -- the driver
+    sources it for its own children, so nothing here imports the interpreter.
+
+    A failed evaluation is reported and training continues: losing a data point costs less than
+    losing the run.
+    """
+    if not args.scenario_sim_driver:
+        return
+
+    started = time.perf_counter()
+    rc = subprocess.run(
+        ["bash", args.scenario_sim_driver],
+        env={**os.environ, "CKPT": ckpt_path, "OUT": out_dir},
+    ).returncode
+    elapsed = time.perf_counter() - started
+    status = "ok" if rc == 0 else f"FAILED rc={rc}"
+    print(f"scenario_sim @epoch {epoch + 1}: {status} in {elapsed:.1f}s -> {out_dir}", flush=True)
+
+    if rc != 0 or not args.use_wandb or wandb.run is None:
+        return
+
+    try:
+        from scenario_generation.wandb_scenario_sim import (
+            build_scenario_sim_wandb_payload,
+            load_case_rows,
+        )
+
+        out_p = Path(out_dir)
+        payload = build_scenario_sim_wandb_payload(load_case_rows(out_p), media_root=out_p)
+        wandb.run.log(payload, step=epoch + 1)
+        print(
+            f"wandb: logged scenario_sim @epoch {epoch + 1} "
+            f"(pass rate {payload.get('scenario_sim/pass_rate')}%)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"Warning: Failed to log scenario_sim to wandb: {exc}", flush=True)
 
 
 def model_training(args: TrainConfig):
+    save_path = args.save_dir
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp
-    global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
+    global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
 
     if global_rank == 0:
@@ -218,9 +233,6 @@ def model_training(args: TrainConfig):
         print("Use device: {}".format(args.device))
         print("Deterministic mode: {}".format(args.deterministic))
 
-        save_path = args.save_dir
-        os.makedirs(save_path, exist_ok=True)
-
         # Save args
         args_dict = vars(args)
         args_dict = {
@@ -229,11 +241,9 @@ def model_training(args: TrainConfig):
         }
         args_dict["major_version"] = 5
 
+        os.makedirs(save_path, exist_ok=True)
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
-
-    else:
-        save_path = None
 
     # set seed
     set_seed(args.seed + global_rank)
@@ -254,6 +264,8 @@ def model_training(args: TrainConfig):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        elif args.augment_type == "frenet":
+            aug = frenet_augmenter_from_args(args)
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
@@ -359,7 +371,12 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    scheduler = CosineAnnealingWarmUpRestarts(
+        optimizer,
+        train_epochs,
+        args.warm_up_epoch,
+        lr_schedule=args.lr_schedule,
+    )
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
@@ -458,14 +475,10 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs
-        final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
-                adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
-                adjusted_lr = base_lr * 0.1
+        # Adjust learning rate for the final 10 epochs (constant schedule only —
+        # the cosine schedule already anneals to 0 and must not be overridden)
+        adjusted_lr = final_phase_lr(args.learning_rate, epoch, train_epochs, args.lr_schedule)
+        if adjusted_lr is not None:
             for param_group in optimizer.param_groups:
                 param_group["lr"] = adjusted_lr
             if global_rank == 0:
@@ -568,6 +581,20 @@ def model_training(args: TrainConfig):
                 step=epoch + 1,
             )
 
+            scenario_output_dir = None
+            if (epoch + 1 - init_epoch) % save_utd == 0:
+                scenario_output_dir = os.path.join(
+                    save_path,
+                    f"epoch{epoch + 1:04d}",
+                    "open_loop_override",
+                )
+            scenario_based_open_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                output_dir=scenario_output_dir,
+            )
+
             curr_data = {
                 "epoch": epoch + 1,
                 "train_loss": train_total_loss,
@@ -616,10 +643,11 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                scenario_sim_validate(
+                    args,
+                    epoch,
+                    f"{curr_dir}/best_model.pth",
+                    os.path.join(curr_dir, "scenario_sim"),
                 )
 
             if valid_loss_ego_position_lat_loss < best_loss:
@@ -644,8 +672,25 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
+        if epoch + 1 == train_epochs:
+            # closed-loop validation runs on all ranks, only at the final epoch
+            curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
+            os.makedirs(curr_dir, exist_ok=True)
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(curr_dir, "closed_loop"),
+            )
+
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+
+    # Tear down the DDP process group explicitly: without this, NCCL's heartbeat +
+    # IB event threads can intermittently deadlock interpreter shutdown and the
+    # training process never exits (observed hanging a full R2LPL round).
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()

@@ -53,6 +53,34 @@ def load_model(model_path: str | Path, device: str = "cuda"):
     return model, args
 
 
+TENSORRT_EP = "TensorrtExecutionProvider"
+CUDA_EP = "CUDAExecutionProvider"
+CPU_EP = "CPUExecutionProvider"
+_ACCELERATED = (TENSORRT_EP, CUDA_EP)
+
+
+def _require_accelerator(session, requested: list[str], onnx_path) -> None:
+    """Fail when the GPU provider that was asked for did not load.
+
+    ``get_available_providers()`` lists every provider the build contains, not the ones that can
+    actually load: when the CUDA/TensorRT shared libraries are missing, ORT prints a warning and
+    continues on CPU. A run that quietly does that is worse than one that stops, because nothing
+    downstream shows it happened. ``get_providers()`` reports what the session really holds, so
+    that is what this checks.
+    """
+    if not any(p in _ACCELERATED for p in requested):
+        return
+    active = session.get_providers()
+    if any(p in _ACCELERATED for p in active):
+        return
+    raise RuntimeError(
+        f"onnx model {onnx_path} asked for {[p for p in requested if p in _ACCELERATED]} "
+        f"but the session runs on {active}. ORT's GPU providers need CUDA 12.x + cuDNN 9.x; "
+        "see the warning ORT printed above for the library it could not load. Pass "
+        f"providers=['{CPU_EP}'] (or device='cpu') to run on CPU deliberately."
+    )
+
+
 class _OnnxModel:
     """Adapter that makes an exported ``diffusion_planner.onnx`` usable in the closed-loop
     rollout exactly like the torch ``Diffusion_Planner`` (callable ``model(data) -> (_, outputs)``
@@ -65,15 +93,37 @@ class _OnnxModel:
     everything else float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session, and
     wrap the two outputs back into torch tensors on ``device``."""
 
-    def __init__(self, onnx_path: str | Path, device: str = "cuda"):
+    def __init__(
+        self,
+        onnx_path: str | Path,
+        device: str = "cuda",
+        providers: list[str] | None = None,
+        engine_cache_dir: str | Path | None = None,
+    ):
         import onnxruntime as ort
 
         self.device = device
-        avail = ort.get_available_providers()
-        # Prefer CUDA when the ORT build exposes it; otherwise fall back to CPU (the graph runs
-        # identically, just slower — a full 60 s segment on CPU is impractical, use a short seg_len).
-        providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in avail]
-        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        if providers is None:
+            # CUDA, not TensorRT, by default. TensorRT partitions the graph up front and refuses
+            # ops it cannot build, so making it the default turns a model it dislikes into a
+            # session that will not open at all. Ask for it explicitly, per model.
+            providers = [CPU_EP] if device.startswith("cpu") else [CUDA_EP, CPU_EP]
+        # TensorRT builds an engine per (graph, shape, GPU), which dominates session setup.
+        # Cached, a run over many routes pays for it once.
+        options = [
+            {
+                "trt_engine_cache_enable": True,
+                "trt_engine_cache_path": str(engine_cache_dir),
+                "trt_timing_cache_enable": True,
+            }
+            if p == TENSORRT_EP and engine_cache_dir is not None
+            else {}
+            for p in providers
+        ]
+        self.session = ort.InferenceSession(
+            str(onnx_path), providers=providers, provider_options=options
+        )
+        _require_accelerator(self.session, providers, onnx_path)
         self._inputs = [(i.name, i.type) for i in self.session.get_inputs()]
         self._outputs = [o.name for o in self.session.get_outputs()]
 
@@ -99,7 +149,12 @@ class _OnnxModel:
         return self
 
 
-def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
+def load_onnx_model(
+    onnx_path: str | Path,
+    device: str = "cuda",
+    providers: list[str] | None = None,
+    engine_cache_dir: str | Path | None = None,
+):
     """Load an exported ONNX planner + its ``args.json`` (Config), returning ``(model, args)`` with
     the same contract as :func:`load_model` so the closed-loop rollout is agnostic to which it got.
 
@@ -108,11 +163,16 @@ def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
     from diffusion_planner.utils.config import Config
 
     args = Config(str(Path(onnx_path).parent / "args.json"))
-    return _OnnxModel(onnx_path, device), args
+    return _OnnxModel(onnx_path, device, providers, engine_cache_dir), args
 
 
 def _ego_to_world(
-    pred_xy: np.ndarray, pred_cos_sin: np.ndarray, ego_x: float, ego_y: float, ego_heading: float
+    pred_xy: np.ndarray,
+    pred_cos_sin: np.ndarray,
+    ego_x: float,
+    ego_y: float,
+    ego_heading: float,
+    dtype=np.float32,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Transform model predictions from ego-centric back to world frame.
 
@@ -120,6 +180,9 @@ def _ego_to_world(
         pred_xy: (..., 2) positions in ego frame.
         pred_cos_sin: (..., 2) [cos_h, sin_h] in ego frame.
         ego_x, ego_y, ego_heading: Ego pose in world frame.
+        dtype: Output precision. float32 spaces map-frame coordinates about
+            8 mm apart at MGRS magnitudes, which a caller that differences
+            the result for velocities cannot afford.
 
     Returns:
         (world_xy, world_headings) where world_headings are in radians.
@@ -128,11 +191,11 @@ def _ego_to_world(
     # Inverse rotation: R^T = [[cos, -sin], [sin, cos]]
     wx = ego_x + pred_xy[..., 0] * c - pred_xy[..., 1] * s
     wy = ego_y + pred_xy[..., 0] * s + pred_xy[..., 1] * c
-    world_xy = np.stack([wx, wy], axis=-1).astype(np.float32)
+    world_xy = np.stack([wx, wy], axis=-1).astype(dtype)
 
     # Transform heading back
     pred_h = np.arctan2(pred_cos_sin[..., 1], pred_cos_sin[..., 0])
-    world_h = (pred_h + ego_heading).astype(np.float32)
+    world_h = (pred_h + ego_heading).astype(dtype)
 
     return world_xy, world_h
 

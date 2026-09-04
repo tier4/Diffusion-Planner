@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from diffusion_planner.utils.dist_init import dist_init_file_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
 
@@ -40,9 +41,15 @@ def main() -> None:
     exp_name = f"{args.exp_name}_grpo"
     train_set_list = str(Path(args.train_set_list).resolve())
     valid_set_list = str(Path(args.valid_set_list).resolve())
-    closed_loop_npz_root = (
-        str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else ""
-    )
+
+    def resolve_npz_root(val):
+        if not val:
+            return []
+        if isinstance(val, list):
+            return [str(Path(p).resolve()) for p in val]
+        return [str(Path(val).resolve())]
+
+    closed_loop_npz_root = resolve_npz_root(args.closed_loop_npz_root)
 
     here = Path(__file__).resolve().parent
     save_path = Path("/mnt/nvme/training_result") / f"{datetime.now():%Y%m%d-%H%M%S}_{exp_name}"
@@ -57,7 +64,7 @@ def main() -> None:
     )
     (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    dist_init_file_path().unlink(missing_ok=True)
 
     cmd = [
         sys.executable,
@@ -79,9 +86,9 @@ def main() -> None:
         resume_model_path,
         "--save_dir",
         str(save_path),
-        "--closed_loop_npz_root",
-        closed_loop_npz_root,
     ]
+    if closed_loop_npz_root:
+        cmd.extend(["--closed_loop_npz_root"] + closed_loop_npz_root)
     rc = tee_run(cmd, cwd=here, env={**os.environ, **NCCL_ENV}, log_path=save_path / "grpo_log.txt")
     sys.exit(rc)
 

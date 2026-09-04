@@ -1,5 +1,5 @@
 {
-  "_doc": "DEFAULT real training config for Ranked-SFT / RL (rlvr.autoresearch.run_experiment) on a v1 dataset. Multi-epoch (8 epochs over ~300 scenes, 16 generations). The keys below are the run_experiment config (passed verbatim via --config); n_train_cap / n_val_cap / sft_batch_size / train_epochs are consumed by the verify script (stripped from --config, passed as CLI flags / used to subsample). For a quick PR check use rsft_ci.json instead.",
+  "_doc": "DEFAULT real training config for Ranked-SFT / RL (rlvr.autoresearch.run_experiment) on a v1 dataset. Multi-epoch (8 epochs, 16 generations) over the FULL pointed dataset (no n_train_cap/n_val_cap => uses every scene). The keys below are the run_experiment config (passed verbatim via --config); sft_batch_size / train_epochs (and n_train_cap / n_val_cap when explicitly set, e.g. in rsft_ci.json) are consumed by the verify script (stripped from --config, passed as CLI flags / used to subsample). For a quick PR check on a small random subsample use rsft_ci.json instead.",
   "ranked_sft_mode": "gt_neighbor",
   "sft_velocity_weight": true,
   "num_generations": 16,
@@ -31,7 +31,5 @@
   "train_epochs": 8,
   "sg_filter_window": 11,
   "sg_filter_order": 3,
-  "n_train_cap": 300,
-  "n_val_cap": 100,
   "sft_batch_size": 8
 }

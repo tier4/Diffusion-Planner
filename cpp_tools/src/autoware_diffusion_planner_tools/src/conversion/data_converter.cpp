@@ -14,6 +14,7 @@
 
 #include "conversion/data_converter.hpp"
 
+#include "conversion/override_segments.hpp"
 #include "io/bag_metadata.hpp"
 #include "io/frame_writer.hpp"
 #include "io/projector_factory.hpp"
@@ -23,13 +24,23 @@
 
 #include <autoware/diffusion_planner/preprocessing/lane_segments.hpp>
 
+#include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
+
 #include <lanelet2_core/LaneletMap.h>
 #include <lanelet2_io/Io.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace
+{
+
+}  // namespace
 
 int run_data_converter(const ConverterPaths & paths, const ConverterOptions & converter)
 {
@@ -47,7 +58,8 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
   const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
   const BagMetadata bag_metadata = load_bag_metadata(paths.rosbag_path);
 
-  ParsedBagData bag_data = load_rosbag(paths.rosbag_path, converter.limit);
+  ParsedBagData bag_data =
+    load_rosbag(paths.rosbag_path, converter.limit, converter.extract_override_segments);
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
   if (missing_topics_skip) {
@@ -60,6 +72,12 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
       paths.save_dir, rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0, missing_topics_skip.value(),
       bag_data.timestamp_stats_map, false, bag_metadata);
     return 0;
+  }
+
+  if (converter.extract_override_segments) {
+    save_override_segments_json(
+      paths.save_dir, build_override_segments(bag_data.control_modes),
+      bag_data.control_modes.size());
   }
 
   std::vector<SequenceData> sequences = build_sequences(bag_data, converter.search_nearest_route);

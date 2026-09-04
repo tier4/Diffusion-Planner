@@ -180,6 +180,22 @@ def main() -> None:
         title_prefix=title_prefix,
         distance_label_offset_m=args.distance_label_offset_m,
         view_half_m=args.view_half_m,
+        # No CLI flag for these; mirror render_segment's former defaults.
+        unstick_radius_mult=3.0,
+        unstick_teleport_after=300,
+        draw_every=1,
+        replan_interval=1,
+        yaw_gate=True,
+        strong_brake_mps2=-2.5,
+        abort_deviation_m=0.0,
+        abort_after=30,
+        abort_max_snaps=0,
+        drop_objects=False,
+        max_stuck_steps=0,
+        interpolate=True,
+        color_by_uuid=True,
+        window=None,
+        draw_pool=None,
     )
     print(metrics)
     if args.make_webm:

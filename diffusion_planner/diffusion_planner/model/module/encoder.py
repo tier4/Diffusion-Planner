@@ -452,7 +452,34 @@ class NeighborEncoder(nn.Module):
         x = torch.cat([x[..., :4], torch.zeros_like(x[..., 4:6]), x[..., 6:]], dim=-1)
 
         valid_indices = ~mask_p.view(-1)
-        x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
+
+        if not self.training:
+            # Static-shape (mask) path used for eval and ONNX export. ONNX cannot
+            # trace the dynamic gather below, so we process all B*P slots and zero
+            # out the invalid ones — numerically identical, just more FLOPs. Export
+            # runs under model.eval() (see onnx_export.py), so keying on
+            # ``self.training`` keeps the exported graph static while letting
+            # training take the fast gather path.
+            x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
+            x = self.channel_pre_project(x)
+            x = x.permute(0, 2, 1)
+            x = self.token_pre_project(x)
+            x = x.permute(0, 2, 1)
+            for block in self.blocks:
+                x = block(x)
+            x = torch.mean(x, dim=1)  # pooling
+            # Reshaped here rather than before the branch so the traced op order (and hence the
+            # exported ONNX bytes) stays identical to the pre-speed-up implementation.
+            type_embedding = self.type_emb(neighbor_type.view(B * P, -1))
+            x = x + type_embedding
+            x = self.emb_project(self.norm(x))
+            x_result = x * valid_indices.float().unsqueeze(-1)
+            return x_result.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
+
+        # Fast gather path (training): the temporal encoder only runs on the ~few
+        # dozen valid neighbours instead of all 320 padded slots.
+        neighbor_type = neighbor_type.view(B * P, -1)
+        x = x[valid_indices]
 
         x = self.channel_pre_project(x)
         x = x.permute(0, 2, 1)
@@ -464,12 +491,13 @@ class NeighborEncoder(nn.Module):
         # pooling
         x = torch.mean(x, dim=1)
 
-        neighbor_type = neighbor_type.view(B * P, -1)
-        type_embedding = self.type_emb(neighbor_type)
+        type_embedding = self.type_emb(neighbor_type[valid_indices])
         x = x + type_embedding
 
         x = self.emb_project(self.norm(x))
-        x_result = x * valid_indices.float().unsqueeze(-1)
+
+        x_result = torch.zeros((B * P, x.shape[-1]), dtype=x.dtype, device=x.device)
+        x_result[valid_indices] = x  # Fill in valid parts
 
         return x_result.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
 

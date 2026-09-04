@@ -105,7 +105,10 @@ def _require(path: Path, what: str) -> Path:
 
 
 def _subsample(scene_list: Path, cap: int, seed: int, out_path: Path) -> int:
-    """Write a seeded ``cap``-scene subset of a JSON scene list. Returns kept count."""
+    """Write the scene list to ``out_path``, optionally capped to a seeded ``cap``-scene
+    subset. ``cap`` falsy (0/None — the default) means **use the FULL dataset** — no
+    subsampling. A positive ``cap`` is an explicit opt-in (only the ``*_ci`` quick-check
+    configs set one). Returns the kept count."""
     scenes = _load_json(scene_list)
     if not isinstance(scenes, list):
         raise ValueError(f"{scene_list} must be a JSON list of NPZ paths")
@@ -302,8 +305,10 @@ def run_il(ds, cfg, args, env) -> tuple[bool, str]:
     norm = _require(ds["normalization"], "normalization.json (IL)")
     work = args.out_dir / "il"
     work.mkdir(parents=True, exist_ok=True)
-    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 400)), args.seed, work / "train.json")
-    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 100)), args.seed, work / "val.json")
+    # No cap in the config => FULL dataset (both lists used in their entirety). Only the
+    # explicit *_ci quick-check configs set a positive cap.
+    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 0)), args.seed, work / "train.json")
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 0)), args.seed, work / "val.json")
     n_epochs = int(cfg.get("train_epochs", 1))
     # Warmstart from --base_model when given: train_predictor RESUMES at the base
     # checkpoint's epoch, so train for n_epochs MORE => train_epochs = base_epoch +
@@ -392,8 +397,9 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     _require(base_model.parent / "args.json", "args.json beside --base_model (RSFT)")
     work = args.out_dir / "rsft"
     work.mkdir(parents=True, exist_ok=True)
-    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 40)), args.seed, work / "train.json")
-    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 40)), args.seed, work / "val.json")
+    # No cap in the config => FULL dataset. Only the explicit *_ci config caps.
+    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 0)), args.seed, work / "train.json")
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 0)), args.seed, work / "val.json")
     # hand run_experiment a clean config (strip the smoke-only keys)
     clean = {k: v for k, v in cfg.items() if k not in _RSFT_SCRIPT_KEYS}
     clean_path = work / "run_experiment_config.json"
@@ -570,7 +576,8 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
     val_list = _require(ds["frame_val"], "frame/val.json (R2LPL)")
     work = args.out_dir / "r2lpl"
     work.mkdir(parents=True, exist_ok=True)
-    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 40)), args.seed, work / "val.json")
+    # No cap in the config => FULL val set. Only the explicit *_ci config caps.
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 0)), args.seed, work / "val.json")
     # The lifelong round mines corrective chunks from the contiguous corpus, builds
     # repair targets, updates replay memory, and TRAINS — warmstarting from base_model.
     # The reward config is an internal asset (not committed): fail loud if absent

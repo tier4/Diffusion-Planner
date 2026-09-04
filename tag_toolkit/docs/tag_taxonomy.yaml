@@ -1,0 +1,117 @@
+# Reference taxonomy for Diffusion Planner frame tags.
+#
+# Documentation and helper APIs only — NOT an allow-list.
+# query / group_by / tags_for / add_tags / remove_tags / set_tags MUST NOT
+# load this file to filter, validate, or fill tags. Those APIs use only the
+# sidecar `tags` arrays on the given source.
+# Helpers that do load this file must warn that it may not match tags
+# actually present on a source.
+#
+# Writers may add dimensions/values not listed here; they remain valid in
+# sidecar JSON.
+
+version: 1
+
+dimensions:
+
+  site:
+    description: >
+      Map / area id for this frame (e.g. xxxx_site_example).
+      Not a native sidecar field. Usually written by a path-based auto-tagger
+      as site:<id>. If the path cannot be parsed, write site:unknown
+      (do not omit the dimension).
+    values:
+      - name: unknown
+        description: Auto-tagger could not resolve a site from the path.
+      # otherwise an open set of map/area ids following dataset naming
+
+  split:
+    description: >
+      How the drive was produced and whether it is used for training.
+      Not a native sidecar field. Usually written by a path-based auto-tagger
+      (optionally helped by split_labels.json at write time only).
+      If unresolved, write split:unknown.
+      One axis: a bag is auto or manual; train/valid are the two halves of
+      manual. Leaf values for bucketing: train, valid, auto, manual, unknown.
+      Query helpers may later expand split:manual to train+valid (umbrella);
+      that is not a storage concern.
+    values:
+      - name: auto
+        description: Autonomously driven / auto-collected.
+      - name: manual
+        description: Human-driven, not in train/valid (or umbrella over them when querying).
+        includes: [train, valid]
+      - name: train
+        description: Human-driven, training set.
+      - name: valid
+        description: Human-driven, validation set.
+      - name: unknown
+        description: Auto-tagger could not resolve split from path / optional inputs.
+
+  lateral:
+    description: >
+      Ego lateral behavior (aligned with scene_labeling / sft canonical names,
+      snake_case).
+    values:
+      - name: lane_keeping
+        description: Stay centered in lane; no intentional LC, turn, or curb approach.
+      - name: turn
+        description: Turning at intersections, roundabouts, or U-turns.
+      - name: lane_change
+        description: Intentional lane change (lateral push).
+      - name: out_of_lane_nudge
+        description: Straddle / out-of-lane avoidance nudge.
+      - name: in_lane_nudge
+        description: In-lane avoidance nudge.
+      - name: pull_over
+        description: Approach curb / pull over.
+      - name: pull_out
+        description: Depart from roadside or a stopped curb position.
+      - name: merge_split
+        description: Merge or split facility change.
+      - name: abort
+        description: Lateral maneuver abort.
+      - name: nudge
+        description: Umbrella for inconsistent in/out-of-lane nudge annotations.
+        includes: [in_lane_nudge, out_of_lane_nudge]
+
+  longitudinal:
+    description: >
+      Ego longitudinal behavior (aligned with scene_labeling / sft, snake_case).
+    values:
+      - name: set_speed
+        description: Track a set / cruise speed.
+      - name: speed_adaptation
+        description: Adapt speed for road events (not lead-vehicle following).
+      - name: lead_follow
+        description: Follow a lead obstacle.
+      - name: stop_static
+        description: Stop for static constraints (lights, stop lines, etc.).
+      - name: yield
+        description: Yield for agent right-of-way.
+      - name: gap_search
+        description: Search for a gap (lane change / merge / zipper).
+      - name: accel_pass
+        description: Accelerate for passing / overtaking.
+
+  override:
+    description: >
+      Curated override categories. Override frames are human intervention events
+      where the driver took control of the vehicle.
+    values:
+      - name: centerline
+        description: Frames for centerline-keeping override evaluation.
+      - name: departure
+        description: Frames for departure / off-road override evaluation.
+
+  override_first_frame:
+    description: >
+      First frame of each override event. A frame may have both override and
+      override_first_frame tags. For example, override:centerline marks all
+      frames during a centerline-keeping override event, while
+      override_first_frame:centerline marks only the first frame of that event.
+    values:
+      - name: centerline
+        description: First frame of a centerline-keeping override event.
+      - name: departure
+        description: First frame of a departure / off-road override event.
