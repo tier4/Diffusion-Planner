@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,26 @@ def _cached_frame(
     return _frame_loader().load(row)
 
 
-def _render_augmentation_settings() -> tuple[float, float, float, float]:
+@dataclass(frozen=True)
+class ILQRSettings:
+    """User-adjustable iLQR settings for the augmentation inspector."""
+
+    num_refine: int
+    wheelbase_m: float
+    state_weights: tuple[float, float, float]
+    terminal_weight_scale: float
+    velocity_weight: float
+    steering_weight: float
+    velocity_rate_weight: float
+    steering_rate_weight: float
+    velocity_max: float
+    steering_limit_rad: float
+    max_iterations: int
+    speed_threshold: float
+    speed_check_index: int
+
+
+def _render_augmentation_settings() -> tuple[float, float, float, float, ILQRSettings]:
     st.sidebar.subheader("Augmentation")
     longitudinal_offset = float(
         st.sidebar.slider(
@@ -95,11 +114,69 @@ def _render_augmentation_settings() -> tuple[float, float, float, float]:
             step=0.01,
         )
     )
+    with st.sidebar.expander("iLQR parameters", expanded=False):
+        num_refine = int(st.number_input("Refine endpoint index", 1, 79, 20, step=1))
+        wheelbase_m = float(
+            st.number_input("Wheelbase [m]", 0.1, 10.0, 2.79, step=0.01)
+        )
+        st.caption("Trajectory tracking weights")
+        q_x = float(st.number_input("Position X weight", 0.0, value=1.0, step=0.1))
+        q_y = float(st.number_input("Position Y weight", 0.0, value=1.0, step=0.1))
+        q_yaw = float(st.number_input("Yaw weight", 0.0, value=0.5, step=0.1))
+        terminal_weight_scale = float(
+            st.number_input("Terminal weight scale", 0.0, value=10.0, step=1.0)
+        )
+        st.caption("Control weights")
+        velocity_weight = float(
+            st.number_input("Velocity tracking weight", 0.0, value=0.2, step=0.1)
+        )
+        steering_weight = float(
+            st.number_input("Steering weight", 0.0, value=0.1, step=0.1)
+        )
+        velocity_rate_weight = float(
+            st.number_input("Velocity change weight", 0.0, value=1.0, step=0.1)
+        )
+        steering_rate_weight = float(
+            st.number_input("Steering change weight", 0.0, value=10.0, step=1.0)
+        )
+        st.caption("Constraints and solver")
+        velocity_max = float(
+            st.number_input("Maximum velocity [m/s]", 0.1, value=30.0, step=1.0)
+        )
+        steering_limit_rad = math.radians(
+            float(
+                st.number_input(
+                    "Steering limit [deg]", 0.1, 89.0, math.degrees(0.7), step=1.0
+                )
+            )
+        )
+        max_iterations = int(st.number_input("Maximum iterations", 1, 100, 15, step=1))
+        speed_threshold = float(
+            st.number_input("Low-speed skip threshold [m/s]", 0.0, value=0.1, step=0.1)
+        )
+        speed_check_index = int(
+            st.number_input("Low-speed check endpoint index", 0, 79, 20, step=1)
+        )
     return (
         longitudinal_offset,
         lateral_offset,
         math.radians(yaw_offset_degrees),
         ego_speed_scale,
+        ILQRSettings(
+            num_refine=num_refine,
+            wheelbase_m=wheelbase_m,
+            state_weights=(q_x, q_y, q_yaw),
+            terminal_weight_scale=terminal_weight_scale,
+            velocity_weight=velocity_weight,
+            steering_weight=steering_weight,
+            velocity_rate_weight=velocity_rate_weight,
+            steering_rate_weight=steering_rate_weight,
+            velocity_max=velocity_max,
+            steering_limit_rad=steering_limit_rad,
+            max_iterations=max_iterations,
+            speed_threshold=speed_threshold,
+            speed_check_index=speed_check_index,
+        ),
     )
 
 
@@ -109,6 +186,7 @@ def _augment_frame(
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
+    ilqr: ILQRSettings,
 ) -> dict[str, Any]:
     speed_augmentation = PlannerSpeedAugmentation(
         speed_scale_range=(ego_speed_scale, ego_speed_scale),
@@ -120,6 +198,19 @@ def _augment_frame(
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
         pose_probability=1.0,
+        num_refine=ilqr.num_refine,
+        wheelbase_m=ilqr.wheelbase_m,
+        state_weights=ilqr.state_weights,
+        terminal_weight_scale=ilqr.terminal_weight_scale,
+        velocity_weight=ilqr.velocity_weight,
+        steering_weight=ilqr.steering_weight,
+        velocity_rate_weight=ilqr.velocity_rate_weight,
+        steering_rate_weight=ilqr.steering_rate_weight,
+        velocity_bounds=(0.0, ilqr.velocity_max),
+        steering_limit_rad=ilqr.steering_limit_rad,
+        max_iterations=ilqr.max_iterations,
+        pose_augmentation_speed_threshold=ilqr.speed_threshold,
+        pose_augmentation_speed_check_index=ilqr.speed_check_index,
     )
     return pose_augmentation(speed_augmentation(frame_data))
 
@@ -142,7 +233,7 @@ def render_data_augmentation() -> None:
     """Render original and deterministically augmented frame data."""
     st.title("Data Augmentation")
     source_path_text = render_data_source_settings()
-    longitudinal_offset, lateral_offset, yaw_offset, ego_speed_scale = (
+    longitudinal_offset, lateral_offset, yaw_offset, ego_speed_scale, ilqr = (
         _render_augmentation_settings()
     )
     if source_path_text is None:
@@ -176,6 +267,7 @@ def render_data_augmentation() -> None:
             lateral_offset,
             yaw_offset,
             ego_speed_scale,
+            ilqr,
         )
     except Exception as error:
         st.exception(error)
@@ -192,6 +284,7 @@ def render_data_augmentation() -> None:
     chart_identity = (
         f"{index.path}::{row.index}::{longitudinal_offset}::{lateral_offset}::"
         f"{yaw_offset_degrees}::{ego_speed_scale}"
+        f"::{ilqr}"
     )
     with original_column:
         st.subheader("Original")
