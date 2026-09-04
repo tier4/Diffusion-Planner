@@ -373,7 +373,7 @@ def test_past_noise_scales_each_accepted_history_by_one_factor():
 
     # untouched rows train on plain ground truth, unscaled
     assert torch.equal(past_ref[~rows], past_new[~rows])
-    assert torch.equal(cur_ref[~rows], cur_new[~rows])
+    assert torch.equal(cur_ref, cur_new), "the scale is history-only"
 
     for b in torch.nonzero(rows, as_tuple=True)[0].tolist():
         real = past_ref[b, :, 0].abs() > 1e-3  # the samples with a length to scale
@@ -381,10 +381,13 @@ def test_past_noise_scales_each_accepted_history_by_one_factor():
         s = float(ratio[0])
         assert 1 - 2 * 0.2 <= s <= 1 + 2 * 0.2, s
         assert torch.allclose(ratio, ratio[0].expand_as(ratio), atol=1e-5), "not one factor"
-        # the state the history implies is scaled with it (vx, vy, ax, ay)
-        assert torch.allclose(cur_new[b, 4:8], cur_ref[b, 4:8] * s, atol=1e-5)
-        # t=0 is the origin of the frame the batch is centred on, before and after
-        assert torch.allclose(past_new[b, -1, :2], torch.zeros(2), atol=1e-5)
+        # ...and NOTHING but the history moves: the current state is an input in its own
+        # right, not a summary of the history, and vx is a loss weight (see
+        # _perturb_history), so scaling it would re-weight the loss rather than perturb
+        assert torch.equal(cur_new[b], cur_ref[b])
+        # t=0 is pinned by construction: the scale is taken about that sample, so it
+        # is the SAMPLE, not the frame origin, that cannot move
+        assert torch.equal(past_new[b, -1], past_ref[b, -1])
         # "no history" stays no history
         assert torch.equal(past_new[b, :3], torch.zeros(3, 4))
 
@@ -505,7 +508,7 @@ def test_the_two_axes_are_drawn_independently():
 
 
 def test_hist_jitter_headings_match_the_perturbed_polyline():
-    """The reason the jitter is applied BEFORE _headings rather than after the fact."""
+    """The jitter runs after the veto, so the stored cos/sin are re-derived from it."""
     aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=13, hist_jitter_lat=0.3)
     inputs, _ = _run(aug, batch=8)
     rows = aug._aug_rows
@@ -581,3 +584,85 @@ def test_a_3col_history_and_4col_future_are_accepted():
     assert torch.allclose(in_alt["ego_agent_past"], in_ref["ego_agent_past"], atol=1e-5)
     assert torch.allclose(in_alt["ego_current_state"], in_ref["ego_current_state"], atol=1e-5)
     assert torch.allclose(fut_alt, fut_ref, atol=1e-5)
+
+
+# ────────────── 7. both perturbations are input-only, post-veto ───────────────
+#
+# The property that makes an A/B between the two history perturbations valid: they are
+# applied to the ACCEPTED history and nothing else, so they cannot move which scenes are
+# augmented, cannot move the training target, and cannot move the pose the model plans
+# from. Everything below is parametrised over both of them for exactly that reason.
+
+_PERTURBATIONS = [
+    pytest.param({"ego_past_noise_std": 0.2}, id="multiplicative"),
+    pytest.param({"hist_jitter_lat": 0.3}, id="jitter_lat"),
+    pytest.param({"hist_jitter_lat": 0.3, "hist_jitter_lon": 0.3}, id="jitter_lat_lon"),
+]
+
+
+def _clean_and_perturbed(seed=11, batch=8, pad_steps=3, **kw):
+    """The same batch augmented twice: once clean, once with a history perturbation."""
+    clean = FrenetStatePerturbationTensor(1.0, "cpu", seed=seed)
+    in_ref, fut_ref = _run(clean, batch=batch, pad_steps=pad_steps)
+    noisy = FrenetStatePerturbationTensor(1.0, "cpu", seed=seed, **kw)
+    in_new, fut_new = _run(noisy, batch=batch, pad_steps=pad_steps)
+    assert bool(clean._aug_rows.any()), "nothing was augmented; the test proves nothing"
+    return (clean, in_ref, fut_ref), (noisy, in_new, fut_new)
+
+
+@pytest.mark.parametrize("kw", _PERTURBATIONS)
+def test_history_noise_cannot_move_which_scenes_are_augmented(kw):
+    """THE point of applying both perturbations after the veto.
+
+    Applied earlier they bend the history the plausibility-jerk screen and the exact-OBB
+    veto judge, so turning the noise on quietly changes the training SET as well as its
+    contents, and the two arms of an A/B are then not comparable.
+    """
+    (clean, _, _), (noisy, _, _) = _clean_and_perturbed(**kw)
+    assert torch.equal(clean._aug_rows, noisy._aug_rows)
+
+
+@pytest.mark.parametrize("kw", _PERTURBATIONS)
+def test_history_noise_leaves_the_training_target_bit_identical(kw):
+    """The future is the target: the model must learn it DESPITE the noisy history."""
+    (_, _, fut_ref), (_, _, fut_new) = _clean_and_perturbed(**kw)
+    assert torch.equal(fut_ref, fut_new)
+
+
+@pytest.mark.parametrize("kw", _PERTURBATIONS)
+def test_history_noise_leaves_the_t0_history_sample_bit_identical(kw):
+    """Pose AND heading: the last history sample is the pose the model plans from."""
+    (_, in_ref, _), (_, in_new, _) = _clean_and_perturbed(**kw)
+    assert torch.equal(in_ref["ego_agent_past"][:, -1], in_new["ego_agent_past"][:, -1])
+    # ...and something upstream of it really did move
+    assert not torch.equal(in_ref["ego_agent_past"], in_new["ego_agent_past"])
+
+
+@pytest.mark.parametrize("kw", _PERTURBATIONS)
+def test_history_noise_leaves_the_current_state_bit_identical(kw):
+    """Every arm perturbs what the encoder sees and NOTHING else.
+
+    The current state is not a summary of the history the model could catch out --
+    ego_agent_past is (x, y, cos, sin) and carries no velocity at all. Of the state,
+    only the pose and vx are read anywhere, and vx is not an encoder input either: it is
+    the divisor of the longitudinal loss weight in decoder.py. Scaling it would make the
+    multiplicative arm a test of history noise AND of loss re-weighting at once, which
+    the jitter arms have no counterpart for.
+    """
+    (_, in_ref, _), (_, in_new, _) = _clean_and_perturbed(**kw)
+    assert torch.equal(in_ref["ego_current_state"], in_new["ego_current_state"])
+
+
+@pytest.mark.parametrize("kw", _PERTURBATIONS)
+def test_stored_history_headings_describe_the_perturbed_track(kw):
+    """The bug the post-veto rewrite fixes: cos/sin used to be left describing the clean
+    positions while the positions beside them had moved."""
+    # no padded prefix here: a "no history" slot is held at exactly zero, so a
+    # difference taken ACROSS it is a phantom step and describes nothing
+    (_, _, _), (noisy, in_new, _) = _clean_and_perturbed(pad_steps=0, **kw)
+    past = in_new["ego_agent_past"][noisy._aug_rows]
+    # interior samples: ddt is a plain central difference there, and _headings keeps the
+    # motion direction wherever the step is longer than 0.3 m (it is, at EGO_V)
+    g = past[:, 2:, :2] - past[:, :-2, :2]
+    stored = torch.atan2(past[:, 1:-1, 3], past[:, 1:-1, 2])
+    assert torch.allclose(torch.atan2(g[..., 1], g[..., 0]), stored, atol=1e-4)

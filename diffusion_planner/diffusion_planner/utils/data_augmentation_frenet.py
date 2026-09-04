@@ -32,7 +32,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from diffusion_planner.dimensions import EGOSTATE
 from diffusion_planner.utils.augmentation_checks import (
     DT,
     border_lateral_bounds,
@@ -102,14 +101,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
     def centric_transform(self, inputs, ego_future, neighbors_future):
         out = super().centric_transform(inputs, ego_future, neighbors_future)
-        # Restore "no history" rows to exact zero. Both the rewrite and the parent's
-        # re-centering write real numbers into every history slot, and the encoder reads
-        # ego_agent_past directly -- a transformed pad would be presented to the model as
-        # history that never happened. Applied to the whole batch, not just augmented rows,
-        # so a future non-identity transform on untouched rows cannot reintroduce it.
-        pad = getattr(self, "_ego_past_pad", None)
-        if pad is not None and bool(pad.any()):
-            inputs["ego_agent_past"][pad] = 0.0
         # Dataset convention is base_link: velocity and acceleration are purely
         # longitudinal (raw NPZs carry vy = ay = 0.0 identically). The rebuilt
         # polyline's finite-diff velocity leaves a small tangent/heading residual
@@ -122,41 +113,127 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             cur[rows, 4] = torch.sqrt(vx * vx + vy * vy) * torch.where(vx < 0, -1.0, 1.0)
             cur[rows, 5] = 0.0
             cur[rows, 7] = 0.0  # ay
-        # History noise runs LAST, after the re-centering rather than before it. Only
-        # here is the history expressed about the augmented t=0 pose, so scaling it
-        # about the origin leaves t=0 exactly at the origin and leaves the implied
-        # speed history consistent with the current state it is scaled with. Scaling in
-        # the pre-centering frame would instead drag the t=0 pose away from the current
-        # state the whole batch is then centered on. It also runs after the pad
-        # zeroing, so a padded row is exactly zero and no factor can resurrect it.
-        if self.past_noise_std > 0.0 and rows is not None and bool(rows.any()):
-            self._scale_history(inputs, rows)
+            # ...and only then is the history perturbed. See _perturb_history for why
+            # every history perturbation happens HERE and nowhere earlier.
+            self._perturb_history(inputs, rows)
+        # Restore "no history" rows to exact zero. The rewrite, the parent's re-centering
+        # and the perturbation above all write real numbers into every history slot, and
+        # the encoder reads ego_agent_past directly -- a transformed pad would be
+        # presented to the model as history that never happened. Runs LAST so no
+        # perturbation can resurrect a padded row, and over the whole batch rather than
+        # just the augmented rows, so a future non-identity transform on untouched rows
+        # cannot reintroduce it either.
+        pad = getattr(self, "_ego_past_pad", None)
+        if pad is not None and bool(pad.any()):
+            inputs["ego_agent_past"][pad] = 0.0
         return out
 
-    def _scale_history(self, inputs, rows):
-        """Scale an augmented row's rewritten history by one factor per scene.
+    def _perturb_history(self, inputs, rows):
+        """Both ego-history perturbations, on the ACCEPTED rows, after everything else.
+
+        WHY HERE, i.e. after the veto and after the re-centering. Two reasons, and they
+        are the reason neither perturbation is applied where the candidate is built:
+
+        * The corridor, the kinematic feasibility screen and the exact-OBB veto exist to
+          certify that the candidate is a valid thing to drive. They have to judge CLEAN
+          geometry. A perturbation applied before them bends the HISTORY by motion that
+          never happened, and the plausibility-jerk screen then rejects good candidates
+          for the noise rather than for the candidate -- so which scenes get augmented at
+          all would depend on the noise setting, and an A/B across settings would be
+          comparing different training sets. Applied here, acceptance is identical for
+          every setting of both flags.
+        * The merge is constructed to be jerk-optimal from the CLEAN t=0 state, and the
+          future is the training TARGET. Perturbing the history first and re-deriving the
+          state from it corrupts that target. The point of history noise is that the model
+          should produce the correct trajectory DESPITE an imperfect history, so the noise
+          has to be input-only: the future and the t=0 state stay exactly as validated.
+
+        Ordering within centric_transform. The parent re-centers the history about the
+        augmented t=0 pose, so by the time this runs the history is expressed in the
+        frame the model sees, and the stored cos/sin are that frame's directions -- which
+        is what the jitter's path frame is taken from below. Both perturbations are also
+        frame-agnostic by construction (the scale is about the t=0 SAMPLE, the jitter's
+        basis vanishes there), so re-centering before or after them would give the same
+        answer; doing it before simply means only one frame is ever involved.
+
+        What moves and what does not. NOTHING outside ``ego_agent_past`` columns 0:4 --
+        the positions, and the cos/sin re-derived from them so the stored heading
+        describes the track that is actually written, at every sample except the pinned
+        t = 0 one. The future is untouched and so is ``ego_current_state``, for BOTH
+        perturbations: every arm of an A/B then perturbs exactly what the encoder sees
+        and nothing else. Nor is there any state consistency to maintain, because the
+        history carries no velocity -- ``ego_agent_past`` is (x, y, cos, sin). Of the
+        current state, only ``[:4]`` (pose) and ``[4:5]`` (vx) are read anywhere in the
+        model, loss or eval path: vy, ax, ay, steering and yaw rate are dead inputs, and
+        vx is not an encoder input either -- its only consumer is the longitudinal loss
+        WEIGHT in decoder.py (``position_lon_loss / clamp_min(|vx|, 1)``, and frenet's
+        2 m/s gate means the clamp never binds). Scaling it would re-weight that scene's
+        loss by 1/s rather than perturb its history, which is a second mechanism the
+        jitter does not have and would make the arms incomparable.
+        """
+        if not (self.past_noise_std > 0.0 or self._hist_jitter_on):
+            return  # nothing drawn, nothing written: the default path is bit-identical
+        past = inputs["ego_agent_past"]
+        xy, tan = past[rows, :, :2], past[rows, :, 2:4]
+        if self.past_noise_std > 0.0:
+            xy = self._scale_history(xy)
+        if self._hist_jitter_on:
+            # jitter the SCALED track, so its flagged amplitude is not itself rescaled
+            nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
+            xy = xy + self._hist_jitter(xy, tan, nrm, xy.shape[1])
+        # Same heading convention as the polyline rewrite, including its fallback to the
+        # stored tangent below 0.3 m/step: without this the cos/sin would keep describing
+        # the clean track and disagree with the positions next to them.
+        _, heading = self._headings(xy, tan)
+        new = torch.stack([xy[..., 0], xy[..., 1], heading.cos(), heading.sin()], dim=-1).to(
+            past.dtype
+        )
+        # t = 0 is pinned WHOLE. Its position cannot move -- both perturbations vanish
+        # there by construction -- and its heading has to keep agreeing with the
+        # ego_current_state pose, which stays exactly as validated. Without this the
+        # one-sided difference _headings takes at the end of the polyline would rewrite
+        # the t=0 heading from the perturbed sample beside it, and the model would be
+        # handed a current pose and a last history pose that disagree.
+        new[:, -1] = past[rows][:, -1, :4]
+        past[rows, :, :4] = new
+
+    def _scale_history(self, xy):
+        """Scale an accepted row's rewritten history about its t=0 sample.
 
         The perturbation the quintic augmenter applies through ``ego_past_noise_std``.
         Frenet reads the same flag, but applies it to the history it rewrote rather than
-        to the recorded one the base class would have scaled: one N(1, std) scalar per scene clamped to +-2 std, multiplying
-        the history xy and the current velocity and acceleration together, so the
-        implied speed history stays consistent with the state. Non-augmented rows are
-        never touched -- they train on plain ground truth, unscaled.
+        to the recorded one the base class would have scaled: one N(1, std) scalar per
+        scene clamped to +-2 std. Semantically "the ego arrived here faster or slower
+        than recorded", so the scene is the same drive at a different approach speed.
+
+        Scaling is about the t = 0 SAMPLE, ``p_i' = p_0 + s * (p_i - p_0)``, not about
+        the frame origin: t = 0 is then pinned exactly, in any frame, so nothing that was
+        validated moves and the model still plans from the pose it was given.
+
+        POSITIONS ONLY. The current state's velocity and acceleration are deliberately
+        NOT scaled with them -- see :meth:`_perturb_history` for why: there is no history
+        velocity for them to stay consistent with, vy/ax/ay are read by nothing, and vx
+        is only a longitudinal-loss weight, so scaling it would re-weight the loss rather
+        than perturb an input.
 
         The draw comes from the augmenter's own generator, and is taken ONLY when the
         std is positive, so at the default the generator is left exactly where the
         unaugmented stream leaves it.
+
+        Args:
+            xy: (M, P, 2) history positions of the accepted rows.
+
+        Returns:
+            (M, P, 2) scaled history positions.
         """
         w = self.past_noise_std
-        past, cur = inputs["ego_agent_past"], inputs["ego_current_state"]
-        scale = torch.normal(1.0, w, size=(int(rows.sum()), 1, 1), generator=self.gen).clamp(
-            1.0 - 2 * w, 1.0 + 2 * w
+        scale = (
+            torch.normal(1.0, w, size=(xy.shape[0], 1, 1), generator=self.gen)
+            .clamp(1.0 - 2 * w, 1.0 + 2 * w)
+            .to(device=xy.device, dtype=xy.dtype)
         )
-        scale = scale.to(device=past.device, dtype=past.dtype)
-        past[rows, :, :2] = past[rows, :, :2] * scale
-        cur[rows, EGOSTATE.VX : EGOSTATE.AY + 1] = (
-            cur[rows, EGOSTATE.VX : EGOSTATE.AY + 1] * scale[:, :, 0]
-        )
+        p0 = xy[:, -1:, :]  # the t=0 sample, held fixed by construction
+        return p0 + scale * (xy - p0)
 
     def __init__(
         self,
@@ -182,7 +259,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             # The base class scales the RECORDED history, which frenet does not keep --
             # it rewrites the past from the perturbed polyline. The same perturbation is
             # applied to that rewrite instead, in _scale_history, so the base class is
-            # disabled here and the caller's value is stored below.
+            # disabled here and the caller's value is stored below. Frenet also applies
+            # it strictly after the veto, which the base class has no equivalent of.
             ego_past_noise_std=0.0,
             use_smoothing_future_trajectory=False,
         )
@@ -232,14 +310,16 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # Std of the per-scene history-scale factor. The base class is told 0 above
         # because frenet rewrites the past kinematically and the quintic scaling would
         # be applied to the recorded history instead; this knob applies the same
-        # perturbation to the REWRITTEN history. 0 draws nothing and is bit-identical.
+        # perturbation to the REWRITTEN history, after the veto, and to the history
+        # POSITIONS only (see _perturb_history). 0 draws nothing and is bit-identical.
         self.past_noise_std = float(ego_past_noise_std)
         if self.past_noise_std < 0.0:
             raise ValueError(f"ego_past_noise_std must be >= 0, got {ego_past_noise_std}")
         # Std (m) of the smooth history jitter AT THE OLDEST history sample, per axis of
         # the path frame. A different perturbation from past_noise_std above: that one
         # scales a correctly-shaped track so it is traversed at the wrong speed, this one
-        # bends the track itself. 0 draws nothing and is bit-identical. See _hist_jitter.
+        # bends the track itself. Applied after the veto, like the scale, so neither can
+        # move acceptance. 0 draws nothing and is bit-identical. See _hist_jitter.
         self.hist_jitter_lat = float(hist_jitter_lat)
         if self.hist_jitter_lat < 0.0:
             raise ValueError(f"hist_jitter_lat must be >= 0, got {hist_jitter_lat}")
@@ -249,9 +329,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self.hist_jitter_lon = float(hist_jitter_lon)
         if self.hist_jitter_lon < 0.0:
             raise ValueError(f"hist_jitter_lon must be >= 0, got {hist_jitter_lon}")
-        # offsets added to the winning polyline's history this call, so the post-veto
-        # retry rebuilds its candidates on the same jittered history; None when off
-        self._hist_jit = None
         self._basis_cache = {}
         self._jitter_basis_cache = {}
 
@@ -336,9 +413,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     def _hist_jitter(self, xy, tan, nrm, P):
         """Per-scene smooth jitter of the HISTORY, as a (B, T, 2) offset on the polyline.
 
-        Applied to the winning polyline BEFORE the headings are derived from it, so the
-        stored cos/sin describe the jittered track rather than disagreeing with it. Only
-        the history is moved: the future and the merge are left exactly as selected.
+        Only the first ``P`` samples are moved; anything past them stays exactly zero, so
+        handing in the whole time grid leaves the future untouched. The caller applies
+        this to the ACCEPTED history only, after the veto, and re-derives the stored
+        cos/sin from the result (see :meth:`_perturb_history`).
 
         One coefficient draw and one GEMM for the whole batch -- no python loop over
         scenes or samples; the loop below runs once per AXIS (one or two).
@@ -692,12 +770,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         aug_xy = self._select_candidate(
             admissible, jerk_fut_peak, first, merges, L, xy, nrm, B, dev
         )
-        # Jitter the HISTORY before the headings are derived, so the stored cos/sin come
-        # out consistent with the perturbed track for free (and so the veto below judges
-        # the track that will actually be written). Off by default: nothing is drawn.
-        self._hist_jit = self._hist_jitter(xy, tan, nrm, P) if self._hist_jitter_on else None
-        if self._hist_jit is not None:
-            aug_xy = aug_xy + self._hist_jit
+        # NOTE: the history perturbations are deliberately NOT applied here. The veto
+        # below, and the feasibility screen above, must judge the clean candidate; the
+        # noise is added to the accepted history at the very end, in _perturb_history.
         g, heading = self._headings(aug_xy, tan)
         upd = self._veto_true_overlaps(inputs, has.clone(), aug_xy, heading)
         if self.recovery_rounds:
@@ -855,8 +930,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             feas_k = adm[rows, cur]
             combo_idx, alive = self._sample_merge_then_jerk(feas_k, jerk[rows, cur], merges)
             cand = xy[rows] + L[rows, cur, combo_idx][..., None] * nrm[rows]
-            if self._hist_jit is not None:
-                cand = cand + self._hist_jit[rows]  # same history jitter as the first pick
             g_r, hd_r = self._headings(cand, tan[rows])
             keep = self._veto_true_overlaps_rows(inputs, alive.clone(), cand, hd_r, rows)
             sel = rows[keep]
