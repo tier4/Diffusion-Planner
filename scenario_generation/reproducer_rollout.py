@@ -228,6 +228,46 @@ def build_input_np(
     torch conversion + normalization happen once for the whole batch afterwards
     (see ``_to_torch_batch``).
     """
+    if getattr(tl, "native_h5", False):
+        from new_dp_h5_eval.transforms import recenter_frame_to_pose
+
+        frame = tl.npz(idx)
+        dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+        recen0 = recenter_frame_to_pose(
+            frame,
+            np.asarray([dx, dy], dtype=np.float32),
+            np.asarray([math.cos(dyaw), math.sin(dyaw)], dtype=np.float32),
+        )
+        recen = {key: np.asarray(value)[None] for key, value in recen0.items()}
+        live4 = _live_ego_past(ego_hist_world, live_pose)[0]
+        live6 = np.zeros((PAST, 6), dtype=np.float32)
+        live6[:, :4] = live4
+        if ego_hist_world.shape[1] >= 5:
+            live6[:, 4:6] = ego_hist_world[-PAST:, 3:5]
+        elif len(ego_hist_world) > 1:
+            delta = np.diff(ego_hist_world[-PAST:, :], axis=0)
+            speeds = np.linalg.norm(delta[:, :2], axis=1) / DT
+            yaw_rates = np.arctan2(np.sin(delta[:, 2]), np.cos(delta[:, 2])) / DT
+            live6[1:, 4] = speeds[-(PAST - 1):]
+            live6[1:, 5] = yaw_rates[-(PAST - 1):]
+            live6[0, 4:6] = live6[1, 4:6]
+        live6[-1, 4], live6[-1, 5] = dyn.speed, dyn.yaw_rate
+        recen["ego_agent_past"] = live6[None]
+        # Exact native fields -> legacy scoring-only views. They never enter ONNX.
+        neighbors_live = np.zeros((frame["neighbor_agents_past"].shape[0], 11), dtype=np.float32)
+        neighbors_live[:, :4] = recen0["neighbor_agents_past"][:, -1]
+        neighbors_live[:, 6:8] = frame["agent_shape"]
+        neighbors_live[:, 8:11] = frame["agent_label"]
+        lines = np.zeros((*recen0["road_borders"].shape[:-1], 4), dtype=np.float32)
+        lines[..., :2] = recen0["road_borders"]
+        lines[..., 3] = (np.linalg.norm(lines[..., :2], axis=-1) > 0).astype(np.float32)
+        recen["line_strings"] = lines[None]
+        from new_dp_h5_eval.metric_compat import legacy_route_lanes
+
+        route33 = legacy_route_lanes(recen0)
+        recen["metric_route_lanes"] = route33[None]
+        return recen, neighbors_live
+
     base = _npz_to_model_base(tl.npz(idx))
     dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
     recen = world_to_ego_frame(base, dx, dy, dyaw)  # re-center recorded frame on live ego
@@ -290,6 +330,15 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     """
     N = len(np_dicts)
     arrays = {k: np.concatenate([d[k] for d in np_dicts], axis=0) for k in np_dicts[0]}
+    if getattr(model_args, "new_dp_h5", False):
+        from new_dp_h5_eval.schema import MODEL_INPUT_NAMES
+
+        arrays = {k: arrays[k] for k in MODEL_INPUT_NAMES}
+        data = {
+            key: torch.from_numpy(np.asarray(value, dtype=np.float32)).to(device)
+            for key, value in arrays.items()
+        }
+        return model_args.observation_normalizer(data)
     data = _arrays_to_device(arrays, device)
     _add_static_inputs(data, model_args, N, device)
     return model_args.observation_normalizer(data)
@@ -486,6 +535,12 @@ def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.n
         [pose[0] + ep[:, 0] * c - ep[:, 1] * s, pose[1] + ep[:, 0] * s + ep[:, 1] * c],
         axis=-1,
     )
+    if getattr(tl, "native_h5", False):
+        local_yaw = np.arctan2(ep[:, 3], ep[:, 2])
+        ego_hist = np.column_stack([hist_xy, local_yaw + pose[2], ep[:, 4], ep[:, 5]]).astype(
+            np.float64
+        )
+        return pose, ego_hist, _EgoDyn(speed=float(ep[-1, 4]), yaw_rate=float(ep[-1, 5]))
     ego_hist = np.column_stack([hist_xy, ep[:, 2] + pose[2]]).astype(np.float64)
     return pose, ego_hist, _EgoDyn(speed=float(tl.speeds[idx]))
 
@@ -640,6 +695,8 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
             s.live_pose
         )  # (1,320,31,11) live-ego
     if gpu_transform:
+        if getattr(s.tl, "native_h5", False):
+            raise ValueError("native H5 requires its schema-aware CPU transform; disable gpu_transform")
         # 8-tuple (..., sim_nb, slot_uuids, world_by_uuid); sim_nb overrides the recorded
         # neighbor block AFTER the batched world_to_ego transform (None = recorded mode).
         base, dxyz, live_past, live_cur, ridx = build_input_raw(
@@ -649,7 +706,9 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         return (base, dxyz, live_past, live_cur, ridx, sim_nb, slot_uuids, world_by_uuid)
     np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
     if sim_nb is not None:
-        np_dict["neighbor_agents_past"] = sim_nb
+        np_dict["neighbor_agents_past"] = (
+            sim_nb[..., :4] if getattr(s.tl, "native_h5", False) else sim_nb
+        )
         neighbors_live = sim_nb[0, :, -1, :].copy()
     np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
@@ -828,7 +887,13 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             steering=steering,
         )
         s.live_pose = new_pose
-        s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
+        if getattr(s.tl, "native_h5", False):
+            native_state = np.asarray(
+                [*s.live_pose, s.dyn.speed, s.dyn.yaw_rate], dtype=np.float64
+            )[None]
+            s.ego_hist = np.vstack([s.ego_hist[1:], native_state])
+        else:
+            s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
         s.sim_time += DT
         # Record this step's realized accel (aligned with clearances[k], written pre-increment)
         # for the strong-brake metric; guard states built without an accels buffer.
