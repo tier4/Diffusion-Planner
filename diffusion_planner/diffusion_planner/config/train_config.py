@@ -99,6 +99,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "0 (default) draws nothing.",
         default=0.0,
     )
+    frenet_hist_jitter_lon: float = cli(
+        "frenet: as frenet_hist_jitter_lat, but ALONG the direction of travel. Varies "
+        "the spacing of the history samples, i.e. makes the implied speed history "
+        "wobble rather than be uniformly wrong. 0 (default) draws nothing.",
+        default=0.0,
+    )
     frenet_ranked_temp_s: float = cli(
         "frenet: time constant (s) of the merge-horizon sampling; smaller favours "
         "faster convergence more strongly.",

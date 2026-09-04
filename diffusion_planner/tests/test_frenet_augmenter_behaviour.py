@@ -461,14 +461,47 @@ def test_hist_jitter_is_smooth_not_white():
     assert float(d2.std()) < white / 20.0, (float(d2.std()), white)
 
 
+def _spacing_ratio(**kw):
+    """Mean along-path sample spacing of the jittered history, over the unjittered one."""
+    xy, _, _ = _straight_frame(4000)
+    off, _ = _jitter_offset(4000, **kw)
+    step0 = (xy[:, 1:P_STEPS] - xy[:, : P_STEPS - 1]).norm(dim=-1)
+    step1 = ((xy + off)[:, 1:P_STEPS] - (xy + off)[:, : P_STEPS - 1]).norm(dim=-1)
+    return abs(float(step1.std() / step0.mean()))
+
+
 def test_lateral_jitter_leaves_the_along_path_spacing_alone():
     """Bending the track sideways must not smuggle in a speed perturbation."""
-    xy, tan, nrm = _straight_frame(4000)
+    xy, _, _ = _straight_frame(4000)
     off, _ = _jitter_offset(4000, hist_jitter_lat=0.3)
     step0 = (xy[:, 1:P_STEPS] - xy[:, : P_STEPS - 1]).norm(dim=-1)
     step1 = ((xy + off)[:, 1:P_STEPS] - (xy + off)[:, : P_STEPS - 1]).norm(dim=-1)
     # a purely lateral bend only lengthens the step at second order in the bend angle
     assert abs(float(step1.mean() / step0.mean()) - 1.0) < 0.01
+
+
+def test_longitudinal_jitter_is_what_moves_the_spacing():
+    """The point of the second axis: the implied speed history wobbles."""
+    lat_only = _spacing_ratio(hist_jitter_lat=0.3, hist_jitter_lon=0.0)
+    lon_only = _spacing_ratio(hist_jitter_lat=0.0, hist_jitter_lon=0.3)
+    assert lat_only < 0.01, lat_only
+    assert lon_only > 20 * lat_only, (lon_only, lat_only)
+
+
+def test_longitudinal_jitter_std_at_the_oldest_sample_is_the_requested_one():
+    sigma = 0.35
+    off, _ = _jitter_offset(40000, hist_jitter_lon=sigma)
+    assert abs(float(off[:, 0, 0].std()) - sigma) / sigma < 0.05
+    assert float(off[:, 0, 1].abs().max()) == 0.0, "longitudinal jitter moved the path normal"
+    assert torch.equal(off[:, P_STEPS - 1], torch.zeros(40000, 2)), "t=0 moved"
+
+
+def test_the_two_axes_are_drawn_independently():
+    """A lateral-only run must not have its wobble mirrored along the path."""
+    off, _ = _jitter_offset(20000, hist_jitter_lat=0.3, hist_jitter_lon=0.3)
+    lon, lat = off[:, 0, 0], off[:, 0, 1]
+    corr = float((lon * lat).mean() / (lon.std() * lat.std()))
+    assert abs(corr) < 0.05, corr
 
 
 def test_hist_jitter_headings_match_the_perturbed_polyline():
@@ -506,7 +539,9 @@ def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
     in_off, fut_off = _run(off, batch=8, pad_steps=3)
     shapes_off, _ = list(shapes), shapes.clear()
 
-    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, hist_jitter_lat=0.0)
+    explicit = FrenetStatePerturbationTensor(
+        1.0, "cpu", seed=7, hist_jitter_lat=0.0, hist_jitter_lon=0.0
+    )
     in_on, fut_on = _run(explicit, batch=8, pad_steps=3)
 
     assert shapes_off == list(shapes), "the off value changed how much randomness is drawn"
@@ -519,6 +554,8 @@ def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
 def test_hist_jitter_refuses_a_negative_std():
     with pytest.raises(ValueError, match="hist_jitter_lat"):
         FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lat=-0.1)
+    with pytest.raises(ValueError, match="hist_jitter_lon"):
+        FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lon=-0.1)
 
 
 # ───────────────────── layout robustness (3-col / 4-col) ─────────────────────

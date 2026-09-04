@@ -173,6 +173,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         min_clearance: float = 0.0,
         ego_past_noise_std: float = 0.0,
         hist_jitter_lat: float = 0.0,
+        hist_jitter_lon: float = 0.0,
     ):
         super().__init__(
             augment_prob=augment_prob,
@@ -242,6 +243,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self.hist_jitter_lat = float(hist_jitter_lat)
         if self.hist_jitter_lat < 0.0:
             raise ValueError(f"hist_jitter_lat must be >= 0, got {hist_jitter_lat}")
+        # The longitudinal axis varies the SPACING of the history samples, i.e. makes the
+        # implied speed history wobble, rather than being uniformly wrong as it is under
+        # past_noise_std. Same basis, same normalisation, independent coefficients.
+        self.hist_jitter_lon = float(hist_jitter_lon)
+        if self.hist_jitter_lon < 0.0:
+            raise ValueError(f"hist_jitter_lon must be >= 0, got {hist_jitter_lon}")
         # offsets added to the winning polyline's history this call, so the post-veto
         # retry rebuilds its candidates on the same jittered history; None when off
         self._hist_jit = None
@@ -289,11 +296,11 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # ---------- smooth ego-history jitter (opt-in, depends only on P) ----------
     @property
     def _hist_jitter_on(self) -> bool:
-        return self.hist_jitter_lat > 0.0
+        return self.hist_jitter_lat > 0.0 or self.hist_jitter_lon > 0.0
 
     def _hist_jitter_axes(self, tan, nrm):
         """(std, unit direction) of every axis the jitter is drawn along."""
-        return ((self.hist_jitter_lat, nrm),)
+        return ((self.hist_jitter_lat, nrm), (self.hist_jitter_lon, tan))
 
     def _hist_jitter_basis(self, P, device, dtype):
         """Cached (K, P) low-frequency displacement basis, normalised in amplitude.
@@ -944,4 +951,5 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         min_clearance=float(args.frenet_min_clearance),
         ego_past_noise_std=float(args.ego_past_noise_std),
         hist_jitter_lat=float(args.frenet_hist_jitter_lat),
+        hist_jitter_lon=float(args.frenet_hist_jitter_lon),
     )
