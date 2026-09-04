@@ -168,6 +168,10 @@ class DecoderONNXWrapper(nn.Module):
 
     This wrapper intentionally does not call a sampler. An external denoising loop should
     update x_t and timesteps, then call this ONNX model once per model evaluation.
+
+    ``diffusion_time`` is taken in the (B, P, 1 + T, 1) layout the deployed ROS node
+    (``autoware_diffusion_planner``) binds, where every element holds the same timestep, and is
+    reduced to the per-sample scalar the DiT expects.
     """
 
     def __init__(self, model: Diffusion_Planner):
@@ -187,12 +191,12 @@ class DecoderONNXWrapper(nn.Module):
         agent_num = 1 + self.decoder._predicted_neighbor_num
 
         sampled_trajectories = sampled_trajectories.reshape(
-            batch_size, agent_num, 1 + self.decoder._future_len, 4
+            batch_size, agent_num, (1 + self.decoder._future_len) * 4
         )
 
         model_output = self.decoder.dit(
             sampled_trajectories,
-            diffusion_time,
+            diffusion_time.reshape(batch_size, -1)[:, 0],
             encoding,
             neighbor_current_mask,
         ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
@@ -220,11 +224,27 @@ class TurnIndicatorONNXWrapper(nn.Module):
 
 
 class FullONNXWrapper(nn.Module):
-    """Original all-in-one planner export."""
+    """Original all-in-one planner export.
+
+    Takes a ``delay`` input that this model does not use. The deployed ROS node
+    (``autoware_diffusion_planner``) always binds a ``delay`` tensor for real-time chunking, and
+    refuses to load an engine whose signature lacks it. Real-time chunking is not part of this
+    model, so ``delay`` is routed through a term that is identically zero for the non-negative
+    step counts the node sends (see :meth:`zero_from_delay`); an input that reaches no output at
+    all would be pruned out of the exported graph.
+    """
 
     def __init__(self, model: Diffusion_Planner):
         super().__init__()
         self.model = model
+
+    def zero_from_delay(self, delay: torch.Tensor) -> torch.Tensor:
+        """Return a (B, 1, 1, 1) tensor of zeros that data-depends on ``delay``.
+
+        ``torch.clamp(delay, max=0)`` is zero for every ``delay >= 0`` while staying opaque to the
+        constant folding in ONNX / TensorRT that would eliminate a plain multiplication by zero.
+        """
+        return torch.clamp(delay, max=0.0)[:, :, None, None]
 
     def forward(
         self,
@@ -247,7 +267,7 @@ class FullONNXWrapper(nn.Module):
         delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = {
-            "sampled_trajectories": sampled_trajectories,
+            "sampled_trajectories": sampled_trajectories + self.zero_from_delay(delay),
             "ego_agent_past": ego_agent_past,
             "ego_current_state": ego_current_state,
             "neighbor_agents_past": neighbor_agents_past,
@@ -263,7 +283,6 @@ class FullONNXWrapper(nn.Module):
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
-            "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
