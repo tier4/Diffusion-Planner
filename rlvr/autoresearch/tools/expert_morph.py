@@ -554,3 +554,59 @@ def build_depart_morph_candidate(
     out[:, 2] = np.cos(heading)
     out[:, 3] = np.sin(heading)
     return _ret(out, "ok", gap_m=gap, progress_m=float(s_feasible[-1]), v0_mps=v0)
+
+
+def build_unified_morph_candidates(
+    det_traj: np.ndarray,
+    expert_traj: np.ndarray,
+    reason: str | None,
+    *,
+    stop_anchor_xy: np.ndarray | None = None,
+    w_max: float = 1.0,
+    max_accel: float = 2.0,
+    max_jerk: float = 4.0,
+    dt: float = 0.1,
+) -> list[tuple[str, np.ndarray | None, dict]]:
+    """THE morph: one GT-schedule re-timing operation for expert_disagreement rows.
+
+    There is a single mechanism — re-time the ego onto the expert's schedule — with the
+    geometry source decided by the disagreement direction:
+
+    - ``stay_behind`` (every ED row): the det plan's own geometry re-timed to the expert's
+      speed profile. The correct response when the model RUSHES a waiting expert
+      (``expert_wait_model_forward``), and the fallback on lagging rows when no departure
+      is feasible.
+    - ``depart`` (``model_lagging_expert`` rows only): the expert path's geometry with a
+      feasible accel/jerk-limited catch-up schedule. The correct response when the model
+      stalls while the expert drives — a parked det plan has no road ahead to re-time.
+
+    Returns the candidate list in POOL ORDER, ``[(kind, traj_or_None, diag), ...]``:
+    ``stay_behind`` first, then ``depart`` when the reason calls for it. Output is
+    bit-identical to calling :func:`build_expert_morph_candidate` and
+    :func:`build_depart_morph_candidate` directly (they are this operation's internals).
+    Selection between the two happens in the repair selector's unified ranking,
+    not here.
+    """
+    out: list[tuple[str, np.ndarray | None, dict]] = []
+    stay, stay_diag = build_expert_morph_candidate(
+        det_traj,
+        expert_traj,
+        w_max=w_max,
+        max_accel=max_accel,
+        max_jerk=max_jerk,
+        dt=dt,
+        stop_anchor_xy=stop_anchor_xy,
+        return_diag=True,
+    )
+    out.append(("stay_behind", stay, stay_diag))
+    if reason == "model_lagging_expert":
+        depart, depart_diag = build_depart_morph_candidate(
+            det_traj,
+            expert_traj,
+            max_accel=max_accel,
+            max_jerk=max_jerk,
+            dt=dt,
+            return_diag=True,
+        )
+        out.append(("depart", depart, depart_diag))
+    return out

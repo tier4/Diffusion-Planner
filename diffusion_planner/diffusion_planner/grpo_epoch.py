@@ -177,6 +177,10 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
 
 
 def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, aug):
+    if len(data_loader) == 0:
+        empty = {"loss": 0.0, "reward_mean": 0.0, "reward_max": 0.0}
+        return empty, 0.0
+
     epoch_loss = []
 
     model.train()

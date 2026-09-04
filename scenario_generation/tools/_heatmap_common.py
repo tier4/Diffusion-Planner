@@ -84,13 +84,40 @@ def project_to_polyline(
 
 
 def project_points_to_polyline(xys: np.ndarray, pts: np.ndarray, s: np.ndarray) -> np.ndarray:
-    """Batch projection via per-point loop. xys: (M, 2). Returns (M, 3) = (arc, signed, |lat|).
+    """Batch projection. xys: (M, 2). Returns (M, 3) = (arc, signed, |lat|).
 
-    O(M*N); fine up to a few hundred thousand points.
+    Vectorized over points (same per-point math and argmin tie-breaking as
+    ``project_to_polyline``, verified equal in the rollout perf work); chunked
+    so the (chunk, N_seg) distance matrix stays small on long polylines. The
+    mining rollout calls this for ~2x81 points per segment per tick — the old
+    per-point Python loop over all route segments was a hot spot.
     """
-    out = np.zeros((len(xys), 3), dtype=np.float64)
-    for k, p in enumerate(xys):
-        out[k] = project_to_polyline(p, pts, s)
+    xys = np.asarray(xys, dtype=np.float64).reshape(-1, 2)
+    M = len(xys)
+    out = np.zeros((M, 3), dtype=np.float64)
+    if M == 0:
+        return out
+    a = pts[:-1]
+    b = pts[1:]
+    ab = b - a  # (N, 2)
+    seg_len2 = np.maximum((ab * ab).sum(axis=1), 1e-9)  # (N,)
+    seg_len = np.sqrt(seg_len2)
+    chunk = max(1, int(4_000_000 // max(1, len(a))))
+    for lo in range(0, M, chunk):
+        p = xys[lo : lo + chunk]  # (m, 2)
+        ap = p[:, None, :] - a[None]  # (m, N, 2)
+        t = (ap * ab[None]).sum(axis=-1) / seg_len2  # (m, N)
+        t_clamped = np.clip(t, 0.0, 1.0)
+        proj = a[None] + t_clamped[..., None] * ab[None]
+        d = np.linalg.norm(p[:, None, :] - proj, axis=-1)  # (m, N)
+        i = np.argmin(d, axis=1)  # first minimum, same tie-break as the scalar path
+        rows = np.arange(len(p))
+        cross = ab[i, 0] * (p[:, 1] - a[i, 1]) - ab[i, 1] * (p[:, 0] - a[i, 0])
+        sign = np.where(cross >= 0, 1.0, -1.0)
+        di = d[rows, i]
+        out[lo : lo + chunk, 0] = s[i] + t_clamped[rows, i] * seg_len[i]
+        out[lo : lo + chunk, 1] = sign * di
+        out[lo : lo + chunk, 2] = di
     return out
 
 

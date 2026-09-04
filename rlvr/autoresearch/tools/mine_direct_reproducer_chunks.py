@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import re
+import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -475,6 +476,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--realized_reward_sample_step", type=int, default=10)
+    parser.add_argument(
+        "--progress_reference_expert",
+        action="store_true",
+        help="pin the realized-reward underprogress reference to the EXPERT path length. "
+        "Without it the penalty never fires at N=1 (single realized trajectory), so the "
+        "reward is blind to lagging behind the expert.",
+    )
     parser.add_argument("--plan_only", action="store_true")
     parser.add_argument("--chunk_len", type=int, default=80)
     parser.add_argument("--start_stride", type=int, default=80)
@@ -541,7 +549,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal_reach_m", type=float, default=0.0)
     parser.add_argument("--unstick_after", type=int, default=300)
     parser.add_argument("--unstick_advance_m", type=float, default=5.0)
-    parser.add_argument("--tracker_mode", choices=["mpc", "perfect"], default="mpc")
+    parser.add_argument(
+        "--tracker_mode", choices=["mpc", "mpc_batched", "perfect"], default="mpc_batched"
+    )
     parser.add_argument("--timeline_progress_mode", choices=["clock", "pose"], default="clock")
     parser.add_argument("--neighbor_history_mode", choices=["sim", "recorded"], default="sim")
     parser.add_argument("--gpu_transform", action="store_true")
@@ -678,6 +688,7 @@ def main() -> None:
             device=device,
             horizon=horizon,
             sample_step=int(args.realized_reward_sample_step),
+            progress_reference_expert=bool(args.progress_reference_expert),
         )
 
     args.segments_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -698,11 +709,12 @@ def main() -> None:
         nonlocal n_credit_rows
         if credit_f is None:
             return
-        for scene_path in sorted(Path(window_dir).glob("credit*.npz")):
-            row = _credit_row_from_saved_scene(scene_path, manifest, label)
-            credit_f.write(json.dumps(row, sort_keys=True) + "\n")
-            n_credit_rows += 1
-        credit_f.flush()
+        with timers("credit_row_reload"):
+            for scene_path in sorted(Path(window_dir).glob("credit*.npz")):
+                row = _credit_row_from_saved_scene(scene_path, manifest, label)
+                credit_f.write(json.dumps(row, sort_keys=True) + "\n")
+                n_credit_rows += 1
+            credit_f.flush()
 
     def flush(chunks: list[Chunk], fout, fskip) -> None:
         nonlocal n_simulated, n_skipped
@@ -712,15 +724,18 @@ def main() -> None:
         kept_chunks = []
 
         def build(chunk: Chunk):
-            return _build_work_unit(
-                chunk,
-                args.sidecar_root,
-                args.prebuild_neighbor_tracks,
-                expected_frame_step=args.expected_frame_step,
-                max_pose_step_m=args.max_pose_step_m,
-                max_pose_speed_mps=args.max_pose_speed_mps,
-                max_yaw_step_rad=args.max_yaw_step_rad,
-            )
+            # NOTE: totals are summed across the build thread pool, so this timer
+            # reports CPU-seconds of timeline build, not wall-clock.
+            with timers("timeline_build"):
+                return _build_work_unit(
+                    chunk,
+                    args.sidecar_root,
+                    args.prebuild_neighbor_tracks,
+                    expected_frame_step=args.expected_frame_step,
+                    max_pose_step_m=args.max_pose_step_m,
+                    max_pose_speed_mps=args.max_pose_speed_mps,
+                    max_yaw_step_rad=args.max_yaw_step_rad,
+                )
 
         workers = max(1, int(args.timeline_build_workers))
         built = []
@@ -787,10 +802,19 @@ def main() -> None:
         # Invariant this relies on: len(work_units) <= args.batch_size (guaranteed above),
         # and the same batch_size is passed to run_segments_batched, so its internal
         # sub-batch loop runs exactly once per call -> no id(s) reuse within one finalize().
+        per_chunk_reward: dict = {}
         if realized_reward_finalize is not None:
             realized_reward_finalize()
+            per_chunk_reward = getattr(realized_reward_finalize, "per_chunk", {})
         for chunk, result in zip(kept_chunks, results):
             row = segment_row_for_json(result, **_chunk_row(chunk))
+            if realized_reward_finalize is not None:
+                # None when the chunk contributed no scored poses (too short for the
+                # horizon, or every sampled window crossed a teleport) — explicit,
+                # not silently absent, so per-chunk joins can tell "unscored" apart.
+                pc = per_chunk_reward.get(chunk.key)
+                row["realized_cl_reward_chunk"] = None if pc is None else pc["mean"]
+                row["realized_cl_reward_chunk_poses"] = 0 if pc is None else pc["poses"]
             fout.write(json.dumps(row, sort_keys=True, default=float) + "\n")
             n_simulated += 1
         fout.flush()
@@ -843,9 +867,21 @@ def main() -> None:
 
     realized_cl_reward = None
     realized_cl_reward_poses = 0
+    realized_cl_reward_components = None
+    realized_cl_reward_sd = realized_cl_reward_sem = None
+    realized_cl_reward_segments = 0
+    realized_cl_reward_segment_mean = None
     if realized_reward_finalize is not None:
         t_rew = time.perf_counter()
         realized_cl_reward, realized_cl_reward_poses = realized_reward_finalize()
+        realized_cl_reward_components = getattr(realized_reward_finalize, "components", None)
+        _per_seg = getattr(realized_reward_finalize, "per_segment_rewards", None) or []
+        realized_cl_reward_segments = len(_per_seg)
+        if _per_seg:
+            realized_cl_reward_segment_mean = statistics.fmean(_per_seg)
+            _sd = statistics.pstdev(_per_seg) if len(_per_seg) > 1 else 0.0
+            realized_cl_reward_sd = _sd
+            realized_cl_reward_sem = _sd / (len(_per_seg) ** 0.5)
         print(
             f"[realized_reward] mean={realized_cl_reward:.4f} over "
             f"{realized_cl_reward_poses} poses ({time.perf_counter() - t_rew:.1f}s)"
@@ -872,9 +908,15 @@ def main() -> None:
         "credit_rows": int(n_credit_rows),
         "realized_cl_reward": realized_cl_reward,
         "realized_cl_reward_poses": int(realized_cl_reward_poses),
+        "realized_cl_reward_components": realized_cl_reward_components,
+        "realized_cl_reward_sd": realized_cl_reward_sd,
+        "realized_cl_reward_segments": int(realized_cl_reward_segments),
+        "realized_cl_reward_segment_mean": realized_cl_reward_segment_mean,
+        "realized_cl_reward_sem": realized_cl_reward_sem,
         "elapsed_sec": round(elapsed, 3),
         "chunks_per_sec": n_simulated / elapsed if elapsed > 0 and n_simulated else 0.0,
         "timers": timers.report(max(1, n_simulated)) if n_simulated else "",
+        "timers_detail": timers.as_dict() if n_simulated else {},
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2))

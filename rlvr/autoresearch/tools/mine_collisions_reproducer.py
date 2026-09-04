@@ -430,8 +430,11 @@ def main() -> None:
 
     # Optionally render the top-N ranked hit segments to PNGs for inspection.
     if args.dump_hits > 0:
+        from scenario_generation.render_pool import render_pool
         from scenario_generation.reproducer_rollout import render_segment
 
+        # One pool for every hit: a spawned worker re-imports torch and matplotlib.
+        draw_pool = render_pool(4)
         render_root = args.out.with_suffix(".renders")
         render_root.mkdir(parents=True, exist_ok=True)
         model_title = _model_lora_title(args.model_path, args.lora_path)
@@ -476,11 +479,38 @@ def main() -> None:
                 view_half_m=args.view_half_m,
                 replan_interval=1,
                 draw_every=1,
+                draw_pool=draw_pool,
+                # Match the run_segments_batched mining pass above so the render reflects
+                # the same rollout that produced the hit.
+                warmup_steps=args.warmup_steps,
+                unstick_after=args.unstick_after,
+                unstick_advance_m=args.unstick_advance_m,
+                neighbor_history_mode="sim",
+                # No CLI flag for these; mirror render_segment's/run_segments_batched's
+                # former defaults.
+                unstick_radius_mult=3.0,
+                unstick_teleport_after=300,
+                tracker_mode="mpc_batched",
+                yaw_gate=True,
+                strong_brake_mps2=-2.5,
+                abort_deviation_m=0.0,
+                abort_after=30,
+                abort_max_snaps=0,
+                drop_objects=False,
+                goal_mode="segment",
+                max_stuck_steps=0,
+                goal_reach_m=5.0,
+                interpolate=True,
+                color_by_uuid=True,
+                window=None,
+                max_steps=None,
+                timeline_progress_mode="pose",
             )
             if args.render_webm:
                 webm = od / "hit_segment.webm"
                 _make_webm(od, webm, args.webm_fps)
                 print(f"    webm -> {webm}")
+        draw_pool.shutdown()
         print(f"rendered {args.dump_hits} hit segment(s) -> {render_root}")
 
 

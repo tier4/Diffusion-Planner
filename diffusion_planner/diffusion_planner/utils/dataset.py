@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from torch.utils.data import Dataset
 
@@ -7,7 +9,10 @@ from planner_metrics.temporal_stability import consecutive_frame_pairs
 
 class DiffusionPlannerData(Dataset):
     def __init__(self, data_list):
-        self.data_list = openjson(data_list)
+        if isinstance(data_list, (str, bytes, os.PathLike)):
+            self.data_list = openjson(data_list)
+        else:
+            self.data_list = list(data_list)
 
     def __len__(self):
         return len(self.data_list)

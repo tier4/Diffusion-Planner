@@ -60,7 +60,7 @@ def test_total_slots_fit_in_K16():
 
     Variants deliberately larger than K=16 must be listed here explicitly with
     their minimum K, so slot bloat stays a loud decision."""
-    larger = {"anchor_fan_16": 17}
+    larger = {"anchor_fan_16": 17, "anchor_fan_16_cl3": 20}
     for name in list_variants():
         v = get_variant(name)
         used = 1 + len(v.cl_spd_configs) + len(v.noise_configs)

@@ -1,6 +1,31 @@
 import argparse
+import json
 import subprocess
 from pathlib import Path
+
+
+def write_conversion_manifest(
+    path: Path,
+    results: list[dict],
+    converted_count: int,
+    skipped_count: int,
+    failed_count: int,
+):
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "records": results,
+                "converted_count": converted_count,
+                "skipped_count": skipped_count,
+                "failed_count": failed_count,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
     parser.add_argument("--write_skipped_npz", type=int, default=1)
+    parser.add_argument("--extract_override_segments", action="store_true")
     return parser.parse_args()
 
 
@@ -53,6 +79,7 @@ def main(
     offlane_max_score: float,
     offlane_time_stride: int,
     write_skipped_npz: int,
+    extract_override_segments: bool = False,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
@@ -80,6 +107,8 @@ def main(
         f"--offlane_time_stride={offlane_time_stride}",
         f"--write_skipped_npz={write_skipped_npz}",
     ]
+    if extract_override_segments:
+        command.append("--extract_override_segments")
     print(" ".join(command))
     result = subprocess.run(
         command,

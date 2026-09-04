@@ -12,6 +12,7 @@ dependencies = [
     "rlvr",
     "scenario-generation",
     "scene-search",
+    "tag-toolkit",
 ]
 
 [dependency-groups]
@@ -26,6 +27,16 @@ name = "flatt"
 url = "https://pypi.flatt.tech/simple/"
 default = true
 
+# onnxruntime-gpu is built against CUDA 12, while PyPI's default torch wheel is the CUDA 13
+# build: it pulls cuda-toolkit 13 and the *-cu13 wheels, leaving ORT without the libraries it
+# loads. Nothing else here asks for CUDA 13, so torch comes from the CUDA 12.8 index and one
+# CUDA sits under the whole environment. torchvision ships compiled ops against a specific
+# torch build and must come from the same place, or its operators fail to register.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.workspace]
 members = [
     "diffusion_planner",
@@ -36,9 +47,12 @@ members = [
     "scenario_generation",
     "scene_search",
     "guidance_gui",
+    "tag_toolkit",
 ]
 
 [tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 diffusion-planner = { workspace = true }
 exploration-policy = { workspace = true }
 planner-metrics = { workspace = true }
@@ -47,6 +61,7 @@ rlvr = { workspace = true }
 scenario-generation = { workspace = true }
 scene-search = { workspace = true }
 guidance-gui = { workspace = true }
+tag-toolkit = { workspace = true }
 
 [tool.pytest.ini_options]
 markers = [

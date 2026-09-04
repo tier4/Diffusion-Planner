@@ -156,15 +156,42 @@ def _min_dist_vectorized(
         proj = s_starts[None, :, :] + t[:, :, None] * ab[None, :, :]  # (K, B, 2)
         delta = points[:, None, :] - proj
         dist = np.sqrt((delta * delta).sum(axis=2))  # (K, B)
-        # Degenerate (zero-length) segments fall back to point distance.
-        dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
-        dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
+        # Only for a block that holds one -- a second full (K, B, 2) norm, and real maps have
+        # none. Kept at all because norm and sqrt(sum(d*d)) need not round identically.
+        degenerate = ab_len2 < 1e-12
+        if degenerate.any():
+            dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
+            dist = np.where(degenerate[None, :], dist_deg, dist)
 
         block_min = float(dist.min())
         if block_min < min_dist:
             min_dist = block_min
 
     return min_dist
+
+
+_TICK_BLOCK = 50
+# A segment further than this from a block's path cannot be nearest for any tick in it, provided
+# the block's reported distances stay inside the bound -- checked, not assumed.
+_BLOCK_MARGIN_M = 50.0
+
+
+def _block_segment_mask(
+    seg_starts: np.ndarray,
+    seg_ends: np.ndarray,
+    xy: np.ndarray,
+    reach: float,
+) -> np.ndarray:
+    """Which segments could be within ``_BLOCK_MARGIN_M`` of the ego anywhere in this block.
+
+    Deliberately not parameterised: the caller's exactness check reads the same constant, and a
+    wider mask with an unchanged check would be silently wrong.
+    """
+    lo = xy.min(axis=0) - (reach + _BLOCK_MARGIN_M)
+    hi = xy.max(axis=0) + (reach + _BLOCK_MARGIN_M)
+    return (np.maximum(seg_starts, seg_ends) >= lo).all(axis=1) & (
+        np.minimum(seg_starts, seg_ends) <= hi
+    ).all(axis=1)
 
 
 def evaluate_trajectory(
@@ -174,37 +201,49 @@ def evaluate_trajectory(
     ego_width: float,
     ego_wheelbase: float,
     rb_cross_thresh: float = 0.20,
-) -> dict:
-    """Compute metrics for a single CL trajectory."""
+) -> tuple[dict, dict[str, np.ndarray]]:
+    """Compute metrics for a single CL trajectory -> (summary, per-step series).
+
+    The two are returned separately because they are different kinds of thing: the summary is
+    flat and JSON-writable, the series are arrays a caller feeds into further metrics.
+    """
     half_l = ego_length / 2
     half_w = ego_width / 2
 
     seg_starts, seg_ends = _flatten_segments(border_segments)
     has_borders = seg_starts.shape[0] > 0
 
-    rb_dists = []
-    speeds = []
-    positions = []
+    speeds = [entry["speed"] for entry in traj]
+    positions = [(entry["x"], entry["y"]) for entry in traj]
 
-    for entry in traj:
-        x, y, h = entry["x"], entry["y"], entry["heading"]
-        speed = entry["speed"]
-        positions.append((x, y))
-        speeds.append(speed)
+    # Full perimeter, not just corners: a border piercing the middle of an edge leaves every
+    # corner outside rb_cross_thresh while still crossing.
+    def _perimeter(entry: dict) -> np.ndarray:
+        return _compute_ego_perimeter(
+            entry["x"], entry["y"], entry["heading"], half_l, half_w, ego_wheelbase
+        )
 
-        if has_borders:
-            # Sample the full OBB perimeter, not just corners: a border that
-            # pierces the middle of a vehicle edge can leave every corner
-            # outside rb_cross_thresh but still be a true crossing.
-            perimeter = _compute_ego_perimeter(
-                x,
-                y,
-                h,
-                half_l,
-                half_w,
-                ego_wheelbase,
+    rb_dists: list[float] = []
+    if has_borders:
+        # Furthest a perimeter point can be from the reported pose.
+        reach = float(np.hypot(0.5 * (ego_length + ego_wheelbase), 0.5 * ego_width))
+        for b0 in range(0, len(traj), _TICK_BLOCK):
+            block = traj[b0 : b0 + _TICK_BLOCK]
+            mask = _block_segment_mask(
+                seg_starts, seg_ends, np.asarray(positions[b0 : b0 + _TICK_BLOCK]), reach
             )
-            rb_dists.append(_min_dist_vectorized(perimeter, seg_starts, seg_ends))
+            b_starts, b_ends = seg_starts[mask], seg_ends[mask]
+            block_dists = [_min_dist_vectorized(_perimeter(e), b_starts, b_ends) for e in block]
+
+            # Redo against the full set when the bound the mask assumed was not honoured. A
+            # block that kept no segments reports inf for every tick, so "no finite distance"
+            # has to trigger this too -- otherwise inf reaches rb_dist_min/med/p5.
+            finite = [d for d in block_dists if math.isfinite(d)]
+            if mask.sum() < seg_starts.shape[0] and (not finite or max(finite) > _BLOCK_MARGIN_M):
+                block_dists = [
+                    _min_dist_vectorized(_perimeter(e), seg_starts, seg_ends) for e in block
+                ]
+            rb_dists.extend(block_dists)
 
     rb_dists = np.array(rb_dists)
     speeds = np.array(speeds)
@@ -236,7 +275,7 @@ def evaluate_trajectory(
     # distance-valued metrics so they are distinguishable from a real
     # zero-distance crossing in downstream summaries/plots.
     rb_has_data = len(rb_dists) > 0
-    return {
+    summary = {
         "n_steps": len(traj),
         "duration_s": duration_s,
         "path_length_m": path_length,
@@ -256,16 +295,16 @@ def evaluate_trajectory(
         "stopped_steps": int((speeds < 0.1).sum()),
         "stopped_frac": float((speeds < 0.1).mean()) if len(speeds) > 0 else 0,
     }
+    # ``rb_dists`` is empty when the map ships no road-border polylines.
+    return summary, {"rb_dists": rb_dists, "speeds": speeds}
 
 
-def load_border_segments(map_path: str) -> list[np.ndarray]:
-    """Load road border polylines from a lanelet2 map."""
-    import lanelet2
-    from autoware_lanelet2_extension_python.projection import MGRSProjector
+def border_segments_from_map(ll_map) -> list[np.ndarray]:
+    """Road border polylines out of an already-loaded lanelet2 map.
 
-    projector = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
-    ll_map = lanelet2.io.load(map_path, projector)
-
+    Raw points, not resampled tiles: the road-border metric measures distance to the border
+    as drawn, and resampling would move it.
+    """
     segments = []
     for ls in ll_map.lineStringLayer:
         attrs = ls.attributes
@@ -275,6 +314,20 @@ def load_border_segments(map_path: str) -> list[np.ndarray]:
             pts = np.array([[p.x, p.y] for p in ls], dtype=np.float64)
             if len(pts) >= 2:
                 segments.append(pts)
+    return segments
+
+
+def load_border_segments(map_path: str) -> list[np.ndarray]:
+    """Load road border polylines from a lanelet2 map file.
+
+    For a caller that already holds a parsed map, ``border_segments_from_map`` avoids keeping
+    a second copy of it alive.
+    """
+    import lanelet2
+    from autoware_lanelet2_extension_python.projection import MGRSProjector
+
+    projector = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+    segments = border_segments_from_map(lanelet2.io.load(map_path, projector))
     print(f"Loaded {len(segments)} road border segments from map")
     return segments
 
@@ -338,7 +391,7 @@ def main():
             print(f"  SKIP: {e}")
             continue
 
-        metrics = evaluate_trajectory(
+        metrics, _series = evaluate_trajectory(
             traj,
             border_segments,
             args.ego_length,

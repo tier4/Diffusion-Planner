@@ -241,6 +241,24 @@ def _heading_at_point(centerline_2d: np.ndarray, idx: int) -> float:
     return float(math.atan2(dy, dx))
 
 
+def _pack_cache(
+    cache: list[tuple[np.ndarray, int]], num_points: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """``[(pts, type_idx), ...]`` -> one ``(N, num_points, 2)`` array and one ``(N,)`` of types.
+
+    Rectangular, with no lengths and no padding: every entry holds exactly ``num_points``
+    points, because both producers resample to it. The row assignment is where that invariant
+    is enforced -- a ragged entry raises here rather than being truncated, which would silently
+    change which entries a distance query selects.
+    """
+    pts = np.empty((len(cache), num_points, 2), dtype=np.float32)
+    types = np.empty(len(cache), dtype=np.int64)
+    for i, (p, type_idx) in enumerate(cache):
+        pts[i] = p
+        types[i] = type_idx
+    return pts, types
+
+
 # ── Cached lanelet data ──────────────────────────────────────────────────────
 
 
@@ -273,6 +291,9 @@ class LaneletSceneBuilder:
         from autoware_lanelet2_extension_python.projection import MGRSProjector
 
         projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+        # Kept so a caller that reuses one builder across scenarios can check it against the
+        # map that scenario declares: every geometry this builder serves is that map's.
+        self.lanelet_path = str(lanelet_path)
         self._lanelet_map = lanelet2.io.load(str(lanelet_path), projection)
 
         # Japanese Autoware maps (e.g. Shinagawa-Odaiba) tag main driving
@@ -425,6 +446,15 @@ class LaneletSceneBuilder:
             f"LaneletSceneBuilder: cached {len(self._polygons_cache)} "
             f"intersection polygons, {len(self._line_strings_cache)} line "
             f"strings (stop_line + road_border)"
+        )
+        # Packed once, next to the caches they come from, because the tensor builders query
+        # them by distance from a moving centre on every tick and a query is only cheap if it
+        # can run over one contiguous array rather than a list of small ones.
+        self._line_string_pts, self._line_string_types = _pack_cache(
+            self._line_strings_cache, POINTS_PER_LINE_STRING
+        )
+        self._polygon_pts, self._polygon_types = _pack_cache(
+            self._polygons_cache, POINTS_PER_POLYGON
         )
 
         # Pre-compute vectorised anchor arrays for fast spatial queries
@@ -872,11 +902,16 @@ class LaneletSceneBuilder:
             return None
         return [ll.id for ll in path]
 
-    def find_route(self, start_ll_id: int, min_length_m: float = 120.0) -> list[int]:
+    def find_route(
+        self, start_ll_id: int, min_length_m: float = 120.0, *, deterministic: bool = False
+    ) -> list[int]:
         """Find a forward route from start_lanelet of at least min_length_m.
 
-        Follows one randomly selected successor at each step until the
-        accumulated arc length reaches min_length_m or a dead end.
+        Follows one successor at each step until the accumulated arc length
+        reaches min_length_m or a dead end. The successor is picked at random,
+        which is what a caller generating varied scenes wants; ``deterministic``
+        takes the lowest-id one instead, for a caller that has to get the same
+        route out of the same map on every run.
         """
         if start_ll_id not in self._ll_by_id:
             return [start_ll_id]
@@ -893,8 +928,11 @@ class LaneletSceneBuilder:
             following = self._routing_graph.following(current_ll)
             if not following:
                 break
-            # Random branch selection for variety
-            next_ll = random.choice(list(following))
+            next_ll = (
+                min(following, key=lambda ll: ll.id)
+                if deterministic
+                else random.choice(list(following))
+            )
             if next_ll.id not in self._cache:
                 break
             route_ids.append(next_ll.id)
@@ -1351,6 +1389,29 @@ class LaneletSceneBuilder:
             dt=0.1,
         )
 
+    def lane_position_pose(self, ll_id: int, s: float, offset: float = 0.0) -> np.ndarray | None:
+        """``(x, y, heading)`` at arc length ``s`` along a lanelet, ``offset`` metres to its left.
+
+        This is the pose an OpenSCENARIO ``LanePosition`` names. It is not the lanelet's end:
+        a scenario that authors ``s`` means that point, and the end can be hundreds of metres
+        past it. None when the lanelet is not cached.
+        """
+        c = self._cache.get(ll_id)
+        if c is None:
+            return None
+        cl = c.raw_centerline
+        arc = c.cum_arc_lengths
+        idx = int(np.searchsorted(arc, s))
+        idx = min(max(idx, 1), len(cl) - 1)
+        span = arc[idx] - arc[idx - 1]
+        t = 0.0 if span <= 0 else (s - arc[idx - 1]) / span
+        pos = cl[idx - 1] + t * (cl[idx] - cl[idx - 1])
+        heading = _heading_at_point(cl, idx - 1)
+        if offset:
+            # Lanelet2 offsets are positive to the left of the direction of travel.
+            pos = pos + offset * np.array([-math.sin(heading), math.cos(heading)])
+        return np.array([pos[0], pos[1], heading], dtype=np.float32)
+
     def _route_goal(self, route_ll_ids: list[int]) -> np.ndarray:
         """Get goal pose from the last point of the route's last lanelet."""
         last_id = route_ll_ids[-1]
@@ -1422,7 +1483,8 @@ class LaneletSceneBuilder:
         ``autoware_diffusion_planner/src/preprocessing/lane_segments.cpp:347``.
         """
         return self._build_line_or_polygon_tensor(
-            self._polygons_cache,
+            self._polygon_pts,
+            self._polygon_types,
             center_xy,
             max_n,
             POINTS_PER_POLYGON,
@@ -1461,7 +1523,8 @@ class LaneletSceneBuilder:
             [3]: one-hot road_border
         """
         return self._build_line_or_polygon_tensor(
-            self._line_strings_cache,
+            self._line_string_pts,
+            self._line_string_types,
             center_xy,
             max_n,
             POINTS_PER_LINE_STRING,
@@ -1471,7 +1534,8 @@ class LaneletSceneBuilder:
 
     def _build_line_or_polygon_tensor(
         self,
-        cache: list[tuple[np.ndarray, int]],
+        all_pts: np.ndarray,
+        types: np.ndarray,
         center_xy: np.ndarray,
         max_n: int,
         num_points: int,
@@ -1480,33 +1544,35 @@ class LaneletSceneBuilder:
     ) -> np.ndarray:
         """Shared implementation for ``build_polygons_tensor`` and
         ``build_line_strings_tensor``. AABB pre-filter + min-distance sort +
-        top-N truncate, matching the C++ ``create_line_tensor`` template."""
+        top-N truncate, matching the C++ ``create_line_tensor`` template.
+
+        Each of those three steps runs over the whole packed array at once. Per entry they are
+        a few numpy calls on a 20- or 40-point slice, where the call overhead rather than the
+        arithmetic sets the cost, so entry-at-a-time scales with the size of the map instead of
+        with how much geometry the caller asked for.
+        """
+        out = np.zeros((max_n, num_points, 2 + num_types), dtype=np.float32)
         cx, cy = float(center_xy[0]), float(center_xy[1])
         x_min, x_max = cx - mask_range, cx + mask_range
         y_min, y_max = cy - mask_range, cy + mask_range
+        xs, ys = all_pts[:, :, 0], all_pts[:, :, 1]
 
-        scored: list[tuple[float, np.ndarray, int]] = []
-        for pts, type_idx in cache:
-            inside = (
-                (pts[:, 0] > x_min)
-                & (pts[:, 0] < x_max)
-                & (pts[:, 1] > y_min)
-                & (pts[:, 1] < y_max)
-            ).any()
-            if not inside:
-                continue
-            dx = pts[:, 0] - cx
-            dy = pts[:, 1] - cy
-            min_d = float(np.sqrt(dx * dx + dy * dy).min())
-            scored.append((min_d, pts, type_idx))
-        scored.sort(key=lambda t: t[0])
+        # 1) AABB pre-filter: keep an entry if ANY of its points is in the window.
+        inside = ((xs > x_min) & (xs < x_max) & (ys > y_min) & (ys < y_max)).any(axis=1)
+        cand = np.flatnonzero(inside)
 
-        out = np.zeros((max_n, num_points, 2 + num_types), dtype=np.float32)
-        for i, (_, pts, type_idx) in enumerate(scored[:max_n]):
-            n = min(len(pts), num_points)
-            out[i, :n, 0] = pts[:n, 0]
-            out[i, :n, 1] = pts[:n, 1]
-            out[i, :n, 2 + type_idx] = 1.0
+        # 2) Distance to each surviving entry: sqrt per point, then the row minimum.
+        min_dists = np.sqrt((xs[cand] - cx) ** 2 + (ys[cand] - cy) ** 2).min(axis=1)
+
+        # 3) Nearest max_n, closest first. Stable, so entries at equal distance keep cache
+        #    order and which of them the cut keeps does not depend on the sort implementation.
+        order = cand[np.argsort(min_dists, kind="stable")][:max_n]
+
+        # Only the selected rows are written, at most ``max_n`` of them -- the loop is over the
+        # output, not over the map.
+        for i, j in enumerate(order):
+            out[i, :, :2] = all_pts[j]
+            out[i, :, 2 + int(types[j])] = 1.0
         return out
 
     # ── Route segment selection (match C++ Autoware) ─────────────────────

@@ -20,9 +20,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+from diffusion_planner.config.closed_loop_config import ClosedLoopPassCondition
 
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
@@ -32,11 +34,38 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # (not in the human-readable ``segments*.jsonl``) so multi-GPU merge can still pool p5.
 
 
+def evaluate_segment_pass(row: dict, condition: "ClosedLoopPassCondition") -> bool:
+    """Return True iff ``row`` satisfies every *enabled* field of ``condition``.
+
+    A segment passes when each enabled check is zero (counts) or true (boolean). Disabled
+    fields are ignored, so a ``condition`` with everything off accepts every row.
+    """
+    obj = row.get("object", {})
+    rb = row.get("road_border", {})
+    rl = row.get("red_light_violation", {})
+    br = row.get("strong_brake", {})
+    repro = row.get("reproducer", {})
+
+    if condition.collision and int(obj.get("collision_count", 0)) > 0:
+        return False
+    if condition.road_border and int(rb.get("collision_count", 0)) > 0:
+        return False
+    if condition.red_light_violation and int(rl.get("count", 0)) > 0:
+        return False
+    if condition.strong_brake and int(br.get("count", 0)) > 0:
+        return False
+    if condition.snap and int(repro.get("snap_count", 0)) > 0:
+        return False
+    if condition.goal_reach and row.get("terminated") != "goal":
+        return False
+    return True
+
+
 def route_label(npz_path: Path, key: str) -> str:
     """Human-readable route label ``<location>_<date>_<key>`` for video/PNG names.
 
     Dataset routes are laid out ``.../<location>/<split>/<date>/<time>/routes/<time>_<idx>_<frame>``
-    -- the bag-prefix ``key`` (``<time>_<idx>``) alone drops the depot/site and date, which makes the
+    -- the bag-prefix ``key`` (``<time>_<idx>``) alone drops the depot/group and date, which makes the
     per-segment MP4 names ambiguous. This prepends ``<location>`` (the dir two levels above the
     ``YYYY-MM-DD`` date component) and ``<date>``. Falls back to bare ``key`` for any path that does
     not match that layout (e.g. a flat single-dir npz tree).
@@ -62,7 +91,7 @@ def resolve_npz_roots(npz_root) -> list[Path]:
     The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
     holding a list of such directory paths (one route dir per entry) -- the same "path list"
     form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
-    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-site
+    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-group
     grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
     list is returned verbatim (each entry a ``Path``).
     """
@@ -93,7 +122,7 @@ def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[s
     for root in roots:
         for key, paths in enumerate_routes(root).items():
             # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
-            # dirs and MP4s carry the site + date, not just the ambiguous time-of-day bag prefix.
+            # dirs and MP4s carry the location + date, not just the ambiguous time-of-day bag prefix.
             label = route_label(paths[0], key)
             uniq, n = label, 1
             while uniq in routes:
@@ -309,9 +338,19 @@ def format_summary_lines(summary: dict) -> list[str]:
 
 
 def aggregate(
-    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -2.5
+    rows: list[dict],
+    near_miss_thresh: float,
+    *,
+    strong_brake_mps2: float = -2.5,
+    pass_condition: "ClosedLoopPassCondition | None" = None,
 ) -> dict:
-    """Aggregate per-segment nested metric rows into a closed-loop summary."""
+    """Aggregate per-segment nested metric rows into a closed-loop summary.
+
+    When ``pass_condition`` is provided, also computes per-segment ``passed`` flags (attached
+    to ``rows`` in place if missing) and reports ``pass_count``, ``fail_count``, ``pass_rate``,
+    and the serialized ``pass_condition`` block in the returned summary.
+    """
+
     n_seg = len(rows)
     total_steps = sum(int(r["n_steps_run"]) for r in rows)
 
@@ -378,7 +417,7 @@ def aggregate(
     repeat = sum(int(_require_block(r, "reproducer")["repeat_steps"]) for r in rows)
 
     n_seg_diverged = term_counts.get("diverged", 0)
-    return {
+    summary = {
         "n_segments": n_seg,
         "total_steps": total_steps,
         "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
@@ -399,13 +438,33 @@ def aggregate(
         },
     }
 
+    # Per-segment pass/fail. Attach ``passed`` to each row (in place) so the value survives
+    # segment_row_for_json / segments.jsonl and downstream consumers can read it without
+    # re-running the evaluator. Stats go in the summary alongside other roll-ups.
+    if pass_condition is not None:
+        passed_flags = [evaluate_segment_pass(r, pass_condition) for r in rows]
+        for row, ok in zip(rows, passed_flags):
+            row.setdefault("passed", ok)
+        pass_count = sum(passed_flags)
+        fail_count = n_seg - pass_count
+        summary["pass_count"] = pass_count
+        summary["fail_count"] = fail_count
+        summary["pass_rate"] = (pass_count / n_seg) if n_seg else 0.0
+        summary["pass_condition"] = pass_condition.to_dict()
 
-def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
+    return summary
+
+
+def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = True) -> None:
     """Encode the PNG sequence in ``png_dir`` to an MP4.
 
     PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
     directory (gap-tolerant, name-sorted) instead of a contiguous ``%05d`` counter. ``fps`` is the
     raw frame rate, so a sparse sequence plays faster than real time (shorter video).
+
+    ``remove_pngs`` (default ``True``): delete the PNGs once the MP4 is built, so a run over
+    many routes/segments does not accumulate per-step PNGs on disk (this is what exhausts
+    inodes on a long eval run). Pass ``False`` to keep them, e.g. for manual inspection.
     """
     subprocess.run(
         [
@@ -431,6 +490,9 @@ def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
         ],
         check=True,
     )
+    if remove_pngs:
+        for png in png_dir.glob("*.png"):
+            png.unlink()
 
 
 def run_closed_loop_eval(
@@ -460,6 +522,7 @@ def run_closed_loop_eval(
     abort_after: int = 30,
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
+    draw_workers: int = 1,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -508,6 +571,8 @@ def run_closed_loop_eval(
     digests_name = "tdigests.jsonl" if shard is None else f"tdigests_{shard[0]}.jsonl"
     fout = open(out_dir / segments_name, "w")
     fdigest = open(out_dir / digests_name, "w")
+    # One pool for every route: a spawned worker re-imports torch and matplotlib.
+    draw_pool = render_pool(draw_workers)
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=route_sidecar_dir[key], timers=timers)
@@ -538,6 +603,19 @@ def run_closed_loop_eval(
                 abort_after=abort_after,
                 abort_max_snaps=abort_max_snaps,
                 drop_objects=drop_objects,
+                draw_pool=draw_pool,
+                # No CLI/kwarg equivalent here; mirror render_segment's former defaults.
+                goal_mode="segment",
+                title_prefix=None,
+                distance_label_offset_m=1.2,
+                view_half_m=50.0,
+                max_stuck_steps=0,
+                goal_reach_m=5.0,
+                interpolate=True,
+                color_by_uuid=True,
+                window=None,
+                max_steps=None,
+                timeline_progress_mode="pose",
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
@@ -574,6 +652,7 @@ def run_closed_loop_eval(
     finally:
         fout.close()
         fdigest.close()
+        draw_pool.shutdown()
 
     # In-memory ``rows`` still carry digests for this process's aggregate.
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)

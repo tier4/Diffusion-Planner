@@ -1,0 +1,10 @@
+{
+ "bag_time": "15-16-36",
+ "date": "2026-07-07",
+ "project_id": "proj_a",
+ "tags": [
+  "override_metric:centerline",
+  "site:xxxx_site_a",
+  "split:train"
+ ]
+}

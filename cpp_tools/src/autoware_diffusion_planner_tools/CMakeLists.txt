@@ -43,6 +43,7 @@ ament_auto_add_executable(data_converter
   src/data_converter.cpp
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
+  src/conversion/override_segments.cpp
   src/io/frame_writer.cpp
   src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
@@ -63,6 +64,7 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
   src/parse_rosbag_for_directory_with_map_version.cpp
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
+  src/conversion/override_segments.cpp
   src/io/frame_writer.cpp
   src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
@@ -78,6 +80,14 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
 )
 target_include_directories(parse_rosbag_for_directory_with_map_version PRIVATE include src)
 target_link_libraries(parse_rosbag_for_directory_with_map_version yaml-cpp ZLIB::ZLIB Threads::Threads CLI11::CLI11 fmt::fmt)
+
+ament_auto_add_executable(override_interval_extractor
+  src/override_interval_extractor.cpp
+  src/conversion/override_segments.cpp
+  src/rosbag/parsed_bag_data.cpp
+)
+target_include_directories(override_interval_extractor PRIVATE include src)
+target_link_libraries(override_interval_extractor CLI11::CLI11)
 
 ament_auto_add_executable(inference_tool
   src/inference_tool.cpp
@@ -172,6 +182,23 @@ if(BUILD_TESTING)
   )
   if(TARGET test_bag_metadata)
     target_include_directories(test_bag_metadata PRIVATE include src)
+  endif()
+
+  # processing/stopped_tail + the ego-future hold it gates in processing/ego_sequence
+  ament_add_gtest(test_stopped_tail
+    test/test_stopped_tail.cpp
+    src/processing/ego_sequence.cpp
+  )
+  if(TARGET test_stopped_tail)
+    target_include_directories(test_stopped_tail PRIVATE include src)
+    ament_target_dependencies(test_stopped_tail SYSTEM
+      nav_msgs
+      autoware_perception_msgs
+      autoware_planning_msgs
+      autoware_vehicle_msgs
+      geometry_msgs
+      autoware_diffusion_planner
+    )
   endif()
 
   # processing/neighbor_processor — future array filling; needs autoware_diffusion_planner

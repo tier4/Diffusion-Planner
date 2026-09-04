@@ -54,7 +54,7 @@ import json
 import math
 import os
 import random
-from concurrent.futures import ThreadPoolExecutor
+import zlib
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -92,6 +92,7 @@ from scenario_generation.gui.lanelet_scene_builder import (
     _obb_collides,
     _obb_corners,
 )
+from scenario_generation.render_pool import render_pool
 from scenario_generation.route import Route
 from scenario_generation.scene_context import Agent, AgentType, SceneContext
 from scenario_generation.simulate import (
@@ -1196,6 +1197,21 @@ _STATIC_NPC_VIZ_THRESH_M = 2.0
 _CLEARANCE_LOG_MAX_M = 30.0
 
 
+def stable_palette_index(agent_id: str) -> int:
+    """Palette slot for an agent id: ``npc_5`` -> 5, anything else -> a hash of the id.
+
+    The hash MUST NOT be the builtin ``hash()``: ``PYTHONHASHSEED`` is randomised per
+    interpreter, so the same id would take a different slot in every process — a different
+    colour on every run, and a different colour in each rendering worker. ``zlib.crc32`` is
+    fixed by the standard. See ``test_stable_palette_index.py``.
+    """
+    if "_" in agent_id:
+        suffix = agent_id.rsplit("_", 1)[-1]
+        if suffix.isdigit():
+            return int(suffix)
+    return zlib.crc32(agent_id.encode())
+
+
 def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
     """Draw lane centerlines **and** left/right borders from the 33-dim tensor.
 
@@ -1510,11 +1526,15 @@ def save_step_figure(
     road_border_polylines: list[np.ndarray] | None = None,
     metrics: dict | None = None,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
     Viewport is fixed to ``±view_half_m`` metres around the ego, so lane
     borders stay visible and NPC detail remains readable at every step.
+
+    ``reproducer_ego``: optional ``(x, y, heading)`` in the live-ego frame for the
+    recorded cursor ego, drawn as a hollow outline in ``_EGO_COLOR``.
     """
     from matplotlib.figure import Figure
 
@@ -1600,16 +1620,7 @@ def save_step_figure(
     def _stable_color(agent) -> str:
         if agent.id == scene.ego_agent_id:
             return _EGO_COLOR
-        # npc_5 → 5; falls back to Python hash otherwise.
-        sid = agent.id
-        idx = None
-        if "_" in sid:
-            suffix = sid.rsplit("_", 1)[-1]
-            if suffix.isdigit():
-                idx = int(suffix)
-        if idx is None:
-            idx = abs(hash(sid))
-        return _agent_color(agent.agent_type, idx)
+        return _agent_color(agent.agent_type, stable_palette_index(agent.id))
 
     for agent in scene.agents:
         is_ego = agent.id == scene.ego_agent_id
@@ -1688,6 +1699,36 @@ def save_step_figure(
                 width=agent.width,
                 wheelbase=agent.wheelbase if is_ego else None,
             )
+
+    # 3a) Hollow reproducer ego (recorded cursor pose in the live-ego frame).
+    # Same color as live ego, outline-only, so divergence from the closed-loop ego is visible.
+    if reproducer_ego is not None:
+        rx, ry, rh = float(reproducer_ego[0]), float(reproducer_ego[1]), float(reproducer_ego[2])
+        draw_agent_box(
+            ax,
+            rx,
+            ry,
+            rh,
+            ego.length,
+            ego.width,
+            _EGO_COLOR,
+            alpha=0.9,
+            lw=2.0,
+            zorder=23,
+            wheelbase=ego.wheelbase,
+            filled=False,
+        )
+        ax.annotate(
+            "reproducer",
+            (rx, ry),
+            fontsize=6,
+            color=_EGO_COLOR,
+            ha="center",
+            va="top",
+            xytext=(0, -8),
+            textcoords="offset points",
+            zorder=24,
+        )
 
     # 3b) Extra ego-frame trajectories (e.g. GT vs model output side by side).
     # Each entry: (traj[T, >=4] with x, y, cos, sin in the CURRENT ego frame,
@@ -2443,7 +2484,10 @@ def run_route_replay(
         )
 
     # --- Main loop. ---
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
+    # save_step_figure builds its figure in Python, which the GIL serialises across threads, so
+    # the saves go to worker processes (see render_pool). REPLAY_SAVE_WORKERS trades RSS for
+    # throughput.
+    with render_pool(int(os.environ.get("REPLAY_SAVE_WORKERS", "4"))) as save_pool:
         pending_saves: list = []
         for step in range(spawn_config.max_steps):
             # Keep NPC manager's sim time in sync for TL writes on spawn.
@@ -2759,11 +2803,11 @@ def run_route_replay(
                         step,
                         spawn_config.max_steps,
                         route_polylines,
-                        _VIEW_HALF_M,
-                        _route_vis_ll_ids,
-                        step * 0.1,
-                        road_border_polylines,
-                        overlay_metrics,
+                        view_half_m=_VIEW_HALF_M,
+                        route_lanelet_ids=_route_vis_ll_ids,
+                        sim_time=step * 0.1,
+                        road_border_polylines=road_border_polylines,
+                        metrics=overlay_metrics,
                     )
                 )
 
