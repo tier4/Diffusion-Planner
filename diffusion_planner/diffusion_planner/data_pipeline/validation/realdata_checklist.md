@@ -16,7 +16,9 @@ the slice is defined by an explicit path list reviewed by a human; no npz is del
 7. Mixing:    python -m diffusion_planner.data_pipeline.validation.mixing_test --dataset-root /scratch/dp_test --keyset ks.parquet --world-size 8 --workers 8 --batch-size 64
 8. Throughput (on the training box, when GPUs are idle): validation.throughput_bench with --C 1,2,4,8 and --legacy-path-list slice_paths.json
 9. Parity training (short): train.py --dataset_root /scratch/dp_test --dataset_version v1 --train_shard_filter "is_skipped IS NOT TRUE" \
-   --valid_shard_filter "is_skipped IS NOT TRUE" … vs the npz path on slice_paths.json; compare loss curves.
+   --valid_shard_filter "is_skipped IS NOT TRUE" … vs the npz path on slice_paths.json; compare loss curves with
+   `validation.compare_runs --candidate <shard run>/train_log.tsv --baseline <npz run>/train_log.tsv --columns train_loss valid_loss_ego --from-epoch <N> --to-epoch <M>`
+   (both runs must use the same --valid_num_workers/--num_workers, or valid_loss_* carries a systematic padding-duplicate shift).
 10. Recipes:  run the equivalence test module against the slice (pytest -k recipes with DP_REAL_SLICE=... if wired) or the same
     steps by hand: legacy script output keys == adapter keys (ordered multiset).
 11. Lifecycle: python -m diffusion_planner.data_pipeline.validation.lifecycle_rehearsal --source <slice dir> --dest /scratch/dp_lifecycle --partition-depth <N>

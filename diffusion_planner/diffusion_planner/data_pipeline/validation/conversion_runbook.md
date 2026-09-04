@@ -767,6 +767,30 @@ dataset (it only has the partitions packed so far). Nothing that reads `latest` 
 should be pointed at this dataset yet. The tag you hand to training is the *final* batch's tag,
 and only after it passes Phase 4 in full.
 
+**If this batched pack is ever resumed on a different host than the one that started it** — the
+dataset root under `$DEST` copied or moved to another machine partway through Phase 3 — every
+batch after the move will fail its rule-mismatch guard: the base recorded the *original* host's
+resolved `--source` path as its namespace, and the new host's resolved `--source` (even pointing
+at an identical corpus) can never match it byte-for-byte. The fix is `--source-namespace`, not
+`--replace-all`: pass the base's recorded namespace explicitly —
+
+```bash
+uv run python -m diffusion_planner.data_pipeline.pack_shards pack \
+  --source "$SOURCE" --dest "$DEST" --base "$prev_tag" --tag "$tag" \
+  --partition-regex "$PARTITION_REGEX" --path-list "$batch_list" --workers "$WORKERS" \
+  --require-sidecars \
+  --source-namespace "$(uv run python -c "
+from diffusion_planner.data_pipeline.versioning import DatasetRoot
+print(DatasetRoot('$DEST').read_version('$prev_tag').source_namespace)")"
+```
+
+— to every batch's `pack` call from that point on, so each batch's rule-mismatch check is
+satisfied by matching the base's original namespace rather than by the new host's resolved
+`--source`. `--replace-all` is the wrong remedy here: it would rebuild every already-packed
+partition from source files, and a relocation of `$DEST` says nothing about whether `$SOURCE`'s
+files are still reachable from the new host at all — reserve `--replace-all` for when the
+partition *rule* itself changed, not when only the dataset root moved.
+
 ### 5.4 Re-measure against your calibration projection
 
 After batch 0 finishes, and again once roughly 5% of the corpus's total samples have been
@@ -1012,7 +1036,40 @@ PY
 Compare that number against what you expect from the total kept-sample count (§6.2's `members`)
 divided by `batch_size × world_size`, and record both.
 
-### 6.5 Cost record
+### 6.5 Training-run comparison against a baseline (optional, post-training)
+
+Once a training run has actually been launched against `$FINAL_TAG` and has produced a
+`train_log.tsv`, `validation.compare_runs` is the tool that decides whether it counts as a
+reproduction of some earlier baseline run — the same acceptance-band idea as §6.3's bit-exact
+sample, but for training curves instead of encoded arrays:
+
+```bash
+export SAVE_PATH=/path/to/this/run/save_dir          # this run's train.py save_dir
+export BASELINE_TRAIN_LOG=/path/to/baseline/train_log.tsv  # the run being reproduced
+export PLATEAU_FROM=0    # first epoch of the range both curves are expected to have converged by
+export PLATEAU_TO=0      # last epoch to include — usually the baseline's final logged epoch
+
+uv run python -m diffusion_planner.data_pipeline.validation.compare_runs \
+  --candidate "$SAVE_PATH/train_log.tsv" \
+  --baseline "$BASELINE_TRAIN_LOG" \
+  --columns train_loss valid_loss_ego \
+  --from-epoch "$PLATEAU_FROM" --to-epoch "$PLATEAU_TO"
+```
+
+It prints, per column, the row count and epoch range actually used, the baseline's mean and sd,
+the acceptance band, and the candidate's own mean and sd — then PASS/FAIL against that band.
+Exit code 0 means every requested column passed. A candidate missing plateau epochs, or with an
+empty/NaN cell in the requested range, is refused with a `ValueError` naming the problem rather
+than silently averaged around — see the tool's own module docstring for the full contract.
+
+**Comparability hazard:** only compare two runs that used the same `--valid_num_workers` (and,
+on the npz path, the same `--num_workers`). That flag changes the shard loader's plan-slot
+count, which changes how many padded duplicate validation samples get double-counted into the
+`valid_loss_*` aggregate (see `validate_model.aggregate_valid_metrics`); a difference there can
+be entirely an artifact of a `--valid_num_workers` mismatch between the two runs, not a real
+regression.
+
+### 6.6 Cost record
 
 Write down, in one place, for the record:
 
