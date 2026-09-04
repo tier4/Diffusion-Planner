@@ -92,6 +92,13 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "0 (default) keeps the overlap-only veto.",
         default=0.0,
     )
+    frenet_hist_jitter_lat: float = cli(
+        "frenet: std (m) of a smooth per-scene LATERAL wobble of the rewritten ego "
+        "history, measured at the oldest history sample and tapering to exactly 0 at "
+        "t=0. Three low-frequency modes, so the track bends rather than looking noisy. "
+        "0 (default) draws nothing.",
+        default=0.0,
+    )
     frenet_ranked_temp_s: float = cli(
         "frenet: time constant (s) of the merge-horizon sampling; smaller favours "
         "faster convergence more strongly.",

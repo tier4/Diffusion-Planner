@@ -44,6 +44,7 @@ def _args(**over):
         frenet_toward_parked_prob=0.0,
         frenet_min_clearance=0.0,
         ego_past_noise_std=0.0,
+        frenet_hist_jitter_lat=0.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -178,6 +179,12 @@ def test_frenet_reads_the_shared_ego_past_noise_std():
     aug = frenet_augmenter_from_args(_args(ego_past_noise_std="0.0"))
     assert aug.past_noise_std == 0.0
     assert aug._ego_past_noise_std == 0.0, "the recorded history must never be scaled"
+
+
+def test_hist_jitter_defaults_off_and_reaches_the_augmenter():
+    assert frenet_augmenter_from_args(_args()).hist_jitter_lat == 0.0
+    aug = frenet_augmenter_from_args(_args(frenet_hist_jitter_lat="0.25"))
+    assert aug.hist_jitter_lat == 0.25
 
 
 def test_negative_past_noise_std_is_refused():
