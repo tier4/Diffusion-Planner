@@ -337,6 +337,7 @@ def veto_overlapping(
     shapes_wl: torch.Tensor,
     near: torch.Tensor,
     min_clearance: float = 0.0,
+    floor_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Clear rows whose footprint truly overlaps a recorded neighbor.
 
@@ -344,6 +345,13 @@ def veto_overlapping(
     footprint clearance from every checked neighbour, not merely avoid overlap.
     The sign-only fast path is used when the floor is 0, so the default is
     unchanged.
+
+    ``floor_mask`` says WHERE the floor applies. Outside it, only true overlap is
+    vetoed. This matters because a candidate coincides with the recorded drive
+    outside its merge window, so a floor applied over the whole horizon rejects
+    scenes for the RECORDING's clearance rather than for anything the perturbation
+    did -- which silently deletes the tight-squeeze scenes the augmentation is most
+    valuable on. Overlap is still vetoed everywhere, floor or no floor.
 
     Lateral bounds are a fast approximation — measured to accept ~1.4% of
     winners whose TRUE footprint overlaps a neighbor box — so the accepted
@@ -362,7 +370,10 @@ def veto_overlapping(
         shapes_wl: (B, N, 2) neighbor width, length.
         near: (B, N) neighbors worth checking, from
             :func:`neighbor_lateral_bounds`.
-        min_clearance: metres of exact clearance every checked pair must keep.
+        min_clearance: metres of exact clearance every checked pair must keep,
+            at the timesteps ``floor_mask`` selects.
+        floor_mask: (B, T) bool, the timesteps at which ``min_clearance`` applies.
+            ``None`` applies it everywhere (the caller wants the whole horizon).
 
     Returns:
         ``rows`` with overlapping (or too-close) scenes set False.
@@ -385,5 +396,10 @@ def veto_overlapping(
         # sign alone answers "do they overlap"; a positive floor needs the true gap
         overlap_only=min_clearance <= 0.0,
     )  # (M, T)
-    rows[bi[clr.amin(-1) < min_clearance]] = False
+    if min_clearance <= 0.0 or floor_mask is None:
+        rows[bi[clr.amin(-1) < min_clearance]] = False
+        return rows
+    # per-timestep threshold: the floor where the candidate deviates, 0 elsewhere
+    thr = torch.where(floor_mask[bi], min_clearance, 0.0).to(clr.dtype)  # (M, T)
+    rows[bi[(clr < thr).any(-1)]] = False
     return rows

@@ -540,7 +540,17 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         heading = torch.where(g.norm(dim=-1) > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
         return g, heading
 
-    def _veto_true_overlaps(self, inputs, upd, aug_xy, heading):
+    # metres of candidate-vs-recording displacement below which a timestep is
+    # treated as the recorded drive itself. The candidate coincides with GT outside
+    # its merge window, so this is what keeps min_clearance from vetoing a scene for
+    # the recording's own clearance.
+    DEVIATION_EPS = 1e-3
+
+    def _deviates_from_gt(self, aug_xy, xy):
+        """(B, T) bool: timesteps where the candidate is not the recorded drive."""
+        return (aug_xy - xy).norm(dim=-1) > self.DEVIATION_EPS
+
+    def _veto_true_overlaps(self, inputs, upd, aug_xy, heading, xy=None):
         """Drop winners whose footprint truly overlaps a recorded neighbor."""
         if self._nbr_st is None:
             return upd
@@ -554,6 +564,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             inputs["neighbor_agents_past"][:, :, -1][..., [6, 7]],
             self._nbr_near,
             min_clearance=self.min_clearance,
+            floor_mask=None if xy is None else self._deviates_from_gt(aug_xy, xy),
         )
 
     # ---------- toward-parked nudge ----------
@@ -774,7 +785,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # below, and the feasibility screen above, must judge the clean candidate; the
         # noise is added to the accepted history at the very end, in _perturb_history.
         g, heading = self._headings(aug_xy, tan)
-        upd = self._veto_true_overlaps(inputs, has.clone(), aug_xy, heading)
+        upd = self._veto_true_overlaps(inputs, has.clone(), aug_xy, heading, xy)
         if self.recovery_rounds:
             aug_xy, g, heading, upd = self._recover_vetoed(
                 inputs,
@@ -931,14 +942,14 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             combo_idx, alive = self._sample_merge_then_jerk(feas_k, jerk[rows, cur], merges)
             cand = xy[rows] + L[rows, cur, combo_idx][..., None] * nrm[rows]
             g_r, hd_r = self._headings(cand, tan[rows])
-            keep = self._veto_true_overlaps_rows(inputs, alive.clone(), cand, hd_r, rows)
+            keep = self._veto_true_overlaps_rows(inputs, alive.clone(), cand, hd_r, rows, xy)
             sel = rows[keep]
             aug_xy[sel], g[sel], heading[sel] = cand[keep], g_r[keep], hd_r[keep]
             upd[sel] = True
             adm[rows, cur, :] = False
         return aug_xy, g, heading, upd
 
-    def _veto_true_overlaps_rows(self, inputs, rows_mask, aug_xy, heading, rows):
+    def _veto_true_overlaps_rows(self, inputs, rows_mask, aug_xy, heading, rows, xy=None):
         """:meth:`_veto_true_overlaps` restricted to a subset of scenes."""
         if self._nbr_st is None:
             return rows_mask
@@ -952,6 +963,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             inputs["neighbor_agents_past"][rows][:, :, -1][..., [6, 7]],
             self._nbr_near[rows],
             min_clearance=self.min_clearance,
+            floor_mask=None if xy is None else self._deviates_from_gt(aug_xy, xy[rows]),
         )
 
     def _write_back(self, inputs, ego_future, aug_xy, g, heading, upd, wb, P):
