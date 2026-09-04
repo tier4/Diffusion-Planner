@@ -277,6 +277,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self._nbr_valid = None
         self._nbr_lo = None
         self._nbr_hi = None
+        # toward-parked rows that kept ungated candidates: augmented, but NOT hardened
+        self._toward_fellback = None
         self.n_draws = n_draws
         self.dy_max = dy_max
         self.dth_max = dth_max
@@ -703,16 +705,31 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         Returns:
             admissible (gated), draw_ok (B, K), first (B,) winning draw per scene.
         """
+        fellback = None  # `toward` is None unless the nudge is on
         if toward_any:
             merge_steps = (merges / DT).round().long()  # (C,)
             in_time = merge_steps[None, :] <= (t_obs - (P - 1))[:, None]  # (B, C)
-            admissible = admissible & torch.where(
+            gated = admissible & torch.where(
                 toward[:, None, None], in_time[:, None, :], torch.ones_like(in_time[:, None, :])
             )
+            # The gate strikes out horizons reaching past the vehicle. On a tight pass it
+            # can strike out ALL of them, and the scene would then train on plain GT --
+            # the option would delete exactly the scenes it exists to harden (measured:
+            # one stationary vehicle 25 m ahead at 1.8 m lateral took acceptance from
+            # 88/128 to 0/128). So the gate is applied only where it leaves something;
+            # elsewhere the row keeps its ungated candidates and is recorded as NOT
+            # hardened, because its merge is no longer guaranteed to finish in front of
+            # the vehicle.
+            fellback = toward & ~gated.any(-1).any(-1) & admissible.any(-1).any(-1)
+            admissible = torch.where(fellback[:, None, None], admissible, gated)
         draw_ok = admissible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
         first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
         if toward_any:
-            first = torch.where(toward, self._largest_offset_draw(draw_ok, dy), first)
+            # largest-offset only where the row is genuinely hardened; a fallback row
+            # takes the ordinary first-feasible draw
+            hardened = toward & ~fellback
+            first = torch.where(hardened, self._largest_offset_draw(draw_ok, dy), first)
+        self._toward_fellback = fellback
         return admissible, draw_ok, first
 
     # ---------- the augmentation ----------

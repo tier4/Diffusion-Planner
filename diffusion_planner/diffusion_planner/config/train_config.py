@@ -39,7 +39,11 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     num_workers: int = 8
     pin_mem: bool = True
 
-    use_data_augment: bool = True
+    use_data_augment: bool = cli(
+        "apply the --augment_type augmenter during training. False trains on the "
+        "recorded states only.",
+        default=True,
+    )
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge", "frenet"] = cli(
         "data augmentation method: quintic (default) = fixed-offset quintic bridge; "
@@ -89,9 +93,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default=0.0,
     )
     frenet_min_clearance: float = cli(
-        "frenet: exact footprint clearance (m) every accepted candidate must keep from "
-        "every recorded neighbour, on top of the corridor margin. Applies to all rows. "
-        "0 (default) keeps the overlap-only veto.",
+        "frenet: exact footprint clearance (m) required from every recorded neighbour, "
+        "on top of the corridor margin, AT THE TIMESTEPS THE PERTURBATION MOVED THE EGO "
+        "-- not a global floor, since a candidate coincides with the recording outside "
+        "its merge window and a global floor would reject scenes for the recording's own "
+        "clearance. True overlap is rejected everywhere regardless. Applies to the "
+        "neighbour cut only, never the road edge. 0 (default) keeps the overlap-only veto.",
         default=0.0,
     )
     frenet_hist_jitter_lat: float = cli(

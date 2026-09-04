@@ -147,9 +147,15 @@ augmenter reproduces the previous behaviour exactly.
   survives is blocked geometrically and re-rolling does not move geometry.
 
 - **`--frenet_min_clearance C`** (default 0.0). Metres of exact footprint clearance
-  every accepted candidate must keep from every recorded vehicle, on top of the
-  corridor margin. Applies to the vehicle cut only — the road-edge margin is
-  unaffected. At `0.0` the check is overlap-only, which is the historical behaviour.
+  required from every recorded vehicle, on top of the corridor margin, **at the
+  timesteps the perturbation actually moved the ego**. It is deliberately not a global
+  floor: a candidate coincides with the recorded drive outside its merge window, so a
+  floor applied over the whole horizon would reject scenes for the *recording's* own
+  clearance — which deletes exactly the tight-squeeze scenes the augmentation is most
+  valuable on. True overlap is still rejected everywhere, floor or no floor, so a
+  candidate can be accepted while passing closer than `C` at a timestep where it is
+  bit-identical to ground truth. Applies to the vehicle cut only; the road-edge margin
+  is unaffected. At `0.0` the check is overlap-only, which is the historical behaviour.
 
 - **`--frenet_toward_parked_prob P`** (default 0.0). The corridor is symmetric, so a
   scene that passes a parked vehicle is as likely to be nudged away from it as toward
