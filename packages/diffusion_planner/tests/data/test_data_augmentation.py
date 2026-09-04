@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from diffusion_planner.data.transforms import (
     PlannerEgoShapeAugmentation,
     PlannerGoalTransform,
-    PlannerQuinticHermiteAugmentation,
+    PlannerILQRAugmentation,
     PlannerRigidDataAugmentation,
     PlannerSpeedAugmentation,
 )
@@ -51,10 +51,10 @@ def _frame() -> dict[str, NDArray[np.float32]]:
     return frame
 
 
-class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
+class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
     def test_transforms_scene_into_augmented_ego_frame(self) -> None:
         frame = _frame()
-        augmentation = PlannerQuinticHermiteAugmentation(
+        augmentation = PlannerILQRAugmentation(
             lateral_offset_range=(2.0, 2.0),
             yaw_offset_range=(math.pi / 2, math.pi / 2),
             pose_probability=1.0,
@@ -70,10 +70,9 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
             _pose(0.0, -3.0, 0.0, -1.0),
             atol=1e-6,
         )
+        self.assertTrue(np.all(np.isfinite(result["ego_agent_future"])))
         np.testing.assert_allclose(
-            result["ego_agent_future"][0, :4],
-            _pose(-2.0, 0.0, 0.0, -1.0),
-            atol=1e-6,
+            np.linalg.norm(result["ego_agent_future"][:, 2:4], axis=-1), 1.0
         )
         np.testing.assert_allclose(
             result["goal_pose"],
@@ -83,7 +82,7 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
 
     def test_preserves_padding_and_non_coordinate_tensors(self) -> None:
         frame = _frame()
-        augmentation = PlannerQuinticHermiteAugmentation(
+        augmentation = PlannerILQRAugmentation(
             (1.0, 1.0), (0.1, 0.1), pose_probability=1.0
         )
 
@@ -136,7 +135,7 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
     def test_pose_augmentation_checks_future_speed_without_current_speed(self) -> None:
         for augmentation_type in (
             PlannerRigidDataAugmentation,
-            PlannerQuinticHermiteAugmentation,
+            PlannerILQRAugmentation,
         ):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
@@ -158,7 +157,7 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
     def test_pose_augmentation_skips_when_speed_before_index_is_too_low(self) -> None:
         for augmentation_type in (
             PlannerRigidDataAugmentation,
-            PlannerQuinticHermiteAugmentation,
+            PlannerILQRAugmentation,
         ):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()

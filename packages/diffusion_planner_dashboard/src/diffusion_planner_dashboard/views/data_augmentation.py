@@ -11,7 +11,7 @@ import numpy as np
 import streamlit as st
 
 from diffusion_planner.data import (
-    PlannerQuinticHermiteAugmentation,
+    PlannerILQRAugmentation,
     PlannerSpeedAugmentation,
 )
 from diffusion_planner.visualizer import plot_frame
@@ -115,7 +115,7 @@ def _augment_frame(
         speed_noise_range=(0.0, 0.0),
         probability=1.0,
     )
-    pose_augmentation = PlannerQuinticHermiteAugmentation(
+    pose_augmentation = PlannerILQRAugmentation(
         longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
