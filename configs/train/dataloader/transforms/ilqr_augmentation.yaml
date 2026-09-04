@@ -4,8 +4,8 @@ lateral_offset_range: [-1.5, 1.5]
 yaw_offset_range: [-0.0872665, 0.0872665]
 pose_probability: 0.5
 num_refine: 30
-pose_augmentation_speed_check_index: 30
 pose_augmentation_speed_threshold: 1.0
+pose_augmentation_peak_speed_threshold: 4.0
 time_step_s: 0.1
 wheelbase_m: 2.79
 state_weights: [1.0, 1.0, 0.5]

@@ -57,14 +57,19 @@ def has_sufficient_future_speed(
     input_data: FrameLike,
     check_index: int,
     speed_threshold: float,
+    peak_speed_threshold: float | None = None,
 ) -> bool:
-    """Return whether every ego-future speed through an index meets a threshold."""
+    """Check minimum and optional peak speed through a future endpoint index."""
     future = input_data.get("ego_agent_future")
     if future is None or len(future) == 0 or check_index < 0:
         return False
     endpoint = min(check_index, len(future) - 1)
     speeds = future[: endpoint + 1, EGO_VELOCITY_INDEX]
-    return bool(np.all(speeds >= speed_threshold))
+    minimum_is_sufficient = bool(np.all(speeds >= speed_threshold))
+    peak_is_sufficient = peak_speed_threshold is None or bool(
+        np.max(speeds) > peak_speed_threshold
+    )
+    return minimum_is_sufficient and peak_is_sufficient
 
 
 def apply_rigid_pose_augmentation(

@@ -73,7 +73,7 @@ class ILQRSettings:
     steering_limit_rad: float
     max_iterations: int
     speed_threshold: float
-    speed_check_index: int
+    peak_speed_threshold: float
 
 
 def _render_augmentation_settings() -> tuple[float, float, float, float, ILQRSettings]:
@@ -154,8 +154,8 @@ def _render_augmentation_settings() -> tuple[float, float, float, float, ILQRSet
         speed_threshold = float(
             st.number_input("Low-speed skip threshold [m/s]", 0.0, value=0.1, step=0.1)
         )
-        speed_check_index = int(
-            st.number_input("Low-speed check endpoint index", 0, 79, 20, step=1)
+        peak_speed_threshold = float(
+            st.number_input("Required peak speed [m/s]", 0.0, value=5.0, step=0.5)
         )
     return (
         longitudinal_offset,
@@ -175,7 +175,7 @@ def _render_augmentation_settings() -> tuple[float, float, float, float, ILQRSet
             steering_limit_rad=steering_limit_rad,
             max_iterations=max_iterations,
             speed_threshold=speed_threshold,
-            speed_check_index=speed_check_index,
+            peak_speed_threshold=peak_speed_threshold,
         ),
     )
 
@@ -210,7 +210,7 @@ def _augment_frame(
         steering_limit_rad=ilqr.steering_limit_rad,
         max_iterations=ilqr.max_iterations,
         pose_augmentation_speed_threshold=ilqr.speed_threshold,
-        pose_augmentation_speed_check_index=ilqr.speed_check_index,
+        pose_augmentation_peak_speed_threshold=ilqr.peak_speed_threshold,
     )
     return pose_augmentation(speed_augmentation(frame_data))
 

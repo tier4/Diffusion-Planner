@@ -140,12 +140,17 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_past"][-1, 4] = 0.0
+                check_index = (
+                    {"num_refine": 1}
+                    if augmentation_type is PlannerILQRAugmentation
+                    else {"pose_augmentation_speed_check_index": 1}
+                )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
                     pose_augmentation_speed_threshold=0.5,
-                    pose_augmentation_speed_check_index=1,
+                    **check_index,
                 )
 
                 result = augmentation(frame)
@@ -162,12 +167,17 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_future"][1, 4] = 0.4
+                check_index = (
+                    {"num_refine": 1}
+                    if augmentation_type is PlannerILQRAugmentation
+                    else {"pose_augmentation_speed_check_index": 1}
+                )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
                     pose_augmentation_speed_threshold=0.5,
-                    pose_augmentation_speed_check_index=1,
+                    **check_index,
                 )
 
                 result = augmentation(frame)

@@ -42,7 +42,7 @@ class PlannerILQRAugmentation:
         max_iterations: int = 15,
         convergence_tolerance: float = 1e-4,
         pose_augmentation_speed_threshold: float = 0.1,
-        pose_augmentation_speed_check_index: int = 20,
+        pose_augmentation_peak_speed_threshold: float = 0.0,
     ) -> None:
         self.longitudinal_offset_range = longitudinal_offset_range
         self.lateral_offset_range = lateral_offset_range
@@ -62,7 +62,9 @@ class PlannerILQRAugmentation:
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
         self.pose_augmentation_speed_threshold = pose_augmentation_speed_threshold
-        self.pose_augmentation_speed_check_index = pose_augmentation_speed_check_index
+        self.pose_augmentation_peak_speed_threshold = (
+            pose_augmentation_peak_speed_threshold
+        )
         if self.dt <= 0.0 or self.wheelbase <= 0.0:
             raise ValueError("time_step_s and wheelbase_m must be positive")
 
@@ -70,8 +72,9 @@ class PlannerILQRAugmentation:
         if (
             not has_sufficient_future_speed(
                 input_data,
-                self.pose_augmentation_speed_check_index,
+                self.num_refine,
                 self.pose_augmentation_speed_threshold,
+                self.pose_augmentation_peak_speed_threshold,
             )
             or np.random.random() >= self.pose_probability
         ):
