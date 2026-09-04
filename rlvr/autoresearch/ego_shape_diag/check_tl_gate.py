@@ -88,12 +88,33 @@ def measure(model, margs, scenes, device, goal, shape) -> dict[str, list[float]]
     return spans
 
 
-def verdict(spans: dict[str, list[float]], min_green_m: float, max_red_m: float) -> list[str]:
-    """Gate failures, empty when the checkpoint passes."""
-    if not spans["green"] and not spans["red"]:
+def untested_halves(spans: dict[str, list[float]]) -> list[str]:
+    """The gate halves this scene set cannot exercise, in report order."""
+    return [state for state in ("green", "red") if not spans[state]]
+
+
+def verdict(
+    spans: dict[str, list[float]],
+    min_green_m: float,
+    max_red_m: float,
+    allow_one_sided: bool = False,
+) -> list[str]:
+    """Gate failures, empty when the checkpoint passes.
+
+    Both halves have to be exercised for a PASS to mean anything. They catch opposite
+    failures — the green half catches a checkpoint that will not move, the red half one
+    that drives through a stop — so a set carrying only one of them leaves the other
+    failure undetectable while still printing PASS. A green-only set in particular cannot
+    notice a model that runs red lights, which is the failure an unstratified span gate
+    already scores as healthy.
+    """
+    missing = untested_halves(spans)
+    if missing and not allow_one_sided:
         raise SystemExit(
-            "no signalled route lanes in any scene — this gate needs scenes whose route "
-            "carries a traffic-light state; refusing to report a vacuous pass"
+            f"the scene set carries no {' and no '.join(missing)} scenes, so the "
+            f"{'/'.join(missing)} half of this gate would never be tested — yet a PASS would "
+            "claim both. Supply scenes spanning a light cycle, or pass --allow_one_sided to "
+            "grade only the half that is present."
         )
     failures = []
     if spans["green"]:
@@ -125,6 +146,12 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--min_green_m", type=float, default=15.0)
     ap.add_argument("--max_red_m", type=float, default=2.0)
     ap.add_argument("--limit", type=int, default=0, help="0 = every scene")
+    ap.add_argument(
+        "--allow_one_sided",
+        action="store_true",
+        help="grade even when the scenes cover only green or only red; the untested half "
+        "is named in the result, which is then not a full acceptance",
+    )
     return ap.parse_args()
 
 
@@ -141,11 +168,18 @@ def main() -> int:
     spans = measure(model, margs, scenes, device, goal, shape)
     report(spans, a.model, len(scenes), shape)
 
-    failures = verdict(spans, a.min_green_m, a.max_red_m)
+    failures = verdict(spans, a.min_green_m, a.max_red_m, a.allow_one_sided)
     print()
     for f in failures:
         print(f"FAIL: {f}")
-    print("PASS" if not failures else "FAIL")
+    missing = untested_halves(spans)
+    if failures:
+        print("FAIL")
+    elif missing:
+        # Never let a half that was never exercised read as an acceptance.
+        print(f"PASS ({'/'.join(missing)} half NOT tested — not a full acceptance)")
+    else:
+        print("PASS")
     return 1 if failures else 0
 
 

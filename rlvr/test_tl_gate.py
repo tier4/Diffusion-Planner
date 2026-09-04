@@ -1,4 +1,4 @@
-"""Tests for the ego-dimension diagnostics.
+"""Tests for the traffic-light acceptance gate.
 
 The gate logic is tested without a model: traffic-light classification reads the scene,
 and the verdict is a pure function of the measured spans.
@@ -14,7 +14,11 @@ from diffusion_planner.dimensions import (
 )
 
 from rlvr.autoresearch.ego_shape_diag import _common
-from rlvr.autoresearch.ego_shape_diag.check_tl_gate import route_tl_class, verdict
+from rlvr.autoresearch.ego_shape_diag.check_tl_gate import (
+    route_tl_class,
+    untested_halves,
+    verdict,
+)
 
 
 def _scene(*onehot_indices: int, valid: bool = True) -> dict:
@@ -66,8 +70,38 @@ def test_verdict_catches_a_model_that_runs_the_light():
 
 def test_verdict_refuses_a_vacuous_pass():
     """No signalled scene means the gate proved nothing; it must not report PASS."""
-    with pytest.raises(SystemExit, match="no signalled route lanes"):
+    with pytest.raises(SystemExit, match="no green and no red scenes"):
         verdict({"green": [], "amber": [1.0], "red": [], "none": [5.0]}, 15.0, 2.0)
+
+
+def test_verdict_refuses_a_green_only_set():
+    """The case that matters: a green-only set cannot detect a red-runner."""
+    green_only = {"green": [16.0], "amber": [], "red": [], "none": []}
+    with pytest.raises(SystemExit, match="no red scenes"):
+        verdict(green_only, 15.0, 2.0)
+    # the override grades what is there, and the untested half is named for the caller
+    assert verdict(green_only, 15.0, 2.0, allow_one_sided=True) == []
+    assert untested_halves(green_only) == ["red"]
+
+
+def test_verdict_refuses_a_red_only_set():
+    """The mirror case: a red-only set cannot detect a checkpoint that will not move."""
+    red_only = {"green": [], "amber": [], "red": [0.04], "none": []}
+    with pytest.raises(SystemExit, match="no green scenes"):
+        verdict(red_only, 15.0, 2.0)
+    assert verdict(red_only, 15.0, 2.0, allow_one_sided=True) == []
+    assert untested_halves(red_only) == ["green"]
+
+
+def test_one_sided_override_still_fails_a_bad_checkpoint():
+    """The override relaxes coverage, never the thresholds."""
+    runs_reds = {"green": [], "amber": [], "red": [19.0], "none": []}
+    (failure,) = verdict(runs_reds, 15.0, 2.0, allow_one_sided=True)
+    assert "runs the light" in failure
+
+
+def test_untested_halves_empty_when_both_covered():
+    assert untested_halves({"green": [16.0], "amber": [], "red": [0.04], "none": []}) == []
 
 
 def test_amber_is_reported_but_never_gated():
