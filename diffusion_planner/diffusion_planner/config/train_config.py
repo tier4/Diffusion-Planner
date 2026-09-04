@@ -35,7 +35,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     # DataLoader Parameters
     # ---------------------------------------------------------
-    batch_size: int = cli("batch size across all GPUs", default=512)
+    batch_size: int = cli("batch size across all GPUs", default=4096)
     num_workers: int = 8
     pin_mem: bool = True
 
@@ -139,6 +139,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     device: str = "cuda"
     use_ema: bool = True
     ema_decay: float = 0.999
+    use_amp: bool = cli("train with Automatic Mixed Precision (bf16 autocast)", default=True)
     resume_model_path: Optional[str] = cli(
         "resume training from this .pth", default=None, path=True
     )
