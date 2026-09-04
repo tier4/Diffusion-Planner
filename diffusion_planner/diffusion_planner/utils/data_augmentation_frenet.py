@@ -131,9 +131,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     def _scale_history(self, inputs, rows):
         """Scale an augmented row's rewritten history by one factor per scene.
 
-        The perturbation the quintic augmenter applies through ``ego_past_noise_std``,
-        which frenet disables at the base class because it rewrites the past
-        kinematically: one N(1, std) scalar per scene clamped to +-2 std, multiplying
+        The perturbation the quintic augmenter applies through ``ego_past_noise_std``.
+        Frenet reads the same flag, but applies it to the history it rewrote rather than
+        to the recorded one the base class would have scaled: one N(1, std) scalar per scene clamped to +-2 std, multiplying
         the history xy and the current velocity and acceleration together, so the
         implied speed history stays consistent with the state. Non-augmented rows are
         never touched -- they train on plain ground truth, unscaled.
@@ -166,15 +166,16 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         recovery_rounds: int = 0,
         toward_parked_prob: float = 0.0,
         min_clearance: float = 0.0,
-        past_noise_std: float = 0.0,
+        ego_past_noise_std: float = 0.0,
     ):
         super().__init__(
             augment_prob=augment_prob,
             num_refine=20,
             device=device,
-            # frenet rewrites the past kinematically, so the base class must not scale
-            # the RECORDED history; the same perturbation is available on the rewritten
-            # history through past_noise_std below.
+            # The base class scales the RECORDED history, which frenet does not keep --
+            # it rewrites the past from the perturbed polyline. The same perturbation is
+            # applied to that rewrite instead, in _scale_history, so the base class is
+            # disabled here and the caller's value is stored below.
             ego_past_noise_std=0.0,
             use_smoothing_future_trajectory=False,
         )
@@ -225,9 +226,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # because frenet rewrites the past kinematically and the quintic scaling would
         # be applied to the recorded history instead; this knob applies the same
         # perturbation to the REWRITTEN history. 0 draws nothing and is bit-identical.
-        self.past_noise_std = float(past_noise_std)
+        self.past_noise_std = float(ego_past_noise_std)
         if self.past_noise_std < 0.0:
-            raise ValueError(f"past_noise_std must be >= 0, got {past_noise_std}")
+            raise ValueError(f"ego_past_noise_std must be >= 0, got {ego_past_noise_std}")
         self._basis_cache = {}
 
     # ---------- shared basis (depends only on the time grid + knobs) ----------
@@ -855,5 +856,5 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         recovery_rounds=int(args.frenet_recovery_rounds),
         toward_parked_prob=float(args.frenet_toward_parked_prob),
         min_clearance=float(args.frenet_min_clearance),
-        past_noise_std=float(args.frenet_past_noise_std),
+        ego_past_noise_std=float(args.ego_past_noise_std),
     )

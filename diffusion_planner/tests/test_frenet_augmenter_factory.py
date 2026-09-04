@@ -43,7 +43,7 @@ def _args(**over):
         frenet_recovery_rounds=0,
         frenet_toward_parked_prob=0.0,
         frenet_min_clearance=0.0,
-        frenet_past_noise_std=0.0,
+        ego_past_noise_std=0.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -168,14 +168,18 @@ def test_negative_min_clearance_is_refused():
         FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", min_clearance=-0.1)
 
 
-def test_past_noise_std_defaults_to_off_and_reaches_the_augmenter():
-    """The base class is handed 0.0 unconditionally; this knob is the frenet one."""
-    assert frenet_augmenter_from_args(_args()).past_noise_std == 0.0
-    aug = frenet_augmenter_from_args(_args(frenet_past_noise_std="0.1"))
-    assert aug.past_noise_std == 0.1
+def test_frenet_reads_the_shared_ego_past_noise_std():
+    """Frenet honours the same flag as quintic -- there is no separate frenet knob.
+
+    The base class is still handed 0.0: it would scale the RECORDED history, which
+    frenet discards. The value reaches frenet's own scaling of the rewritten history.
+    """
+    assert frenet_augmenter_from_args(_args(ego_past_noise_std="0.1")).past_noise_std == 0.1
+    aug = frenet_augmenter_from_args(_args(ego_past_noise_std="0.0"))
+    assert aug.past_noise_std == 0.0
     assert aug._ego_past_noise_std == 0.0, "the recorded history must never be scaled"
 
 
 def test_negative_past_noise_std_is_refused():
     with pytest.raises(ValueError, match="past_noise_std"):
-        FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", past_noise_std=-0.1)
+        FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", ego_past_noise_std=-0.1)

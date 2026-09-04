@@ -360,7 +360,7 @@ def test_past_noise_scales_each_accepted_history_by_one_factor():
     """One scalar per scene, on the rewritten history and the state it implies."""
     plain = FrenetStatePerturbationTensor(1.0, "cpu", seed=7)
     in_ref, _ = _run(plain, batch=8, pad_steps=3)
-    noisy = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, past_noise_std=0.2)
+    noisy = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, ego_past_noise_std=0.2)
     in_new, _ = _run(noisy, batch=8, pad_steps=3)
 
     rows = plain._aug_rows
@@ -394,7 +394,7 @@ def test_past_noise_at_zero_changes_nothing(monkeypatch):
     in_off, fut_off = _run(off, batch=8, pad_steps=3)
     shapes_off, _ = list(shapes), shapes.clear()
 
-    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, past_noise_std=0.0)
+    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, ego_past_noise_std=0.0)
     in_on, fut_on = _run(explicit, batch=8, pad_steps=3)
 
     assert shapes_off == list(shapes)
