@@ -189,7 +189,7 @@ def run_one_group(
             ),
             fps=float(cfg.closed_loop_fps),
             verbose=False,
-            profile=False,
+            profile=cfg.closed_loop_profile,
             max_jobs=None,
             pass_condition=pass_condition,
         ),

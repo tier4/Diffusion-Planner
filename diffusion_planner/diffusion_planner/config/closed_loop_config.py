@@ -145,6 +145,12 @@ class ClosedLoopConfig:
     closed_loop_seg_len: int = 100000
     # ClosedLoopEvalConfig
     closed_loop_fps: int = 10
+    closed_loop_profile: bool = cli(
+        "print + persist a per-stage timing breakdown (route load, model inference, "
+        "render wait, score/advance, video encode) to <out_dir>/timing_report.txt "
+        "after each group",
+        default=True,
+    )
     # RolloutParams
     closed_loop_near_miss_thresh: float = 0.5
     closed_loop_search_radius: float = 1.5

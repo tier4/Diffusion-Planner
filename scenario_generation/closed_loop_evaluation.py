@@ -466,6 +466,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
                 merged.extras["route_keys"].append(job.route_key)
+                partial_timers = partial.extras.get("timers")
+                if partial_timers is not None:
+                    merged.extras.setdefault("timers", Timers()).merge(partial_timers)
                 self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
@@ -479,7 +482,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
-        timers = Timers() if self.config.profile else None
+        timers = Timers()
         tl = RouteTimeline(job.route_paths, sidecar_dir=job.npz_root, timers=timers)
         rows: list[dict] = []
         video_mp4s: list[Path] = []
@@ -495,6 +498,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 png_dir,
                 **params.render_kwargs(),
                 draw_pool=draw_pool,
+                timers=timers,
             )
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
@@ -519,7 +523,8 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            build_mp4(png_dir, seg_mp4, self.config.fps)
+            with timers("build_mp4"):
+                build_mp4(png_dir, seg_mp4, self.config.fps)
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]
@@ -529,9 +534,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     f"min_clr={obj['clearance_min_m']:.3f}"
                 )
 
-        extras: dict[str, Any] = {}
-        if timers is not None:
-            extras["timers"] = timers
+        extras: dict[str, Any] = {"timers": timers}
         return JobRunResult(rows=rows, video_mp4s=video_mp4s, extras=extras)
 
     def on_job_complete(
@@ -562,6 +565,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         summary["elapsed_sec"] = elapsed_sec
         summary["video_mp4s"] = result.video_mp4s
         summary["segments"] = result.rows
+        timers = result.extras.get("timers")
+        if timers is not None:
+            summary["timers_detail"] = timers.as_dict()
         return summary
 
     def write_artifacts(self, summary: dict, result: JobRunResult) -> None:
@@ -571,6 +577,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 f,
                 indent=4,
             )
+        timers = result.extras.get("timers")
+        if self.config.profile and timers is not None:
+            report = timers.report(summary.get("total_steps"))
+            (self.out_dir / "timing_report.txt").write_text(report + "\n")
+            print(f"\n=== timing breakdown: {self.out_dir} ===\n{report}")
 
     def print_summary(self, summary: dict) -> None:
         n_seg = summary["n_segments"]

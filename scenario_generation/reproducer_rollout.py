@@ -1495,6 +1495,7 @@ def render_segment(
     max_steps: int | None,
     timeline_progress_mode: str,
     draw_pool: Executor | None,
+    timers: Timers | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1573,7 +1574,7 @@ def render_segment(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = max_steps if max_steps is not None else 3 * (end - start)
-    timers = Timers()
+    timers = timers or Timers()
     s = _seed_state(
         tl=tl,
         start=start,
@@ -1639,7 +1640,8 @@ def render_segment(
         )
         while not s.done:
             k = s.k
-            pre = _pre_step(s)
+            with timers("input_build"):
+                pre = _pre_step(s)
             if pre is None:
                 dbg.write(
                     json.dumps(
@@ -1754,10 +1756,12 @@ def render_segment(
             offset = k % replan_interval
             override = None
             if plan_world is None or offset == 0:
-                data = _to_torch_batch([np_dict], model_args, device)
+                with timers("to_torch"):
+                    data = _to_torch_batch([np_dict], model_args, device)
                 # No-op unless the model was compiled with cudagraphs; one inference is one step.
                 mark_inference_step()
-                _, outputs = model(data)
+                with timers("model_forward"):
+                    _, outputs = model(data)
                 pred = outputs["prediction"][0, 0].cpu().numpy()
                 plan_world = _ego_pred_to_world(
                     pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
@@ -1804,22 +1808,23 @@ def render_segment(
                 and k % draw_every == 0
             ):
                 repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
-                pending.append(
-                    draw.submit(
-                        _draw_step,
-                        np_dict,
-                        pred_cur,
-                        s.ego_shape,
-                        out_dir / f"{k:05d}.png",
-                        neighbor_ids=nids if color_by_uuid else None,
-                        step=k,
-                        total=cap,
-                        title_prefix=title_prefix,
-                        distance_label_offset_m=distance_label_offset_m,
-                        view_half_m=view_half_m,
-                        reproducer_ego=repro_xyh,
+                with timers("render_submit"):
+                    pending.append(
+                        draw.submit(
+                            _draw_step,
+                            np_dict,
+                            pred_cur,
+                            s.ego_shape,
+                            out_dir / f"{k:05d}.png",
+                            neighbor_ids=nids if color_by_uuid else None,
+                            step=k,
+                            total=cap,
+                            title_prefix=title_prefix,
+                            distance_label_offset_m=distance_label_offset_m,
+                            view_half_m=view_half_m,
+                            reproducer_ego=repro_xyh,
+                        )
                     )
-                )
             snaps_before = s.snap_count
             _advance_step(s, pred_cur, idx, device, timers, override=override)
             if s.snap_count > snaps_before:
@@ -1829,8 +1834,9 @@ def render_segment(
                 plan_world = None
     # Every PNG must be on disk before the caller globs the directory for ffmpeg, and a worker
     # exception only surfaces here.
-    for f in pending:
-        f.result()
+    with timers("render_drain"):
+        for f in pending:
+            f.result()
     return _finalize(s)
 
 
