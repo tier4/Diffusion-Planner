@@ -5,6 +5,7 @@ from diffusion_planner.data_pipeline.validation.compare_runs import (
     Result,
     band,
     compare,
+    main,
     plateau_stats,
 )
 
@@ -67,3 +68,66 @@ def test_zero_variance_baseline_still_yields_a_usable_band(tmp_path):
     candidate = _write(tmp_path, "cand.tsv", [(1, 2.0, 5.0), (2, 2.0, 5.0)])
     results = compare(candidate, baseline, ["train_loss"], (1, 2))
     assert results[0].passed is True
+
+
+def test_main_returns_zero_when_every_metric_passes(tmp_path):
+    baseline = _write(tmp_path, "base.tsv", [(1, 1.0, 5.0), (2, 1.0, 5.0), (3, 1.2, 5.0)])
+    candidate = _write(tmp_path, "cand.tsv", [(1, 1.05, 5.0), (2, 1.05, 5.0), (3, 1.1, 5.0)])
+    code = main(
+        [
+            "--candidate",
+            str(candidate),
+            "--baseline",
+            str(baseline),
+            "--columns",
+            "train_loss",
+            "--from-epoch",
+            "1",
+            "--to-epoch",
+            "3",
+        ]
+    )
+    assert code == 0
+
+
+def test_main_returns_one_when_a_metric_falls_outside_the_band(tmp_path):
+    baseline = _write(tmp_path, "base.tsv", [(1, 1.0, 5.0), (2, 1.0, 5.0), (3, 1.0, 5.0)])
+    candidate = _write(tmp_path, "cand.tsv", [(1, 9.0, 5.0), (2, 9.0, 5.0), (3, 9.0, 5.0)])
+    code = main(
+        [
+            "--candidate",
+            str(candidate),
+            "--baseline",
+            str(baseline),
+            "--columns",
+            "train_loss",
+            "--from-epoch",
+            "1",
+            "--to-epoch",
+            "3",
+        ]
+    )
+    assert code == 1
+
+
+def test_main_reports_error_and_exits_one_on_unknown_column(tmp_path, capsys):
+    baseline = _write(tmp_path, "base.tsv", [(1, 1.0, 5.0), (2, 1.0, 5.0)])
+    candidate = _write(tmp_path, "cand.tsv", [(1, 1.0, 5.0), (2, 1.0, 5.0)])
+    code = main(
+        [
+            "--candidate",
+            str(candidate),
+            "--baseline",
+            str(baseline),
+            "--columns",
+            "nonexistent",
+            "--from-epoch",
+            "1",
+            "--to-epoch",
+            "2",
+        ]
+    )
+    assert code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "Traceback" not in captured.err

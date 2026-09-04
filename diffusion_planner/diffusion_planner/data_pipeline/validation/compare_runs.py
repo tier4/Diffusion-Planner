@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import statistics
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -75,16 +76,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--to-epoch", type=int, required=True)
     p.add_argument("--k", type=float, default=2.0)
     a = p.parse_args(argv)
-    results = compare(a.candidate, a.baseline, a.columns, (a.from_epoch, a.to_epoch), a.k)
-    width = max(len(r.column) for r in results)
-    for r in results:
-        verdict = "PASS" if r.passed else "FAIL"
-        print(
-            f"{r.column:<{width}}  baseline={r.baseline_mean:.6f} sd={r.baseline_sd:.6f}  "
-            f"band=[{r.lo:.6f}, {r.hi:.6f}]  ours={r.candidate_mean:.6f}  {verdict}"
-        )
+    try:
+        results = compare(a.candidate, a.baseline, a.columns, (a.from_epoch, a.to_epoch), a.k)
+        width = max(len(r.column) for r in results)
+        for r in results:
+            verdict = "PASS" if r.passed else "FAIL"
+            print(
+                f"{r.column:<{width}}  baseline={r.baseline_mean:.6f} sd={r.baseline_sd:.6f}  "
+                f"band=[{r.lo:.6f}, {r.hi:.6f}]  ours={r.candidate_mean:.6f}  {verdict}"
+            )
+    except (ValueError, FileNotFoundError, KeyError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0 if all(r.passed for r in results) else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
