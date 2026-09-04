@@ -183,3 +183,24 @@ def test_frenet_reads_the_shared_ego_past_noise_std():
 def test_negative_past_noise_std_is_refused():
     with pytest.raises(ValueError, match="past_noise_std"):
         FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", ego_past_noise_std=-0.1)
+
+
+def test_seed_and_past_noise_std_are_real_command_line_flags():
+    """Both were plain dataclass fields, so the parser rejected them outright.
+
+    The A/B they are needed for cannot run without them: ``--ego_past_noise_std 0`` is
+    the no-history-noise control, and ``--seed`` is the only way to measure the
+    run-to-run noise floor of an otherwise deterministic training.
+    """
+    from diffusion_planner.config import TrainConfig, build_config, build_parser
+
+    parser = build_parser(TrainConfig, description="t")
+    base = build_config(TrainConfig, parser.parse_args([]))
+    assert (base.seed, base.ego_past_noise_std) == (3407, 0.1), "a default moved"
+    assert (base.lr_schedule, base.augment_type) == ("constant", "quintic"), "a default moved"
+
+    over = build_config(
+        TrainConfig, parser.parse_args(["--seed", "1234", "--ego_past_noise_std", "0.0"])
+    )
+    assert over.seed == 1234
+    assert over.ego_past_noise_std == 0.0

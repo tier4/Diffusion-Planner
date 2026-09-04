@@ -48,7 +48,13 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default="quintic",
     )
     num_refine: int = 20
-    ego_past_noise_std: float = 0.1
+    ego_past_noise_std: float = cli(
+        "std of the single per-scene factor that scales an augmented row's ego history "
+        "and its current velocity/acceleration, drawn from N(1, std) and clamped to "
+        "+-2 std. The quintic augmenter scales the RECORDED history; frenet scales the "
+        "history it rewrote from the perturbed polyline. 0 disables it.",
+        default=0.1,
+    )
     use_smoothing_future_trajectory: bool = True
 
     # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---
@@ -102,7 +108,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     # Training Parameters
     # ---------------------------------------------------------
-    seed: int = 3407
+    seed: int = cli(
+        "seed for model init, data order and augmentation draws. Vary it to measure the "
+        "run-to-run noise floor: training is otherwise deterministic, so two runs at the "
+        "same seed produce identical weights and cannot serve as a control.",
+        default=3407,
+    )
     train_epochs: int = cli("total training epochs", default=80)
     save_utd: int = cli("checkpoint save cadence in epochs", default=10)
     learning_rate: float = 1e-4
