@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import DropPath
 from timm.models.layers import Mlp
+from timm.models.mlp_mixer import MixerBlock
 
 from diffusion_planner.dimensions import *
-from diffusion_planner.model.module.mixer import MixerBlock
 
 CLASS_TYPE_EGO = 0
 CLASS_TYPE_NEIGHBOR = 1
@@ -335,40 +335,17 @@ class SelfAttentionBlock(nn.Module):
 
 
 class EgoEncoder(nn.Module):
-    def __init__(self, time_len, drop_path_rate, hidden_dim, depth):
+    def __init__(self, time_len, drop_path_rate, hidden_dim, depth, embed_dim=128):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
 
-        self.channel_pre_project = Mlp(
-            in_features=4,
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-        self.token_pre_project = Mlp(
-            in_features=time_len,
-            hidden_features=tokens_mlp_dim,
-            out_features=tokens_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-
+        self.stem = nn.Linear(4, embed_dim)
         self.blocks = nn.ModuleList(
-            [MixerBlock(tokens_mlp_dim, channels_mlp_dim, drop_path_rate) for i in range(depth)]
+            [MixerBlock(embed_dim, time_len, drop_path=drop_path_rate) for i in range(depth)]
         )
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, hidden_dim)
 
     def forward(self, x):
         """
@@ -381,59 +358,33 @@ class EgoEncoder(nn.Module):
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
-        x = self.channel_pre_project(x)
-        x = x.permute(0, 2, 1)
-        x = self.token_pre_project(x)
-        x = x.permute(0, 2, 1)
-
+        x = self.stem(x)  # (B, T, embed_dim)
         for block in self.blocks:
             x = block(x)
+        x = self.norm(x)
 
-        # pooling
-        x = torch.mean(x, dim=1, keepdim=True)  # (B, 1, C=channels_mlp_dim)
+        # global average pooling over tokens
+        x = torch.mean(x, dim=1, keepdim=True)  # (B, 1, embed_dim)
 
-        x = self.emb_project(self.norm(x))  # (B, hidden_dim)
+        x = self.head(x)  # (B, 1, hidden_dim)
 
         return x, mask, pos
 
 
 class NeighborEncoder(nn.Module):
-    def __init__(self, time_len, drop_path_rate, hidden_dim, depth):
+    def __init__(self, time_len, drop_path_rate, hidden_dim, depth, embed_dim=128):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
 
-        self.type_emb = nn.Linear(3, channels_mlp_dim)
+        self.type_emb = nn.Linear(3, embed_dim)
 
-        self.channel_pre_project = Mlp(
-            in_features=8 + 1,
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-        self.token_pre_project = Mlp(
-            in_features=time_len,
-            hidden_features=tokens_mlp_dim,
-            out_features=tokens_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-
+        self.stem = nn.Linear(8 + 1, embed_dim)
         self.blocks = nn.ModuleList(
-            [MixerBlock(tokens_mlp_dim, channels_mlp_dim, drop_path_rate) for i in range(depth)]
+            [MixerBlock(embed_dim, time_len, drop_path=drop_path_rate) for i in range(depth)]
         )
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, hidden_dim)
 
     def forward(self, x):
         """
@@ -455,21 +406,19 @@ class NeighborEncoder(nn.Module):
         valid_indices = ~mask_p.view(-1)
         x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
 
-        x = self.channel_pre_project(x)
-        x = x.permute(0, 2, 1)
-        x = self.token_pre_project(x)
-        x = x.permute(0, 2, 1)
+        x = self.stem(x)  # (B * P, V, embed_dim)
         for block in self.blocks:
             x = block(x)
+        x = self.norm(x)
 
-        # pooling
+        # global average pooling over tokens
         x = torch.mean(x, dim=1)
 
         neighbor_type = neighbor_type.view(B * P, -1)
         type_embedding = self.type_emb(neighbor_type)
         x = x + type_embedding
 
-        x = self.emb_project(self.norm(x))
+        x = self.head(x)
         x_result = x * valid_indices.float().unsqueeze(-1)
 
         return x_result.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
@@ -517,45 +466,23 @@ class LaneEncoder(nn.Module):
         drop_path_rate,
         hidden_dim,
         depth,
-        tokens_mlp_dim=64,
-        channels_mlp_dim=128,
+        embed_dim=128,
     ):
         super().__init__()
 
         self._lane_len = lane_len
         self._class_type = class_type
 
-        self.speed_limit_emb = nn.Linear(1, channels_mlp_dim)
-        self.unknown_speed_emb = nn.Embedding(1, channels_mlp_dim)
-        self.attribute_emb = nn.Linear(5 + 2 * 10, channels_mlp_dim)  # traffic_light and line type
+        self.speed_limit_emb = nn.Linear(1, embed_dim)
+        self.unknown_speed_emb = nn.Embedding(1, embed_dim)
+        self.attribute_emb = nn.Linear(5 + 2 * 10, embed_dim)  # traffic_light and line type
 
-        self.channel_pre_project = Mlp(
-            in_features=8,
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-        self.token_pre_project = Mlp(
-            in_features=lane_len,
-            hidden_features=tokens_mlp_dim,
-            out_features=tokens_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-
+        self.stem = nn.Linear(8, embed_dim)
         self.blocks = nn.ModuleList(
-            [MixerBlock(tokens_mlp_dim, channels_mlp_dim, drop_path_rate) for i in range(depth)]
+            [MixerBlock(embed_dim, lane_len, drop_path=drop_path_rate) for i in range(depth)]
         )
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, hidden_dim)
 
     def forward(self, x, speed_limit, has_speed_limit):
         """
@@ -582,13 +509,12 @@ class LaneEncoder(nn.Module):
         # Use torch.where instead of indexing to maintain fixed size
         x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
 
-        x = self.channel_pre_project(x)
-        x = x.permute(0, 2, 1)
-        x = self.token_pre_project(x)
-        x = x.permute(0, 2, 1)
+        x = self.stem(x)  # (B * P, V, embed_dim)
         for block in self.blocks:
             x = block(x)
+        x = self.norm(x)
 
+        # global average pooling over tokens
         x = torch.mean(x, dim=1)
 
         # Reshape speed_limit and traffic to match flattened dimensions
@@ -607,7 +533,7 @@ class LaneEncoder(nn.Module):
         traffic_light_embedding = self.attribute_emb(attribute)
 
         x = x + speed_limit_embedding + traffic_light_embedding
-        x = self.emb_project(self.norm(x))
+        x = self.head(x)
 
         # Apply mask to zero out invalid positions
         x = x * valid_indices.float().unsqueeze(-1)
@@ -616,44 +542,23 @@ class LaneEncoder(nn.Module):
 
 
 class LineEncoder(nn.Module):
-    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, num_types):
+    def __init__(
+        self, line_len, class_type, drop_path_rate, hidden_dim, depth, num_types, embed_dim=128
+    ):
         super().__init__()
         self._class_type = class_type
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
 
         self._line_len = line_len
 
-        # type one-hot is fed via an embedding, not through the Mlp/Mixer
-        self.type_emb = nn.Linear(num_types, channels_mlp_dim)
+        # type one-hot is fed via an embedding, not through the stem/Mixer
+        self.type_emb = nn.Linear(num_types, embed_dim)
 
-        self.channel_pre_project = Mlp(
-            in_features=4,  # x, y, dx, dy
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-        self.token_pre_project = Mlp(
-            in_features=line_len,
-            hidden_features=tokens_mlp_dim,
-            out_features=tokens_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-
+        self.stem = nn.Linear(4, embed_dim)  # x, y, dx, dy
         self.blocks = nn.ModuleList(
-            [MixerBlock(tokens_mlp_dim, channels_mlp_dim, drop_path_rate) for i in range(depth)]
+            [MixerBlock(embed_dim, line_len, drop_path=drop_path_rate) for i in range(depth)]
         )
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, hidden_dim)
 
     def forward(self, x):
         """
@@ -687,19 +592,18 @@ class LineEncoder(nn.Module):
 
         feat = feat.view(B * P, V, -1)
 
-        feat = self.channel_pre_project(feat)
-        feat = feat.permute(0, 2, 1)
-        feat = self.token_pre_project(feat)
-        feat = feat.permute(0, 2, 1)
+        feat = self.stem(feat)  # (B * P, V, embed_dim)
         for block in self.blocks:
             feat = block(feat)
+        feat = self.norm(feat)
 
+        # global average pooling over tokens
         feat = torch.mean(feat, dim=1)
 
-        # Inject type information via embedding instead of through the Mlp/Mixer.
+        # Inject type information via embedding instead of through the stem/Mixer.
         feat = feat + self.type_emb(type_one_hot.view(B * P, -1))
 
-        feat = self.emb_project(self.norm(feat))
+        feat = self.head(feat)
 
         # Apply mask to zero out invalid positions
         feat = feat * valid_indices.float().unsqueeze(-1)
@@ -708,28 +612,21 @@ class LineEncoder(nn.Module):
 
 
 class GoalPoseEncoder(nn.Module):
-    def __init__(self, drop_path_rate, hidden_dim):
+    def __init__(self, drop_path_rate, hidden_dim, embed_dim=128):
         super().__init__()
-        channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
 
-        self.channel_pre_project = Mlp(
+        # No mixer blocks here (single token), so the stem keeps a nonlinearity.
+        self.stem = Mlp(
             in_features=4,
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
+            hidden_features=embed_dim,
+            out_features=embed_dim,
             act_layer=nn.GELU,
             drop=0.0,
         )
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, hidden_dim)
 
     def forward(self, x):
         """
@@ -742,38 +639,31 @@ class GoalPoseEncoder(nn.Module):
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
-        x = self.channel_pre_project(x)  # (B, C=channels_mlp_dim)
-        x = x.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
+        x = self.stem(x)  # (B, embed_dim)
+        x = x.unsqueeze(1)  # (B, 1, embed_dim)
 
-        x = self.emb_project(self.norm(x))  # (B, 1, hidden_dim)
+        x = self.head(self.norm(x))  # (B, 1, hidden_dim)
 
         return x, mask, pos
 
 
 class FloatsEncoder(nn.Module):
-    def __init__(self, num_float, class_type, drop_path_rate, hidden_dim):
+    def __init__(self, num_float, class_type, drop_path_rate, hidden_dim, embed_dim=128):
         super().__init__()
-        channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
         self._class_type = class_type
 
-        self.channel_pre_project = Mlp(
+        # No mixer blocks here (single token), so the stem keeps a nonlinearity.
+        self.stem = Mlp(
             in_features=num_float,
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
+            hidden_features=embed_dim,
+            out_features=embed_dim,
             act_layer=nn.GELU,
             drop=0.0,
         )
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, hidden_dim)
 
     def forward(self, x):
         """
@@ -793,10 +683,10 @@ class FloatsEncoder(nn.Module):
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
-        x = self.channel_pre_project(x)  # (B, C=channels_mlp_dim)
-        x = x.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
+        x = self.stem(x)  # (B, embed_dim)
+        x = x.unsqueeze(1)  # (B, 1, embed_dim)
 
-        x = self.emb_project(self.norm(x))  # (B, 1, hidden_dim)
+        x = self.head(self.norm(x))  # (B, 1, hidden_dim)
 
         return x, mask, pos
 

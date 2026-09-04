@@ -1,12 +1,12 @@
 import torch
 from timm.layers import DropPath
 from timm.models.layers import Mlp
+from timm.models.mlp_mixer import MixerBlock
 from torch import nn
 from torch.nn import functional as F
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.module.encoder import LaneEncoder
-from diffusion_planner.model.module.mixer import MixerBlock
 
 # This network keeps its own, deliberately small, token-type vocabulary so that
 # it stays independent from the main diffusion Encoder (which owns a different,
@@ -77,9 +77,9 @@ def make_lane_pos(x: torch.Tensor, lane_len: int, class_type: int):
 class TrajectoryEncoder(nn.Module):
     """Encode an ego trajectory (B, T, D) into a single cross-attention query.
 
-    Reuses the shared ``MixerBlock`` (repo convention), but operates at
-    ``hidden_dim`` width throughout: a linear pose embedding, ``depth`` mixer
-    blocks, a final norm and global average pooling over time.
+    Uses timm's standard ``MixerBlock`` at ``hidden_dim`` width throughout: a
+    linear pose embedding, ``depth`` mixer blocks, a final norm and global
+    average pooling over time.
     """
 
     def __init__(
@@ -92,11 +92,11 @@ class TrajectoryEncoder(nn.Module):
     ):
         super(TrajectoryEncoder, self).__init__()
 
-        self.input_projection = nn.Linear(pose_dim, hidden_dim)
-        # Token mixing runs on the time axis (tokens_mlp_dim = time_len); channel
+        self.stem = nn.Linear(pose_dim, hidden_dim)
+        # Token mixing runs on the time axis (seq_len = time_len); channel
         # mixing runs at hidden_dim, so no width bottleneck / re-projection.
         self.blocks = nn.ModuleList(
-            [MixerBlock(time_len, hidden_dim, drop_path_rate) for _ in range(depth)]
+            [MixerBlock(hidden_dim, time_len, drop_path=drop_path_rate) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(hidden_dim)
 
@@ -107,7 +107,7 @@ class TrajectoryEncoder(nn.Module):
         Returns:
             x: (B, 1, hidden_dim) query token.
         """
-        x = self.input_projection(x)  # (B, T, hidden_dim)
+        x = self.stem(x)  # (B, T, hidden_dim)
         for block in self.blocks:
             x = block(x)
         x = self.norm(x)
@@ -243,8 +243,7 @@ class TurnIndicatorNetwork(nn.Module):
             drop_path_rate=drop_path_rate,
             hidden_dim=hidden_dim,
             depth=mixer_depth,
-            tokens_mlp_dim=32,
-            channels_mlp_dim=64,
+            embed_dim=64,
         )
         self.route_encoder = LaneEncoder(
             POINTS_PER_LANELET,
@@ -252,8 +251,7 @@ class TurnIndicatorNetwork(nn.Module):
             drop_path_rate=drop_path_rate,
             hidden_dim=hidden_dim,
             depth=mixer_depth,
-            tokens_mlp_dim=32,
-            channels_mlp_dim=64,
+            embed_dim=64,
         )
 
         # position embedding for key/value tokens encodes x, y, cos, sin, type
