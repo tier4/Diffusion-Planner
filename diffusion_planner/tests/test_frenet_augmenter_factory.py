@@ -215,3 +215,37 @@ def test_seed_and_past_noise_std_are_real_command_line_flags():
     )
     assert over.seed == 1234
     assert over.ego_past_noise_std == 0.0
+
+
+def test_every_arg_the_factory_reads_exists_on_the_real_config():
+    """Every ``args.<name>`` the augmenter factories read must be a real TrainConfig field.
+
+    The other tests here build a SimpleNamespace and hand-supply the attributes, so a
+    field deleted from TrainConfig still "passes" while every real training crashes at
+    startup with AttributeError. That happened: `frenet_recovery_rounds` was removed by
+    an edit to a neighbouring field and nothing caught it until a training was launched.
+    This reads the attribute names straight out of the source and checks them against
+    the dataclass, so the two cannot drift again.
+    """
+    import ast
+    import re
+    from dataclasses import fields
+    from pathlib import Path
+
+    from diffusion_planner.config.train_config import TrainConfig
+
+    declared = {f.name for f in fields(TrainConfig)}
+    root = Path(__file__).resolve().parents[1] / "diffusion_planner" / "utils"
+    read: set[str] = set()
+    for src in ("data_augmentation_frenet.py", "augmenter_factory.py"):
+        tree = ast.parse((root / src).read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "args"
+            ):
+                read.add(node.attr)
+    assert read, "found no args.* reads — the AST walk is broken, not the config"
+    missing = sorted(read - declared)
+    assert not missing, f"read from args but not declared on TrainConfig: {missing}"
