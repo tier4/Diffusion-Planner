@@ -1415,7 +1415,10 @@ class StatePerturbation:
         inputs["ego_agent_future"] = ego_future
 
         # goal pose (x, y, cos, sin)
-        mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+        # Validity is decided from the position only: heading_to_cos_sin turns an
+        # all-zero (x, y, heading) goal into (0, 0, 1, 0), so a full-width zero test
+        # never fires and an absent goal would survive as a goal at the ego itself.
+        mask = torch.sum(torch.ne(inputs["goal_pose"][..., :2], 0), dim=-1) == 0
         inputs["goal_pose"][..., :2] = vector_transform(
             inputs["goal_pose"][..., :2], transform_matrix, center_xy
         )
