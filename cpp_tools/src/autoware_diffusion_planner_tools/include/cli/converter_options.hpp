@@ -94,6 +94,11 @@ struct ConverterOptions
   // Mutually exclusive with sidecar_only (which writes no npz at all).
   bool pack_sequence;
 
+  // Extract control-mode 4 intervals and write control_mode_4_intervals.json.
+  // This is explicit because the output path does not reliably identify the
+  // source rosbag type.
+  bool extract_override_segments;
+
   // Build converter defaults shared by all converter entry points.
   static ConverterOptions default_converter_options();
 

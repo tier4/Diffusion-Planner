@@ -24,9 +24,17 @@
 #include <optional>
 #include <vector>
 
+// Build a [num_timesteps, 4] (x, y, cos, sin) ego trajectory in the frame given by
+// map2bl_matrix, whose last timestep lands on reference_time.
+//
+// allow_hold_past_end decides what happens when the requested window reaches past the last frame
+// of data_list: false gives up (nullopt), true holds the final pose for the remaining timesteps.
+// Holding is only faithful for a sequence that ends standing still, so callers gate it on
+// stopped_tail::ends_stopped; pass false for a window that cannot overrun (the past window) to
+// keep that intent visible at the call site.
 std::optional<std::vector<float>> create_ego_sequence(
   const std::vector<FrameData> & data_list, const int64_t start_idx, const size_t num_timesteps,
   const Eigen::Matrix4d & map2bl_matrix, const rclcpp::Time & reference_time,
-  const bool use_interpolation);
+  const bool use_interpolation, const bool allow_hold_past_end);
 
 #endif  // PROCESSING__EGO_SEQUENCE_HPP_

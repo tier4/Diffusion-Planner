@@ -33,8 +33,7 @@
 #include <geometry_msgs/msg/accel_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
-#include <boost/geometry/algorithms/distance.hpp>
-#include <boost/geometry/algorithms/intersects.hpp>
+#include <boost/geometry.hpp>
 
 #include <lanelet2_io/Io.h>
 #include <rcl_yaml_param_parser/parser.h>
@@ -731,7 +730,7 @@ int main(int argc, char ** argv)
     writer_parser.write_topic(
       planner_output.predicted_objects, frame_time, TOPIC_OUT_PREDICTED_OBJECTS);
     writer_parser.write_topic(
-      planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
+      planner_output.turn_indicators_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
 
     // Build ground truth trajectory from future odometry with interpolation
     autoware_planning_msgs::msg::Trajectory gt_trajectory;

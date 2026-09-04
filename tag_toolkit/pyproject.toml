@@ -1,0 +1,22 @@
+[project]
+name = "tag-toolkit"
+version = "0.1.0"
+description = "Per-frame tags in NPZ sidecars, plus query/group helpers for Diffusion Planner data"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tag_toolkit"]
+package-dir = { "tag_toolkit" = "." }
+
+[tool.setuptools.package-data]
+tag_toolkit = [
+    "README.md",
+    "docs/*",
+]

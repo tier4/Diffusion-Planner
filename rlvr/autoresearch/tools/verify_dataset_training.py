@@ -1,14 +1,18 @@
 """Smoke-test that a v1-style dataset can still train every pipeline.
 
 Point this at a dataset built by ``build_small_dataset.py`` and it runs a tiny,
-fast pass of each training pipeline — each **warmstarted from ``--base_model``** —
-reporting PASS/FAIL per pipeline, EMITTING each pipeline's trained model, and
-showing a base-vs-trained regression check:
+fast pass of each training pipeline — warmstarted from ``--base_model`` (IL may also
+run **from scratch** when no base is given) — reporting PASS/FAIL per pipeline, EMITTING
+each pipeline's trained model, and showing a base-vs-trained regression check:
 
-* **SFT**   - ``diffusion_planner/train_predictor.py`` on the frame set, warmstarted
-  (``train_epochs = base_epoch + N``, computed from the checkpoint). PASS = finite
-  train+val loss + a saved checkpoint. Reports **base->trained L2** (ego/neighbor via
-  ``valid_predictor``) as the regression signal.
+* **IL**    - imitation learning: ``diffusion_planner/train_predictor.py`` on the frame
+  set. This is the README's primary supervised predictor training (the base/"pretraining"
+  stage), NOT a fine-tune-after-pretraining step. Warmstarted from ``--base_model`` when
+  given (``train_epochs = base_epoch + N``, computed from the checkpoint), or **from
+  scratch** when ``--base_model`` is omitted (the README cold-start recipe;
+  ``train_epochs = N``). PASS = finite train+val loss + a saved checkpoint. With a base it
+  reports **base->trained L2** (ego/neighbor via ``valid_predictor``) as the regression
+  signal; from scratch there is no base to regress against.
 * **RSFT**  - ``rlvr.autoresearch.run_experiment`` (K-sample ranked SFT), warmstarted.
   PASS = finite per-epoch loss + reward + a LoRA save. Reports **base->trained reward**
   and merges the LoRA into a full model.
@@ -29,20 +33,26 @@ independently (all run by default). No paths are hard-coded; the only assumption
 the dataset layout produced by ``build_small_dataset.py``::
 
     <dataset_root>/
-      frame/train.json          # SFT + RSFT train scene list
-      frame/val.json            # SFT + RSFT + L2 val scene list
+      frame/train.json          # IL + RSFT train scene list
+      frame/val.json            # IL + RSFT + L2 val scene list
       contiguous/window_scenes.json     # R2LPL ordered contiguous scene list
       contiguous/reproducer_chunks.jsonl  # R2LPL chunk manifest (failure corpus)
       normalization.json        # (or pass --normalization)
 
-The base model (``--base_model``) is required (warmstart) and must have an
-``args.json`` beside it (the standard deploy-dir layout).
+The base model (``--base_model``) must have an ``args.json`` beside it (the standard
+deploy-dir layout). It is required whenever RSFT or R2LPL runs (they warmstart from it);
+an IL-only run may omit it to train from scratch (README cold-start).
 
 Usage:
+    # warmstart smoke of all three pipelines
     python -m rlvr.autoresearch.tools.verify_dataset_training \
         --dataset_root <v1_dir> --base_model <best_model.pth> \
-        [--skip_sft] [--skip_rsft] [--skip_r2lpl] [--no-emit-models] [--no_l2] \
+        [--skip_il] [--skip_rsft] [--skip_r2lpl] [--no-emit-models] [--no_l2] \
         [--device auto]
+
+    # from-scratch IL (no base model): omit --base_model and skip the warmstart-only pipelines
+    python -m rlvr.autoresearch.tools.verify_dataset_training \
+        --dataset_root <v1_dir> --skip_rsft --skip_r2lpl [--device auto]
 """
 
 from __future__ import annotations
@@ -95,7 +105,10 @@ def _require(path: Path, what: str) -> Path:
 
 
 def _subsample(scene_list: Path, cap: int, seed: int, out_path: Path) -> int:
-    """Write a seeded ``cap``-scene subset of a JSON scene list. Returns kept count."""
+    """Write the scene list to ``out_path``, optionally capped to a seeded ``cap``-scene
+    subset. ``cap`` falsy (0/None — the default) means **use the FULL dataset** — no
+    subsampling. A positive ``cap`` is an explicit opt-in (only the ``*_ci`` quick-check
+    configs set one). Returns the kept count."""
     scenes = _load_json(scene_list)
     if not isinstance(scenes, list):
         raise ValueError(f"{scene_list} must be a JSON list of NPZ paths")
@@ -286,14 +299,16 @@ def _regression_l2(base_model: Path, trained_ckpt: Path, val_list: Path, work: P
 # --------------------------------------------------------------------------- #
 # pipelines
 # --------------------------------------------------------------------------- #
-def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
-    train_list = _require(ds["frame_train"], "frame/train.json (SFT)")
-    val_list = _require(ds["frame_val"], "frame/val.json (SFT)")
-    norm = _require(ds["normalization"], "normalization.json (SFT)")
-    work = args.out_dir / "sft"
+def run_il(ds, cfg, args, env) -> tuple[bool, str]:
+    train_list = _require(ds["frame_train"], "frame/train.json (IL)")
+    val_list = _require(ds["frame_val"], "frame/val.json (IL)")
+    norm = _require(ds["normalization"], "normalization.json (IL)")
+    work = args.out_dir / "il"
     work.mkdir(parents=True, exist_ok=True)
-    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 400)), args.seed, work / "train.json")
-    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 100)), args.seed, work / "val.json")
+    # No cap in the config => FULL dataset (both lists used in their entirety). Only the
+    # explicit *_ci quick-check configs set a positive cap.
+    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 0)), args.seed, work / "train.json")
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 0)), args.seed, work / "val.json")
     n_epochs = int(cfg.get("train_epochs", 1))
     # Warmstart from --base_model when given: train_predictor RESUMES at the base
     # checkpoint's epoch, so train for n_epochs MORE => train_epochs = base_epoch +
@@ -302,7 +317,7 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
     resume = []
     if args.base_model:
         base_args = _require(
-            args.base_model.parent / "args.json", "args.json beside --base_model (SFT)"
+            args.base_model.parent / "args.json", "args.json beside --base_model (IL)"
         )
         train_epochs = _ckpt_epoch(args.base_model) + n_epochs
         # pass the base ARCHITECTURE args so the resumed model matches the checkpoint
@@ -311,7 +326,7 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
         train_epochs = n_epochs
     cmd = [
         sys.executable, "diffusion_planner/train_predictor.py",
-        "--exp_name", "verify_sft",
+        "--exp_name", "verify_il",
         "--save_dir", str(work / "out"),
         "--train_set_list", str(work / "train.json"),
         "--valid_set_list", str(work / "val.json"),
@@ -329,11 +344,11 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
         *resume,
     ]  # fmt: skip
     print(
-        f"[SFT] warmstart={'yes' if resume else 'no'} train {n_tr} / val {n_va} "
-        f"-> train_epochs={train_epochs} -> {work / 'sft.log'}",
+        f"[IL] warmstart={'yes' if resume else 'no'} train {n_tr} / val {n_va} "
+        f"-> train_epochs={train_epochs} -> {work / 'il.log'}",
         flush=True,
     )
-    rc, text = _run(cmd, work / "sft.log", env)
+    rc, text = _run(cmd, work / "il.log", env)
     num = r"(-?inf|nan|[0-9.eE+-]+)"
     tr_loss = re.findall(rf"epoch_mean_loss\['loss'\]={num}", text)
     va_loss = re.findall(rf"valid_loss_ego={num}", text)
@@ -354,9 +369,18 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
     ok = rc == 0 and _finite(tr_loss) and _finite(va_loss) and best.exists()
     l2_note = ""
     if ok and not args.no_l2:
-        l2_note, l2_ok = _regression_l2(args.base_model, best, work / "val.json", work, args, env)
-        ok = ok and l2_ok
-    saved = _emit_model(best, "sft", args) if (ok and best.exists() and args.emit_models) else None
+        if args.base_model:
+            l2_note, l2_ok = _regression_l2(
+                args.base_model, best, work / "val.json", work, args, env
+            )
+            ok = ok and l2_ok
+        else:
+            # From-scratch IL: no base checkpoint exists, so a base-vs-trained L2
+            # regression is undefined. The PASS contract is finite train/val loss + a
+            # written checkpoint (reported below). Flag the gate as N/A loudly rather
+            # than silently skipping it.
+            l2_note = " [from-scratch: no base for L2 regression]"
+    saved = _emit_model(best, "il", args) if (ok and best.exists() and args.emit_models) else None
     detail = (
         f"rc={rc} train_loss={tr_loss[-1] if tr_loss else 'NONE'} "
         f"valid_loss_ego={va_loss[-1] if va_loss else 'NONE'} "
@@ -373,8 +397,9 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     _require(base_model.parent / "args.json", "args.json beside --base_model (RSFT)")
     work = args.out_dir / "rsft"
     work.mkdir(parents=True, exist_ok=True)
-    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 40)), args.seed, work / "train.json")
-    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 40)), args.seed, work / "val.json")
+    # No cap in the config => FULL dataset. Only the explicit *_ci config caps.
+    n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 0)), args.seed, work / "train.json")
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 0)), args.seed, work / "val.json")
     # hand run_experiment a clean config (strip the smoke-only keys)
     clean = {k: v for k, v in cfg.items() if k not in _RSFT_SCRIPT_KEYS}
     clean_path = work / "run_experiment_config.json"
@@ -454,7 +479,7 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     # base-vs-trained reward comparison, so a missing base reward is a failed contract.
     ok = rc == 0 and trained and ev_val is not None and base_reward is not None and bool(lora)
     # merge the LoRA into the base and emit a usable full model (own subdir + args.json,
-    # matching SFT/R2LPL so the emitted model is self-contained and loadable)
+    # matching IL/R2LPL so the emitted model is self-contained and loadable)
     saved = None
     if ok and lora and args.emit_models:
         merged = args.out_dir / "models" / "rsft" / "rsft.pth"
@@ -551,7 +576,8 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
     val_list = _require(ds["frame_val"], "frame/val.json (R2LPL)")
     work = args.out_dir / "r2lpl"
     work.mkdir(parents=True, exist_ok=True)
-    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 40)), args.seed, work / "val.json")
+    # No cap in the config => FULL val set. Only the explicit *_ci config caps.
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 0)), args.seed, work / "val.json")
     # The lifelong round mines corrective chunks from the contiguous corpus, builds
     # repair targets, updates replay memory, and TRAINS — warmstarting from base_model.
     # The reward config is an internal asset (not committed): fail loud if absent
@@ -669,7 +695,7 @@ def main() -> None:
     ap.add_argument(
         "--base_model",
         type=Path,
-        help="base model .pth (with args.json beside it); required unless SFT is the only pipeline",
+        help="base model .pth (with args.json beside it); required unless IL is the only pipeline",
     )
     ap.add_argument(
         "--normalization",
@@ -677,10 +703,10 @@ def main() -> None:
         default=None,
         help="override normalization.json (default <dataset_root>/normalization.json)",
     )
-    ap.add_argument("--sft_config", type=Path, default=_CONFIG_DIR / "sft.json")
+    ap.add_argument("--il_config", type=Path, default=_CONFIG_DIR / "il.json")
     ap.add_argument("--rsft_config", type=Path, default=_CONFIG_DIR / "rsft.json")
     ap.add_argument("--r2lpl_config", type=Path, default=_CONFIG_DIR / "r2lpl.json")
-    ap.add_argument("--skip_sft", action="store_true")
+    ap.add_argument("--skip_il", action="store_true")
     ap.add_argument("--skip_rsft", action="store_true")
     ap.add_argument("--skip_r2lpl", action="store_true")
     ap.add_argument(
@@ -724,8 +750,8 @@ def main() -> None:
     env = _env_for_device(args.device)
 
     pipelines = []
-    if not args.skip_sft:
-        pipelines.append(("SFT", run_sft, _load_json(args.sft_config)))
+    if not args.skip_il:
+        pipelines.append(("IL", run_il, _load_json(args.il_config)))
     if not args.skip_rsft:
         pipelines.append(("RSFT", run_rsft, _load_json(args.rsft_config)))
     if not args.skip_r2lpl:
@@ -733,10 +759,17 @@ def main() -> None:
     if not pipelines:
         print("Nothing to do: all pipelines skipped.")
         return
-    # Every pipeline warmstarts from the base model and reports base-vs-trained metrics,
-    # so it is required for all three (not just RSFT/R2LPL) — no silent from-scratch SFT.
-    if not args.base_model:
-        raise SystemExit("--base_model is required (every pipeline warmstarts from it)")
+    # RSFT and R2LPL always warmstart from the base model (and report base-vs-trained
+    # metrics against it), so a base is required whenever either is enabled. IL (the base
+    # supervised training) can also train from scratch (no --base_model) — the README's
+    # cold-start recipe — so an IL-only run may omit it. Fail loud if a warmstart-only
+    # pipeline has no base.
+    needs_base = any(name in ("RSFT", "R2LPL") for name, _, _ in pipelines)
+    if needs_base and not args.base_model:
+        raise SystemExit(
+            "--base_model is required for RSFT/R2LPL (they warmstart from it). "
+            "For from-scratch IL, run with --skip_rsft --skip_r2lpl and omit --base_model."
+        )
 
     print(f"dataset_root: {root}")
     print(f"out_dir:      {args.out_dir}")

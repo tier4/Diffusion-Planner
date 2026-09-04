@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import json
 import math
+import time
+from concurrent.futures import Executor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +33,7 @@ from diffusion_planner.dimensions import INPUT_T, POSE_DIM
 
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
+from scenario_generation.inference_compile import mark_inference_step
 from scenario_generation.metrics import (
     score_object_step,
     score_object_step_batched,
@@ -40,6 +44,7 @@ from scenario_generation.metrics import (
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
@@ -335,16 +340,33 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
 
     # Extract scoring inputs (+ optional save dicts) BEFORE normalization, so they match
     # the un-normalized arrays build_input_np returns.
-    nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()  # (N,320,11)
-    neighbors_live = [nb_all[i].copy() for i in range(N)]
     np_dicts = None
     if want_np_dicts:
-        np_dicts = [
-            {k: batch[k][i : i + 1].detach().cpu().numpy() for k in batch} for i in range(N)
-        ]
+        # ONE D2H transfer per key for the whole batch (16 transfers/step),
+        # then numpy slicing per segment — replaces the previous N x n_keys
+        # per-segment `.cpu()` calls (B x 16 transfers + syncs per step).
+        # The per-segment arrays are VIEWS into the batch-sized host arrays;
+        # every consumer (scorers, credit-window dump) is read-only on them.
+        # Memory caveat: while ALL N segments are alive this equals the old
+        # N standalone copies, but a single long-lived segment's save buffer
+        # now pins the whole tick's batch arrays (up to Bx its own slice) —
+        # bounded by the save-buffer deque cap, and irrelevant at B<=64.
+        host = {k: batch[k].detach().cpu().numpy() for k in batch}
+        np_dicts = [{k: host[k][i : i + 1] for k in host} for i in range(N)]
+        nb_all = host["neighbor_agents_past"][:, :, -1, :]  # (N,320,11)
+    else:
+        nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()
+    neighbors_live = [nb_all[i].copy() for i in range(N)]
 
+    # Un-normalized GPU tensors with the same key set as np_dicts (snapshot
+    # BEFORE the static inputs land): per-segment slices of these feed the
+    # per-step scorers directly, replacing the old GPU->CPU->GPU round trip
+    # (np_dict D2H above, then a per-segment H2D re-upload in every scorer).
+    # The normalizer below shallow-copies and REPLACES keys, so these tensors
+    # stay un-normalized.
+    raw_gpu = dict(batch)
     _add_static_inputs(batch, model_args, N, device)
-    return model_args.observation_normalizer(batch), neighbors_live, np_dicts
+    return model_args.observation_normalizer(batch), neighbors_live, np_dicts, raw_gpu
 
 
 # --------------------------------------------------------------------------- #
@@ -442,10 +464,11 @@ class _SegState:
     # sustain threshold. route_arc_s caches tl.poses cumulative arc length (lazy).
     realized_lag_streak: int = 0
     route_arc_s: object = None
-    # Running sum/count of per-step GT-pose deviation (m), for the mean_gt_deviation_m metric
-    # (average distance from the recorded expert path — a graded tracking-quality signal that,
-    # unlike the saturating segment-rates, improves smoothly as the model trains). Accumulated
-    # only in render_segment's loop (where gt_deviation is computed); 0 count -> reported inf.
+    # Running sum/count of per-step GT deviation (m), for the mean_gt_deviation_m metric:
+    # mean yaw-gated min point-to-polyline distance from the live ego to a ±15 s window of
+    # recorded poses around the cursor's current frame (see ``_gt_deviation_m``). A graded
+    # tracking-quality signal that, unlike the saturating segment-rates, improves smoothly as
+    # the model trains. Accumulated only in render_segment's loop; 0 count -> reported inf.
     gt_dev_sum: float = 0.0
     gt_dev_count: int = 0
 
@@ -501,7 +524,7 @@ def _seed_state(
     neighbor_history_mode="recorded",
     goal_mode="segment",
     replay_mode="pose",
-    tracker_mode="mpc",
+    tracker_mode="mpc_batched",
     strong_brake_mps2=-2.5,
     yaw_gate: bool = True,
 ) -> _SegState:
@@ -535,10 +558,15 @@ def _seed_state(
     turn_hist = np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
     if tracker_mode == "perfect":
         tracker = PerfectTracker(dt=DT)
-    elif tracker_mode == "mpc":
+    elif tracker_mode in ("mpc", "mpc_batched"):
+        # mpc_batched keeps the identical per-segment MPCTracker (warm start +
+        # telemetry live on it); only the per-tick SOLVE is batched across
+        # segments in run_segments_batched (see mpc_tracker_batched.track_many).
         tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
     else:
-        raise ValueError(f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect' or 'mpc'")
+        raise ValueError(
+            f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect', 'mpc', or 'mpc_batched'"
+        )
     return _SegState(
         tl=tl,
         start=start,
@@ -649,6 +677,66 @@ def _hold_turn_indicator(s: _SegState) -> None:
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
+# GT-deviation lookup window: ±15 s of recorded trajectory around the cursor. Wide enough to
+# cover any realistic live-ego-vs-recorded drift (the cursor only advances ~0.5-1.0 s/step on
+# a normal route) but bounded so the loop stays ~200 µs/step.
+_GT_DEV_WINDOW_FRAMES = 150  # 15 s * 10 Hz
+_GT_DEV_INF = float("inf")
+
+
+def _wrap_pi(a):
+    """Wrap an angle (or array of them) to (-pi, pi]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _gt_deviation_m(
+    tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cursor_idx: int
+) -> float:
+    """Min yaw-gated point-to-polyline distance from ``live_xy`` to a ±15 s window of
+    recorded poses centered on ``cursor_idx``.
+
+    Why this and not ``||live - poses[cursor_idx]||``: the recorded frame the cursor
+    currently picks can lag the live ego (cool-down, speed-gap repeat, search_radius
+    jump) by up to several seconds, so the xy-only distance to that single frame
+    inflates. The min projection over a small temporal window is the proper
+    "how far off the recorded path am I" signal.
+
+    Yaw gate: each candidate segment's recorded heading must be within ±90° of the
+    live ego's heading. Otherwise a future wrong-direction recorded segment (U-turn,
+    opposite lane on a divided road) gets picked and the lateral distance is reported
+    near zero even though the live ego is in its correct lane on the other side.
+    Segments that fail the gate are skipped (treated as ``inf``).
+    """
+    live_xy = np.asarray(live_xy, dtype=np.float64).reshape(2)
+    n = int(len(tl.poses))
+    lo = max(0, int(cursor_idx) - _GT_DEV_WINDOW_FRAMES)
+    hi = min(n, int(cursor_idx) + _GT_DEV_WINDOW_FRAMES + 1)
+    window = tl.poses[lo:hi]  # (M, 3) -- xy + yaw
+    if len(window) == 0:
+        return _GT_DEV_INF
+    if len(window) == 1:
+        pose = window[0]
+        if abs(_wrap_pi(float(pose[2]) - float(live_yaw))) > (np.pi / 2.0):
+            return _GT_DEV_INF
+        return float(np.linalg.norm(live_xy - pose[:2]))
+    a = window[:-1, :2]
+    b = window[1:, :2]
+    ab = b - a  # (M-1, 2)
+    ap = live_xy[None, :] - a
+    seg_len2 = (ab * ab).sum(axis=1)
+    seg_len2_safe = np.maximum(seg_len2, 1e-9)
+    t = (ap * ab).sum(axis=1) / seg_len2_safe
+    t_clamped = np.clip(t, 0.0, 1.0)
+    proj = a + t_clamped[:, None] * ab
+    d = np.linalg.norm(live_xy[None, :] - proj, axis=1)
+    # Yaw gate: skip segments whose recorded heading disagrees with live ego by >90°.
+    # Seg yaw = atan2(ab_y, ab_x).
+    seg_yaw = np.arctan2(ab[:, 1], ab[:, 0])
+    wrong_heading = np.abs(_wrap_pi(seg_yaw - float(live_yaw))) > (np.pi / 2.0)
+    d = np.where(wrong_heading, _GT_DEV_INF, d)
+    return float(d.min())
+
+
 def _score_into(
     s: _SegState,
     neighbors_live,
@@ -685,7 +773,7 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
-def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
+def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
     ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
@@ -693,6 +781,12 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
     PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
     multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
     applied directly, which is the faithful "perfect tracking" of the cached plan.
+
+    ``tracked`` = ``(new_pose(3,), new_speed)`` from a BATCHED tracker solve
+    (``mpc_tracker_batched.track_many``): the caller already ran the tracker for
+    this segment, so the tracker branch is skipped and its result applied with
+    the same telemetry reads (``track_many`` set ``last_yaw_rate``/``last_steering``
+    on ``s.tracker`` exactly like ``track()`` does).
     """
     from scenario_generation.mpc_tracker import postprocess_reference
 
@@ -709,6 +803,11 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             dh = (float(new_pose[2]) - float(s.live_pose[2]) + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = float(dh / DT)
             steering = 0.0
+        elif tracked is not None:
+            new_pose = np.asarray(tracked[0], dtype=np.float64)
+            new_speed = float(tracked[1])
+            yaw_rate = float(getattr(s.tracker, "last_yaw_rate", 0.0))
+            steering = float(getattr(s.tracker, "last_steering", 0.0))
         else:
             wxy, wh = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
@@ -799,6 +898,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
+                s.stuck = 0
                 s.snap_count += 1
 
 
@@ -864,19 +964,53 @@ def _clearance_stats(values: np.ndarray) -> dict:
     return out
 
 
+def road_border_collision_mask(rb_dists: np.ndarray) -> np.ndarray:
+    """Contact mask for the road-border family: a finite distance under the contact threshold.
+
+    Objects report contact from OBB overlap; road borders have no such test, so contact is
+    read off the distance series itself.
+    """
+    return np.isfinite(rb_dists) & (rb_dists < RB_COLLISION_THRESH_M)
+
+
+def clearance_family_block(
+    values: np.ndarray, collisions: np.ndarray, *, miss_thresh: float
+) -> dict:
+    """One ``object`` / ``road_border`` segment-row block from a clearance series.
+
+    Every producer of these blocks must go through here: ``closed_loop_eval._event_family_block``
+    rolls the ``collision_*`` / ``miss_*`` keys up positionally, so a layout that differs
+    between producers still aggregates -- silently, with the wrong numbers.
+    """
+    miss = np.isfinite(values) & (values <= miss_thresh)
+    return {
+        "miss_thresh_m": float(miss_thresh),
+        "collision_steps": int(collisions.sum()),
+        "collision_count": _event_count(collisions),
+        "miss_steps": int(miss.sum()),
+        "miss_count": _event_count(miss),
+        **_clearance_stats(values),
+    }
+
+
+def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
+    """The ``strong_brake`` segment-row block from a realized-acceleration series."""
+    mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
+    return {
+        "thresh_mps2": float(thresh_mps2),
+        # Strongest over-threshold accel after the 2-frame consecutive mask
+        # (single-frame tracker/replan spikes are excluded).
+        "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
+        "steps": int(mask.sum()),
+        "count": _event_count(mask),
+    }
+
+
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
-    finite = np.isfinite(cl)
     rb = s.rb_dists[: s.k]
     accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
-    # Per-step state booleans -> both a step count and a rising-edge event count.
-    obj_coll = s.collisions[: s.k]
-    obj_miss = finite & (cl <= s.near_miss_thresh)
-    rb_finite = np.isfinite(rb)
-    rb_coll = rb_finite & (rb < RB_COLLISION_THRESH_M)
-    rb_miss = rb_finite & (rb <= s.near_miss_thresh)
     red_mask = s.red_light[: s.k]
-    brake_mask = strong_brake_mask(accels, thresh_mps2=float(s.strong_brake_mps2))
 
     # Graded (non-saturating) headline metrics: improve smoothly as the model trains, unlike the
     # binary *_count event tallies below — the "getting better" signal those alone can't show.
@@ -897,36 +1031,15 @@ def _finalize(s: _SegState) -> dict:
         if s.gt_dev_count
         else float("inf"),
         "progress_m": progress_m,
-        "object": {
-            "miss_thresh_m": float(s.near_miss_thresh),
-            "collision_steps": int(obj_coll.sum()),
-            "collision_count": _event_count(obj_coll),
-            "miss_steps": int(obj_miss.sum()),
-            "miss_count": _event_count(obj_miss),
-            **_clearance_stats(cl),
-        },
-        "road_border": {
-            "miss_thresh_m": float(s.near_miss_thresh),
-            "collision_steps": int(rb_coll.sum()),
-            "collision_count": _event_count(rb_coll),
-            "miss_steps": int(rb_miss.sum()),
-            "miss_count": _event_count(rb_miss),
-            **_clearance_stats(rb),
-        },
+        "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
+        "road_border": clearance_family_block(
+            rb, road_border_collision_mask(rb), miss_thresh=s.near_miss_thresh
+        ),
         "red_light_violation": {
             "steps": int(red_mask.sum()),
             "count": _event_count(red_mask),
         },
-        "strong_brake": {
-            "thresh_mps2": float(s.strong_brake_mps2),
-            # Strongest over-threshold accel after the 2-frame consecutive mask
-            # (single-frame tracker/replan spikes are excluded).
-            "strongest_mps2": (
-                float(accels[brake_mask].min()) if brake_mask.any() else float("inf")
-            ),
-            "steps": int(brake_mask.sum()),
-            "count": _event_count(brake_mask),
-        },
+        "strong_brake": strong_brake_block(accels, s.strong_brake_mps2),
         "reproducer": {
             "expand_count": int(s.expand_count),
             "snap_count": int(s.snap_count),
@@ -957,7 +1070,7 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) ego frame
+        nb = tl.neighbor_last(idx)  # (320, 11) ego frame — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
@@ -982,6 +1095,42 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             np.unwrap(np.array([k[3] for k in kept])),
         )
     return interp
+
+
+# Track anchors depend only on the recorded data, not on the model or the epoch, yet
+# render_segment rebuilds them on every call that builds them -- one NPZ read per frame of the
+# whole route -- and closed_loop_validate re-evaluates the same routes in the same process.
+#
+# Unbounded on purpose, the same argument the per-map caches use: a process sees as many
+# (route, span) pairs as the suite has routes, not as many as it runs evaluations.
+#
+# No lock needed: the anchors are read-only downstream and the single call site runs before
+# render_segment starts its thread pool.
+_INTERP_ANCHOR_CACHE: dict[tuple, dict] = {}
+
+
+def _neighbor_interp_cached(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1) -> dict:
+    """``_build_neighbor_interp`` memoised per (route, span, sidecar, eps) for the process.
+
+    The sidecar path is part of the key because the same NPZ files paired with a different
+    sidecar directory report different track ids, and so yield different anchors.
+    """
+    key = (
+        str(tl.npz_paths[lo]),
+        str(tl.npz_paths[hi - 1]),
+        str(tl.sidecar_path(lo)),
+        hi - lo,  # the endpoints plus the count pin the file set: npz_paths is sorted
+        eps,
+    )
+    hit = _INTERP_ANCHOR_CACHE.get(key)
+    if hit is not None:
+        # counted so a profile shows the scan was skipped rather than silently missing
+        tl.timers.add("interp_build_cached", 0.0)
+        return hit
+    with tl.timers("interp_build"):
+        anchors = _build_neighbor_interp(tl, lo, hi, eps)
+    _INTERP_ANCHOR_CACHE[key] = anchors
+    return anchors
 
 
 def _interp_pose(anchors: tuple, idx: int) -> tuple[float, float, float]:
@@ -1252,6 +1401,7 @@ def _draw_step(
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1265,6 +1415,9 @@ def _draw_step(
     ``neighbor_ids``: per-slot track UUIDs from the sidecar. When given, neighbor
     agents are renamed to their UUID so the sim's own ``_stable_color`` keeps one
     color per track across frames (vs the flickering distance-sorted slot colors).
+
+    ``reproducer_ego``: optional ``(x, y, heading)`` of the recorded cursor ego in
+    the live-ego frame, drawn as a hollow outline matching the live ego color.
     """
     from pathlib import Path
 
@@ -1300,6 +1453,7 @@ def _draw_step(
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
         extra_ego_trajectories=extra_ego_trajectories,
+        reproducer_ego=reproducer_ego,
     )
 
 
@@ -1311,36 +1465,36 @@ def render_segment(
     start: int,
     end: int,
     out_dir,
-    device: str = "cuda",
-    near_miss_thresh: float = 0.5,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    window: tuple[int, int] | None = None,
-    max_steps: int | None = None,
-    goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 0,
-    color_by_uuid: bool = True,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    interpolate: bool = True,
-    neighbor_history_mode: str = "sim",
-    timeline_progress_mode: str = "pose",
-    tracker_mode: str = "mpc",
-    goal_mode: str = "segment",
-    title_prefix: str | None = None,
-    distance_label_offset_m: float = 1.2,
-    view_half_m: float = 50.0,
-    strong_brake_mps2: float = -2.5,
-    yaw_gate: bool = True,
-    *,
-    replan_interval: int = 1,
-    draw_every: int = 1,
-    abort_deviation_m: float = 0.0,
-    abort_after: int = 30,
-    abort_max_snaps: int = 0,
-    drop_objects: bool = False,
+    device: str,
+    near_miss_thresh: float,
+    search_radius: float,
+    warmup_steps: int,
+    unstick_after: int,
+    unstick_advance_m: float,
+    unstick_radius_mult: float,
+    unstick_teleport_after: int,
+    draw_every: int | None,
+    replan_interval: int,
+    tracker_mode: str,
+    neighbor_history_mode: str,
+    yaw_gate: bool,
+    strong_brake_mps2: float,
+    abort_deviation_m: float,
+    abort_after: int,
+    abort_max_snaps: int,
+    drop_objects: bool,
+    goal_mode: str,
+    title_prefix: str | None,
+    distance_label_offset_m: float,
+    view_half_m: float,
+    max_stuck_steps: int,
+    goal_reach_m: float,
+    interpolate: bool,
+    color_by_uuid: bool,
+    window: tuple[int, int] | None,
+    max_steps: int | None,
+    timeline_progress_mode: str,
+    draw_pool: Executor | None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1358,6 +1512,13 @@ def render_segment(
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
     throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
     play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
+    ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/
+    ``rollout.jsonl`` (and anything downstream that reads it, e.g. trajectory-colormap images)
+    are unaffected, only the video/PNG artifacts disappear.
+
+    ``draw_pool`` (see ``render_pool``): the workers the PNGs are rendered on. The step loop
+    hands the arrays off and waits once, at the end of the segment. Pass one to share workers
+    across segments; ``None`` opens a one-worker pool for this segment.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1372,7 +1533,10 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
-    ``tracker_mode="mpc"`` (default) uses the bicycle-model MPC tracker for ego advance while
+    ``tracker_mode="mpc_batched"`` (default) uses the bicycle-model MPC tracker for ego advance
+    (in the batched rollout, one vectorized solve for all segments per tick; in THIS
+    single-segment path it behaves exactly like ``"mpc"``, the serial per-segment scipy
+    solve) while
     keeping the same reproduced perception inputs. ``tracker_mode="perfect"`` is *complete* perfect
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
@@ -1390,9 +1554,10 @@ def render_segment(
     fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
 
     Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
-    ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
-    carries no lane geometry) alongside the ego pose — see
-    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+    ``collision``, ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
+    carries no lane geometry), and ``red_light_violation`` alongside the ego pose — see
+    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
+    (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
 
     ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
     ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
@@ -1410,15 +1575,15 @@ def render_segment(
     cap = max_steps if max_steps is not None else 3 * (end - start)
     timers = Timers()
     s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        near_miss_thresh,
-        goal_reach_m,
-        max_stuck_steps,
-        timers,
+        tl=tl,
+        start=start,
+        end=end,
+        search_radius=search_radius,
+        warmup_steps=warmup_steps,
+        near_miss_thresh=near_miss_thresh,
+        goal_reach_m=goal_reach_m,
+        max_stuck_steps=max_stuck_steps,
+        timers=timers,
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
@@ -1433,215 +1598,239 @@ def render_segment(
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
-    # margin covers any overrun without scanning the whole route.
+    # margin covers any overrun without scanning the whole route. Skipped under drop_objects:
+    # every neighbor row is zeroed before _apply_neighbor_interp runs and that function skips
+    # all-zero rows, so the anchors cannot be read.
     interp = (
-        _build_neighbor_interp(tl, start, min(end + 100, len(tl)))
-        if interpolate and neighbor_history_mode != "sim"
+        _neighbor_interp_cached(tl, start, min(end + 100, len(tl)))
+        if interpolate and neighbor_history_mode != "sim" and not drop_objects
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
+    pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
     # reach). One JSONL line per step + a start header + a terminated line, next to the PNGs.
-    dbg = open(out_dir / "rollout.jsonl", "w", buffering=1)
-    dbg.write(
-        json.dumps(
-            {
-                "event": "start",
-                "start_frame_id": _frame_id(tl, start),
-                "end_frame_id": _frame_id(tl, max(start, end - 1)),
-                "start_route_index": int(start),
-                "end_route_index": int(end),
-                "goal_frame_id": _frame_id(tl, max(start, end - 1)),
-                "goal_idx": int(end - 1),
-                "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
-                "goal_reach_m": float(s.goal_reach_m),
-                "max_steps": int(cap),
-                "unstick_after": int(s.unstick_after),
-                "len_tl": int(len(tl)),
-            }
-        )
-        + "\n"
-    )
-    while not s.done:
-        k = s.k
-        pre = _pre_step(s)
-        if pre is None:
-            dbg.write(
-                json.dumps(
-                    {
-                        "event": "terminated",
-                        "k": k,
-                        "reason": s.terminated,
-                        "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
-                        "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
-                        "max_idx_reached": int(s.cursor.max_idx_reached),
-                        "snap_count": int(s.snap_count),
-                    }
-                )
-                + "\n"
-            )
-            break
-        np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
-
-        if drop_objects:
-            # Empty-world ablation: no other traffic (dynamic neighbors + static objects), map
-            # kept. Zeroing makes every neighbor/static slot fail its validity mask, so the model
-            # sees an empty scene, the PNG/video render empty, and scoring finds nothing to hit
-            # (clearance inf, collision 0) — consistent across model input, draw, and scoring.
-            np_dict["neighbor_agents_past"] = np.zeros_like(np_dict["neighbor_agents_past"])
-            if "static_objects" in np_dict:
-                np_dict["static_objects"] = np.zeros_like(np_dict["static_objects"])
-            neighbors_live = np.zeros_like(neighbors_live)
-
-        # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
-        # last step's advance — an already-diverged segment skips inference too instead of just
-        # cutting the render short. GT deviation is measured against the recorded pose at the
-        # cursor's current frame (same `idx` the goal/progress checks use).
-        gt_deviation_m = float(np.linalg.norm(s.live_pose[:2] - tl.poses[idx, :2]))
-        s.gt_dev_sum += gt_deviation_m
-        s.gt_dev_count += 1
-        if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
-            deviation_streak += 1
-        else:
-            deviation_streak = 0
-        if (abort_deviation_m > 0 and deviation_streak >= abort_after) or (
-            abort_max_snaps > 0 and s.snap_count >= abort_max_snaps
-        ):
-            s.terminated, s.done = "diverged", True
-            dbg.write(
-                json.dumps(
-                    {
-                        "event": "diverged",
-                        "k": k,
-                        "gt_deviation_m": round(gt_deviation_m, 3),
-                        "deviation_streak": int(deviation_streak),
-                        "snap_count": int(s.snap_count),
-                    }
-                )
-                + "\n"
-            )
-            break
-
-        # Neighbor positions are interpolation-smoothed (if enabled) before scoring/drawing, same
-        # as the un-cached-plan path below — scoring on raw (freeze-then-jump) recorded positions
-        # would make clearance/collision noisier than what's actually rendered.
-        nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
-        if interpolate and nids and interp:
-            _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
-
-        # Scored here (before the replan/draw below) so this step's clearance/collision/
-        # road-border-distance are available for the per-step trace line right below — used by
-        # trajectory_colormap.py to color the rendered path by risk.
-        _score_into(s, neighbors_live, device, timers, np_dict)
-
-        # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
-        # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
+    with (
+        open(out_dir / "rollout.jsonl", "w", buffering=1) as dbg,
+        # Only a pool opened here gets shut down.
+        nullcontext(draw_pool) if draw_pool is not None else render_pool(1) as draw,
+    ):
         dbg.write(
             json.dumps(
                 {
-                    "k": k,
-                    "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
-                    "yaw": round(float(s.live_pose[2]), 4),
-                    "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
-                    "speed": round(float(s.dyn.speed), 3),
-                    "rec_frame_id": _frame_id(tl, idx),
-                    "rec_idx": int(idx),
-                    "max_idx_reached": int(s.cursor.max_idx_reached),
-                    "stuck": int(s.stuck),
-                    "ego_stuck": int(s.ego_stuck),
-                    # Cursor's own state (normal/repeat) + the rollout's escalation counts
-                    # (an expand/teleport this tick shows as a *_count delta on the next line).
-                    "state": s.cursor.state,
-                    "state_run_steps": int(s.cursor.state_run_steps),
-                    "expand_count": int(s.expand_count),
-                    "snap_count": int(s.snap_count),
-                    "clearance_m": round(float(s.clearances[k]), 4)
-                    if np.isfinite(s.clearances[k])
-                    else None,
-                    "collision": bool(s.collisions[k]),
-                    "rb_dist_m": round(float(s.rb_dists[k]), 4)
-                    if np.isfinite(s.rb_dists[k])
-                    else None,
-                    "gt_deviation_m": round(gt_deviation_m, 3),
+                    "event": "start",
+                    "start_frame_id": _frame_id(tl, start),
+                    "end_frame_id": _frame_id(tl, max(start, end - 1)),
+                    "start_route_index": int(start),
+                    "end_route_index": int(end),
+                    "goal_frame_id": _frame_id(tl, max(start, end - 1)),
+                    "goal_idx": int(end - 1),
+                    "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
+                    "goal_reach_m": float(s.goal_reach_m),
+                    "max_steps": int(cap),
+                    "unstick_after": int(s.unstick_after),
+                    "len_tl": int(len(tl)),
                 }
             )
             + "\n"
         )
-        # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
-        # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
-        # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-        # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-        # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-        # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
-        offset = k % replan_interval
-        override = None
-        if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-            plan_world = _ego_pred_to_world(
-                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
+        while not s.done:
+            k = s.k
+            pre = _pre_step(s)
+            if pre is None:
+                dbg.write(
+                    json.dumps(
+                        {
+                            "event": "terminated",
+                            "k": k,
+                            "reason": s.terminated,
+                            "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
+                            "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
+                            "max_idx_reached": int(s.cursor.max_idx_reached),
+                            "snap_count": int(s.snap_count),
+                        }
+                    )
+                    + "\n"
+                )
+                break
+            np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+
+            if drop_objects:
+                # Empty-world ablation: no other traffic (dynamic neighbors + static objects), map
+                # kept. Zeroing makes every neighbor/static slot fail its validity mask, so the model
+                # sees an empty scene, the PNG/video render empty, and scoring finds nothing to hit
+                # (clearance inf, collision 0) — consistent across model input, draw, and scoring.
+                np_dict["neighbor_agents_past"] = np.zeros_like(np_dict["neighbor_agents_past"])
+                if "static_objects" in np_dict:
+                    np_dict["static_objects"] = np.zeros_like(np_dict["static_objects"])
+                neighbors_live = np.zeros_like(neighbors_live)
+
+            # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
+            # last step's advance — an already-diverged segment skips inference too instead of just
+            # cutting the render short. GT deviation is the yaw-gated min point-to-polyline distance
+            # from the live ego to a ±15 s window of recorded poses around the cursor's current frame
+            # (see ``_gt_deviation_m``). Pure xy distance to the cursor frame would over-report drift
+            # whenever the cursor is mid-repeat / mid-cooldown.
+            gt_deviation_m = _gt_deviation_m(tl, s.live_pose[:2], s.live_pose[2], idx)
+            s.gt_dev_sum += gt_deviation_m
+            s.gt_dev_count += 1
+            if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
+                deviation_streak += 1
+            else:
+                deviation_streak = 0
+            if (abort_deviation_m > 0 and deviation_streak >= abort_after) or (
+                abort_max_snaps > 0 and s.snap_count >= abort_max_snaps
+            ):
+                s.terminated, s.done = "diverged", True
+                dbg.write(
+                    json.dumps(
+                        {
+                            "event": "diverged",
+                            "k": k,
+                            "gt_deviation_m": round(gt_deviation_m, 3),
+                            "deviation_streak": int(deviation_streak),
+                            "snap_count": int(s.snap_count),
+                        }
+                    )
+                    + "\n"
+                )
+                break
+
+            # Neighbor positions are interpolation-smoothed (if enabled) before scoring/drawing, same
+            # as the un-cached-plan path below — scoring on raw (freeze-then-jump) recorded positions
+            # would make clearance/collision noisier than what's actually rendered.
+            nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
+            if interpolate and nids and interp:
+                _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
+
+            # Scored here (before the replan/draw below) so this step's clearance/collision/
+            # road-border-distance are available for the per-step trace line right below — used by
+            # trajectory_colormap.py to color the rendered path by risk.
+            _score_into(s, neighbors_live, device, timers, np_dict)
+
+            # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
+            # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
+            dbg.write(
+                json.dumps(
+                    {
+                        "k": k,
+                        "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+                        "yaw": round(float(s.live_pose[2]), 4),
+                        "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+                        "speed": round(float(s.dyn.speed), 3),
+                        "rec_frame_id": _frame_id(tl, idx),
+                        "rec_idx": int(idx),
+                        "max_idx_reached": int(s.cursor.max_idx_reached),
+                        "stuck": int(s.stuck),
+                        "ego_stuck": int(s.ego_stuck),
+                        # Cursor's own state (normal/repeat) + the rollout's escalation counts
+                        # (an expand/teleport this tick shows as a *_count delta on the next line).
+                        "state": s.cursor.state,
+                        "state_run_steps": int(s.cursor.state_run_steps),
+                        "expand_count": int(s.expand_count),
+                        "snap_count": int(s.snap_count),
+                        "clearance_m": round(float(s.clearances[k]), 4)
+                        if np.isfinite(s.clearances[k])
+                        else None,
+                        "collision": bool(s.collisions[k]),
+                        "rb_dist_m": round(float(s.rb_dists[k]), 4)
+                        if np.isfinite(s.rb_dists[k])
+                        else None,
+                        "red_light_violation": bool(s.red_light[k]),
+                        "gt_deviation_m": round(gt_deviation_m, 3),
+                    }
+                )
+                + "\n"
             )
-            pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
-            _feed_turn_indicator(s, outputs)
-        else:
-            # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
-            off = min(offset, len(plan_world[0]) - 1)
-            tx, ty, th = (
-                float(plan_world[0][off, 0]),
-                float(plan_world[0][off, 1]),
-                float(plan_world[1][off]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-            pred_cur = _world_plan_to_ego(
-                plan_world[0][off:],
-                plan_world[1][off:],
-                s.live_pose[0],
-                s.live_pose[1],
-                s.live_pose[2],
-            )
-            # No fresh inference this step: hold the last decoded turn indicator so the
-            # 10 Hz turn_indicators history keeps scrolling with the same signal.
-            _hold_turn_indicator(s)
-        # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
-        # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
-        # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
-        # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
-        # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
-        # override path implements). Every step then lands on the predicted polyline point.
-        if tracker_mode == "perfect" and override is None:
-            tx, ty, th = (
-                float(plan_world[0][0, 0]),
-                float(plan_world[0][0, 1]),
-                float(plan_world[1][0]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
-            _draw_step(
-                np_dict,
-                pred_cur,
-                s.ego_shape,
-                out_dir / f"{k:05d}.png",
-                neighbor_ids=nids if color_by_uuid else None,
-                step=k,
-                total=cap,
-                title_prefix=title_prefix,
-                distance_label_offset_m=distance_label_offset_m,
-                view_half_m=view_half_m,
-            )
-        snaps_before = s.snap_count
-        _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.snap_count > snaps_before:
-            # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
-            # world location, so executing it next step would drag the ego right back. Invalidate
-            # it to force a fresh inference at the snapped pose (else the snap never sticks).
-            plan_world = None
-    dbg.close()
+            # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
+            # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
+            # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
+            # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
+            # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
+            # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
+            offset = k % replan_interval
+            override = None
+            if plan_world is None or offset == 0:
+                data = _to_torch_batch([np_dict], model_args, device)
+                # No-op unless the model was compiled with cudagraphs; one inference is one step.
+                mark_inference_step()
+                _, outputs = model(data)
+                pred = outputs["prediction"][0, 0].cpu().numpy()
+                plan_world = _ego_pred_to_world(
+                    pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
+                )
+                pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+                _feed_turn_indicator(s, outputs)
+            else:
+                # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
+                off = min(offset, len(plan_world[0]) - 1)
+                tx, ty, th = (
+                    float(plan_world[0][off, 0]),
+                    float(plan_world[0][off, 1]),
+                    float(plan_world[1][off]),
+                )
+                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                pred_cur = _world_plan_to_ego(
+                    plan_world[0][off:],
+                    plan_world[1][off:],
+                    s.live_pose[0],
+                    s.live_pose[1],
+                    s.live_pose[2],
+                )
+                # No fresh inference this step: hold the last decoded turn indicator so the
+                # 10 Hz turn_indicators history keeps scrolling with the same signal.
+                _hold_turn_indicator(s)
+            # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
+            # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
+            # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
+            # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
+            # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
+            # override path implements). Every step then lands on the predicted polyline point.
+            if tracker_mode == "perfect" and override is None:
+                tx, ty, th = (
+                    float(plan_world[0][0, 0]),
+                    float(plan_world[0][0, 1]),
+                    float(plan_world[1][0]),
+                )
+                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+            if (
+                draw_every is not None
+                and (window is None or (window[0] <= k <= window[1]))
+                and k % draw_every == 0
+            ):
+                repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
+                pending.append(
+                    draw.submit(
+                        _draw_step,
+                        np_dict,
+                        pred_cur,
+                        s.ego_shape,
+                        out_dir / f"{k:05d}.png",
+                        neighbor_ids=nids if color_by_uuid else None,
+                        step=k,
+                        total=cap,
+                        title_prefix=title_prefix,
+                        distance_label_offset_m=distance_label_offset_m,
+                        view_half_m=view_half_m,
+                        reproducer_ego=repro_xyh,
+                    )
+                )
+            snaps_before = s.snap_count
+            _advance_step(s, pred_cur, idx, device, timers, override=override)
+            if s.snap_count > snaps_before:
+                # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
+                # world location, so executing it next step would drag the ego right back. Invalidate
+                # it to force a fresh inference at the snapped pose (else the snap never sticks).
+                plan_world = None
+    # Every PNG must be on disk before the caller globs the directory for ffmpeg, and a worker
+    # exception only surfaces here.
+    for f in pending:
+        f.result()
     return _finalize(s)
 
 
@@ -1676,7 +1865,7 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
-    tracker_mode: str = "mpc",
+    tracker_mode: str = "mpc_batched",
     timeline_progress_mode: str = "pose",
     strong_brake_mps2: float = -2.5,
     yaw_gate: bool = True,
@@ -1689,6 +1878,7 @@ def run_segments_batched(
     danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
     danger_decluster_steps: int = 10,
     danger_manifest_callback=None,
+    goal_mode: str = "segment",
 ) -> list[dict]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1760,6 +1950,7 @@ def run_segments_batched(
                     replay_mode=timeline_progress_mode,
                     strong_brake_mps2=strong_brake_mps2,
                     yaw_gate=yaw_gate,
+                    goal_mode=goal_mode,
                 )
                 for (tl, start, end) in chunk
             ]
@@ -1840,7 +2031,7 @@ def run_segments_batched(
                         # ONE batched on-device world_to_ego_frame; downstream identical.
                         raw_payloads = [pre for _s, pre in live]
                         with timers("to_torch"):
-                            data, nb_list, npd_list = _to_torch_batch_gpu(
+                            data, nb_list, npd_list, raw_gpu = _to_torch_batch_gpu(
                                 raw_payloads,
                                 model_args,
                                 device,
@@ -1850,6 +2041,11 @@ def run_segments_batched(
                                     or danger_save_dir is not None
                                 ),
                             )
+                        # Per-segment GPU-resident scene slices for the per-step
+                        # scorers (same keys/values as np_dict, no host round trip).
+                        gpu_scenes = [
+                            {k: raw_gpu[k][i : i + 1] for k in raw_gpu} for i in range(len(live))
+                        ]
                         built = [
                             (
                                 s,
@@ -1863,6 +2059,7 @@ def run_segments_batched(
                         ]
                     else:
                         built = [(s, *pre) for s, pre in live]
+                        gpu_scenes = None  # CPU build: scorers consume the numpy np_dicts
                         with timers("to_torch"):
                             data = _to_torch_batch([b[1] for b in built], model_args, device)
                     with timers("model_forward"):
@@ -1878,6 +2075,9 @@ def run_segments_batched(
                                 else:
                                     nxt = s.cursor.max_idx_reached + 1
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
+                        # No-op unless the model was compiled with cudagraphs; one inference is
+                        # one step.
+                        mark_inference_step()
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
                         # Model's predicted turn indicator per segment, decoded with the SAME
@@ -1889,11 +2089,13 @@ def run_segments_batched(
                         score_list = score_object_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    danger_rows = (
-                        danger_scorer(built, preds, data, device)
-                        if danger_scorer is not None
-                        else [None] * len(built)
-                    )
+                    with timers("danger_scorer"):
+                        danger_rows = (
+                            danger_scorer(built, preds, data, device)
+                            if danger_scorer is not None
+                            else [None] * len(built)
+                        )
+                    realized_t0 = time.perf_counter()
                     realized_rows = []
                     for _row_i, (
                         (_s, np_dict, _nb, _idx, _suuid, _wbu),
@@ -1955,7 +2157,7 @@ def run_segments_batched(
                                     _s.realized_lag_streak = 0
                         realized_rows.append(
                             realized_event_scorer(
-                                np_dict,
+                                gpu_scenes[_row_i] if gpu_scenes is not None else np_dict,
                                 collided=bool(col),
                                 step=_s.k,
                                 model_pred_world=model_pred_world,
@@ -1966,6 +2168,7 @@ def run_segments_batched(
                                 realized_lag_gap_m=realized_lag_gap_m,
                             )
                         )
+                    timers.add("realized_events", time.perf_counter() - realized_t0)
                     for row_idx, (
                         (s, _np, nb, idx, suuid, wbu),
                         (cl, col, _M, collider_slot),
@@ -1977,7 +2180,9 @@ def run_segments_batched(
                             nb,
                             device,
                             timers,
-                            np_dict=_np,
+                            # GPU-resident slice when available: the rb / red-light
+                            # scorers then skip their per-step H2D re-upload.
+                            np_dict=gpu_scenes[row_idx] if gpu_scenes is not None else _np,
                             object_cl=float(cl),
                             object_col=bool(col),
                         )
@@ -2016,6 +2221,7 @@ def run_segments_batched(
                                 extra_manifest={
                                     "offense_frame_id": int(s.credit_window["offense_frame"])
                                 },
+                                timers=timers,
                             )
                             s.credit_saved = True
                             s.terminated = "credit_window_saved"
@@ -2096,6 +2302,7 @@ def run_segments_batched(
                                                 )
                                             ),
                                         },
+                                        timers=timers,
                                     )
                                     if manifest is not None:
                                         if danger_manifest_callback is not None:
@@ -2153,6 +2360,7 @@ def run_segments_batched(
                                             extra_manifest=_credit_event_metadata(
                                                 event_row_by_label.get(label)
                                             ),
+                                            timers=timers,
                                         )
                                         if (
                                             manifest is not None
@@ -2227,14 +2435,50 @@ def run_segments_batched(
                                         min_post_snap_frames=save_min_post_snap_frames,
                                         min_pre_frames=save_min_pre_frames,
                                         min_ego_speed=save_min_ego_speed,
+                                        timers=timers,
                                     )
                                     if mani is not None:
                                         s.episode_saved = True
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
+                    tracked_by_row: dict[int, tuple] = {}
+                    if tracker_mode == "mpc_batched":
+                        # ONE vectorized L-BFGS-B solve for every tracker-branch
+                        # segment this tick, instead of B serial scipy solves
+                        # inside _advance_step (its `tracked` fast path applies
+                        # the results; warmup segments keep their own branch).
+                        from scenario_generation.mpc_tracker import postprocess_reference
+                        from scenario_generation.mpc_tracker_batched import track_many
+
+                        with timers("advance_solve"):
+                            rows_b: list[int] = []
+                            trks_b, x0s_b, refs_b = [], [], []
+                            for i, (s, *_rest) in enumerate(built):
+                                if s.k < s.warmup_steps:
+                                    continue
+                                wxy, wh = _ego_pred_to_world(
+                                    preds[i][:, :2],
+                                    preds[i][:, 2:4],
+                                    s.live_pose[0],
+                                    s.live_pose[1],
+                                    s.live_pose[2],
+                                )
+                                refs_b.append(postprocess_reference(wxy, wh, dt=DT))
+                                x0s_b.append(
+                                    [s.live_pose[0], s.live_pose[1], s.live_pose[2], s.dyn.speed]
+                                )
+                                rows_b.append(i)
+                                trks_b.append(s.tracker)
+                            if rows_b:
+                                solved = track_many(
+                                    trks_b, np.asarray(x0s_b, dtype=np.float64), refs_b
+                                )
+                                tracked_by_row = dict(zip(rows_b, solved))
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.snap_count
-                        _advance_step(s, preds[i], idx, device, timers)
+                        _advance_step(
+                            s, preds[i], idx, device, timers, tracked=tracked_by_row.get(i)
+                        )
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
@@ -2271,6 +2515,7 @@ def _dump_credit_window(
     seg_end: int,
     label: str,
     extra_manifest: dict | None = None,
+    timers: Timers | None = None,
 ) -> dict | None:
     """Write an inclusive R2LPL credit window ending before the offense step.
 
@@ -2314,6 +2559,7 @@ def _dump_credit_window(
         min_post_snap_frames=0,
         min_pre_frames=0,
         min_ego_speed=0.0,
+        timers=timers,
     )
     if manifest is None:
         return None
@@ -2553,6 +2799,7 @@ def _dump_precollision_window(
     min_post_snap_frames: int = 0,
     min_pre_frames: int = 30,
     min_ego_speed: float = 0.5,
+    timers: Timers | None = None,
 ) -> dict | None:
     """Write the scenes before collision step ``t_c`` from a live buffer.
 
@@ -2575,6 +2822,9 @@ def _dump_precollision_window(
     import json
     from pathlib import Path
 
+    if timers is None:
+        timers = Timers()  # throwaway sink: standalone callers without a report
+    t_window = time.perf_counter()
     out_dir = Path(out_dir)
     # Clear any prior batch in this dir FIRST — before the skip early-return — so that a
     # re-mine which now SKIPS this segment (or writes a shorter window) never leaves stale
@@ -2670,6 +2920,7 @@ def _dump_precollision_window(
                 f"[{start_k}, {t_c}] but it is absent (window-clamp / buffer regression)"
             )
         _, idx, live_pose, np_dict, slot_uuids, _wbu = live_by_step[step_k]
+        _t = time.perf_counter()
         scene = _scene_npz_from_np_dict(np_dict)
         ep = scene["ego_agent_past"]
         scene["ego_agent_past"] = np.column_stack(
@@ -2760,6 +3011,8 @@ def _dump_precollision_window(
             if naf is not None:
                 dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
                 scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
+        timers.add("dump_naf", time.perf_counter() - _t)
+        _t = time.perf_counter()
         eaf = np.zeros((fut_len, 4), dtype=np.float32)
         for j in range(1, fut_len + 1):
             fk = step_k + j
@@ -2808,9 +3061,12 @@ def _dump_precollision_window(
         if 0 < n_recorded < fut_len:
             recorded_eaf[n_recorded:] = recorded_eaf[n_recorded - 1]
         scene["ego_recorded_future"] = recorded_eaf
+        timers.add("dump_futures", time.perf_counter() - _t)
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
+        _t = time.perf_counter()
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
+        timers.add("dump_savez", time.perf_counter() - _t)
         saved.append(int(step_k))
         saved_frame_ids.append(_frame_id(tl, idx))
 
@@ -2832,4 +3088,5 @@ def _dump_precollision_window(
         "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    timers.add("dump_window", time.perf_counter() - t_window)
     return manifest

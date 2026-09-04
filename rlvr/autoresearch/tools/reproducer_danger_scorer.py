@@ -96,15 +96,25 @@ def _np_dict_to_scoring_tensors(
     *,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
+    """Normalize a scene dict (numpy arrays OR torch tensors) to scoring tensors.
+
+    Values that are already tensors on the right device/dtype pass through
+    without a copy (``Tensor.to`` is a no-op then) — the rollout hands the
+    scorer GPU-resident slices of the batched model input, so the per-segment
+    host->device re-upload this function used to force is gone.
+    """
     out: dict[str, torch.Tensor] = {}
     for key, value in np_dict.items():
-        array = np.asarray(value)
         if key in {"lanes_has_speed_limit", "route_lanes_has_speed_limit"}:
-            out[key] = torch.as_tensor(array, dtype=torch.bool, device=device)
+            dtype = torch.bool
         elif key in {"turn_indicators", "delay"}:
-            out[key] = torch.as_tensor(array, dtype=torch.long, device=device)
+            dtype = torch.long
         else:
-            out[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
+            dtype = torch.float32
+        if torch.is_tensor(value):
+            out[key] = value.to(device=device, dtype=dtype)
+        else:
+            out[key] = torch.as_tensor(np.asarray(value), dtype=dtype, device=device)
     if "delay" not in out:
         out["delay"] = torch.zeros((1,), dtype=torch.long, device=device)
     return out
@@ -408,6 +418,7 @@ def build_realized_reward_scorer(
     device: str,
     horizon: int,
     sample_step: int = 10,
+    progress_reference_expert: bool = False,
 ):
     """Realized closed-loop reward, computed natively during a mining rollout.
 
@@ -451,6 +462,31 @@ def build_realized_reward_scorer(
     teleport_ks: dict[int, set] = {}  # seg -> step indices where an unstick teleport fired
     last_snaps: dict[int, int] = {}
     acc = {"sum": 0.0, "n": 0}  # persistent running total across batches
+    comp = {
+        "centerline": 0.0,
+        "feasibility": 0.0,
+        "progress": 0.0,
+        "collision_poses": 0,
+        "rb_crossing_poses": 0,
+        "kinematic_poses": 0,
+    }  # per-component sums/counts over the SAME scored poses (decomposition of the mean)
+    # Per-SEGMENT reward samples. The aggregate mean alone hides how wide the per-chunk
+    # spread is, and that spread sets the standard error: without it, model-vs-model
+    # differences of a few percent look meaningful when they are not. Segment identity is a
+    # process-local id() here, so these are exposed as an ORDERED LIST (scoring order) for
+    # computing SD/SE, not as a joinable key -> pair models at shard level instead, which is
+    # deterministic by manifest order and therefore identical across runs.
+    per_segment: dict[int, list[float]] = {}
+    # Finalized per-segment means. id(s) keys are only unique WITHIN one batch —
+    # CPython reuses freed addresses across batches — so per_segment must be
+    # drained into this list and cleared on every finalize() (which runs once
+    # per batch), never accumulated across batches under id keys.
+    per_segment_means: list[float] = []
+    # Chunk key per segment (s.output_route_key, set by run_segments_batched from
+    # route_keys). Lets finalize expose a per-chunk mean so the mining loop can persist
+    # per-chunk realized reward into segments.jsonl (paired per-chunk deltas need it;
+    # only the aggregate mean was recoverable from summary.json before).
+    seg_keys: dict[int, str | None] = {}
 
     def hook(built, preds, data, _device):
         rows = []
@@ -461,6 +497,7 @@ def build_realized_reward_scorer(
             wbu = rest[3] if len(rest) > 3 else None  # uuid -> current shown world pose
             k = int(s.k)
             sid = id(s)
+            seg_keys.setdefault(sid, getattr(s, "output_route_key", None))
             poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
             if wbu:
                 nbr_world.setdefault(sid, {})[k] = {
@@ -511,7 +548,9 @@ def build_realized_reward_scorer(
         return nf
 
     def finalize() -> tuple[float, int]:
+        per_chunk: dict[str, dict[str, float]] = {}
         for sid, kmap in poses.items():
+            seg_key = seg_keys.get(sid)
             ks = sorted(kmap)
             kpos = {k: i for i, k in enumerate(ks)}  # step index -> contiguous row
             world = np.stack([kmap[k] for k in ks])
@@ -536,15 +575,49 @@ def build_realized_reward_scorer(
                 if nf is not None:
                     sd_gpu["neighbor_agents_future"] = torch.from_numpy(nf[None]).to(tdev)
                 ego = torch.from_numpy(fut[None]).to(tdev)
+                if progress_reference_expert and "ego_expert_future" in sd:
+                    # Underprogress is gated on (N > 1 or a baseline reference); realized
+                    # scoring passes ONE trajectory, so without this the penalty NEVER fires
+                    # and the ruler is blind to lagging. Pin it to the expert.
+                    _ef = sd["ego_expert_future"]
+                    _ef = _ef[0] if _ef.dim() == 3 else _ef
+                    _xy = _ef[:, :2]
+                    _valid = _xy.abs().sum(dim=-1) > 0.1
+                    if int(_valid.sum()) >= 2:
+                        _len = torch.diff(_xy[_valid], dim=0).norm(dim=-1).sum()
+                        sd_gpu["baseline_path_len"] = _len.to(tdev)
                 rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
                 acc["sum"] += float(rb[0].total)
                 acc["n"] += 1
+                per_segment.setdefault(int(sid), []).append(float(rb[0].total))
+                if seg_key is not None:
+                    pc = per_chunk.setdefault(seg_key, {"sum": 0.0, "n": 0})
+                    pc["sum"] += float(rb[0].total)
+                    pc["n"] += 1
+                comp["centerline"] += float(rb[0].centerline)
+                comp["feasibility"] += float(rb[0].feasibility)
+                comp["progress"] += float(rb[0].progress)
+                comp["collision_poses"] += int(rb[0].collision_step is not None)
+                comp["rb_crossing_poses"] += int(bool(rb[0].rb_crossing))
+                comp["kinematic_poses"] += int(bool(getattr(rb[0], "kinematic_violated", False)))
         poses.clear()
         contexts.clear()
         nbr_world.clear()
         slot_uuids_at.clear()
         teleport_ks.clear()
         last_snaps.clear()
+        seg_keys.clear()
+        finalize.components = dict(comp)
+        # One mean per segment, in scoring order, so callers can report SD / standard error
+        # of the reward mean instead of quoting it as if it were exact.
+        per_segment_means.extend(sum(v) / len(v) for v in per_segment.values() if v)
+        per_segment.clear()
+        finalize.per_segment_rewards = list(per_segment_means)
+        # Per-chunk means for the batch just finalized only (buffers are per batch);
+        # the caller reads this right after finalize() and attaches it to segment rows.
+        finalize.per_chunk = {
+            k: {"mean": v["sum"] / v["n"], "poses": int(v["n"])} for k, v in per_chunk.items()
+        }
         return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]
 
     return hook, finalize

@@ -1,0 +1,9 @@
+{
+  "_doc": "DEFAULT real training config for IL / base supervised training (diffusion_planner/train_predictor.py, the README predictor training) on a v1 dataset. From --base_model (warm-start) or from scratch when omitted. NO n_train_cap/n_val_cap => trains on the ENTIRE pointed dataset (matches the canonical trainer, which has no cap). For a quick 'did I break it' PR check on a small subsample, use il_ci.json instead.",
+  "train_epochs": 11,
+  "warm_up_epoch": 0,
+  "batch_size": 8,
+  "learning_rate": 0.0001,
+  "use_data_augment": true,
+  "augment_prob": 0.5
+}

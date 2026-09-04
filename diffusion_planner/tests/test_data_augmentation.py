@@ -1057,7 +1057,158 @@ def test_augment_collision_batch_selectively_suppresses():
 # ──────────────────────────────── runner ────────────────────────────────────
 
 
+# ──────────────────────────── frenet augmentation ───────────────────────────
+
+
+def _make_frenet_inputs(B: int = 4, vx: float = 5.0, T_past: int = 21, T_fut: int = 80):
+    """Inputs for FrenetStatePerturbationTensor: 4-col past, ego_shape, 4-ch borders,
+    and the canonical 3-col (x, y, heading) neighbor future."""
+    inputs, ego_future, neighbors_future = _make_inputs(B=B, T_past=T_past, T_fut=T_fut)
+    inputs["ego_current_state"] = _ego_state(B, vx=vx)
+    # 4-col (x, y, cos, sin) past, straight along +x at `vx`
+    past = torch.zeros(B, T_past, 4, dtype=torch.float32)
+    for t in range(T_past):
+        past[:, t, 0] = (t - (T_past - 1)) * 0.1 * vx
+    past[:, :, 2] = 1.0
+    inputs["ego_agent_past"] = past
+    inputs["ego_shape"] = torch.tensor([[2.7, 4.5, 1.9]] * B, dtype=torch.float32)
+    inputs["line_strings"] = torch.zeros(B, 2, 5, 4, dtype=torch.float32)
+    inputs["goal_pose"] = torch.zeros(B, 4, dtype=torch.float32)
+    for t in range(T_fut):
+        ego_future[:, t, 0] = (t + 1) * 0.1 * vx
+    # neighbor future stays 3-col: the frenet corridor must handle (x, y, heading)
+    assert neighbors_future.shape[-1] == 3
+    inputs["neighbor_agents_future"] = neighbors_future
+    return inputs, ego_future, neighbors_future
+
+
+def test_frenet_handles_3col_neighbor_future():
+    """Regression: canonical NPZs carry 3-col neighbor futures and train_epoch
+    converts to cos/sin only AFTER augmentation — frenet must not crash, must
+    keep shapes/contract, and must leave the t=0 state on base_link (vy=ay=0)."""
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=8, vx=5.0)
+    fut_before = ego_future.clone()
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    out_inputs, out_future, out_nbr = aug(inputs, ego_future, neighbors_future)
+
+    assert out_future.shape == fut_before.shape
+    assert out_nbr.shape == neighbors_future.shape
+    cur = out_inputs["ego_current_state"]
+    assert cur.shape[-1] == 10
+    moved = (out_future[..., :2] - fut_before[..., :2]).norm(dim=-1).amax(-1) > 0.05
+    assert bool(moved.any()), "augment_prob=1 at 5 m/s should perturb at least one row"
+    assert torch.allclose(cur[moved, 5], torch.zeros_like(cur[moved, 5]), atol=ATOL), "vy != 0"
+    assert torch.allclose(cur[moved, 7], torch.zeros_like(cur[moved, 7]), atol=ATOL), "ay != 0"
+    assert torch.isfinite(out_future).all() and torch.isfinite(cur).all()
+    print("  [PASS] frenet handles 3-col neighbor futures + base_link contract")
+
+
+def test_frenet_cli_selection():
+    """--augment_type frenet must be selectable through the shared dataclass parser,
+    on both the IL config and the GRPO config that inherits it."""
+    from diffusion_planner.config import GRPOConfig, TrainConfig, build_config, build_parser
+
+    for cfg_cls in (TrainConfig, GRPOConfig):
+        args = build_parser(cfg_cls, description="t").parse_args(["--augment_type", "frenet"])
+        cfg = build_config(cfg_cls, args)
+        assert cfg.augment_type == "frenet", f"{cfg_cls.__name__} did not accept frenet"
+    print("  [PASS] frenet selectable via CLI on TrainConfig and GRPOConfig")
+
+
+def test_frenet_handles_4col_futures():
+    """ego/neighbor futures may also arrive as (x, y, cos, sin): column 2 must be
+    read as cos(heading), not as an angle, and written back in the same layout."""
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future3, _ = _make_frenet_inputs(B=8, vx=5.0)
+    ego_future = torch.cat(
+        [ego_future3[..., :2], ego_future3[..., 2:3].cos(), ego_future3[..., 2:3].sin()], dim=-1
+    )
+    nbr_future = torch.zeros(*inputs["neighbor_agents_past"].shape[:2], 80, 4)
+    inputs["neighbor_agents_future"] = nbr_future
+    fut_before = ego_future.clone()
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    _, out_future, _ = aug(inputs, ego_future, nbr_future)
+
+    # centric_transform always returns the canonical 3-col (x, y, heading) future
+    # (same contract as quintic); train_epoch re-converts to cos/sin afterwards.
+    assert out_future.shape[-1] == 3
+    moved = (out_future[..., :2] - fut_before[..., :2]).norm(dim=-1).amax(-1) > 0.05
+    assert bool(moved.any())
+    assert torch.isfinite(out_future).all()
+    assert out_future[..., 2].abs().amax() < 4.0, "column 2 is not a plausible heading angle"
+    print("  [PASS] frenet handles 4-col (x, y, cos, sin) futures")
+
+
+def test_frenet_low_speed_gate():
+    """A near-stationary or reversing ego must never be augmented (the quintic
+    augmenter has the same gate): sideways translation of a stopped ego passes
+    every path-relative feasibility metric trivially."""
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    for vx in (0.0, 0.5, -5.0):
+        torch.manual_seed(0)
+        inputs, ego_future, neighbors_future = _make_frenet_inputs(B=4, vx=vx)
+        fut_before = ego_future.clone()
+        past_before = inputs["ego_agent_past"].clone()
+        aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+        out_inputs, out_future, _ = aug(inputs, ego_future, neighbors_future)
+        assert torch.allclose(out_future[..., :2], fut_before[..., :2], atol=ATOL), (
+            f"vx={vx}: future rewritten despite the low-speed/reverse gate"
+        )
+        assert torch.allclose(out_inputs["ego_agent_past"], past_before, atol=ATOL), (
+            f"vx={vx}: history rewritten despite the low-speed/reverse gate"
+        )
+    print("  [PASS] frenet low-speed / reverse gate")
+
+
+def test_frenet_corridor_unconstrained_without_obstacles():
+    """With no borders and no neighbors the corridor must not constrain anything.
+
+    Guards a regression that pruned the bounds to dy_max plus the rotation
+    margin. dy is the offset at t=0, NOT a bound on the quintic: a draw with an
+    initial heading slope overshoots it (measured |L| = 3.39 m for dy = 1.98 m),
+    so such a cap silently rejects feasible perturbations even on an empty road.
+    Any future pruning must be checked against the profiles themselves, not dy.
+    """
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=4, vx=10.0)
+    inputs["line_strings"] = torch.zeros_like(inputs["line_strings"])  # no borders
+    inputs["neighbor_agents_past"] = torch.zeros_like(inputs["neighbor_agents_past"])
+    inputs["neighbor_agents_future"] = torch.zeros_like(inputs["neighbor_agents_future"])
+
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    P = inputs["ego_agent_past"].shape[1]
+    xy = torch.cat([inputs["ego_agent_past"][..., :2], ego_future[..., :2]], dim=1)
+    tan = torch.cat(
+        [
+            inputs["ego_agent_past"][..., 2:4],
+            torch.stack([ego_future[..., 2].cos(), ego_future[..., 2].sin()], dim=-1),
+        ],
+        dim=1,
+    )
+    nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
+    wb, ego_l, ego_w = (inputs["ego_shape"][:, i] for i in range(3))
+    lo, hi = aug._corridor(inputs, xy, tan, nrm, ego_w / 2, ego_l / 2, wb)
+
+    assert float(lo.max()) <= -20.0 + ATOL, f"corridor cut from below with no obstacles: {lo.max()}"
+    assert float(hi.min()) >= 20.0 - ATOL, f"corridor cut from above with no obstacles: {hi.min()}"
+    assert P > 0
+    print("  [PASS] frenet corridor unconstrained without obstacles")
+
+
 ALL_TESTS = [
+    test_frenet_handles_3col_neighbor_future,
+    test_frenet_handles_4col_futures,
+    test_frenet_cli_selection,
+    test_frenet_low_speed_gate,
+    test_frenet_corridor_unconstrained_without_obstacles,
     # ── vector_transform ──
     test_vector_transform_identity,
     test_vector_transform_rotation_90,
@@ -1153,3 +1304,59 @@ if __name__ == "__main__":
         sys.exit(1)
     else:
         print("All tests passed!")
+
+
+def test_frenet_preserves_zero_padded_ego_history():
+    """Leading zero padding means "no history"; it must survive the rewrite untouched.
+
+    The augmenter rewrites every history timestep and the inherited centric_transform then
+    re-centres the whole block, so without an explicit restore the padded rows come back as
+    plausible poses. The encoder reads ego_agent_past directly, so those would be presented
+    to the model as history that never happened.
+    """
+    import torch
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=8)
+    pad = 5
+    inputs["ego_agent_past"][:, :pad, :] = 0.0
+    before = inputs["ego_agent_past"].clone()
+
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    aug(inputs, ego_future, neighbors_future)
+    past = inputs["ego_agent_past"]
+    accepted = torch.nonzero(aug._aug_rows).flatten().tolist()
+    assert accepted, "fixture should accept at least one row, or this proves nothing"
+
+    # every originally padded row is bitwise zero, on accepted and rejected rows alike
+    assert torch.equal(past[:, :pad], torch.zeros_like(past[:, :pad]))
+    # the real history is still usable and was actually rewritten where accepted
+    assert torch.isfinite(past[:, pad:]).all()
+    assert (past[accepted, pad:] != before[accepted, pad:]).any()
+    # rejected rows are untouched end to end
+    rejected = [b for b in range(past.shape[0]) if b not in accepted]
+    if rejected:
+        assert torch.equal(past[rejected], before[rejected])
+
+
+def test_frenet_padding_does_not_leak_into_the_first_real_step():
+    """A padded slot sits at the origin; the first REAL sample must not take its heading
+    from that phantom jump. The padded prefix is held at the first real pose so the
+    differences across the boundary are zero."""
+    import torch
+    from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
+
+    torch.manual_seed(0)
+    inputs, ego_future, neighbors_future = _make_frenet_inputs(B=4)
+    pad = 4
+    inputs["ego_agent_past"][:, :pad, :] = 0.0
+    aug = FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu")
+    aug(inputs, ego_future, neighbors_future)
+
+    past = inputs["ego_agent_past"]
+    for b in torch.nonzero(aug._aug_rows).flatten().tolist():
+        cos, sin = past[b, pad, 2].item(), past[b, pad, 3].item()
+        assert abs(cos * cos + sin * sin - 1.0) < 1e-3, "first real step lost a unit heading"
+        step = (past[b, pad + 1, :2] - past[b, pad, :2]).norm().item()
+        assert step < 5.0, f"first real step jumped {step:.1f} m — padding leaked in"

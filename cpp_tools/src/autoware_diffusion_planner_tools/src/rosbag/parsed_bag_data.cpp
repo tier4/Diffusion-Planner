@@ -17,13 +17,17 @@
 #include "rosbag_parser.hpp"
 #include "utils/timestamp_utils.hpp"
 
+#include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
+
 #include <iostream>
 
-ParsedBagData load_rosbag(const std::string & rosbag_path, int64_t limit)
+ParsedBagData load_rosbag(
+  const std::string & rosbag_path, const int64_t limit, const bool load_control_modes)
 {
   using autoware_perception_msgs::msg::TrackedObjects;
   using autoware_perception_msgs::msg::TrafficLightGroupArray;
   using autoware_planning_msgs::msg::LaneletRoute;
+  using autoware_vehicle_msgs::msg::ControlModeReport;
   using autoware_vehicle_msgs::msg::TurnIndicatorsReport;
   using geometry_msgs::msg::AccelWithCovarianceStamped;
   using nav_msgs::msg::Odometry;
@@ -81,6 +85,10 @@ ParsedBagData load_rosbag(const std::string & rosbag_path, int64_t limit)
       data.timestamp_stats_map.add_timestamp(
         "/perception/traffic_light_recognition/traffic_signals",
         parse_timestamp(traffic_signal.stamp), rosbag_time);
+    } else if (load_control_modes && msg->topic_name == "/vehicle/status/control_mode") {
+      const ControlModeReport control_mode =
+        rosbag_parser.deserialize_message<ControlModeReport>(msg);
+      data.control_modes.push_back({rosbag_time, static_cast<int32_t>(control_mode.mode)});
     }
 
     parse_count++;
@@ -94,6 +102,9 @@ ParsedBagData load_rosbag(const std::string & rosbag_path, int64_t limit)
   std::cout << "Parsed " << data.route_msgs.size() << " route messages" << std::endl;
   std::cout << "Parsed " << data.turn_indicators.size() << " turn indicator messages" << std::endl;
   std::cout << "Parsed " << data.traffic_signals.size() << " traffic signal messages" << std::endl;
+  if (load_control_modes) {
+    std::cout << "Parsed " << data.control_modes.size() << " control mode messages" << std::endl;
+  }
 
   return data;
 }

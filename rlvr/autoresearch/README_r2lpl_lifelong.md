@@ -144,7 +144,8 @@ call to the prob/normal split (repaired scenes = prob, the listed real normal
 scenes = normal), with the mix controlled by the training config's explicit
 `n_prob_scenes` / `n_normal_scenes`. The list must be a non-empty JSON list of
 paths (validated at startup), the normal scenes are homogenized to 4-col
-neighbor futures into `r2lpl_round_NNN/normal_scenes_4col/` with a per-round
+neighbor futures into the campaign-level `normal_scenes_4col/` (converted once
+per campaign, manifest-cached across rounds) with a per-round
 resolved list (same collate incompatibility as the anchor slice below), and
 each round fails before training if `n_prob_scenes` is below that round's
 repaired-scene count — `run_experiment`'s `min(n_prob, len(prob))` sampling
@@ -152,8 +153,9 @@ would otherwise silently drop repairs.
 Raw logged anchor scenes carry
 3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
 `[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the
-3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
-(zero padding rows preserved) before the union.
+3-col anchors as 4-col copies under the campaign-level `anchor_scenes_4col/`
+(zero padding rows preserved, conversions manifest-cached so each anchor scene
+is converted once per campaign) before the union.
 
 For the base_sft backend, `training.train_args.ema_decay` is forwarded to
 `train_predictor --ema_decay`. The default 0.999 (time constant ~1000 steps)
@@ -325,7 +327,9 @@ building each chunk.
 
 For this workflow, the intended reproducer settings are:
 
-- `tracker_mode="mpc"`
+- `tracker_mode="mpc_batched"` (bicycle-model MPC, one vectorized solve for all
+  segments per tick; `"mpc"` selects the legacy serial per-segment solve — same
+  events within a frame or two of onset shift, ~2.3x slower advance stage)
 - `timeline_progress_mode="clock"`
 - `neighbor_history_mode="sim"`
 - `gpu_transform=true`
@@ -371,10 +375,33 @@ override `width_s` or `gap_s`; scalar frame-count entries are not accepted.
 
 For each mined scene:
 
-1. Generate `K` candidate ego trajectories.
-2. Score all candidates against the configured gates.
-3. Keep at most one winner.
-4. Drop the scene if no candidate passes.
+1. Generate `K` candidate ego trajectories (the `anchor_fan_16_cl3` variant adds
+   a deterministic slot, 16 anchor-prototype slots and 3 route-centerline guided
+   slots, K=20).
+2. For expert-disagreement-like rows (label OR `expert_disagreement_reason`),
+   synthesize scripted candidates from ONE GT-schedule re-timing entry point: the
+   stay-behind stop morph (stop anchor from the recorded expert via
+   `--expert_stop_anchor recorded`) and the depart morph for fail-to-take-off
+   rows (default ON, `--disable_depart_morph` to opt out). Scripted candidates
+   join the same pool under the same gates — they are never forced.
+3. Score all candidates against the configured gates, then apply the trust
+   region (`--max_expert_dev_m`): gate-passing candidates whose deviation from
+   the expert reference exceeds the bound are rejected; the depart candidate is
+   measured with a timing-free path distance (a delayed departure follows the
+   expert's geometry) while all others use pointwise L2.
+4. Rank survivors with the unified state-weighted rule (paper Eq. 26): rule
+   score + route-path consistency + expert consistency, weighted by the state
+   class from the trajectory-level expert progress gap (paper Eq. 24). Rows
+   carrying a measured `expert_disagreement_max_dev` classify by it regardless
+   of their primary label.
+5. Keep at most one winner; `--save_candidates` persists the full pool
+   (`<target>.candidates.npz`: all K trajectories, reward totals, selected and
+   morph indices) for later re-scoring.
+6. Drop the scene if no candidate passes.
+
+With `--progress_reference_expert` the underprogress reference is pinned to the
+logged expert's path length for every repaired row, so the progress discipline
+does not collapse to the model grading itself.
 
 Before candidate generation, repair groups rows by event window. If any source
 scene in an event window is already colliding with any neighbor at t=0, or is
@@ -442,8 +469,8 @@ The re-timing morph covers the fail-to-stop direction only: it re-times the
 model's OWN plan, and a parked plan contains no road ahead to accelerate
 along, so `model_lagging_expert` (fail-to-take-off) scenes die as
 `not_synthesized:infeasible_deceleration`. With
-`repair_generation.enable_depart_morph: true` (CLI `--enable_depart_morph`,
-off by default) a second scripted candidate is synthesized for those scenes
+`repair_generation.enable_depart_morph` (CLI default ON;
+`--disable_depart_morph` to opt out) a second scripted candidate is synthesized for those scenes
 from the EXPERT path's geometry: a cubic Hermite bridge connects the ego pose
 to the expert path, and the same accel/jerk-limited tracker chases the
 expert's progress schedule starting at the ego (no jump at t=0; full catch-up
@@ -471,8 +498,41 @@ Per round, the workflow reports:
 - replay memory size
 - final training scene count
 - guard metrics, when guards are configured
+- realized closed-loop reward (`--realized_reward`): aggregate mean with
+  SD/SEM/segment count (pooled across shards), the per-term component
+  decomposition, and a per-chunk mean in every mining segments row
+  (`realized_cl_reward_chunk` + `_poses`) so frozen chunk sets support paired
+  per-chunk model comparisons.
 
 Artifacts belong under the SSD `auto_research` area, not inside the git repo.
+
+## Replay Target Refresh (`replay_refresh`)
+
+The replay memory is a floor, not a leash: with `replay_refresh: true` each
+round re-repairs the stale replayed scenes with the CURRENT policy (same reward
+ruler) and keeps `max(frozen, fresh)` per scene; refreshed targets are then
+persisted back into the round memory (atomically) so the improvement carries to
+later rounds instead of being re-derived. Zero fresh gate-passing candidates
+keeps every frozen target and never aborts the round. See
+`refresh_replay_targets.py`.
+
+## Dataset Pool Construction
+
+`build_r2lpl_pools.py` builds the anchor/waits training pools from an IL scene
+list as chainable stages (seeded subsample, moving filter, stop-go waits via
+`build_patience_benchmark --out_pool`, per-log frame dedup, `is_skipped` audit,
+route-arc region exclusion). Every output-changing threshold is a required
+argument and the stages fail loudly on unreadable inputs.
+`build_resume_benchmark.py` selects quasi-stationary-at-t0 scenes whose
+recorded ego resumes mid-horizon — the take-off decision benchmark.
+`prep_ddp_ema.py` rewrites checkpoint keys with the ``module.`` prefix so EMA
+extractions evaluate through the standard DDP validation entrypoint.
+
+Replay-memory notes: entry difficulty falls back to the winning candidate's
+reward total when the width fields are absent (repaired rows), and
+``label_quotas`` keys accept the ``label/reason`` form (e.g.
+``expert_disagreement/model_lagging_expert``) so per-reason teacher classes can
+be reserved separately from the umbrella label.
 
 ## Hard-Example Signal (`target_gt_disagreement`)
 
@@ -532,7 +592,7 @@ Common production settings:
 - `repair_generation.repair_labels=["road_border_crossing","static_collision","moving_collision","expert_disagreement"]`
 - `validate_on_repaired_targets=true` when training validation should measure
   imitation on the repaired scene-target pairs produced by the same round
-- `perception_reproducer.tracker_mode=mpc`
+- `perception_reproducer.tracker_mode=mpc_batched`
 - `perception_reproducer.timeline_progress_mode=clock`
 - `perception_reproducer.neighbor_history_mode=sim`
 

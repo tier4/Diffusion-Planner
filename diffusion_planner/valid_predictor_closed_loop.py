@@ -16,17 +16,15 @@ always produces video: one MP4 per route (``<route>.mp4``). Per-route metrics ar
 Clearance t-digest sketches used for multi-GPU p5 merge are written beside them as
 ``tdigests.jsonl`` / ``tdigests_{rank}.jsonl`` so ``segments.jsonl`` stays human-readable.
 
-Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
-the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
-closed-loop mining config. ``--npz_root`` is either one NPZ dir tree or a .json path list of
-route dirs; given a path list of multiple routes, the rollout automatically fans out one worker
-process per visible GPU (each its own model copy), which also parallelizes the matplotlib render.
-Example (1st epoch of a GRPO run)::
+Multi-GPU: launched via ``torch.distributed.run`` (same as training). Each rank reads
+``RANK``/``WORLD_SIZE`` from the environment and evaluates its route shard
+(``route_keys[rank::world]``). Rank 0 merges all shards when done.
+Example::
 
     NPZ=/path/to/closed_loop_npz_dir   # or /path/to/path_list.json
-
-    python3 valid_predictor_closed_loop.py \
-        --model_path /mnt/nvme/training_result/20260622-083517_per_sample_noise_grpo/epoch0001/best_model.pth \
+    python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone \
+        valid_predictor_closed_loop.py \
+        --model_path /path/to/best_model.pth \
         --npz_root ${NPZ}
 """
 
@@ -37,6 +35,8 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+
+from diffusion_planner.utils import ddp
 
 
 def _negative_mps2(value: str) -> float:
@@ -66,6 +66,13 @@ def parse_args() -> argparse.Namespace:
         help="dir tree of route NPZ frames (recursively globbed, grouped into routes), OR a .json "
         "path list of such dirs (one route dir per entry, like --train_set_list). Pose JSON "
         "sidecars are read from next to each .npz, falling back to its own source tree.",
+    )
+    p.add_argument(
+        "--out_dir",
+        type=Path,
+        default=None,
+        help="output dir for segments.jsonl/summary.json/videos. Default: "
+        "<model_path dir>/closed_loop/<timestamp>/",
     )
     # --- tunable knobs (default to the closed-loop mining config) ---
     p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
@@ -133,6 +140,32 @@ def parse_args() -> argparse.Namespace:
         "dominant cost; this throttles it without touching the rollout. Frames are encoded at --fps "
         "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
     )
+    p.add_argument(
+        "--draw_workers",
+        type=int,
+        default=4,
+        help="render the PNGs on this many worker processes (minimum 1). Output is "
+        "byte-identical whatever the count; costs ~780 MB of RSS per worker, per GPU shard",
+    )
+    p.add_argument(
+        "--abort_deviation_m",
+        type=float,
+        default=0.0,
+        help="early-abort a segment (terminated='diverged') once GT deviation exceeds this "
+        "(m) for --abort_after steps (0=disabled)",
+    )
+    p.add_argument("--abort_after", type=int, default=30)
+    p.add_argument(
+        "--abort_max_snaps",
+        type=int,
+        default=0,
+        help="early-abort a segment after this many unstick teleports (0=disabled)",
+    )
+    p.add_argument(
+        "--drop_objects",
+        action="store_true",
+        help="empty-world ablation: zero out dynamic/static objects each step (map kept)",
+    )
     return p.parse_args()
 
 
@@ -161,38 +194,35 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         fps=args.fps,
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,
+        draw_workers=args.draw_workers,
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
         strong_brake_mps2=args.strong_brake_mps2,
-    )
-
-
-def _run_shard(rank, num_workers, gpu_ids, model_path, npz_root, out_dir, knobs) -> None:
-    """Worker entrypoint (spawned): load the model on this worker's GPU and roll out the rank-th
-    route slice, writing segments_{rank}.jsonl plus its PNG dirs/MP4s into the shared out_dir."""
-    from scenario_generation.closed_loop_eval import run_closed_loop_eval
-
-    device = f"cuda:{gpu_ids[rank % len(gpu_ids)]}"
-    model, model_args = _load_model(Path(model_path), device)
-    run_closed_loop_eval(
-        model,
-        model_args,
-        npz_root,
-        out_dir,
-        device=device,
-        verbose=(rank == 0),
-        shard=(rank, num_workers),
-        **knobs,
+        abort_deviation_m=args.abort_deviation_m,
+        abort_after=args.abort_after,
+        abort_max_snaps=args.abort_max_snaps,
+        drop_objects=args.drop_objects,
     )
 
 
 def _merge_shards(
     out_dir: Path, npz_root, near_miss_thresh: float, *, strong_brake_mps2: float
 ) -> dict:
-    """Aggregate every worker's segments_{rank}.jsonl (+ tdigests sidecars) into one summary."""
-    from scenario_generation.closed_loop_eval import aggregate, load_segment_rows_with_tdigests
+    """Aggregate every rank's segments_{rank}.jsonl (+ tdigests sidecars) into one summary.
+
+    Also writes a merged, human-readable ``segments.jsonl`` (same tdigest-stripped shape the
+    sequential path writes) for downstream consumers.
+    """
+    from scenario_generation.closed_loop_eval import (
+        aggregate,
+        load_segment_rows_with_tdigests,
+        segment_row_for_json,
+    )
 
     rows = load_segment_rows_with_tdigests(out_dir)
+    with open(out_dir / "segments.jsonl", "w") as f:
+        for r in sorted(rows, key=lambda r: r["route"]):
+            f.write(json.dumps(segment_row_for_json(r, route=r["route"]), default=float) + "\n")
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len({r["route"] for r in rows})
@@ -206,57 +236,67 @@ def _write_summary(out_dir: Path, summary: dict) -> None:
 
 
 def main() -> None:
+    import torch
+
+    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+
     args = parse_args()
 
-    out_dir = args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = args.out_dir or (
+        args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     knobs = _eval_knobs(args)
 
-    import torch
+    class _CfgShim:
+        ddp = True
 
-    from scenario_generation.closed_loop_eval import enumerate_routes, resolve_npz_roots
+    _rank, _local_rank, _world = ddp.ddp_setup_universal(True, _CfgShim())
+    print(f"{_rank=}, {_local_rank=}, {_world=}")
+    shard = (_rank, _world) if _world > 1 else None
 
-    # One worker process per visible GPU (respecting CUDA_VISIBLE_DEVICES), capped at the route
-    # count so no worker gets an empty shard. Enumerate up front -- cheap globbing, no CUDA -- so the
-    # parent never initializes a CUDA context before spawn. 1 GPU or 1 route => plain sequential.
-    n_gpu = torch.cuda.device_count() if args.device.startswith("cuda") else 0
-    n_routes = sum(len(enumerate_routes(r)) for r in resolve_npz_roots(args.npz_root))
-    nproc = max(1, min(n_gpu, n_routes))
-
-    if nproc <= 1:
-        from scenario_generation.closed_loop_eval import run_closed_loop_eval
-
-        model, model_args = _load_model(args.model_path, args.device)
-        print(f"device: {args.device} | model: {args.model_path} | out: {out_dir}")
-        summary = run_closed_loop_eval(
-            model, model_args, args.npz_root, out_dir, device=args.device, verbose=True, **knobs
-        )
+    if args.device.startswith("cuda"):
+        torch.cuda.set_device(_local_rank)
+        device = f"cuda:{_local_rank}"
     else:
-        import torch.multiprocessing as mp
+        device = args.device
 
-        gpu_ids = list(range(n_gpu))
-        print(
-            f"parallel closed-loop: {nproc} workers ({n_routes} routes) over GPUs {gpu_ids} | "
-            f"out: {out_dir}"
-        )
-        t0 = time.perf_counter()
-        mp.spawn(
-            _run_shard,
-            args=(nproc, gpu_ids, str(args.model_path), str(args.npz_root), str(out_dir), knobs),
-            nprocs=nproc,
-            join=True,
-        )
-        summary = _merge_shards(
-            out_dir,
-            args.npz_root,
-            args.near_miss_thresh,
-            strong_brake_mps2=args.strong_brake_mps2,
-        )
-        summary["elapsed_sec"] = time.perf_counter() - t0
+    model, model_args = _load_model(args.model_path, device)
+    print(
+        f"device: {device} | model: {args.model_path} | out: {out_dir}"
+        + (f" | shard: {shard}" if shard else "")
+    )
+
+    t0 = time.perf_counter()
+    summary = run_closed_loop_eval(
+        model,
+        model_args,
+        args.npz_root,
+        out_dir,
+        device=device,
+        verbose=True,
+        shard=shard,
+        **knobs,
+    )
+    summary["elapsed_sec"] = time.perf_counter() - t0
+
+    # Barrier: wait for all ranks to finish writing their segments_{rank}.jsonl
+    # Only rank 0 merges the results to avoid race conditions
+    if shard is not None:
+        import torch.distributed as dist
+
+        dist.barrier()
+        if _rank == 0:
+            summary = _merge_shards(
+                out_dir,
+                args.npz_root,
+                args.near_miss_thresh,
+                strong_brake_mps2=args.strong_brake_mps2,
+            )
+            summary["elapsed_sec"] = time.perf_counter() - t0
 
     summary["model_path"] = str(args.model_path)
-    if nproc > 1:
-        _write_summary(out_dir, summary)
+    _write_summary(out_dir, summary)
 
     from scenario_generation.closed_loop_eval import format_summary_lines
 

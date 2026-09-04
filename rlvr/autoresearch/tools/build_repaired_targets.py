@@ -27,6 +27,7 @@ from rlvr.autoresearch.tools.classify_scene_failures import (
     _load_scene_thresholds,
     classify_loaded_scene_candidates_batch,
     current_ego_neighbor_clearance,
+    slice_subscore_outputs,
 )
 from rlvr.autoresearch.tools.eval_det_avoidance import (
     det_inference_batched,
@@ -34,8 +35,7 @@ from rlvr.autoresearch.tools.eval_det_avoidance import (
     load_npz_data,
 )
 from rlvr.autoresearch.tools.expert_morph import (
-    build_depart_morph_candidate,
-    build_expert_morph_candidate,
+    build_unified_morph_candidates,
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.deviation import rollout_gt_deviation
@@ -44,7 +44,8 @@ from rlvr.grpo_trainer_batched import (
     _stack_scene_data,
     generate_all_scenes_batched,
 )
-from rlvr.reward import compute_reward_batch
+from rlvr.reward import _shape_reward, compute_reward_batch
+from scenario_generation.perf_timer import Timers
 
 _GENERATION_MODE_GUIDED_VARIANT = "guided_variant"
 _GENERATION_MODE_GRPO_TEMPERATURE = "grpo_temperature"
@@ -128,6 +129,19 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
     return future_to_4col(arr, zero_rows_are_padding=False)
 
 
+def _future_is_4col(data: dict[str, Any], key: str) -> bool:
+    return key not in data or int(data[key].shape[-1]) == 4
+
+
+def _row_is_ed_like(row: dict) -> bool:
+    """Row needs ED treatment: labelled expert_disagreement OR the conflict detector
+    recorded a reason (a stall ending in a collision/RB event is labelled by the
+    violation while the behavioural failure is still the lag). Synthesis, det
+    extraction and forcing must all use THIS predicate or rows fall in the gap
+    (measured: stall rows are dropped essentially wholesale otherwise)."""
+    return _row_is_expert_disagreement(row) or bool(row.get("expert_disagreement_reason"))
+
+
 def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
     return "expert_disagreement" in set(row.get("repair_labels") or [])
 
@@ -136,12 +150,16 @@ def _expert_reference_scoring_data(
     data: dict[str, torch.Tensor],
     *,
     scene_path: str,
+    progress_reference_expert: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Shallow copy of ``data`` whose ego_agent_future is the LOGGED EXPERT.
 
-    For expert_disagreement scenes reward.py's over/under-progress penalties must
-    reference the logged human expert, not the realized (disagreeing) ego. Fails
-    loudly if the mine did not supply ego_expert_future (no silent fallback).
+    reward.py's over/under-progress penalties must reference the logged human
+    expert, not the realized ego: closed-loop mined windows truncate
+    ego_agent_future at the contact step, so the realized reference is a stub on
+    exactly the rows being repaired (originally ED-only, extended to all rows
+    2026-08-07). Fails loudly if the mine did not supply ego_expert_future (no
+    silent fallback).
     """
     if "ego_expert_future" not in data:
         raise ValueError(
@@ -150,6 +168,17 @@ def _expert_reference_scoring_data(
         )
     scoring = dict(data)
     scoring["ego_agent_future"] = data["ego_expert_future"]
+    if progress_reference_expert:
+        # Pin the underprogress reference to the EXPERT's path length. Without this the
+        # reward falls back to model_path_lens[0] (the current model's own det trajectory),
+        # so cautious candidates are graded against an equally cautious yardstick and the
+        # reference collapses as the model degrades.
+        exp = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
+        xy = exp[:, :2]
+        valid = np.abs(xy).sum(axis=-1) > 0.1
+        if valid.sum() >= 2:
+            seg = np.diff(xy[valid], axis=0)
+            scoring["baseline_path_len"] = float(np.linalg.norm(seg, axis=-1).sum())
     return scoring
 
 
@@ -215,6 +244,43 @@ def _candidate_deviation_penalty(
     return float(np.linalg.norm(cand[:T, :2] - ref[:T, :2], axis=1).mean())
 
 
+def _candidate_path_deviation(
+    candidate_traj: torch.Tensor | np.ndarray | None,
+    reference_traj: torch.Tensor | np.ndarray | None,
+) -> float:
+    """Timing-free deviation: mean distance from candidate points to the reference PATH.
+
+    For the depart candidate the schedule differs from the expert BY DESIGN (a feasible
+    catch-up starts from the stalled ego), so pointwise L2 conflates the intended delay
+    with geometric divergence and the trust region vetoes exactly the rows the candidate
+    exists for (measured: stall rows were nearly all vetoed under pointwise L2).
+    This measures what the trust region actually wants to bound — how far the candidate's
+    GEOMETRY strays from the expert's — via the canonical point-to-segment helper.
+    Mirrors ``_candidate_deviation_penalty``'s null handling.
+    """
+    if reference_traj is None or candidate_traj is None:
+        return 0.0
+    from planner_metrics.geometry import _point_to_segments_min_dist
+
+    if isinstance(candidate_traj, torch.Tensor):
+        cand = candidate_traj.detach().cpu().numpy().astype(np.float32, copy=False)
+    else:
+        cand = np.asarray(candidate_traj, dtype=np.float32)
+    ref = _future_to_4col(reference_traj)
+    if cand.ndim != 2 or cand.shape[1] < 2:
+        raise ValueError(f"candidate trajectory must be shaped (T,C), got {cand.shape}")
+    ref_xy = ref[:, :2]
+    # Drop consecutive duplicates (held tail) — zero-length segments carry no path.
+    keep = np.concatenate([[True], np.linalg.norm(np.diff(ref_xy, axis=0), axis=1) > 1e-6])
+    ref_xy = ref_xy[keep]
+    if ref_xy.shape[0] < 2 or cand.shape[0] < 1:
+        return _candidate_deviation_penalty(candidate_traj, reference_traj)
+    pts = torch.from_numpy(np.ascontiguousarray(cand[:, :2], dtype=np.float32))
+    p1 = torch.from_numpy(np.ascontiguousarray(ref_xy[:-1], dtype=np.float32))
+    p2 = torch.from_numpy(np.ascontiguousarray(ref_xy[1:], dtype=np.float32))
+    return float(_point_to_segments_min_dist(pts, p1, p2).mean().item())
+
+
 def _candidate_deviation_max_l2(
     candidate_traj: torch.Tensor | np.ndarray | None,
     reference_traj: torch.Tensor | np.ndarray | None,
@@ -252,7 +318,26 @@ def _normalize_values(values: list[float]) -> list[float]:
 
 
 def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
-    dev = float(source_row.get("expert_disagreement_max_dev", 0.0))
+    """R2LPL guidance class (near_log / recoverable / far_offpolicy, paper Eq. 24).
+
+    Classified by the trajectory-level expert progress gap: rows carrying a
+    measured ``expert_disagreement_max_dev`` classify by it, everything else is
+    the paper's middle class.
+    """
+    if not _row_is_ed_like(source_row):
+        # Rows with NO disagreement measurement (pure collision/road-border) are
+        # off-log by construction (the realized rollout failed where the log did
+        # not) but not beyond salvage -> the paper's middle class. Rows that DO
+        # carry a measured expert_disagreement_max_dev — including
+        # collision/border-labelled rows with the reason field — classify by it.
+        return "recoverable"
+    dev_raw = source_row.get("expert_disagreement_max_dev")
+    if dev_raw is None:
+        # Ed-like row WITHOUT a measurement: the middle class, same as pure-safety
+        # rows — a phantom 0.0 here would pin selection to near_log expert
+        # imitation on rows where nothing was measured.
+        return "recoverable"
+    dev = float(dev_raw)
     if dev <= 1.0:
         return "near_log"
     if dev <= 5.0:
@@ -260,12 +345,22 @@ def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
     return "far_offpolicy"
 
 
-def _r2lpl_weights(state_class: str) -> tuple[float, float]:
+def _r2lpl_weights(state_class: str) -> tuple[float, float, float]:
+    """Paper Eq. 26 weights (w_q rule, w_ref reference-path, w_E expert), matching the
+    reference implementation (R2LPL rollout_cl_generator.py): near-log leans on expert
+    consistency; recoverable/far lean on the rule score + route-path consistency."""
     if state_class == "near_log":
-        return 0.20, 0.80
+        return 0.10, 0.10, 0.80
     if state_class == "recoverable":
-        return 0.95, 0.05
-    return 1.00, 0.00
+        return 0.65, 0.30, 0.05
+    return 0.80, 0.20, 0.00
+
+
+# Reference-implementation near-log expert gate: candidates whose expert consistency
+# falls below max(best - margin, floor) are excluded from near-log selection (unless
+# that would exclude every survivor).
+_NEAR_LOG_EXPERT_MARGIN = 0.05
+_NEAR_LOG_EXPERT_MIN = 0.75
 
 
 def _apply_rear_end_collision_mode(rcfg, *, count_rear_end_collisions: bool) -> None:
@@ -521,6 +616,7 @@ def _best_safe_candidate(
     reference_traj: torch.Tensor | np.ndarray | None = None,
     morph_index: int | None = None,
     depart_index: int | None = None,
+    max_expert_dev_m: float | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
     # Scripted candidates get a per-candidate outcome taxonomy in the meta
     # (selected / lost_selection / gate_rejected) keyed by their prefix.
@@ -541,11 +637,43 @@ def _best_safe_candidate(
             min_static_margin=min_static_margin,
         ):
             violation_score = _candidate_violation_score(label_row, reward_row)
-            deviation_penalty = _candidate_deviation_penalty(
-                candidate_traj_list[idx] if candidate_traj_list is not None else None,
-                reference_traj,
-            )
+            cand_traj = candidate_traj_list[idx] if candidate_traj_list is not None else None
+            # Depart candidate: geometry-true, timing-free deviation (see
+            # _candidate_path_deviation); every other candidate keeps the strict
+            # pointwise rule that guards against far-off-policy generations.
+            if depart_index is not None and idx == depart_index:
+                deviation_penalty = _candidate_path_deviation(cand_traj, reference_traj)
+            else:
+                deviation_penalty = _candidate_deviation_penalty(cand_traj, reference_traj)
             accepted.append((violation_score, deviation_penalty, float(reward_row.total), idx))
+
+    # Trust-region gate: a gate-passing candidate that strays too far from the
+    # expert reference is a worse training target than no target at all — far
+    # off-policy targets measurably degrade closed-loop behavior when imitated.
+    gate_passing_indices = {item[3] for item in accepted}
+    if max_expert_dev_m is not None and accepted:
+        within = [item for item in accepted if item[1] <= max_expert_dev_m]
+        if not within:
+            meta = {
+                "reason": "no_candidate_within_trust_region",
+                "max_expert_dev_m": float(max_expert_dev_m),
+                "min_observed_dev_m": float(min(item[1] for item in accepted)),
+                # keep the unrepaired meta shape of the no_safe_candidate branch
+                "best_total": max(float(r.total) for r in reward_rows),
+                "best_sc_min_dist": max(
+                    float(getattr(r, "sc_min_dist", -99.0)) for r in reward_rows
+                ),
+            }
+            accepted_idx = {item[3] for item in accepted}
+            for prefix, idx_s in scripted.items():
+                # A scripted candidate that never passed the safety gates was not
+                # rejected by the trust region — stamping it so corrupts drop-rate
+                # audits that attribute rejections to the gate.
+                meta[f"{prefix}_outcome"] = (
+                    "trust_region_rejected" if idx_s in accepted_idx else "gate_rejected"
+                )
+            return None, meta
+        accepted = within
 
     accepted_indices = {item[3] for item in accepted}
     if not accepted:
@@ -564,32 +692,45 @@ def _best_safe_candidate(
             )
         return None, meta
 
-    uses_r2lpl_conflict_selection = "expert_disagreement" in set(
-        source_row.get("repair_labels", [])
-    )
+    # Unified paper-style selection (R2LPL Eq. 26, reference implementation
+    # rollout_cl_generator.py): the SAME three-term score ranks survivors of
+    # EVERY mistake type. y = w_q * rule + w_ref * route-path consistency +
+    # w_E * expert consistency, weights by state class.
     scripted_r2lpl_scores: dict[str, float] = {}
-    if uses_r2lpl_conflict_selection:
-        rule_scores = _normalize_values([item[2] for item in accepted])
-        state_class = _r2lpl_state_class(source_row)
-        rule_weight, expert_weight = _r2lpl_weights(state_class)
-        ranked: list[tuple[float, float, float, int]] = []
-        for item, rule_score in zip(accepted, rule_scores, strict=True):
-            violation_score, deviation_penalty, _reward_total, idx = item
-            expert_score = math.exp(-max(deviation_penalty, 0.0) / 4.0)
-            r2lpl_score = rule_weight * rule_score + expert_weight * expert_score
-            for prefix, idx_s in scripted.items():
-                if idx == idx_s:
-                    scripted_r2lpl_scores[prefix] = float(r2lpl_score)
-            ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
-        ranked.sort()
-        neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
-        selected_r2lpl_score = -float(neg_r2lpl_score)
-        selected_state_class = state_class
-    else:
-        accepted.sort(key=lambda item: (item[0], item[1], item[3]))
-        violation_score, deviation_penalty, _reward_total, idx = accepted[0]
-        selected_r2lpl_score = None
-        selected_state_class = None
+    rule_scores = _normalize_values([item[2] for item in accepted])
+    # Route-path consistency: the reward's centerline component IS the
+    # route-reference-path adherence score (baselink mode), normalized across
+    # survivors like the rule score.
+    ref_scores = _normalize_values([float(reward_rows[item[3]].centerline) for item in accepted])
+    state_class = _r2lpl_state_class(source_row)
+    rule_weight, ref_weight, expert_weight = _r2lpl_weights(state_class)
+    expert_scores = [math.exp(-max(item[1], 0.0) / 4.0) for item in accepted]
+    # Near-log expert gate (reference impl): drop survivors far below the most
+    # expert-consistent one, unless that would drop everyone.
+    gate_ok = [True] * len(accepted)
+    if state_class == "near_log" and expert_scores:
+        floor = max(max(expert_scores) - _NEAR_LOG_EXPERT_MARGIN, _NEAR_LOG_EXPERT_MIN)
+        gated = [score >= floor for score in expert_scores]
+        if any(gated):
+            gate_ok = gated
+    ranked: list[tuple[float, float, float, int]] = []
+    for item, rule_score, ref_score, expert_score, ok in zip(
+        accepted, rule_scores, ref_scores, expert_scores, gate_ok, strict=True
+    ):
+        violation_score, deviation_penalty, _reward_total, idx = item
+        r2lpl_score = (
+            rule_weight * rule_score + ref_weight * ref_score + expert_weight * expert_score
+        )
+        if not ok:
+            r2lpl_score = -1.0
+        for prefix, idx_s in scripted.items():
+            if idx == idx_s:
+                scripted_r2lpl_scores[prefix] = float(r2lpl_score)
+        ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
+    ranked.sort()
+    neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
+    selected_r2lpl_score = -float(neg_r2lpl_score)
+    selected_state_class = state_class
     reward_row = reward_rows[idx]
     label_row = candidate_rows[idx]
 
@@ -623,6 +764,10 @@ def _best_safe_candidate(
             meta[f"{prefix}_outcome"] = "lost_selection"
             if prefix in scripted_r2lpl_scores:
                 meta[f"{prefix}_r2lpl_score"] = scripted_r2lpl_scores[prefix]
+        elif idx_s in gate_passing_indices:
+            # Passed every safety gate but fell to the trust region — stamping it
+            # gate_rejected would corrupt drop-rate audits.
+            meta[f"{prefix}_outcome"] = "trust_region_rejected"
         else:
             meta[f"{prefix}_outcome"] = "gate_rejected"
             meta[f"{prefix}_labels"] = list(candidate_rows[idx_s].get("labels", []))
@@ -681,7 +826,7 @@ def _preflight_recorded_anchor(rows: list[dict[str, Any]]) -> None:
     """
     missing = []
     for row in rows:
-        if not _row_is_expert_disagreement(row):
+        if not _row_is_ed_like(row):
             continue
         with np.load(row["scene_path"]) as z:
             if "ego_recorded_future" not in z.files:
@@ -721,6 +866,9 @@ def build_repaired_targets(
     count_rear_end_collisions: bool,
     allow_empty: bool = False,
     target_gt_disagreement_thresh: float = 2.0,
+    max_expert_dev_m: float | None = None,
+    progress_reference_expert: bool = False,
+    save_candidates: bool = False,
     repair_expert_gt_candidate: bool = True,
     repair_expert_reference: bool = True,
     expert_morph_w_max: float = 1.0,
@@ -744,14 +892,16 @@ def build_repaired_targets(
     thresholds = _load_scene_thresholds(threshold_config_path)
     model, model_args = load_model(model_path, device)
     out_dir.mkdir(parents=True, exist_ok=True)
+    timers = Timers()
     repaired_rows: list[dict[str, Any]] = []
     unrepaired_rows: list[dict[str, Any]] = []
-    rows, dirty_rows = _drop_t0_dirty_event_windows(
-        rows,
-        rcfg=rcfg,
-        thresholds=thresholds,
-        device=device,
-    )
+    with timers("t0_prefilter"):
+        rows, dirty_rows = _drop_t0_dirty_event_windows(
+            rows,
+            rcfg=rcfg,
+            thresholds=thresholds,
+            device=device,
+        )
     unrepaired_rows.extend(dirty_rows)
 
     class _Args:
@@ -777,7 +927,8 @@ def build_repaired_targets(
         kept_rows = []
         for row in batch_rows:
             p = row["scene_path"]
-            data = load_npz_data(p, device)
+            with timers("scene_load"):
+                data = load_npz_data(p, device)
             npz_es = data["ego_shape"].detach().cpu().numpy().reshape(-1)[:3]
             if ego_shape is not None and not np.allclose(npz_es, ego_shape, atol=1e-2):
                 raise ValueError(
@@ -790,84 +941,131 @@ def build_repaired_targets(
         if not datas:
             continue
 
-        norm_batch = _normalize_batch(_stack_scene_data(datas, device), model_args)
-        if generation_mode == _GENERATION_MODE_GRPO_TEMPERATURE:
-            trajs = _generate_grpo_temperature_scenes(
-                model,
-                norm_batch,
-                K=K,
-                grpo_noise_scale=grpo_noise_scale,
-                device=device,
-            )
-        elif generation_mode == _GENERATION_MODE_GUIDED_VARIANT:
-            trajs = generate_all_scenes_batched(
-                model,
-                model_args,
-                norm_batch,
-                K=K,
-                noise_range=(noise_low, noise_high),
-                device=device,
-                gen_chunk_size=K,
-                gt_max_speed=gt_max_speed,
-                generation_variant=variant,
-                prototypes_path=repair_prototypes_path,
-                use_route_cl_guidance=use_route_cl_guidance,
-            )
-        else:
-            raise ValueError(
-                f"unknown generation_mode {generation_mode!r}; expected "
-                f"{_GENERATION_MODE_GRPO_TEMPERATURE!r} or {_GENERATION_MODE_GUIDED_VARIANT!r}"
-            )
+        with timers("generate"):
+            norm_batch = _normalize_batch(_stack_scene_data(datas, device), model_args)
+            if generation_mode == _GENERATION_MODE_GRPO_TEMPERATURE:
+                trajs = _generate_grpo_temperature_scenes(
+                    model,
+                    norm_batch,
+                    K=K,
+                    grpo_noise_scale=grpo_noise_scale,
+                    device=device,
+                )
+            elif generation_mode == _GENERATION_MODE_GUIDED_VARIANT:
+                trajs = generate_all_scenes_batched(
+                    model,
+                    model_args,
+                    norm_batch,
+                    K=K,
+                    noise_range=(noise_low, noise_high),
+                    device=device,
+                    gen_chunk_size=K,
+                    gt_max_speed=gt_max_speed,
+                    generation_variant=variant,
+                    prototypes_path=repair_prototypes_path,
+                    use_route_cl_guidance=use_route_cl_guidance,
+                )
+            else:
+                raise ValueError(
+                    f"unknown generation_mode {generation_mode!r}; expected "
+                    f"{_GENERATION_MODE_GRPO_TEMPERATURE!r} or {_GENERATION_MODE_GUIDED_VARIANT!r}"
+                )
         scene_paths = [str(row["scene_path"]) for row in kept_rows]
-        candidate_rows_per_scene = classify_loaded_scene_candidates_batch(
-            scene_paths,
-            trajs,
-            datas,
-            rcfg,
-            moving_collision_thresh=thresholds["moving_collision_thresh"],
-            moving_near_thresh=thresholds["moving_near_thresh"],
-            static_near_thresh=thresholds["static_near_thresh"],
-            rb_near_thresh=thresholds["rb_near_thresh"],
-            device=device,
-            args=cls_args,
-        )
+        with timers("classify"):
+            candidate_rows_per_scene, batch_subs = classify_loaded_scene_candidates_batch(
+                scene_paths,
+                trajs,
+                datas,
+                rcfg,
+                moving_collision_thresh=thresholds["moving_collision_thresh"],
+                moving_near_thresh=thresholds["moving_near_thresh"],
+                static_near_thresh=thresholds["static_near_thresh"],
+                rb_near_thresh=thresholds["rb_near_thresh"],
+                device=device,
+                args=cls_args,
+                return_subscores=True,
+            )
 
         # Deterministic plan per scene — needed to seed the det-path re-timing morph
         # AND the depart morph (initial speed) for expert_disagreement scenes.
         want_morph = (repair_expert_gt_candidate or enable_depart_morph) and any(
-            _row_is_expert_disagreement(row) for row in kept_rows
+            _row_is_ed_like(row) for row in kept_rows
         )
         det_trajs = None
         if want_morph:
-            det_trajs = det_inference_batched(
-                model, model_args, datas, device, norm_batch=norm_batch
-            )
+            with timers("det_inference"):
+                det_trajs = det_inference_batched(
+                    model, model_args, datas, device, norm_batch=norm_batch
+                )
 
         for scene_idx, (row, data, scene_trajs, candidate_rows) in enumerate(
             zip(kept_rows, datas, trajs, candidate_rows_per_scene, strict=True)
         ):
-            is_expert = _row_is_expert_disagreement(row)
+            # Morph synthesis, telemetry and the recorded-anchor preflight all key on
+            # the SAME ed-like predicate (label OR reason field); a stricter predicate
+            # here silently drops morph outcome telemetry for reason-only rows.
+            is_expert = _row_is_ed_like(row)
 
-            # R2 expert-reference scoring fix: for expert_disagreement scenes the
-            # progress / expert-consistency terms must reference the LOGGED EXPERT,
-            # not the realized disagreeing ego. Scoring-only — no mutation of the
-            # original data dict, and the SAVED target is still the selected candidate.
-            if repair_expert_reference and is_expert:
+            # Expert-reference scoring (ALL rows): the progress terms must
+            # reference the LOGGED EXPERT for every mistake type, not the realized ego.
+            # In closed-loop mined windows ego_agent_future is truncated at the contact
+            # step (RB/MC rows typically retain only a few valid steps / a couple of
+            # metres of arc), so referencing it either disables the progress discipline
+            # (<10 valid steps) or slams every full-length candidate with overprogress
+            # against a stub, selecting for shortness; underprogress then falls back to
+            # the det plan grading the model against itself. Scoring-only — no mutation
+            # of the original data dict, and the SAVED target is still the selected
+            # candidate.
+            if repair_expert_reference:
                 scoring_data = _expert_reference_scoring_data(
-                    data, scene_path=str(row["scene_path"])
+                    data,
+                    scene_path=str(row["scene_path"]),
+                    progress_reference_expert=progress_reference_expert,
                 )
-                reference_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
             else:
                 scoring_data = data
-                reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
+            # Unified paper-style selection: the expert-consistency term references
+            # the LOGGED EXPERT future for EVERY mistake type (Eq. 26); the mined
+            # window scenes always carry it. Fail loudly if a corpus does not.
+            if "ego_expert_future" not in data:
+                raise ValueError(
+                    f"{row['scene_path']}: mined scene lacks 'ego_expert_future' — "
+                    "the unified R2LPL selection requires the logged expert future "
+                    "for every repaired row (re-mine with a reproducer that saves it)."
+                )
+            reference_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
 
-            reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
+            # The classifier above already ran the full subscore geometry
+            # (OBB clearance / road border / lane / centerline) on this exact
+            # (scene, candidates) pair — reuse it and apply only the reward
+            # shaping, instead of recomputing everything. Valid only when the
+            # reward would score the SAME data the classifier saw: not for
+            # expert-reference scoring (mutated data) and not when futures are
+            # 3-col (the classifier scores a 4-col-converted copy, the legacy
+            # reward path scored the raw arrays).
+            reuse_subs = (
+                not repair_expert_reference
+                and _future_is_4col(data, "ego_agent_future")
+                and _future_is_4col(data, "neighbor_agents_future")
+            )
+            with timers("reward"):
+                if reuse_subs:
+                    reward_rows = list(
+                        _shape_reward(
+                            slice_subscore_outputs(batch_subs, scene_idx),
+                            scene_trajs,
+                            scoring_data,
+                            rcfg,
+                        )
+                    )
+                else:
+                    reward_rows = list(compute_reward_batch(scene_trajs, scoring_data, rcfg))
             candidate_rows = list(candidate_rows)
 
             name = _output_name_for_scene(row["scene_path"])
 
             expert_traj = det_traj = None
-            if is_expert and (repair_expert_gt_candidate or enable_depart_morph):
+            if _row_is_ed_like(row) and (repair_expert_gt_candidate or enable_depart_morph):
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
             scripted_kwargs = dict(
@@ -880,87 +1078,94 @@ def build_repaired_targets(
                 device=device,
             )
 
-            # Extra det-path re-timing morph candidate for expert_disagreement scenes.
+            # THE morph (unified): ONE GT-schedule re-timing operation.
+            # ``stay_behind`` re-times the det plan's own geometry (rushing rows + fallback);
+            # ``depart`` sources geometry from the expert path (lagging rows — a parked det
+            # plan has no road ahead to re-time, it dies as "infeasible_deceleration").
+            # Legacy flags gate which candidates ENTER the pool; pool order is preserved.
             morph_added = False
             morph_index: int | None = None
             morph_diag: dict[str, Any] | None = None
-            if repair_expert_gt_candidate and is_expert:
-                stop_anchor_xy = None
-                if expert_stop_anchor == "recorded":
-                    if "ego_recorded_future" not in data:
-                        raise ValueError(
-                            f"{row['scene_path']}: --expert_stop_anchor recorded requires "
-                            "'ego_recorded_future' in the mined scene (re-mine with a "
-                            "reproducer that saves it, or run with --expert_stop_anchor "
-                            "pseudo; no silent fallback)."
-                        )
-                    recorded = _future_to_4col(data["ego_recorded_future"].detach().cpu().numpy())
-                    stop_anchor_xy = recorded[-1, :2]
-                elif expert_stop_anchor != "pseudo":
-                    raise ValueError(
-                        f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
-                        "expected 'pseudo' or 'recorded'"
-                    )
-                morph, morph_diag = build_expert_morph_candidate(
-                    det_traj,
-                    expert_traj,
-                    w_max=expert_morph_w_max,
-                    max_accel=expert_morph_max_accel,
-                    max_jerk=expert_morph_max_jerk,
-                    stop_anchor_xy=stop_anchor_xy,
-                    return_diag=True,
-                )
-                if morph is not None:
-                    morph_index, scene_trajs = _append_scripted_candidate(
-                        morph,
-                        candidate_rows=candidate_rows,
-                        reward_rows=reward_rows,
-                        scene_trajs=scene_trajs,
-                        **scripted_kwargs,
-                    )
-                    morph_added = True
-
-            # Depart morph for the fail-to-take-off direction: the stop morph
-            # re-times the det plan's own geometry, which cannot synthesize a
-            # departure from a parked plan (no road ahead on a 2 m path) — it
-            # dies as "infeasible_deceleration". The depart morph sources its
-            # geometry from the expert path instead.
             depart_added = False
             depart_index: int | None = None
             depart_diag: dict[str, Any] | None = None
-            if (
-                enable_depart_morph
-                and is_expert
-                and row.get("expert_disagreement_reason") == "model_lagging_expert"
-            ):
-                depart, depart_diag = build_depart_morph_candidate(
-                    det_traj,
-                    expert_traj,
-                    max_accel=expert_morph_max_accel,
-                    max_jerk=expert_morph_max_jerk,
-                    return_diag=True,
-                )
-                if depart is not None:
-                    depart_index, scene_trajs = _append_scripted_candidate(
-                        depart,
-                        candidate_rows=candidate_rows,
-                        reward_rows=reward_rows,
-                        scene_trajs=scene_trajs,
-                        **scripted_kwargs,
+            # Morph eligibility keys on the CONFLICT REASON, not only the mined label:
+            # a stall that ends in a collision/RB event is labelled moving_collision/
+            # road_border_crossing while expert_disagreement_reason still says
+            # model_lagging_expert — without a morph in the pool such rows have no
+            # expert-paced candidate to select at all.
+            is_ed_like = _row_is_ed_like(row)
+            if is_ed_like and (repair_expert_gt_candidate or enable_depart_morph):
+                stop_anchor_xy = None
+                if repair_expert_gt_candidate:
+                    if expert_stop_anchor == "recorded":
+                        if "ego_recorded_future" not in data:
+                            raise ValueError(
+                                f"{row['scene_path']}: --expert_stop_anchor recorded requires "
+                                "'ego_recorded_future' in the mined scene (re-mine with a "
+                                "reproducer that saves it, or run with --expert_stop_anchor "
+                                "pseudo; no silent fallback)."
+                            )
+                        recorded = _future_to_4col(
+                            data["ego_recorded_future"].detach().cpu().numpy()
+                        )
+                        stop_anchor_xy = recorded[-1, :2]
+                    elif expert_stop_anchor != "pseudo":
+                        raise ValueError(
+                            f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
+                            "expected 'pseudo' or 'recorded'"
+                        )
+                with timers("morph"):
+                    unified = build_unified_morph_candidates(
+                        det_traj,
+                        expert_traj,
+                        row.get("expert_disagreement_reason"),
+                        stop_anchor_xy=stop_anchor_xy,
+                        w_max=expert_morph_w_max,
+                        max_accel=expert_morph_max_accel,
+                        max_jerk=expert_morph_max_jerk,
                     )
-                    depart_added = True
+                    for kind, traj, diag in unified:
+                        if kind == "stay_behind":
+                            if not repair_expert_gt_candidate:
+                                continue
+                            morph_diag = diag
+                            if traj is not None:
+                                morph_index, scene_trajs = _append_scripted_candidate(
+                                    traj,
+                                    candidate_rows=candidate_rows,
+                                    reward_rows=reward_rows,
+                                    scene_trajs=scene_trajs,
+                                    **scripted_kwargs,
+                                )
+                                morph_added = True
+                        elif kind == "depart":
+                            if not enable_depart_morph:
+                                continue
+                            depart_diag = diag
+                            if traj is not None:
+                                depart_index, scene_trajs = _append_scripted_candidate(
+                                    traj,
+                                    candidate_rows=candidate_rows,
+                                    reward_rows=reward_rows,
+                                    scene_trajs=scene_trajs,
+                                    **scripted_kwargs,
+                                )
+                                depart_added = True
 
-            best_idx, meta = _best_safe_candidate(
-                row,
-                candidate_rows,
-                reward_rows,
-                min_static_margin=min_static_margin,
-                target_gt_disagreement_thresh=target_gt_disagreement_thresh,
-                candidate_trajs=scene_trajs,
-                reference_traj=reference_traj,
-                morph_index=morph_index if morph_added else None,
-                depart_index=depart_index if depart_added else None,
-            )
+            with timers("select"):
+                best_idx, meta = _best_safe_candidate(
+                    row,
+                    candidate_rows,
+                    reward_rows,
+                    min_static_margin=min_static_margin,
+                    target_gt_disagreement_thresh=target_gt_disagreement_thresh,
+                    candidate_trajs=scene_trajs,
+                    reference_traj=reference_traj,
+                    morph_index=morph_index if morph_added else None,
+                    depart_index=depart_index if depart_added else None,
+                    max_expert_dev_m=max_expert_dev_m,
+                )
             morph_selected = bool(morph_added and best_idx == morph_index)
             depart_selected = bool(depart_added and best_idx == depart_index)
             if is_expert:
@@ -993,13 +1198,37 @@ def build_repaired_targets(
                 )
                 continue
 
-            with np.load(row["scene_path"], allow_pickle=True) as loaded:
-                raw = _filtered_npz_payload(loaded)
-            raw["ego_agent_future"] = _future4_to_3col(
-                scene_trajs[best_idx].detach().cpu().numpy().astype(np.float32)
-            )
-            out_path = out_dir / name
-            np.savez(out_path, **raw)
+            with timers("npz_write"):
+                with np.load(row["scene_path"], allow_pickle=True) as loaded:
+                    raw = _filtered_npz_payload(loaded)
+                raw["ego_agent_future"] = _future4_to_3col(
+                    scene_trajs[best_idx].detach().cpu().numpy().astype(np.float32)
+                )
+                out_path = out_dir / name
+                np.savez(out_path, **raw)
+                if save_candidates:
+                    # Persist ALL K candidates + their reward totals so a future change to the
+                    # SELECTION rule can be evaluated by re-scoring on CPU (minutes) instead of
+                    # re-running the diffusion generation (hours). ~22 KB/scene at K=17.
+                    np.savez_compressed(
+                        out_dir / f"{Path(name).stem}.candidates.npz",
+                        candidates=np.stack(
+                            [
+                                _future_to_4col(t.detach().cpu().numpy().astype(np.float32))
+                                for t in scene_trajs
+                            ]
+                        ),
+                        totals=np.asarray([float(r.total) for r in reward_rows], dtype=np.float32),
+                        selected_index=np.asarray(int(best_idx), dtype=np.int32),
+                        morph_index=np.asarray(
+                            -1 if morph_index is None else int(morph_index), dtype=np.int32
+                        ),
+                        # Without the depart identity a re-scorer cannot apply the
+                        # depart-specific trust-region metric to the saved pool.
+                        depart_index=np.asarray(
+                            -1 if depart_index is None else int(depart_index), dtype=np.int32
+                        ),
+                    )
 
             repaired = dict(row)
             repaired["source_scene_path"] = str(row["scene_path"])
@@ -1034,6 +1263,7 @@ def build_repaired_targets(
         unrepaired_path.write_text(json.dumps(unrepaired_rows, indent=2))
         print(f"  unrepaired list -> {unrepaired_path}")
 
+    print(timers.report(max(1, len(rows))))
     print(f"repaired {len(repaired_rows)}/{len(rows)} -> {out_dir}")
     return repaired_paths, unrepaired_rows
 
@@ -1100,6 +1330,28 @@ def main() -> None:
         "which target_gt_disagreement is flagged (R2LPL hard-example signal).",
     )
     ap.add_argument(
+        "--max_expert_dev_m",
+        type=float,
+        default=None,
+        help="trust-region gate: reject gate-passing candidates whose mean-L2 deviation from "
+        "the expert reference exceeds this (m); scenes with no candidate inside the region "
+        "are dropped to unrepaired. Off when omitted.",
+    )
+    ap.add_argument(
+        "--save_candidates",
+        action="store_true",
+        help="write <target>.candidates.npz next to each repaired target (all K trajectories, "
+        "their reward totals, the selected index and the morph index) so a future selection-rule "
+        "change can be evaluated by re-scoring instead of re-generating.",
+    )
+    ap.add_argument(
+        "--progress_reference_expert",
+        action="store_true",
+        help="pin the underprogress reference to the EXPERT path length when scoring "
+        "expert_disagreement candidates (default: reward falls back to the model's own det "
+        "trajectory, which collapses as the model gets more cautious).",
+    )
+    ap.add_argument(
         "--repair_expert_gt_candidate",
         dest="repair_expert_gt_candidate",
         action="store_true",
@@ -1128,9 +1380,15 @@ def main() -> None:
     ap.add_argument(
         "--enable_depart_morph",
         action="store_true",
-        help="Also synthesize a depart-morph candidate (expert-path geometry, "
-        "feasible catch-up timing) for model_lagging_expert scenes — the stop "
-        "morph cannot build a departure from a parked det plan.",
+        help="No-op kept for compatibility: the depart-morph candidate (expert-path "
+        "geometry, feasible catch-up timing, for model_lagging_expert scenes) is ON "
+        "by default — the stop morph cannot build a departure from a parked det "
+        "plan. Use --disable_depart_morph to turn it off.",
+    )
+    ap.add_argument(
+        "--disable_depart_morph",
+        action="store_true",
+        help="Opt out of the depart-morph candidate (A/B control arms).",
     )
     ap.add_argument("--expert_morph_w_max", type=float, default=1.0)
     ap.add_argument(
@@ -1206,13 +1464,16 @@ def main() -> None:
         count_rear_end_collisions=bool(args.count_rear_end_collisions),
         allow_empty=bool(args.allow_empty),
         target_gt_disagreement_thresh=float(args.target_gt_disagreement_thresh),
+        max_expert_dev_m=(None if args.max_expert_dev_m is None else float(args.max_expert_dev_m)),
+        progress_reference_expert=bool(args.progress_reference_expert),
+        save_candidates=bool(args.save_candidates),
         repair_expert_gt_candidate=bool(args.repair_expert_gt_candidate),
         repair_expert_reference=bool(args.repair_expert_reference),
         expert_morph_w_max=float(args.expert_morph_w_max),
         expert_morph_max_accel=float(args.expert_morph_max_accel),
         expert_morph_max_jerk=float(args.expert_morph_max_jerk),
         expert_stop_anchor=str(args.expert_stop_anchor),
-        enable_depart_morph=bool(args.enable_depart_morph),
+        enable_depart_morph=not bool(args.disable_depart_morph),
     )
 
 

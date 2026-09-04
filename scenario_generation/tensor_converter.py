@@ -539,11 +539,16 @@ class MapTensorCache:
             top_idx = top_idx[np.argsort(dists[top_idx])]
 
         selected = self._all_lanes[top_idx].copy()
+        # Which points are padding is a property of the map, so it is decided before the ego
+        # frame moves them. A translation carries a padded (0, 0) to -R @ ego_xy, which is not
+        # zero, so a mask taken afterwards misses exactly the entries it exists to catch and the
+        # model reads padding as lane geometry sitting at the map origin. This is the order
+        # ``_build_lanes`` and the other cached getters use.
+        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
         selected[:, :, :2] = transform_positions(selected[:, :, :2], R, ego_xy)
         selected[:, :, 2:4] = transform_directions(selected[:, :, 2:4], R)
         selected[:, :, 4:6] = transform_directions(selected[:, :, 4:6], R)
         selected[:, :, 6:8] = transform_directions(selected[:, :, 6:8], R)
-        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
         selected[mask] = 0.0
 
         out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)

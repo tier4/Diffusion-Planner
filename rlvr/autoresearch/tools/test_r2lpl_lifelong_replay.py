@@ -86,6 +86,27 @@ from scenario_generation.danger_event_selection import (
 from scenario_generation.tools.classify_replay_steps import _decluster as _decluster_replay_steps
 
 
+def _reward_row(total: float = 1.0, **overrides):
+    """Stub of one ``compute_reward_batch`` row.
+
+    The real row carries the per-term subscores that the realized-reward component
+    telemetry reads (centerline / feasibility / progress / gate flags), so a stub with
+    only ``total`` diverges from the production interface and the telemetry raises
+    AttributeError. Keep every field the callers touch here, in ONE place.
+    """
+    fields = {
+        "total": float(total),
+        "centerline": 0.0,
+        "feasibility": 0.0,
+        "progress": 0.0,
+        "collision_step": None,
+        "rb_crossing": False,
+        "kinematic_violated": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 class _IdentityObservationNormalizer:
     def __call__(self, data):
         return data
@@ -786,7 +807,11 @@ def test_round_runner_mining_shards_use_private_outputs_and_merge(monkeypatch, t
             assert cmd[cmd.index("--num_shards") + 1] == "2"
             assert cmd[cmd.index("--shard_index") + 1] == str(expected_idx)
             assert "--chunk_manifest" in cmd
-            assert cmd[cmd.index("--chunk_manifest") + 1] == str(rdir / "planned_chunks.jsonl")
+            # The plan pass is cached at the CAMPAIGN level (rdir.parent) so
+            # later rounds reuse it instead of re-planning the full pool.
+            assert cmd[cmd.index("--chunk_manifest") + 1] == str(
+                rdir.parent / "planned_chunks.jsonl"
+            )
             assert "--scene_list" not in cmd
             _arg(cmd, "--out_jsonl").parent.mkdir(parents=True, exist_ok=True)
             _arg(cmd, "--out_jsonl").write_text(
@@ -1510,6 +1535,7 @@ def test_round_runner_cli_dry_run_uses_multiple_visible_gpus_or_skips(tmp_path):
                     "min_margin": 0.3,
                     "candidate_count_per_scene": 2,
                 },
+                "replay_memory": {"capacity": 200},
                 "training": {"val_scenes": str(tmp_path / "val.json")},
                 "rounds": {"rounds": 1, "epochs_per_round": 1},
             }
@@ -1804,7 +1830,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             else {"labels": ["clean"], "label": "clean"}
         )
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -1840,6 +1866,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         verify_credit_windows=[
             {
                 "route_key": "bagA",
@@ -1971,7 +2000,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             else {"labels": ["clean"], "label": "clean"}
         )
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -2005,6 +2034,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         route_keys=["bagA"],
         danger_save_dir=tmp_path,
         danger_scorer=_fake_danger_scorer,
@@ -2109,7 +2141,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_clean_realized(*_args, **_kwargs):
         return {"labels": ["clean"], "label": "clean"}
 
-    def _fake_advance_step(s, pred, idx, device, timers):
+    def _fake_advance_step(s, pred, idx, device, timers, tracked=None):
         s.k += 1
 
     def _fake_finalize(s, *args, **kwargs):
@@ -2137,6 +2169,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         batch_size=1,
         n_build_threads=1,
         prefetch_ahead=0,
+        # window-saving tests fake _advance_step / seg states: pin the serial
+        # tracker so the mpc_batched default's solve precompute stays out.
+        tracker_mode="mpc",
         route_keys=["bagA"],
         danger_save_dir=tmp_path,
         danger_scorer=_fake_clean_scorer,
@@ -2353,6 +2388,7 @@ def test_repair_candidate_selector_requires_safe_fix():
     ]
     reward_rows = [
         SimpleNamespace(
+            centerline=0.0,
             total=-20.0,
             collision_step=None,
             rb_crossing=True,
@@ -2363,6 +2399,7 @@ def test_repair_candidate_selector_requires_safe_fix():
             rb_min_dist=0.0,
         ),
         SimpleNamespace(
+            centerline=0.0,
             total=5.0,
             collision_step=None,
             rb_crossing=False,
@@ -2404,6 +2441,7 @@ def test_repair_candidate_selector_does_not_hard_gate_expert_disagreement():
     ]
     reward_rows = [
         SimpleNamespace(
+            centerline=0.0,
             total=10.0,
             collision_step=None,
             rb_crossing=False,
@@ -2414,6 +2452,7 @@ def test_repair_candidate_selector_does_not_hard_gate_expert_disagreement():
             rb_min_dist=1.0,
         ),
         SimpleNamespace(
+            centerline=0.0,
             total=1.0,
             collision_step=None,
             rb_crossing=False,
@@ -2445,6 +2484,7 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
     ]
     reward_rows = [
         SimpleNamespace(
+            centerline=0.0,
             total=0.0,
             collision_step=None,
             rb_crossing=False,
@@ -2455,6 +2495,7 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
             rb_min_dist=1.0,
         ),
         SimpleNamespace(
+            centerline=0.0,
             total=10.0,
             collision_step=None,
             rb_crossing=False,
@@ -2545,57 +2586,83 @@ def test_seed_state_tracker_mode_selects_mpc():
     assert state.tracker.__class__.__name__ == "MPCTracker"
 
 
-def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
+def _clean_reward_row(total: float, centerline: float = 0.0) -> SimpleNamespace:
+    return SimpleNamespace(
+        total=total,
+        centerline=centerline,
+        collision_step=None,
+        rb_crossing=False,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+_SELECTOR_CANDIDATE_ROWS = [
+    {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+    {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+]
+_SELECTOR_CANDIDATE_TRAJS = [
+    torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+    torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+]
+_SELECTOR_REFERENCE = torch.tensor(
+    [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32
+)
+
+
+def test_repair_candidate_selector_unified_recoverable_prefers_rule_score():
+    # Paper Eq. 26, unified across mistake types: a collision/road-border row is a
+    # "recoverable" state (0.65 rule / 0.30 ref / 0.05 expert), so the higher-reward
+    # candidate wins even though the lower-reward one sits nearer the expert.
     source_row = {"repair_labels": ["road_border_crossing"]}
-    candidate_rows = [
-        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
-        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
-    ]
-    reward_rows = [
-        SimpleNamespace(
-            total=1.0,
-            collision_step=None,
-            rb_crossing=False,
-            lane_crossing=False,
-            static_crossing=False,
-            kinematic_violated=False,
-            sc_min_dist=1.0,
-            rb_min_dist=1.0,
-        ),
-        SimpleNamespace(
-            total=10.0,
-            collision_step=None,
-            rb_crossing=False,
-            lane_crossing=False,
-            static_crossing=False,
-            kinematic_violated=False,
-            sc_min_dist=1.0,
-            rb_min_dist=1.0,
-        ),
-    ]
-    candidate_trajs = [
-        torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
-        torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
-    ]
-    reference_traj = torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
 
     idx, meta = _best_safe_candidate(
         source_row,
-        candidate_rows,
+        _SELECTOR_CANDIDATE_ROWS,
         reward_rows,
         min_static_margin=0.3,
         target_gt_disagreement_thresh=2.0,
-        candidate_trajs=candidate_trajs,
-        reference_traj=reference_traj,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
     )
 
-    assert idx == 0
-    assert meta["selected_deviation_penalty"] < 1.0
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "recoverable"
+    assert meta["selected_r2lpl_score"] > 0.0
     # R2LPL hard-example signal is emitted alongside the deviation penalty and is
     # distinct from realized expert_disagreement.
     assert meta["target_gt_disagreement_mean_l2"] == meta["selected_deviation_penalty"]
     assert meta["target_gt_disagreement_max_l2"] >= meta["target_gt_disagreement_mean_l2"]
     assert isinstance(meta["target_gt_disagreement"], bool)
+
+
+def test_repair_candidate_selector_unified_near_log_prefers_expert():
+    # Near-log conflict states weight expert consistency 0.80 and gate out
+    # candidates far below the most expert-consistent one, so the expert-nearest
+    # candidate wins despite a lower reward total.
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_max_dev": 0.5,
+    }
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        _SELECTOR_CANDIDATE_ROWS,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
+    )
+
+    assert idx == 0
+    assert meta["selected_r2lpl_state_class"] == "near_log"
+    assert meta["selected_deviation_penalty"] < 1.0
 
 
 def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
@@ -3115,12 +3182,14 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         lanes_has_speed_limit=sim_lanes_has_speed_limit,
         turn_indicators=sim_turn_indicators,
         ego_agent_future=np.full((80, 4), -5.0, dtype=np.float32),
+        ego_expert_future=np.full((80, 4), -5.0, dtype=np.float32),
         origin=np.asarray("sim"),
     )
 
     data = {
         "ego_shape": torch.tensor(sim_ego_shape[None], dtype=torch.float32),
         "ego_agent_future": torch.zeros((80, 4), dtype=torch.float32),
+        "ego_expert_future": torch.zeros((80, 4), dtype=torch.float32),
     }
     selected = torch.zeros((80, 4), dtype=torch.float32)
     selected[:, 0] = torch.arange(80, dtype=torch.float32)
@@ -3179,12 +3248,18 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "classify_loaded_scene_candidates_batch",
-        lambda *_args, **_kwargs: [[{"labels": ["clean"]}]],
+        # return_subscores=True contract: (rows_per_scene, B-major subscores)
+        lambda *_args, **_kwargs: ([[{"labels": ["clean"]}]], {}),
     )
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "compute_reward_batch",
-        lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
+        lambda *_args, **_kwargs: [_reward_row(1.0)],
+    )
+    monkeypatch.setattr(
+        build_repaired_targets_tool,
+        "_shape_reward",
+        lambda *_args, **_kwargs: [_reward_row(1.0)],
     )
     monkeypatch.setattr(
         build_repaired_targets_tool,
@@ -3812,6 +3887,7 @@ def test_expert_morph_return_diag_reports_stage():
 
 def _morph_outcome_reward_row(total: float, *, rb_crossing: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
+        centerline=0.0,
         total=total,
         collision_step=None,
         rb_crossing=rb_crossing,
@@ -4491,7 +4567,10 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
     scene_list.write_text(json.dumps(["/tmp/a.npz"]))
     out_dir = tmp_path / "auto_research" / "out"
     initial_model = tmp_path / "initial.pth"
-    initial_model.write_bytes(b"")
+    # A real (if tiny) checkpoint: inference phases resolve EMA weights through
+    # _ema_inference_model_path, which torch.loads this file. An empty stub only passed
+    # while that resolution step did not exist.
+    torch.save({"model": {}}, initial_model)
     cfg = {
         "rounds": 2,
         "epochs_per_round": 1,
@@ -4528,7 +4607,7 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
         round_runner._write_json(rdir / "credit_windows_paths.json", ["/tmp/a.npz"])
         return 0.0
 
-    def fake_repair(cfg, model_path, rdir, gpu_ids):
+    def fake_repair(cfg, model_path, rdir, gpu_ids, **kwargs):
         round_runner._write_json(rdir / "repaired_targets.json", ["/tmp/repaired_a.npz"])
         round_runner._write_jsonl(
             rdir / "repaired_targets.jsonl",
@@ -4548,7 +4627,9 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
         train_warm_starts.append(str(model_path))
         ckpt = rdir / "base_train" / "latest.pth"
         ckpt.parent.mkdir(parents=True, exist_ok=True)
-        ckpt.write_bytes(b"")
+        # Loadable stub: the next round's inference phases resolve EMA weights from this
+        # checkpoint (see _ema_inference_model_path), so it must be a real torch file.
+        torch.save({"model": {}}, ckpt)
         return 0.0, ckpt
 
     guarded: list[tuple[str, str]] = []
@@ -4656,6 +4737,85 @@ def test_ensure_4col_neighbor_futures_converts_only_3col(tmp_path):
     batch = [dict(np.load(p)) for p in result]
     stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
     assert stacked.shape == (2, 4, 80, 4)
+
+
+def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
+    """The 4-col rewrite is called with a CAMPAIGN-level out_dir every round; a
+    second call over the same pool must reuse the manifest + converted files
+    instead of re-decompressing/re-compressing every scene, and a converted
+    file deleted out from under the manifest must be rebuilt (a stale manifest
+    entry is never trusted blindly)."""
+    three = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((4, 80, 3), dtype=np.float32),
+    }
+    three["neighbor_agents_future"][0, :, 0] = 1.0
+    p3 = tmp_path / "logged_scene.npz"
+    np.savez(p3, **three)
+    out_dir = tmp_path / "converted"
+
+    first = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    manifest = json.loads((out_dir / "conversion_manifest.json").read_text())
+    assert manifest[str(p3)]["marker"] == Path(first[0]).name
+    mtime = Path(first[0]).stat().st_mtime_ns
+
+    second = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert second == first
+    assert Path(first[0]).stat().st_mtime_ns == mtime  # cached: not rewritten
+
+    Path(first[0]).unlink()  # simulate a lost/partial conversion
+    third = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert third == first
+    assert Path(first[0]).exists()  # rebuilt, not blindly trusted
+
+    # A source regenerated IN PLACE (same path, new content/mtime) must be
+    # reconverted — the cache is path-keyed but stamped with size+mtime.
+    three["neighbor_agents_future"][0, :, 1] = 5.0
+    np.savez(p3, **three)
+    fourth = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
+    assert fourth == first
+    with np.load(fourth[0]) as d:
+        np.testing.assert_allclose(d["neighbor_agents_future"][0, :, 1], 5.0)
+
+
+def test_materialize_chunk_manifest_campaign_cache(tmp_path, monkeypatch):
+    """The plan_only chunk pass is planned once per CAMPAIGN and reused across
+    rounds; a knob change against the cached plan fails loudly (chunking must
+    stay constant within a campaign for guard comparability)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    out_dir = tmp_path / "campaign"
+    r1 = out_dir / "r2lpl_round_001"
+    r2 = out_dir / "r2lpl_round_002"
+    r1.mkdir(parents=True)
+    r2.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, log_path, env=None):
+        calls.append([str(c) for c in cmd])
+        Path(out_dir / "planned_chunks.jsonl").write_text("")
+        return 0.0
+
+    monkeypatch.setattr(round_runner, "_run", fake_run)
+    cfg = {"perception_mining": {"scene_list": str(scene_list), "chunk_len": 160}}
+
+    got1 = round_runner._materialize_chunk_manifest_for_shards(cfg, r1)
+    assert len(calls) == 1
+    assert got1["perception_mining"]["chunk_manifest"] == str(out_dir / "planned_chunks.jsonl")
+
+    got2 = round_runner._materialize_chunk_manifest_for_shards(cfg, r2)
+    assert len(calls) == 1  # reused, no second plan pass
+    assert got2["perception_mining"]["chunk_manifest"] == str(out_dir / "planned_chunks.jsonl")
+
+    bad_cfg = {"perception_mining": {"scene_list": str(scene_list), "chunk_len": 80}}
+    with pytest.raises(ValueError, match="different knobs"):
+        round_runner._materialize_chunk_manifest_for_shards(bad_cfg, r2)
+
+    # A scene list regenerated IN PLACE (same path, new content) must fail
+    # loudly too — the plan is keyed by content digest, not pathname.
+    scene_list.write_text('["/data/new_scene.npz"]')
+    with pytest.raises(ValueError, match="different knobs"):
+        round_runner._materialize_chunk_manifest_for_shards(cfg, r2)
 
 
 def test_replay_capacity_is_required():
@@ -5154,7 +5314,7 @@ def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypat
     # predict which poses get scored and that teleport windows are excluded.
     def fake_reward(ego, data, cfg):
         xy = ego[0, :, :2].cpu().numpy()
-        return [SimpleNamespace(total=float(abs(xy[-1, 0] - xy[0, 0])))]
+        return [_reward_row(float(abs(xy[-1, 0] - xy[0, 0])))]
 
     monkeypatch.setattr(_reward, "compute_reward_batch", fake_reward)
 
@@ -5207,9 +5367,7 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
     does not re-score the same poses."""
     import rlvr.reward as _reward
 
-    monkeypatch.setattr(
-        _reward, "compute_reward_batch", lambda ego, data, cfg: [SimpleNamespace(total=1.0)]
-    )
+    monkeypatch.setattr(_reward, "compute_reward_batch", lambda ego, data, cfg: [_reward_row(1.0)])
     import tempfile
     from pathlib import Path as _P
 
@@ -5233,3 +5391,465 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
         _, n_second = finalize()  # no new data
         assert n_first > 0
         assert n_second == n_first, "second finalize must not re-score cleared buffers"
+
+
+def test_main_replay_refresh_keeps_max_of_frozen_and_fresh(tmp_path, monkeypatch):
+    """End-to-end wiring of replay_refresh through main(), not just the join helper.
+
+    Two replayed scenes seeded from a previous link's memory: for one the current policy
+    proposes a better target (must switch to the fresh NPZ), for the other a worse one (must
+    keep the frozen NPZ). Asserts the refresh actually ran, in its own subdirectory, and that
+    the TRAIN LIST is what changed -- the failure mode this guards against is a refresh that
+    computes a list nobody trains on.
+    """
+    manifest, benchmark = _guard_assets(tmp_path)
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text(json.dumps(["/tmp/a.npz"]))
+    out_dir = tmp_path / "auto_research" / "out"
+    initial_model = tmp_path / "initial.pth"
+    torch.save({"model": {}}, initial_model)
+
+    frozen_better = str(tmp_path / "frozen_better.npz")  # policy regressed here
+    frozen_worse = str(tmp_path / "frozen_worse.npz")  # policy improved here
+    src_better, src_worse = str(tmp_path / "src_b.npz"), str(tmp_path / "src_w.npz")
+    fresh_worse = str(tmp_path / "fresh_w.npz")
+    seed_memory = tmp_path / "seed_memory.json"
+    seed_memory.write_text(
+        json.dumps(
+            {
+                "capacity": 10,
+                "entries": [
+                    {
+                        "scene_path": frozen_better,
+                        "source_scene_path": src_better,
+                        "selected_total": -1.0,
+                    },
+                    {
+                        "scene_path": frozen_worse,
+                        "source_scene_path": src_worse,
+                        "selected_total": -3.0,
+                    },
+                ],
+            }
+        )
+    )
+
+    refresh_dirs: list[str] = []
+
+    def fake_repair(cfg, model_path, rdir, gpu_ids, **kwargs):
+        if rdir.name == "replay_refresh":
+            refresh_dirs.append(str(rdir))
+            # the fresh pass must have been handed the SOURCE scenes to re-repair
+            rows = [json.loads(x) for x in (rdir / "credit_windows.jsonl").read_text().splitlines()]
+            assert {r["scene_path"] for r in rows} == {src_better, src_worse}
+            round_runner._write_jsonl(
+                rdir / "repaired_targets.jsonl",
+                [
+                    # worse than frozen -1.0 -> frozen must be kept
+                    {
+                        "scene_path": str(tmp_path / "fresh_b.npz"),
+                        "source_scene_path": src_better,
+                        "selected_total": -2.5,
+                    },
+                    # better than frozen -3.0 -> fresh must win
+                    {
+                        "scene_path": fresh_worse,
+                        "source_scene_path": src_worse,
+                        "selected_total": -0.5,
+                    },
+                ],
+            )
+            return 0.0
+        round_runner._write_json(rdir / "repaired_targets.json", ["/tmp/repaired_a.npz"])
+        round_runner._write_jsonl(
+            rdir / "repaired_targets.jsonl", [{"scene_path": "/tmp/repaired_a.npz"}]
+        )
+        return 0.0
+
+    def fake_run(cmd, log_path, *, cwd=None, env=None):
+        if "--out_memory" in cmd:
+            round_runner._write_json(Path(cmd[cmd.index("--out_memory") + 1]), {"entries": []})
+            # the memory step hands back the two seeded replay scenes
+            round_runner._write_json(
+                Path(cmd[cmd.index("--out_replay_scenes") + 1]), [frozen_better, frozen_worse]
+            )
+        return 0.0
+
+    trained_lists: list[list[str]] = []
+
+    def fake_training(cfg, *, model_path, train_input_list, rdir, round_idx, gpu_ids):
+        trained_lists.append([str(p) for p in json.loads(Path(train_input_list).read_text())])
+        ckpt = rdir / "base_train" / "latest.pth"
+        ckpt.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": {}}, ckpt)
+        return 0.0, ckpt
+
+    cfg = {
+        "rounds": 1,
+        "epochs_per_round": 1,
+        "model_path": str(initial_model),
+        "val_scenes": "/tmp/valid.json",
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "replay_memory": {"capacity": 10},
+        "initial_replay_memory": str(seed_memory),
+        "replay_refresh": True,
+        "training_config": {"train_args": {}},
+        "training_backend": "base_sft",
+        "output_dir": str(out_dir),
+        "checkpoint_policy": "latest",
+        "repair_config": {"ego_shape": "2.7,4.3,1.7", "min_margin": 0.3},
+        "mine_labels": ["expert_disagreement"],
+        "perception_mining": {"scene_list": str(scene_list), "chunk_len": 80},
+        "guards": {"frozen_chunk_manifest": str(manifest), "patience_benchmark": str(benchmark)},
+    }
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    def fake_mining(cfg, model_path, rdir, gpu_ids):
+        # the runner reads this summary to fail loudly on a zero-chunk mine
+        round_runner._write_json(
+            rdir / "perception_direct_summary.json",
+            {"planned_chunks": 1, "simulated_chunks": 1, "skipped_chunks": 0},
+        )
+        round_runner._write_jsonl(rdir / "credit_windows.jsonl", [{"scene_path": "/tmp/a.npz"}])
+        return 0.0
+
+    monkeypatch.setattr(round_runner, "_run_mining_phase", fake_mining)
+    monkeypatch.setattr(round_runner, "_run_repair_phase", fake_repair)
+    monkeypatch.setattr(round_runner, "_run", fake_run)
+    monkeypatch.setattr(round_runner, "_run_base_sft_training", fake_training)
+    monkeypatch.setattr(round_runner, "_run_guard_phase", lambda *a, **k: {})
+    monkeypatch.setattr(round_runner, "_anchor_slice_paths", lambda *a, **k: [])
+    monkeypatch.setattr(sys, "argv", ["run_lifelong_r2lpl_rounds", "--config", str(cfg_path)])
+    round_runner.main()
+
+    assert refresh_dirs, "replay_refresh was configured but the refresh repair never ran"
+    stats = json.loads((Path(refresh_dirs[0]) / "refresh_stats.json").read_text())
+    assert stats["improved_by_fresh"] == 1 and stats["kept_frozen"] == 1
+
+    assert trained_lists, "training never ran"
+    trained = trained_lists[0]
+    assert fresh_worse in trained, "the improved fresh target never reached the train list"
+    assert frozen_better in trained, "the frozen target must survive where the policy regressed"
+    assert frozen_worse not in trained, "the surpassed frozen target must NOT be trained on"
+
+
+def _mk_reward_row(total=5.0):
+    return SimpleNamespace(
+        centerline=0.0,
+        total=total,
+        collision_step=None,
+        rb_crossing=False,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+def _mk_candidate_row():
+    return {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]}
+
+
+def test_unified_morph_bit_identical_to_legacy_pair():
+    # THE morph: the unified entry must be byte-equal to the two legacy builders
+    # on both disagreement classes (also verified bit-identical on real mined rows
+    # of both classes before the legacy call sites were removed).
+    import numpy as np
+
+    from rlvr.autoresearch.tools.expert_morph import (
+        build_depart_morph_candidate,
+        build_expert_morph_candidate,
+        build_unified_morph_candidates,
+    )
+
+    T = 80
+    t = np.arange(T) * 0.1
+    expert = np.zeros((T, 4), dtype=np.float64)
+    expert[:, 0] = 8.0 + np.cumsum(np.minimum(1.5 * t, 7.0) * 0.1)
+    expert[:, 2] = 1.0
+    det = np.zeros((T, 4), dtype=np.float64)
+    det[:, 2] = 1.0
+    anchor = expert[-1, :2]
+
+    for reason, expected_kinds in (
+        ("model_lagging_expert", ["stay_behind", "depart"]),
+        ("expert_wait_model_forward", ["stay_behind"]),
+    ):
+        uni = build_unified_morph_candidates(det, expert, reason, stop_anchor_xy=anchor)
+        assert [k for k, _, _ in uni] == expected_kinds
+        stay, stay_d = build_expert_morph_candidate(
+            det, expert, stop_anchor_xy=anchor, return_diag=True
+        )
+        assert (stay is None) == (uni[0][1] is None)
+        if stay is not None:
+            assert stay.tobytes() == uni[0][1].tobytes()
+        assert stay_d == uni[0][2]
+        if reason == "model_lagging_expert":
+            dep, dep_d = build_depart_morph_candidate(det, expert, return_diag=True)
+            assert (dep is None) == (uni[1][1] is None)
+            if dep is not None:
+                assert dep.tobytes() == uni[1][1].tobytes()
+            assert dep_d == uni[1][2]
+
+
+def test_trust_region_uses_path_deviation_for_depart_only():
+    # A delayed catch-up ON the expert's path: pointwise L2 is huge (schedule offset),
+    # path deviation ~0. The trust region must pass it as the DEPART candidate and
+    # reject the identical trajectory when it is an ordinary generated candidate.
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import (
+        _candidate_deviation_penalty,
+        _candidate_path_deviation,
+    )
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)  # cruising expert
+    expert[:, 2] = 1.0
+    delayed = np.zeros((T, 4), dtype=np.float32)
+    delayed[:, 0] = np.concatenate([np.zeros(20), np.linspace(0, 40, 60)])  # waits, then follows
+    delayed[:, 2] = 1.0
+    assert _candidate_deviation_penalty(delayed, expert) > 4.0
+    assert _candidate_path_deviation(delayed, expert) < 0.1
+
+    offset = delayed.copy()
+    offset[:, 1] += 6.0  # genuinely divergent geometry
+    assert _candidate_path_deviation(offset, expert) > 4.0
+
+
+def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)
+    expert[:, 2] = 1.0
+    delayed = np.zeros((T, 4), dtype=np.float32)
+    delayed[:, 0] = np.concatenate([np.zeros(20), np.linspace(0, 40, 60)])
+    delayed[:, 2] = 1.0
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_reason": "model_lagging_expert",
+        "expert_disagreement_max_dev": 0.5,  # measured: near_log
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(2)]
+    # The generated twin carries the HIGHER reward: if the trust region ever stops
+    # rejecting it, unified selection would pick it and this test fails.
+    reward_rows = [_mk_reward_row(5.0), _mk_reward_row(2.0)]
+    # candidate 0 = generated with the SAME delayed trajectory; candidate 1 = depart
+    trajs = [delayed, delayed]
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=trajs,
+        reference_traj=expert,
+        max_expert_dev_m=4.0,
+        depart_index=1,
+    )
+    # The depart candidate's path-based deviation passes the trust region while the
+    # generated twin's pointwise deviation rejects it — depart is the only survivor
+    # and unified selection picks it. The depart_outcome assertion makes trust-region
+    # removal detectable even where Eq.26 weights would pick depart anyway.
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "near_log"
+    assert meta["depart_outcome"] == "selected"
+
+
+def test_selection_classifies_reason_only_rows_by_measured_deviation():
+    # A stall that ends in a collision is labelled moving_collision while the conflict
+    # detector still records model_lagging_expert. Selection must classify such rows by
+    # their measured deviation (the ed-like predicate), not default them to recoverable.
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)
+    expert[:, 2] = 1.0
+    delayed = np.zeros((T, 4), dtype=np.float32)
+    delayed[:, 0] = np.concatenate([np.zeros(20), np.linspace(0, 40, 60)])
+    delayed[:, 2] = 1.0
+    source_row = {
+        "repair_labels": ["moving_collision"],  # NOT expert_disagreement
+        "expert_disagreement_reason": "model_lagging_expert",
+        # 0.4 -> near_log: discriminates from BOTH failure modes (pre-unification
+        # the row was not ed-like -> recoverable; a dropped measurement -> recoverable).
+        "expert_disagreement_max_dev": 0.4,
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(2)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0)]
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[delayed, delayed],
+        reference_traj=expert,
+        max_expert_dev_m=4.0,
+        depart_index=1,
+    )
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "near_log"
+
+
+def test_state_class_handles_missing_and_measured_deviation():
+    from rlvr.autoresearch.tools.build_repaired_targets import _r2lpl_state_class
+
+    base = {
+        "repair_labels": ["moving_collision"],
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    # no measurement -> the middle class, never a phantom near_log
+    assert _r2lpl_state_class(dict(base)) == "recoverable"
+    assert _r2lpl_state_class({**base, "expert_disagreement_max_dev": 0.4}) == "near_log"
+    assert _r2lpl_state_class({**base, "expert_disagreement_max_dev": 3.0}) == "recoverable"
+    assert _r2lpl_state_class({**base, "expert_disagreement_max_dev": 9.0}) == "far_offpolicy"
+    # pure safety row without any disagreement measurement
+    assert _r2lpl_state_class({"repair_labels": ["moving_collision"]}) == "recoverable"
+
+
+def test_preflight_recorded_anchor_checks_reason_only_rows(tmp_path):
+    """Reason-only ed-like rows reach morph synthesis, so the preflight must check
+    them too — a strict-label preflight once let a run die hours into generation."""
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _preflight_recorded_anchor
+
+    scene = tmp_path / "row.npz"
+    np.savez(scene, ego_agent_future=np.zeros((80, 3), dtype=np.float32))
+    rows = [
+        {
+            "scene_path": str(scene),
+            "repair_labels": ["moving_collision"],
+            "expert_disagreement_reason": "model_lagging_expert",
+        }
+    ]
+    with pytest.raises(ValueError, match="ego_recorded_future"):
+        _preflight_recorded_anchor(rows)
+
+
+def test_selection_breaks_score_ties_by_lower_deviation():
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)
+    expert[:, 2] = 1.0
+    near = expert.copy()
+    near[:, 1] += 0.5
+    far = expert.copy()
+    far[:, 1] += 2.0
+    source_row = {"repair_labels": ["moving_collision"]}
+    candidate_rows = [_mk_candidate_row() for _ in range(2)]
+    # identical rewards -> identical Eq.26 scores -> the deviation tiebreak decides
+    reward_rows = [_mk_reward_row(2.0), _mk_reward_row(2.0)]
+    idx, _meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[far, near],
+        reference_traj=expert,
+    )
+    assert idx == 1
+
+
+@pytest.mark.parametrize(
+    ("section", "knob", "value"),
+    [
+        ("repair_generation", "lagging_expert_target", "force"),
+        ("repair_generation", "expert_target_require_clear", True),
+        ("repair_generation", "state_class_mode", "state_dev"),
+        ("event_mining", "expert_min_end_progress_m", 1.0),
+    ],
+)
+def test_workflow_contract_rejects_removed_knobs(tmp_path, section, knob, value):
+    import json as _json
+
+    workflow_dict = {
+        "judgement": {
+            "reward_config": "/tmp/reward.json",
+            "threshold_config": "/tmp/thresholds.json",
+            "credit_window_config": "/tmp/credit.json",
+            "enabled_labels": ["moving_collision"],
+        },
+        "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+        "replay_memory": {"capacity": 200},
+        "training": {"val_scenes": "/tmp/valid.json"},
+    }
+    workflow_dict.setdefault(section, {})[knob] = value
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(_json.dumps(workflow_dict))
+    training = tmp_path / "training.json"
+    training.write_text(_json.dumps({"backend": "base_sft", "train_args": {}}))
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    with pytest.raises(ValueError, match=knob):
+        round_runner._config_from_workflow_contract(
+            {
+                "model_path": "/tmp/model.pth",
+                "scene_list": str(scene_list),
+                "workflow_config": str(workflow),
+                "training_config": str(training),
+                "output_dir": str(tmp_path / "auto_research" / "out"),
+            }
+        )
+
+
+def test_refresh_join_rejects_negative_min_gain(tmp_path):
+    from rlvr.autoresearch.tools.refresh_replay_targets import join
+
+    with pytest.raises(ValueError, match="min_gain"):
+        join(
+            replay_scenes=tmp_path / "replay.json",
+            prev_rows=[tmp_path / "rows.jsonl"],
+            fresh_rows=[tmp_path / "fresh.jsonl"],
+            out_list=tmp_path / "out.json",
+            out_stats=tmp_path / "stats.json",
+            min_gain=-0.1,
+        )
+
+
+def test_direct_config_rejects_removed_knobs(tmp_path):
+    """The tombstones must also fire on the direct --config path, not only the
+    workflow-contract parser."""
+    import json as _json
+
+    cfg = {
+        "rounds": 1,
+        "epochs_per_round": 1,
+        "model_path": "/tmp/model.pth",
+        "scene_list": "/tmp/scenes.json",
+        "val_scenes": "/tmp/valid.json",
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "output_dir": str(tmp_path / "auto_research" / "out"),
+        "training_config": "/tmp/training.json",
+        "perception_mining": {"batch_size": 1},
+        "repair_config": {
+            "ego_shape": "from_npz",
+            "min_margin": 0.3,
+            "state_class_mode": "state_dev",
+        },
+        "replay_memory": {"capacity": 10},
+    }
+    path = tmp_path / "cfg.json"
+    path.write_text(_json.dumps(cfg))
+    with pytest.raises(ValueError, match="state_class_mode"):
+        round_runner._load_config(path)
