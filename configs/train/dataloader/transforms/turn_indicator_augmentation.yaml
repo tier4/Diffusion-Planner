@@ -1,2 +1,2 @@
 _target_: diffusion_planner.data.transforms.PlannerTurnIndicatorAugmentation
-probability: 0.1
+probability: 0.2

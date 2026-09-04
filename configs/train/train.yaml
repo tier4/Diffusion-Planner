@@ -5,7 +5,7 @@
 defaults:
   - /train/accelerator@accelerator: default
   - /train/dataloader@dataloader: default
-  - /train/model@model: xlarge_66m
+  - /train/model@model: large_33m
   - /train/optimizer@optimizer: default
   - /train/scheduler@scheduler: default
   - _self_
@@ -23,7 +23,7 @@ training:
   ego_loss_weight: 100.0
   neighbor_loss_weight: 1.0
   turn_indicator_loss_weight: 1e-3
-  turn_indicator_transition_loss_weight: 100.0
+  turn_indicator_transition_loss_weight: 1.0
   log_interval: 200
   checkpoint_interval: 2000
   checkpoint_dir: checkpoints
