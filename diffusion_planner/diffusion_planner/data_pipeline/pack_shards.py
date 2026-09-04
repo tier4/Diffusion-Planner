@@ -50,6 +50,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("pack")
     p.add_argument("--source", required=True, type=Path)
+    p.add_argument(
+        "--source-namespace",
+        type=str,
+        default=None,
+        help=(
+            "override the source namespace recorded for this pack, instead of the resolved "
+            "--source path. The base revision records the original absolute --source path as "
+            "its namespace; if the dataset root has since been relocated to another machine, "
+            "the resolved --source there will never match it, and every incremental pack would "
+            "otherwise fail with a namespace mismatch. Pass the base's recorded namespace here "
+            "to let such a relocated dataset root keep being extended incrementally."
+        ),
+    )
     p.add_argument("--dest", required=True, type=Path)
     p.add_argument("--base", required=True, help="base version tag, 'latest', or 'none'")
     p.add_argument("--tag", required=True)
@@ -141,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                     partitions=a.partitions,
                     sync=a.sync,
                     replace_all=a.replace_all,
+                    source_namespace=a.source_namespace,
                     shard_size_bytes=max(int(a.shard_size_gb * 2**30), 1),
                     seed=a.seed,
                     workers=a.workers,

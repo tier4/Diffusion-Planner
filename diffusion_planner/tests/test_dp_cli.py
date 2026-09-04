@@ -142,6 +142,52 @@ def test_pack_refuses_existing_tag_with_different_content(tmp_path):
     )  # different shuffle → different content
 
 
+def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path):
+    """A dataset root copied to another machine can no longer be extended incrementally: the
+    base revision recorded the original absolute --source path as its namespace, and the
+    resolved --source on the new machine will never match it. --source-namespace lets the
+    caller supply the base's recorded value explicitly so the mismatch guard can be satisfied
+    without --replace-all (which would require every source file to still be present)."""
+    src1, src2, dst = tmp_path / "src1", tmp_path / "src2", tmp_path / "dst"
+    make_tree(src1, LAYOUT[:1])
+    common1 = ["--source", str(src1), "--dest", str(dst), "--partition-depth", "4"]
+    assert CLI.main(["pack", *common1, "--base", "none", "--tag", "v1"]) == 0
+    root = DatasetRoot(dst)
+    v1 = root.read_version("v1")
+    recorded_namespace = v1.source_namespace
+    assert recorded_namespace == str(src1.resolve())
+
+    # Same content, different source directory — stands in for "the dataset root's original
+    # source tree is no longer at the path recorded in the base revision".
+    make_tree(src2, LAYOUT[:1])
+    common2 = ["--source", str(src2), "--dest", str(dst), "--partition-depth", "4"]
+    assert CLI.main(["pack", *common2, "--base", "v1", "--tag", "v2"]) == 1
+    assert DatasetRoot(dst).latest() == "v1"  # rejected pack must not publish v2
+
+    assert (
+        CLI.main(
+            [
+                "pack",
+                *common2,
+                "--base",
+                "v1",
+                "--tag",
+                "v2",
+                "--source-namespace",
+                recorded_namespace,
+            ]
+        )
+        == 0
+    )
+    v2 = DatasetRoot(dst).read_version("v2")
+    assert v2.source_namespace == recorded_namespace
+    assert set(v2.partitions) == set(v1.partitions)
+    # base partitions were reused, not rebuilt: identical data_rev/meta_rev/shard layout
+    assert {p: (e.data_rev, e.meta_rev, tuple(e.shards)) for p, e in v1.partitions.items()} == {
+        p: (e.data_rev, e.meta_rev, tuple(e.shards)) for p, e in v2.partitions.items()
+    }
+
+
 def test_pack_rejects_workers_below_one(tmp_path, capsys):
     src, dst = tmp_path / "src", tmp_path / "dst"
     make_tree(src, LAYOUT[:1])
