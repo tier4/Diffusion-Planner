@@ -50,15 +50,25 @@ _CLASSES = {
     TRAFFIC_LIGHT_YELLOW - TRAFFIC_LIGHT_GREEN: "amber",
     TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT_GREEN: "red",
 }
-_ORDER = ("green", "amber", "red", "none")
+_ORDER = ("green", "amber", "red", "ambiguous", "none")
 
 
 def route_tl_class(d: dict) -> str:
-    """The traffic-light state carried by the scene's own route lanes.
+    """The traffic-light state governing the ego, or ``ambiguous`` / ``none``.
 
-    Red wins over amber and amber over green when several appear: a route whose lanes
-    include a red signal is a hold situation whatever the other lanes show. Scenes with
-    no signalled route lane are reported as ``none`` and excluded from the gate.
+    A route tensor does not carry one signal. At an intersection ``route_lanes`` can
+    include a perpendicular approach whose light is correctly red while the ego's own
+    approach is green, so treating "any red lane" as red mislabels ordinary green scenes
+    — and this gate would then fail a perfectly normal plan for running a light the ego
+    never faced.
+
+    Deciding which signal governs the ego needs heading alignment and stop-line
+    proximity. That logic already exists in the C++ frame filters
+    (``detect_red_light_run``) and is deliberately not reimplemented here, because a
+    second, uncross-checked copy of the geometry is how the two drift apart. A route
+    whose signalled lanes disagree is therefore reported as ``ambiguous`` and left out of
+    the verdict: fewer graded scenes, but no invented answer. A route with no signalled
+    lane at all is ``none``, likewise excluded.
     """
     rl = d["route_lanes"].detach().cpu().numpy()
     if rl.ndim > 3:
@@ -71,10 +81,12 @@ def route_tl_class(d: dict) -> str:
     if not hot.any():
         return "none"
     present = {_CLASSES.get(int(c)) for c in onehot[hot].argmax(axis=1)}
-    for state in ("red", "amber", "green"):
-        if state in present:
-            return state
-    return "none"
+    present.discard(None)  # one-hot slots outside green/amber/red carry no state
+    if not present:
+        return "none"
+    if len(present) > 1:
+        return "ambiguous"
+    return present.pop()
 
 
 def measure(model, margs, scenes, device, goal, shape) -> dict[str, list[float]]:
@@ -134,7 +146,13 @@ def report(spans: dict[str, list[float]], model_path: str, n_scenes: int, shape)
     print(f"shape  : {shape if shape else 'as recorded'}")
     for k in _ORDER:
         if spans[k]:
-            print(f"   {k:<6} n={len(spans[k]):<3} mean span {float(np.mean(spans[k])):6.2f} m")
+            print(f"   {k:<9} n={len(spans[k]):<3} mean span {float(np.mean(spans[k])):6.2f} m")
+    excluded = len(spans["ambiguous"]) + len(spans["none"])
+    if excluded:
+        print(
+            f"   ({excluded} scene(s) not graded: ambiguous = route lanes disagree, "
+            "none = no signalled lane)"
+        )
 
 
 def _parse_args() -> argparse.Namespace:

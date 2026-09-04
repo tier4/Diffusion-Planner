@@ -44,10 +44,16 @@ def test_route_tl_class_unsignalled_is_none():
     assert route_tl_class(_scene(TRAFFIC_LIGHT_GREEN, valid=False)) == "none"
 
 
-def test_route_tl_class_red_outranks_green():
-    """A route that includes a red signal is a hold, whatever the other lanes show."""
-    assert route_tl_class(_scene(TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_RED)) == "red"
-    assert route_tl_class(_scene(TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_YELLOW)) == "amber"
+def test_route_tl_class_mixed_states_are_ambiguous():
+    """route_lanes can hold a perpendicular red while the ego's own approach is green.
+
+    Picking either one would be a guess, and guessing "red" makes this gate fail a normal
+    plan for running a light the ego never faced. Such scenes are excluded instead.
+    """
+    assert route_tl_class(_scene(TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_RED)) == "ambiguous"
+    assert route_tl_class(_scene(TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_YELLOW)) == "ambiguous"
+    # agreeing lanes are not ambiguous
+    assert route_tl_class(_scene(TRAFFIC_LIGHT_RED, TRAFFIC_LIGHT_RED)) == "red"
 
 
 def test_verdict_passes_when_it_goes_on_green_and_holds_on_red():
