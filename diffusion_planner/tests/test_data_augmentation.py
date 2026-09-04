@@ -1195,7 +1195,9 @@ def test_frenet_corridor_unconstrained_without_obstacles():
     )
     nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
     wb, ego_l, ego_w = (inputs["ego_shape"][:, i] for i in range(3))
-    lo, hi = aug._corridor(inputs, xy, tan, nrm, ego_w / 2, ego_l / 2, wb)
+    # border and neighbour cuts take separate half-widths (the clearance floor is a
+    # neighbour rule); with min_clearance at its default the two are the same number.
+    lo, hi = aug._corridor(inputs, xy, tan, nrm, ego_w / 2, ego_w / 2, ego_l / 2, wb)
 
     assert float(lo.max()) <= -20.0 + ATOL, f"corridor cut from below with no obstacles: {lo.max()}"
     assert float(hi.min()) >= 20.0 - ATOL, f"corridor cut from above with no obstacles: {hi.min()}"

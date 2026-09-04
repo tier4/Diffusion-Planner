@@ -183,6 +183,7 @@ def neighbor_lateral_bounds(
     wb: torch.Tensor,
     lo: torch.Tensor,
     hi: torch.Tensor,
+    min_clearance: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Tighten lateral bounds where a recorded neighbor blocks the way.
 
@@ -195,6 +196,11 @@ def neighbor_lateral_bounds(
         xy, tan, nrm: (B, T, 2) ego path, tangent, normal.
         half_l, half_w, wb: (B,) ego half length, half width, wheel base.
         lo, hi: (B, T) bounds to tighten.
+        min_clearance: metres of exact clearance the caller will later demand of
+            every checked pair. It widens ``near`` only: the returned prefilter has
+            to admit every pair that could come within the floor, not merely every
+            pair that could touch, or the floor would go silently unenforced on the
+            pairs it excluded. 0 leaves the prefilter exactly as it was.
 
     Returns:
         tightened (lo, hi) and ``near`` (B, N) — neighbors close enough
@@ -228,9 +234,12 @@ def neighbor_lateral_bounds(
     near = valid_m & (lon.abs() <= half_l_m + ext_lon)
     # Same test, padded, for the exact-OBB veto: the pad covers the ego's
     # longitudinal half-extent growing under a heading change
-    # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre shift,
-    # so a pair outside it cannot overlap and skipping it changes no verdict.
-    near_any[vb, vn] = (valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2)).any(-1)
+    # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre shift, plus
+    # any clearance floor the caller will demand, so a pair outside it can neither
+    # overlap nor come within the floor and skipping it changes no verdict.
+    near_any[vb, vn] = (
+        valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2 + min_clearance)
+    ).any(-1)
 
     cut_hi = torch.where(
         near & (lat > 0), lat - ext_lat - half_w_m, torch.full_like(lat, torch.inf)
@@ -327,8 +336,22 @@ def veto_overlapping(
     valid: torch.Tensor,
     shapes_wl: torch.Tensor,
     near: torch.Tensor,
+    min_clearance: float = 0.0,
+    floor_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Clear rows whose footprint truly overlaps a recorded neighbor.
+
+    With ``min_clearance > 0`` the row must also keep at least that much exact
+    footprint clearance from every checked neighbour, not merely avoid overlap.
+    The sign-only fast path is used when the floor is 0, so the default is
+    unchanged.
+
+    ``floor_mask`` says WHERE the floor applies. Outside it, only true overlap is
+    vetoed. This matters because a candidate coincides with the recorded drive
+    outside its merge window, so a floor applied over the whole horizon rejects
+    scenes for the RECORDING's clearance rather than for anything the perturbation
+    did -- which silently deletes the tight-squeeze scenes the augmentation is most
+    valuable on. Overlap is still vetoed everywhere, floor or no floor.
 
     Lateral bounds are a fast approximation — measured to accept ~1.4% of
     winners whose TRUE footprint overlaps a neighbor box — so the accepted
@@ -347,9 +370,13 @@ def veto_overlapping(
         shapes_wl: (B, N, 2) neighbor width, length.
         near: (B, N) neighbors worth checking, from
             :func:`neighbor_lateral_bounds`.
+        min_clearance: metres of exact clearance every checked pair must keep,
+            at the timesteps ``floor_mask`` selects.
+        floor_mask: (B, T) bool, the timesteps at which ``min_clearance`` applies.
+            ``None`` applies it everywhere (the caller wants the whole horizon).
 
     Returns:
-        ``rows`` with overlapping scenes set False.
+        ``rows`` with overlapping (or too-close) scenes set False.
     """
     if not bool(rows.any()):
         return rows
@@ -366,7 +393,13 @@ def veto_overlapping(
         shapes_wl[bi, ni],
         valid[bi, ni],
         paired=True,
-        overlap_only=True,  # a veto only asks whether they overlap
+        # sign alone answers "do they overlap"; a positive floor needs the true gap
+        overlap_only=min_clearance <= 0.0,
     )  # (M, T)
-    rows[bi[clr.amin(-1) < 0.0]] = False
+    if min_clearance <= 0.0 or floor_mask is None:
+        rows[bi[clr.amin(-1) < min_clearance]] = False
+        return rows
+    # per-timestep threshold: the floor where the candidate deviates, 0 elsewhere
+    thr = torch.where(floor_mask[bi], min_clearance, 0.0).to(clr.dtype)  # (M, T)
+    rows[bi[(clr < thr).any(-1)]] = False
     return rows

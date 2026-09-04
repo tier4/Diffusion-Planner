@@ -18,11 +18,7 @@ from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import closed_loop_validate
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.data_augmentation_bridge import (
-    StatePerturbation as BridgeStatePerturbation,
-)
-from diffusion_planner.utils.data_augmentation_frenet import frenet_augmenter_from_args
+from diffusion_planner.utils.augmenter_factory import augmenter_from_args
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.neighbor_db import NeighborPatternDB
@@ -116,23 +112,9 @@ def model_training(args):
     if global_rank == 0 and args.w_kinematic > 0.0:
         print(f"Kinematic-feasibility reward enabled: w_kinematic={args.w_kinematic}")
 
-    if args.use_data_augment:
-        if args.augment_type == "bridge":
-            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
-        elif args.augment_type == "frenet":
-            aug = frenet_augmenter_from_args(args)
-        else:
-            aug = StatePerturbation(
-                augment_prob=args.augment_prob,
-                num_refine=args.num_refine,
-                device=args.device,
-                ego_past_noise_std=args.ego_past_noise_std,
-                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
-            )
-        if global_rank == 0:
-            print(f"Data augmentation enabled: type={args.augment_type} prob={args.augment_prob}")
-    else:
-        aug = None
+    aug = augmenter_from_args(args)
+    if aug is not None and global_rank == 0:
+        print(f"Data augmentation enabled: type={args.augment_type} prob={args.augment_prob}")
 
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)

@@ -48,7 +48,15 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default="quintic",
     )
     num_refine: int = 20
-    ego_past_noise_std: float = 0.1
+    ego_past_noise_std: float = cli(
+        "std of the single per-scene factor scaling an augmented row's ego history, "
+        "drawn from N(1, std) and clamped to +-2 std. WHAT IT SCALES DIFFERS BY "
+        "AUGMENTER: quintic scales the RECORDED history AND the current velocity and "
+        "acceleration; frenet scales the history it rewrote from the perturbed polyline "
+        "and leaves ego_current_state bit-identical. Note the default is non-zero, so "
+        "frenet runs perturb the history unless this is set to 0.",
+        default=0.1,
+    )
     use_smoothing_future_trajectory: bool = True
 
     # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---
@@ -71,6 +79,39 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "frenet: initial lateral curvature, as a fraction of the value a quintic "
         "naturally takes for the drawn offset and horizon.",
         default_factory=lambda: [0.0, -0.5, 0.5, -1.0, 1.0],
+    )
+    frenet_toward_parked_prob: float = cli(
+        "frenet: fraction of scenes where a PARKED vehicle bounds the corridor far enough "
+        "ahead that the avoidance is still in front of the ego, whose nudges are mirrored "
+        "to point AT that vehicle and the largest feasible one is taken. Makes the t=0 "
+        "state a harder avoidance than the recording's. 0 (default) leaves the uniform "
+        "draw untouched.",
+        default=0.0,
+    )
+    frenet_min_clearance: float = cli(
+        "frenet: exact footprint clearance (m) every accepted candidate must keep from "
+        "every recorded neighbour, on top of the corridor margin. Applies to all rows. "
+        "0 (default) keeps the overlap-only veto.",
+        default=0.0,
+    )
+    frenet_hist_jitter_lat: float = cli(
+        "frenet: std (m) of a smooth per-scene LATERAL wobble of the rewritten ego "
+        "history, measured at the oldest history sample and tapering to exactly 0 at "
+        "t=0. Three low-frequency modes, so the track bends rather than looking noisy. "
+        "0 (default) draws nothing.",
+        default=0.0,
+    )
+    frenet_hist_jitter_lon: float = cli(
+        "frenet: as frenet_hist_jitter_lat, but ALONG the direction of travel. Varies "
+        "the spacing of the history samples, i.e. makes the implied speed history "
+        "wobble rather than be uniformly wrong. 0 (default) draws nothing.",
+        default=0.0,
+    )
+    frenet_recovery_rounds: int = cli(
+        "frenet: rounds of re-selection allowed after a candidate is vetoed for truly "
+        "overlapping a recorded neighbour. Each round burns the losing draw and tries "
+        "the next one. 0 (default) leaves a vetoed scene on plain ground truth.",
+        default=0,
     )
     frenet_ranked_temp_s: float = cli(
         "frenet: time constant (s) of the merge-horizon sampling; smaller favours "
@@ -95,7 +136,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     # Training Parameters
     # ---------------------------------------------------------
-    seed: int = 3407
+    seed: int = cli(
+        "seed for model init, data order and augmentation draws. Vary it to measure the "
+        "run-to-run noise floor: training is otherwise deterministic, so two runs at the "
+        "same seed produce identical weights and cannot serve as a control.",
+        default=3407,
+    )
     train_epochs: int = cli("total training epochs", default=80)
     save_utd: int = cli("checkpoint save cadence in epochs", default=10)
     learning_rate: float = 1e-4
