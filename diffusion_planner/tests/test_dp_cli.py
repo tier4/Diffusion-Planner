@@ -2,6 +2,7 @@ import json
 
 import pytest
 from diffusion_planner.data_pipeline import pack_shards as CLI
+from diffusion_planner.data_pipeline import tar_shards as T
 from diffusion_planner.data_pipeline.partition import pid_of
 from diffusion_planner.data_pipeline.versioning import DatasetRoot
 from tests.dp_fixtures import make_tree
@@ -142,12 +143,29 @@ def test_pack_refuses_existing_tag_with_different_content(tmp_path):
     )  # different shuffle → different content
 
 
-def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path):
+def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path, monkeypatch):
     """A dataset root copied to another machine can no longer be extended incrementally: the
     base revision recorded the original absolute --source path as its namespace, and the
     resolved --source on the new machine will never match it. --source-namespace lets the
     caller supply the base's recorded value explicitly so the mismatch guard can be satisfied
-    without --replace-all (which would require every source file to still be present)."""
+    without --replace-all (which would require every source file to still be present).
+
+    data_rev/meta_rev/shards alone cannot prove the base's partition was *reused* rather than
+    deterministically rebuilt to an identical revision (src2 has the same content as src1, so
+    a full rebuild would land on the exact same tuple). Capturing (inode, mtime_ns) of the
+    published shard/manifest files doesn't prove it either: `_publish` never overwrites an
+    already-published shard directory that verifies byte-identical, it just discards the
+    redundant rebuild — so a full rebuild that reproduces the base's exact revision leaves the
+    same (inode, mtime_ns) behind as a genuine reuse would (verified empirically against this
+    file's own `_build_partition` before writing this test: disabling the reuse short-circuit
+    entirely still left the published files' stat untouched). The only thing that actually
+    distinguishes reuse from a deterministic rebuild is whether pass 2 of `_build_partition`
+    (the npz-decode-and-shard-write loop) ran at all — so this test spies on
+    `tar_shards.ShardWriter`, the object that loop instantiates once per partition it builds,
+    and asserts it is never constructed during the incremental pack for the (single, fully
+    reused) partition under test. --workers defaults to 1, which runs `_build_partition`
+    serially in this process (see packer._run_builds), so the spy sees every call.
+    """
     src1, src2, dst = tmp_path / "src1", tmp_path / "src2", tmp_path / "dst"
     make_tree(src1, LAYOUT[:1])
     common1 = ["--source", str(src1), "--dest", str(dst), "--partition-depth", "4"]
@@ -164,6 +182,15 @@ def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path):
     assert CLI.main(["pack", *common2, "--base", "v1", "--tag", "v2"]) == 1
     assert DatasetRoot(dst).latest() == "v1"  # rejected pack must not publish v2
 
+    shard_writer_calls = []
+    real_shard_writer = T.ShardWriter
+
+    def _spy_shard_writer(*args, **kwargs):
+        shard_writer_calls.append(args)
+        return real_shard_writer(*args, **kwargs)
+
+    monkeypatch.setattr(T, "ShardWriter", _spy_shard_writer)
+
     assert (
         CLI.main(
             [
@@ -179,13 +206,19 @@ def test_pack_source_namespace_override_allows_relocated_dataset_root(tmp_path):
         )
         == 0
     )
+    # Pass 2 (npz decode + tar-shard write) never ran: the base's partition was reused outright,
+    # not rebuilt to a matching revision.
+    assert shard_writer_calls == []
     v2 = DatasetRoot(dst).read_version("v2")
     assert v2.source_namespace == recorded_namespace
     assert set(v2.partitions) == set(v1.partitions)
-    # base partitions were reused, not rebuilt: identical data_rev/meta_rev/shard layout
-    assert {p: (e.data_rev, e.meta_rev, tuple(e.shards)) for p, e in v1.partitions.items()} == {
-        p: (e.data_rev, e.meta_rev, tuple(e.shards)) for p, e in v2.partitions.items()
-    }
+    e1 = v1.partitions["pA/mX/manual/2026-01-01"]
+    e2 = v2.partitions["pA/mX/manual/2026-01-01"]
+    assert (e2.data_rev, e2.meta_rev, tuple(e2.shards)) == (
+        e1.data_rev,
+        e1.meta_rev,
+        tuple(e1.shards),
+    )
 
 
 def test_pack_rejects_workers_below_one(tmp_path, capsys):
