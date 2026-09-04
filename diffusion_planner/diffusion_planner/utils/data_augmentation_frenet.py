@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from diffusion_planner.dimensions import EGOSTATE
 from diffusion_planner.utils.augmentation_checks import (
     DT,
     border_lateral_bounds,
@@ -116,7 +117,41 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             cur[rows, 4] = torch.sqrt(vx * vx + vy * vy) * torch.where(vx < 0, -1.0, 1.0)
             cur[rows, 5] = 0.0
             cur[rows, 7] = 0.0  # ay
+        # History noise runs LAST, after the re-centering rather than before it. Only
+        # here is the history expressed about the augmented t=0 pose, so scaling it
+        # about the origin leaves t=0 exactly at the origin and leaves the implied
+        # speed history consistent with the current state it is scaled with. Scaling in
+        # the pre-centering frame would instead drag the t=0 pose away from the current
+        # state the whole batch is then centered on. It also runs after the pad
+        # zeroing, so a padded row is exactly zero and no factor can resurrect it.
+        if self.past_noise_std > 0.0 and rows is not None and bool(rows.any()):
+            self._scale_history(inputs, rows)
         return out
+
+    def _scale_history(self, inputs, rows):
+        """Scale an augmented row's rewritten history by one factor per scene.
+
+        The perturbation the quintic augmenter applies through ``ego_past_noise_std``,
+        which frenet disables at the base class because it rewrites the past
+        kinematically: one N(1, std) scalar per scene clamped to +-2 std, multiplying
+        the history xy and the current velocity and acceleration together, so the
+        implied speed history stays consistent with the state. Non-augmented rows are
+        never touched -- they train on plain ground truth, unscaled.
+
+        The draw comes from the augmenter's own generator, and is taken ONLY when the
+        std is positive, so at the default the generator is left exactly where the
+        unaugmented stream leaves it.
+        """
+        w = self.past_noise_std
+        past, cur = inputs["ego_agent_past"], inputs["ego_current_state"]
+        scale = torch.normal(1.0, w, size=(int(rows.sum()), 1, 1), generator=self.gen).clamp(
+            1.0 - 2 * w, 1.0 + 2 * w
+        )
+        scale = scale.to(device=past.device, dtype=past.dtype)
+        past[rows, :, :2] = past[rows, :, :2] * scale
+        cur[rows, EGOSTATE.VX : EGOSTATE.AY + 1] = (
+            cur[rows, EGOSTATE.VX : EGOSTATE.AY + 1] * scale[:, :, 0]
+        )
 
     def __init__(
         self,
@@ -131,12 +166,16 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         recovery_rounds: int = 0,
         toward_parked_prob: float = 0.0,
         min_clearance: float = 0.0,
+        past_noise_std: float = 0.0,
     ):
         super().__init__(
             augment_prob=augment_prob,
             num_refine=20,
             device=device,
-            ego_past_noise_std=0.0,  # frenet rewrites the past kinematically
+            # frenet rewrites the past kinematically, so the base class must not scale
+            # the RECORDED history; the same perturbation is available on the rewritten
+            # history through past_noise_std below.
+            ego_past_noise_std=0.0,
             use_smoothing_future_trajectory=False,
         )
         # The ego past is rewritten to the perturbed polyline, so it must also be
@@ -182,6 +221,13 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self.min_clearance = float(min_clearance)
         if self.min_clearance < 0.0:
             raise ValueError(f"min_clearance must be >= 0, got {min_clearance}")
+        # Std of the per-scene history-scale factor. The base class is told 0 above
+        # because frenet rewrites the past kinematically and the quintic scaling would
+        # be applied to the recorded history instead; this knob applies the same
+        # perturbation to the REWRITTEN history. 0 draws nothing and is bit-identical.
+        self.past_noise_std = float(past_noise_std)
+        if self.past_noise_std < 0.0:
+            raise ValueError(f"past_noise_std must be >= 0, got {past_noise_std}")
         self._basis_cache = {}
 
     # ---------- shared basis (depends only on the time grid + knobs) ----------
@@ -809,4 +855,5 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         recovery_rounds=int(args.frenet_recovery_rounds),
         toward_parked_prob=float(args.frenet_toward_parked_prob),
         min_clearance=float(args.frenet_min_clearance),
+        past_noise_std=float(args.frenet_past_noise_std),
     )

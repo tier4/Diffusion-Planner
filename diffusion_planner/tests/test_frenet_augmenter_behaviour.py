@@ -36,7 +36,7 @@ EGO_SHAPE = (2.75, 5.0, 2.0)  # wheel base, length, width
 N_SLOTS = 4  # neighbour slots per scene
 
 
-def _scene(batch: int = 1, border_y: float = 6.0, neighbours=()):
+def _scene(batch: int = 1, border_y: float = 6.0, neighbours=(), pad_steps: int = 0):
     """A straight-road batch: ego at EGO_V along +x, kerbs at +-border_y.
 
     ``neighbours`` is a list of dicts, one per occupied slot, applied to EVERY
@@ -63,6 +63,10 @@ def _scene(batch: int = 1, border_y: float = 6.0, neighbours=()):
     cur = torch.zeros(batch, 10)
     cur[:, 2] = 1.0
     cur[:, 4] = EGO_V
+
+    # a scene starting near the beginning of a recording: the leading history is
+    # all-zero, meaning "no history", not "the ego was at the origin"
+    past[:, :pad_steps] = 0.0
 
     xs = torch.linspace(-40.0, 120.0, 20)
     line_strings = torch.zeros(batch, 2, 20, 4)
@@ -347,6 +351,57 @@ def test_min_clearance_does_not_move_the_border_bounds():
         )
     assert torch.equal(bounds[0][0], bounds[1][0])
     assert torch.equal(bounds[0][1], bounds[1][1])
+
+
+# ─────────────────────────── 5. ego-history noise ────────────────────────────
+
+
+def test_past_noise_scales_each_accepted_history_by_one_factor():
+    """One scalar per scene, on the rewritten history and the state it implies."""
+    plain = FrenetStatePerturbationTensor(1.0, "cpu", seed=7)
+    in_ref, _ = _run(plain, batch=8, pad_steps=3)
+    noisy = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, past_noise_std=0.2)
+    in_new, _ = _run(noisy, batch=8, pad_steps=3)
+
+    rows = plain._aug_rows
+    assert torch.equal(rows, noisy._aug_rows), "the scale draw must not shift the decisions"
+    assert bool(rows.any())
+
+    past_ref, past_new = in_ref["ego_agent_past"], in_new["ego_agent_past"]
+    cur_ref, cur_new = in_ref["ego_current_state"], in_new["ego_current_state"]
+
+    # untouched rows train on plain ground truth, unscaled
+    assert torch.equal(past_ref[~rows], past_new[~rows])
+    assert torch.equal(cur_ref[~rows], cur_new[~rows])
+
+    for b in torch.nonzero(rows, as_tuple=True)[0].tolist():
+        real = past_ref[b, :, 0].abs() > 1e-3  # the samples with a length to scale
+        ratio = past_new[b, real, 0] / past_ref[b, real, 0]
+        s = float(ratio[0])
+        assert 1 - 2 * 0.2 <= s <= 1 + 2 * 0.2, s
+        assert torch.allclose(ratio, ratio[0].expand_as(ratio), atol=1e-5), "not one factor"
+        # the state the history implies is scaled with it (vx, vy, ax, ay)
+        assert torch.allclose(cur_new[b, 4:8], cur_ref[b, 4:8] * s, atol=1e-5)
+        # t=0 is the origin of the frame the batch is centred on, before and after
+        assert torch.allclose(past_new[b, -1, :2], torch.zeros(2), atol=1e-5)
+        # "no history" stays no history
+        assert torch.equal(past_new[b, :3], torch.zeros(3, 4))
+
+
+def test_past_noise_at_zero_changes_nothing(monkeypatch):
+    shapes = _rand_spy(monkeypatch)
+    off = FrenetStatePerturbationTensor(1.0, "cpu", seed=7)
+    in_off, fut_off = _run(off, batch=8, pad_steps=3)
+    shapes_off, _ = list(shapes), shapes.clear()
+
+    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, past_noise_std=0.0)
+    in_on, fut_on = _run(explicit, batch=8, pad_steps=3)
+
+    assert shapes_off == list(shapes)
+    assert torch.equal(off.gen.get_state(), explicit.gen.get_state())
+    assert torch.equal(in_off["ego_agent_past"], in_on["ego_agent_past"])
+    assert torch.equal(in_off["ego_current_state"], in_on["ego_current_state"])
+    assert torch.equal(fut_off, fut_on)
 
 
 # ───────────────────── layout robustness (3-col / 4-col) ─────────────────────

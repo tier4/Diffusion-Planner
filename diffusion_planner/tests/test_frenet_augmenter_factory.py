@@ -43,6 +43,7 @@ def _args(**over):
         frenet_recovery_rounds=0,
         frenet_toward_parked_prob=0.0,
         frenet_min_clearance=0.0,
+        frenet_past_noise_std=0.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -165,3 +166,16 @@ def test_toward_parked_prob_outside_unit_interval_is_refused():
 def test_negative_min_clearance_is_refused():
     with pytest.raises(ValueError, match="min_clearance"):
         FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", min_clearance=-0.1)
+
+
+def test_past_noise_std_defaults_to_off_and_reaches_the_augmenter():
+    """The base class is handed 0.0 unconditionally; this knob is the frenet one."""
+    assert frenet_augmenter_from_args(_args()).past_noise_std == 0.0
+    aug = frenet_augmenter_from_args(_args(frenet_past_noise_std="0.1"))
+    assert aug.past_noise_std == 0.1
+    assert aug._ego_past_noise_std == 0.0, "the recorded history must never be scaled"
+
+
+def test_negative_past_noise_std_is_refused():
+    with pytest.raises(ValueError, match="past_noise_std"):
+        FrenetStatePerturbationTensor(augment_prob=1.0, device="cpu", past_noise_std=-0.1)

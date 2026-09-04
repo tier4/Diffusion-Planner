@@ -86,6 +86,14 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "0 (default) keeps the overlap-only veto.",
         default=0.0,
     )
+    frenet_past_noise_std: float = cli(
+        "frenet: std of the single per-scene factor scaling an AUGMENTED row's rewritten "
+        "history and its current velocity/acceleration, drawn from N(1, std) and clamped "
+        "to +-2 std -- the same history perturbation the quintic augmenter applies via "
+        "--ego_past_noise_std, which frenet otherwise disables because it rewrites the "
+        "past kinematically. 0 (default) leaves the rewritten history alone.",
+        default=0.0,
+    )
     frenet_recovery_rounds: int = cli(
         "frenet: rounds of re-selection allowed after a candidate is vetoed for truly "
         "overlapping a recorded neighbour. Each round burns the losing draw and tries "
