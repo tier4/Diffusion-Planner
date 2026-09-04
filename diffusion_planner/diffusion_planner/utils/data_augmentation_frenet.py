@@ -546,8 +546,15 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # the recording's own clearance.
     DEVIATION_EPS = 1e-3
 
-    def _deviates_from_gt(self, aug_xy, xy):
-        """(B, T) bool: timesteps where the candidate is not the recorded drive."""
+    def _floor_mask(self, aug_xy, xy):
+        """(B, T) bool: timesteps the clearance floor applies at, or None if it is off.
+
+        The mask marks where the candidate is not the recorded drive. Returning None
+        with the floor off keeps the default path from computing a mask that
+        :func:`veto_overlapping` would then ignore.
+        """
+        if xy is None or self.min_clearance <= 0.0:
+            return None
         return (aug_xy - xy).norm(dim=-1) > self.DEVIATION_EPS
 
     def _veto_true_overlaps(self, inputs, upd, aug_xy, heading, xy=None):
@@ -564,7 +571,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             inputs["neighbor_agents_past"][:, :, -1][..., [6, 7]],
             self._nbr_near,
             min_clearance=self.min_clearance,
-            floor_mask=None if xy is None else self._deviates_from_gt(aug_xy, xy),
+            floor_mask=self._floor_mask(aug_xy, xy),
         )
 
     # ---------- toward-parked nudge ----------
@@ -963,7 +970,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             inputs["neighbor_agents_past"][rows][:, :, -1][..., [6, 7]],
             self._nbr_near[rows],
             min_clearance=self.min_clearance,
-            floor_mask=None if xy is None else self._deviates_from_gt(aug_xy, xy[rows]),
+            floor_mask=self._floor_mask(aug_xy, None if xy is None else xy[rows]),
         )
 
     def _write_back(self, inputs, ego_future, aug_xy, g, heading, upd, wb, P):
