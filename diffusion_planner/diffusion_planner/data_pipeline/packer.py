@@ -614,7 +614,14 @@ def pack(opts: PackOptions) -> V.Version:
             and (base.rule_hash != opts.rule.rule_hash or base.source_namespace != namespace)
         ):
             raise RuleMismatchError(
-                "partition rule or source namespace differs from base; pass --replace-all"
+                "partition rule or source namespace differs from base. If the partition "
+                "rule itself changed, pass --replace-all to rebuild every partition from "
+                "source (this requires every source file the base was built from to still "
+                "be present). If only the source root moved — e.g. this dataset root was "
+                "relocated to another machine and the resolved --source path can no longer "
+                "match what the base recorded — pass --source-namespace <the base's "
+                "recorded namespace> instead, so the base's partitions are reused rather "
+                "than rebuilt from files a relocation usually leaves behind."
             )
         if opts.sync and opts.path_list is not None:
             raise PlanError("--sync requires a full source scan; cannot be used with --path-list")

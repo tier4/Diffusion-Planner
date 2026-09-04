@@ -122,8 +122,14 @@ def test_rule_change_requires_replace_all_and_keys_stay_unique(tmp_path):
     PK.pack(_opts(src, dst, "v1"))
     o = _opts(src, dst, "v2", base="v1")
     o.rule = PartitionRule(depth=3)
-    with pytest.raises(RuleMismatchError):
+    with pytest.raises(RuleMismatchError) as exc_info:
         PK.pack(o)
+    # The message must name BOTH remedies and say when each applies: --replace-all for a
+    # genuine rule change (rebuilds from source), --source-namespace for a relocated dataset
+    # root where --replace-all would wrongly demand every source file still be present.
+    msg = str(exc_info.value)
+    assert "--replace-all" in msg
+    assert "--source-namespace" in msg
     o.replace_all = True
     v2 = PK.pack(o)
     assert all(p.count("/") == 2 for p in v2.partitions)
