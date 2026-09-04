@@ -267,7 +267,8 @@ def main():
 
             gt_np = None
             if args.show_gt:
-                _gt = np.load(sp, allow_pickle=True)["ego_agent_future"]
+                with np.load(sp, allow_pickle=True) as _npz:
+                    _gt = _npz["ego_agent_future"]
                 # Legacy 3-col [x, y, heading] futures must be widened to the
                 # canonical [x, y, cos, sin] that draw_traj indexes.
                 gt_np = future_to_4col(

@@ -42,13 +42,24 @@ from diffusion_planner.utils.augmentation_checks import (
     unconstrained_bounds,
     veto_overlapping,
 )
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation import (
+    StatePerturbation,
+    cos_sin_to_heading,
+    pose_to_cos_sin,
+)
 
 # extra half-width the corridor keeps from borders and neighbors
 CORRIDOR_MARGIN = 0.10
-# a recorded neighbour slower than this at t=0 counts as parked for the toward-parked
-# nudge; avoiding a MOVING vehicle is a different problem and is deliberately excluded
+# A neighbour counts as parked for the toward-parked nudge when its RECORDED velocity at
+# the last history step is below this. The recorded (vx, vy) is used rather than a
+# finite difference of the centroid: over one 0.1 s step a differenced position amplifies
+# tracker jitter tenfold, so a stationary car wobbling 5 cm would read as 0.5 m/s.
 PARKED_SPEED = 0.5  # m/s
+# ...and it must also STAY put: a car stopped at a light is slow at t=0 and then departs,
+# and the nudge would aim the ego at a lead vehicle that is no longer there. Every
+# recorded future sample must stay within this distance of its t=0 position, which is
+# what makes the "MOVING vehicles are excluded" claim true rather than aspirational.
+PARKED_MAX_DISPLACEMENT = 1.0  # m
 
 
 def quintic_basis(t0: float, t1: float, t: np.ndarray):
@@ -135,7 +146,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # rows augmented in the most recent __call__; centric_transform re-projects
         # velocity/accel to base_link (vy = ay = 0) for exactly these rows
         self._aug_rows = None
+        # corridor by-products, all reset at the top of every _corridor call
         self._nbr_near = None
+        self._nbr_st = None
+        self._nbr_valid = None
+        self._nbr_lo = None
+        self._nbr_hi = None
         self.n_draws = n_draws
         self.dy_max = dy_max
         self.dth_max = dth_max
@@ -206,7 +222,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         return out
 
     # ---------- corridor, fully batched ----------
-    def _corridor(self, inputs, xy, tan, nrm, half_w, half_l, wb):
+    def _corridor(self, inputs, xy, tan, nrm, half_w, half_w_nbr, half_l, wb):
         """Lateral free space per timestep: where can this ego go sideways.
 
         Border and neighbour cuts are computed against separate copies of the
@@ -214,6 +230,13 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         sequence. Both are max/min reductions so the intersection is identical,
         and keeping the neighbour-only pair is what lets the toward-parked nudge ask
         "which side is a VEHICLE on" without mistaking a kerb for a car.
+
+        The two cuts take SEPARATE half-widths: ``min_clearance`` is a floor on the
+        gap to a NEIGHBOUR, and widening the border cut with it as well would drop
+        kerb-hugging scenes out of augmentation entirely (the recorded drives touch
+        the mapped borders, which is exactly why borders are never vetoed either).
+        ``half_w`` cuts against borders, ``half_w_nbr`` against neighbours; they are
+        equal whenever ``min_clearance <= CORRIDOR_MARGIN``.
         """
         # reset per batch so a neighbor-less batch never sees a stale tensor
         self._nbr_st = self._nbr_valid = self._nbr_near = None
@@ -233,15 +256,25 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             shapes_wl = past[:, :, -1][..., [6, 7]]  # width, length
             n_lo, n_hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
             n_lo, n_hi, self._nbr_near = neighbor_lateral_bounds(
-                st, valid, shapes_wl, xy, tan, nrm, half_l, half_w, wb, n_lo, n_hi
+                st,
+                valid,
+                shapes_wl,
+                xy,
+                tan,
+                nrm,
+                half_l,
+                half_w_nbr,
+                wb,
+                n_lo,
+                n_hi,
+                min_clearance=self.min_clearance,
             )
             lo, hi = torch.maximum(lo, n_lo), torch.minimum(hi, n_hi)
             if self.toward_parked_prob > 0.0:
                 # bounds from PARKED neighbours alone: the toward-parked nudge points at
                 # these and nothing else
                 P = inputs["ego_agent_past"].shape[1]
-                step = (st[:, :, P - 1, :2] - st[:, :, P - 2, :2]).norm(dim=-1)
-                parked = valid[:, :, P - 1] & valid[:, :, P - 2] & (step / DT < PARKED_SPEED)
+                parked = self._parked_mask(past, st, valid, P)
                 p_lo, p_hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
                 p_lo, p_hi, _ = neighbor_lateral_bounds(
                     st,
@@ -251,13 +284,39 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                     tan,
                     nrm,
                     half_l,
-                    half_w,
+                    half_w_nbr,
                     wb,
                     p_lo,
                     p_hi,
                 )
                 self._nbr_lo, self._nbr_hi = p_lo, p_hi
         return lo, hi
+
+    @staticmethod
+    def _parked_mask(past, st, valid, P):
+        """Which recorded neighbours are parked for the whole recording.
+
+        Two conditions, both necessary. STOPPED: the dataset's own velocity
+        ``(vx, vy)`` at the last history step is below :data:`PARKED_SPEED` — the
+        recorded velocity, not a one-step position difference, whose 1/DT factor turns
+        centimetres of centroid jitter into half a metre per second. STAYS: no recorded
+        future sample leaves a :data:`PARKED_MAX_DISPLACEMENT` ball around the t=0
+        position, so a vehicle that is merely waiting to move is excluded rather than
+        being treated as parked for the whole horizon.
+
+        Args:
+            past: (B, N, P, >=6) neighbour history; cols 4, 5 are vx, vy.
+            st, valid: from :func:`time_aligned_neighbor_tracks`.
+            P: number of history steps, so index ``P - 1`` is t=0.
+
+        Returns:
+            (B, N) bool.
+        """
+        stopped = valid[:, :, P - 1] & (past[:, :, P - 1, 4:6].norm(dim=-1) < PARKED_SPEED)
+        # invalid future slots contribute 0 displacement: absence of a track is not
+        # evidence of motion, and those slots cut no corridor anyway
+        moved = (st[:, :, P:, :2] - st[:, :, P - 1, None, :2]).norm(dim=-1) * valid[:, :, P:]
+        return stopped & (moved.amax(dim=-1) < PARKED_MAX_DISPLACEMENT)
 
     @staticmethod
     def _headings(aug_xy, tan):
@@ -288,7 +347,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         )
 
     # ---------- toward-parked nudge ----------
-    def _parked_vehicle_ahead(self, P, F, half_w, merge_steps_min):
+    def _parked_vehicle_ahead(self, P, half_w, merge_steps_min):
         """Which scenes can be made into a harder avoidance than the recording?
 
         Eligible when a PARKED vehicle (not a kerb, not a moving car) bounds the
@@ -296,6 +355,15 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         avoidance is still ahead of the ego. An object already beside the ego at t=0 leaves no approach
         to perturb, and no merge horizon could rejoin before it anyway -- so the
         floor is ``min(merge_times)``, derived rather than tuned.
+
+        "Within reach" is a test in OFFSET space: ``neighbor_lateral_bounds`` returns
+        bounds that already have the ego half-width subtracted, so the room it reports
+        is room for the ego's centreline, which is what ``dy_max`` bounds.
+
+        Args:
+            P: number of history steps.
+            half_w: (B,) ego half width; used for its shape/device/dtype only.
+            merge_steps_min: shortest merge horizon in timesteps.
 
         Returns:
             eligible: (B,) bool.
@@ -312,62 +380,146 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         b = torch.arange(slack.shape[0], device=slack.device)
         # the vehicle sits on whichever side left less room at that timestep
         side = torch.where(room_hi[b, t_rel] <= room_lo[b, t_rel], 1.0, -1.0)
-        eligible = (s_min <= self.dy_max + half_w) & (t_rel >= merge_steps_min)
+        eligible = (s_min <= self.dy_max) & (t_rel >= merge_steps_min)
         return eligible, side, t_rel + P
+
+    # ---------- input canonicalisation ----------
+    @staticmethod
+    def _ego_past_4col(past):
+        """Ego history as (x, y, cos, sin), from either recorded layout.
+
+        A 3-col history cannot tell a padded row from the ego's own t=0 sample, which
+        in the ego frame IS the origin with heading 0. Position resolves it: padding is
+        a LEADING prefix, so the last sample is never padding, and the widened array
+        then carries the same padded-rows-are-zero contract the 4-col layout has.
+        """
+        if past.shape[-1] >= 4:
+            return past
+        pad = torch.sum(torch.ne(past, 0), dim=-1) == 0
+        pad[:, -1] = False
+        return pose_to_cos_sin(past, pad=pad)
+
+    def _history_polyline(self, past4):
+        """History positions and tangents, with the zero-padded prefix held.
+
+        Leading history can be zero-padded when a scene starts near the beginning of a
+        recording. Those rows mean "no history", not "the ego was at the origin facing
+        +x", so the pad mask is remembered on the instance and the rows are restored to
+        exact zero after the rewrite and the re-centering (see ``centric_transform``).
+        Same contract as the bridge path.
+
+        Across the padding the first real pose is HELD rather than left at the origin: a
+        (0, 0) position adjacent to a real one is a metres-wide phantom step, which would
+        give the first REAL history sample a heading taken from that jump and a speed
+        spike the feasibility screen would then judge. Replicating makes the differences
+        zero across the padding boundary, so the first real sample keeps its own stored
+        heading.
+        """
+        P = past4.shape[1]
+        self._ego_past_pad = torch.sum(torch.ne(past4[..., :4], 0), dim=-1) == 0  # (B, P)
+        past_xy, past_tan = past4[..., :2], past4[..., 2:4]
+        if not bool(self._ego_past_pad.any()):
+            return past_xy, past_tan
+        first = torch.argmax((~self._ego_past_pad).to(torch.int8), dim=1)  # (B,)
+        idx = torch.arange(P, device=past4.device)[None, :]
+        src = torch.maximum(idx, first[:, None])  # pad -> first real, real -> itself
+        return (
+            torch.gather(past_xy, 1, src[..., None].expand(-1, -1, 2)),
+            torch.gather(past_tan, 1, src[..., None].expand(-1, -1, 2)),
+        )
+
+    # ---------- toward-parked nudge: draws and selection ----------
+    def _toward_parked_draws(self, r, K, P, half_w, do_aug, dy):
+        """Point a fraction of the eligible scenes' drawn offsets AT a parked vehicle.
+
+        On the scenes where a PARKED vehicle bounds the corridor further ahead than the
+        shortest merge, every drawn offset is mirrored to point at that vehicle. Only
+        the SIGN is mirrored, so |dy| keeps the distribution it already had -- the ego's
+        t=0 state becomes a harder avoidance than the recording's, and nothing
+        downstream (dth, merge sampling, shapes, corridor, kinematics, veto) is touched.
+        Candidates too hard to drive are still rejected by the existing feasibility
+        screen, so "harder" cannot become "impossible".
+
+        Returns:
+            toward: (B,) bool or None when the nudge is off.
+            toward_any: ``bool(toward.any())``, computed once and reused.
+            dy: the drawn offsets, mirrored on the toward rows.
+            t_obs: (B,) tightest-corridor timestep, or None when the nudge is off.
+        """
+        if self.toward_parked_prob <= 0.0:
+            return None, False, dy, None
+        merge_steps_min = int(min(self.knobs.merge_times) / DT)
+        eligible, side, t_obs = self._parked_vehicle_ahead(P, half_w, merge_steps_min)
+        toward = eligible & (r[:, 2 * K + 1] < self.toward_parked_prob) & do_aug
+        toward_any = bool(toward.any())
+        if toward_any:
+            dy = torch.where(toward[:, None], side[:, None] * dy.abs(), dy)
+        return toward, toward_any, dy, t_obs
+
+    @staticmethod
+    def _largest_offset_draw(draw_ok, dy):
+        """Index of the still-feasible draw with the biggest |dy|, per scene."""
+        return torch.where(draw_ok, dy.abs(), torch.full_like(dy, -1.0)).argmax(-1)
+
+    def _toward_parked_select(self, admissible, merges, dy, toward, toward_any, t_obs, P):
+        """Merge gate and winner index; a no-op on every row that is not toward-parked.
+
+        Two things happen to a toward row. The recovery has to FINISH while the vehicle
+        still matters, so merge horizons reaching past the tightest-corridor timestep are
+        struck out. And the winner is the LARGEST feasible offset rather than the first
+        feasible draw: mirroring the sign only fixes direction; measured on 105k scenes,
+        first-feasible left the baseline harder in 24.5% of rows, largest-feasible in
+        9.5% -- the remainder being the merge gate refusing a horizon the baseline was
+        allowed. "Harder" has to hold per scene, not on average.
+
+        Returns:
+            admissible (gated), draw_ok (B, K), first (B,) winning draw per scene.
+        """
+        if toward_any:
+            merge_steps = (merges / DT).round().long()  # (C,)
+            in_time = merge_steps[None, :] <= (t_obs - (P - 1))[:, None]  # (B, C)
+            admissible = admissible & torch.where(
+                toward[:, None, None], in_time[:, None, :], torch.ones_like(in_time[:, None, :])
+            )
+        draw_ok = admissible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
+        first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
+        if toward_any:
+            first = torch.where(toward, self._largest_offset_draw(draw_ok, dy), first)
+        return admissible, draw_ok, first
 
     # ---------- the augmentation ----------
     @torch.no_grad()
     def __call__(self, inputs, ego_future, neighbors_future):
-        # ego_future may arrive as (x, y, heading) or (x, y, cos, sin) — same
-        # branch heading_to_cos_sin uses upstream. Canonicalize to 3-col heading
-        # here; centric_transform returns the rebuilt 3-col future either way,
-        # and train_epoch re-converts to cos/sin after augmentation.
-        if ego_future.shape[-1] >= 4:
-            ego_future = torch.cat(
-                [
-                    ego_future[..., :2],
-                    torch.atan2(ego_future[..., 3], ego_future[..., 2])[..., None],
-                ],
-                dim=-1,
-            )
+        # Both fields arrive in either layout depending on the entrypoint. The future is
+        # narrowed to a heading angle (centric_transform returns the rebuilt 3-col future
+        # either way, and train_epoch re-converts afterwards); the history is widened,
+        # because everything below indexes its cols 2:4 as a heading VECTOR. Both are
+        # no-ops at the canonical widths the training loop already supplies.
+        ego_future = cos_sin_to_heading(ego_future)
+        inputs["ego_agent_past"] = self._ego_past_4col(inputs["ego_agent_past"])
         past4 = inputs["ego_agent_past"]  # (B, P, 4) x, y, cos, sin
         B, P, _ = past4.shape
-        # Leading history can be zero-padded when a scene starts near the beginning of a
-        # recording. Those rows mean "no history", not "the ego was at the origin facing
-        # +x", so they are remembered here and restored to exact zero after the rewrite
-        # and the re-centering (see centric_transform). Same contract as the bridge path.
-        self._ego_past_pad = torch.sum(torch.ne(past4[..., :4], 0), dim=-1) == 0  # (B, P)
         F = ego_future.shape[1]
         dev, dtype = past4.device, past4.dtype
         t, combos = self._bases(P, F, dev, dtype)
-        T = P + F
 
         fut_cs = torch.stack([ego_future[..., 2].cos(), ego_future[..., 2].sin()], dim=-1)
-        past_xy, past_tan = past4[..., :2], past4[..., 2:4]
-        if bool(self._ego_past_pad.any()):
-            # Hold the first real pose across the padded prefix instead of leaving it at the
-            # origin. A (0,0) position adjacent to a real one is a metres-wide phantom step:
-            # it would give the first REAL history sample a heading taken from that jump, and
-            # a speed spike the feasibility screen would then judge. Replicating makes the
-            # differences zero across the padding boundary, so the first real sample keeps its
-            # own stored heading. The padded rows themselves are zeroed again at the end.
-            first = torch.argmax((~self._ego_past_pad).to(torch.int8), dim=1)  # (B,)
-            idx = torch.arange(P, device=past4.device)[None, :]
-            src = torch.maximum(idx, first[:, None])  # pad -> first real, real -> itself
-            past_xy = torch.gather(past_xy, 1, src[..., None].expand(-1, -1, 2))
-            past_tan = torch.gather(past_tan, 1, src[..., None].expand(-1, -1, 2))
+        past_xy, past_tan = self._history_polyline(past4)
         xy = torch.cat([past_xy, ego_future[..., :2]], dim=1)  # (B, T, 2)
         tan = torch.cat([past_tan, fut_cs], dim=1)
         nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
         speed = ddt(xy, 1).norm(dim=-1).clamp(min=0.5)  # (B, T)
         v0 = speed[:, P - 1]
         wb = inputs["ego_shape"][:, 0]
-        half_w = inputs["ego_shape"][:, 2] / 2 + max(CORRIDOR_MARGIN, self.min_clearance)
+        # min_clearance is a floor on the gap to a NEIGHBOUR only; the border cut keeps
+        # the plain corridor margin (see _corridor).
+        half_w = inputs["ego_shape"][:, 2] / 2 + CORRIDOR_MARGIN
+        half_w_nbr = inputs["ego_shape"][:, 2] / 2 + max(CORRIDOR_MARGIN, self.min_clearance)
         half_l = inputs["ego_shape"][:, 1] / 2
 
-        lo, hi = self._corridor(inputs, xy, tan, nrm, half_w, half_l, wb)
+        lo, hi = self._corridor(inputs, xy, tan, nrm, half_w, half_w_nbr, half_l, wb)
 
-        K, C = self.n_draws, len(combos)
+        K = self.n_draws
         # One extra column ONLY when the toward-parked nudge is on, so at
         # toward_parked_prob = 0 the RNG stream is byte-for-byte what it has always been.
         toward_on = self.toward_parked_prob > 0.0
@@ -382,20 +534,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         dy = (r[:, :K] * 2 - 1) * self.dy_max
         dth = (r[:, K : 2 * K] * 2 - 1) * self.dth_max
 
-        # Toward-parked nudge: on a fraction of the scenes where a PARKED vehicle bounds
-        # the corridor further ahead than the shortest merge, point every drawn offset AT
-        # that vehicle. Only the SIGN is mirrored, so |dy| keeps the distribution it
-        # already had -- the ego's t=0 state becomes a harder avoidance than the
-        # recording's, and nothing downstream (dth, merge sampling, shapes, corridor,
-        # kinematics, veto) is touched. Candidates too hard to drive are still rejected
-        # by the existing feasibility screen, so "harder" cannot become "impossible".
-        toward = None
-        if toward_on:
-            merge_steps_min = int(min(self.knobs.merge_times) / DT)
-            eligible, side, t_obs = self._parked_vehicle_ahead(P, F, half_w, merge_steps_min)
-            toward = eligible & (r[:, 2 * K + 1] < self.toward_parked_prob) & do_aug
-            if bool(toward.any()):
-                dy = torch.where(toward[:, None], side[:, None] * dy.abs(), dy)
+        toward, toward_any, dy, t_obs = self._toward_parked_draws(r, K, P, half_w_nbr, do_aug, dy)
 
         L, in_corr, merges = self._candidate_profiles(
             combos, dy, dth, v0, speed, half_l, lo, hi, dev, dtype
@@ -408,24 +547,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # augment_prob coin, or it is below the low-speed gate -- so the two questions stay
         # separable when reading the selection below.
         admissible = feasible & do_aug[:, None, None]
-        if toward is not None and bool(toward.any()):
-            # the recovery has to finish while the vehicle still matters
-            merge_steps = (merges / DT).round().long()  # (C,)
-            in_time = merge_steps[None, :] <= (t_obs - (P - 1))[:, None]  # (B, C)
-            admissible = admissible & torch.where(
-                toward[:, None, None], in_time[:, None, :], torch.ones_like(in_time[:, None, :])
-            )
-        draw_ok = admissible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
+        admissible, draw_ok, first = self._toward_parked_select(
+            admissible, merges, dy, toward, toward_any, t_obs, P
+        )
         has = draw_ok.any(-1)  # (B,)
-        first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
-        if toward is not None and bool(toward.any()):
-            # Toward-parked rows take the LARGEST feasible offset rather than the first
-            # feasible draw. Mirroring the sign only fixes direction; measured on 105k
-            # scenes, first-feasible left the baseline harder in 24.5% of rows,
-            # largest-feasible in 9.5% -- the remainder being the merge gate refusing a
-            # horizon the baseline was allowed. "Harder" has to hold per scene, not on average.
-            largest = torch.where(draw_ok, dy.abs(), torch.full_like(dy, -1.0)).argmax(-1)
-            first = torch.where(toward, largest, first)
 
         if not bool(has.any()):
             # nothing feasible this batch: every row trains on plain GT
@@ -453,6 +578,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 heading,
                 upd,
                 has,
+                dy,
+                toward,
+                toward_any,
             )
 
         self._write_back(inputs, ego_future, aug_xy, g, heading, upd, wb, P)
@@ -550,6 +678,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         heading,
         upd,
         has,
+        dy,
+        toward,
+        toward_any,
     ):
         """Re-draw for rows whose winner truly overlapped a recorded neighbour.
 
@@ -559,6 +690,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         re-selected and re-checked. Measured on 105k scenes: round 1 recovers
         ~54% of vetoed rows, round 2 ~7% more, round 3 ~2% — the survivors are
         blocked geometrically, and re-rolling does not move geometry.
+
+        The retry keeps each row's own selection rule: first-feasible everywhere, and
+        LARGEST-feasible on the toward-parked rows. Falling back to first-feasible for a
+        toward row would let it recover on a 3 cm offset and still be counted as a
+        hardened example, which is the whole reason the rule exists (see
+        :meth:`_toward_parked_select`).
 
         Rows that never recover keep upd False and train on plain GT, exactly as
         they do with recovery disabled.
@@ -575,6 +712,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             if not bool(draw_ok.any()):
                 break
             cur = draw_ok.float().argmax(-1)
+            if toward_any:
+                cur = torch.where(toward[rows], self._largest_offset_draw(draw_ok, dy[rows]), cur)
             feas_k = adm[rows, cur]
             combo_idx, alive = self._sample_merge_then_jerk(feas_k, jerk[rows, cur], merges)
             cand = xy[rows] + L[rows, cur, combo_idx][..., None] * nrm[rows]

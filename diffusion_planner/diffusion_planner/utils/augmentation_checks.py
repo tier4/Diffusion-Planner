@@ -183,6 +183,7 @@ def neighbor_lateral_bounds(
     wb: torch.Tensor,
     lo: torch.Tensor,
     hi: torch.Tensor,
+    min_clearance: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Tighten lateral bounds where a recorded neighbor blocks the way.
 
@@ -195,6 +196,11 @@ def neighbor_lateral_bounds(
         xy, tan, nrm: (B, T, 2) ego path, tangent, normal.
         half_l, half_w, wb: (B,) ego half length, half width, wheel base.
         lo, hi: (B, T) bounds to tighten.
+        min_clearance: metres of exact clearance the caller will later demand of
+            every checked pair. It widens ``near`` only: the returned prefilter has
+            to admit every pair that could come within the floor, not merely every
+            pair that could touch, or the floor would go silently unenforced on the
+            pairs it excluded. 0 leaves the prefilter exactly as it was.
 
     Returns:
         tightened (lo, hi) and ``near`` (B, N) — neighbors close enough
@@ -228,9 +234,12 @@ def neighbor_lateral_bounds(
     near = valid_m & (lon.abs() <= half_l_m + ext_lon)
     # Same test, padded, for the exact-OBB veto: the pad covers the ego's
     # longitudinal half-extent growing under a heading change
-    # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre shift,
-    # so a pair outside it cannot overlap and skipping it changes no verdict.
-    near_any[vb, vn] = (valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2)).any(-1)
+    # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre shift, plus
+    # any clearance floor the caller will demand, so a pair outside it can neither
+    # overlap nor come within the floor and skipping it changes no verdict.
+    near_any[vb, vn] = (
+        valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2 + min_clearance)
+    ).any(-1)
 
     cut_hi = torch.where(
         near & (lat > 0), lat - ext_lat - half_w_m, torch.full_like(lat, torch.inf)
