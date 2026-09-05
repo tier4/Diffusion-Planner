@@ -3,6 +3,7 @@
 defaults:
   - /train/dataloader/transforms@_global_.transform_configs.speed_augmentation: speed_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.trajectory_augmentation: ilqr_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.fix_stop_point: fix_stop_point
   - /train/dataloader/transforms@_global_.transform_configs.goal: goal
   - /train/dataloader/transforms@_global_.transform_configs.ego_shape_augmentation: ego_shape_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.turn_indicator_augmentation: turn_indicator_augmentation
@@ -19,6 +20,7 @@ dataset:
   transforms:
     - ${transform_configs.speed_augmentation}
     - ${transform_configs.trajectory_augmentation}
+    - ${transform_configs.fix_stop_point}
     - ${transform_configs.goal}
     - ${transform_configs.ego_shape_augmentation}
     - ${transform_configs.turn_indicator_augmentation}
