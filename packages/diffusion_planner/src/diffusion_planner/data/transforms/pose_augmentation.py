@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -14,52 +15,70 @@ from .base import Frame, FrameLike
 POSE_AUGMENTATION_APPLIED_KEY = "_pose_augmentation_applied"
 
 
+class PoseAugmentationCase(Enum):
+    """Pose-noise profile selected for one planner frame."""
+
+    NORMAL = "normal_case"
+    STOPPED_IN_INTERSECTION = "stopped_in_intersection"
+
+
 class PlannerPoseAugmentation:
     """Move the ego pose and recenter the scene without refining its future."""
 
     def __init__(
         self,
-        longitudinal_offset_range: tuple[float, float] = (0.0, 0.0),
-        lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
-        yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
-        pose_probability: float = 0.5,
-        pose_augmentation_endpoint_speed_threshold: float = 0.1,
-        pose_augmentation_speed_check_endpoint_index: int = 20,
+        normal_case: Mapping[str, Any],
+        stopped_in_intersection: Mapping[str, Any],
     ) -> None:
-        self.longitudinal_offset_range = longitudinal_offset_range
-        self.lateral_offset_range = lateral_offset_range
-        self.yaw_offset_range = yaw_offset_range
-        self.pose_probability = pose_probability
-        self.pose_augmentation_endpoint_speed_threshold = (
-            pose_augmentation_endpoint_speed_threshold
-        )
-        self.pose_augmentation_speed_check_endpoint_index = (
-            pose_augmentation_speed_check_endpoint_index
-        )
+        self.normal_case = dict(normal_case)
+        self.stopped_in_intersection = dict(stopped_in_intersection)
+        self._case_configs = {
+            PoseAugmentationCase.NORMAL: self.normal_case,
+            PoseAugmentationCase.STOPPED_IN_INTERSECTION: self.stopped_in_intersection,
+        }
 
     def __call__(self, input_data: FrameLike) -> Frame:
         """Apply a pose offset and record whether it was applied."""
-        if (
-            not has_sufficient_future_speed(
-                input_data,
-                self.pose_augmentation_speed_check_endpoint_index,
-                self.pose_augmentation_endpoint_speed_threshold,
-            )
-            or np.random.random() >= self.pose_probability
+        case = self._select_case(input_data)
+        case_config = self._case_configs[case]
+        if case is PoseAugmentationCase.NORMAL and not has_sufficient_future_speed(
+            input_data,
+            int(case_config["pose_augmentation_speed_check_endpoint_index"]),
+            float(case_config["pose_augmentation_endpoint_speed_threshold"]),
         ):
             output = dict(input_data)
             output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(False)
             return output
-        longitudinal_offset = 0.0
-        if any(value != 0.0 for value in self.longitudinal_offset_range):
-            longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
-        lateral_offset = np.random.uniform(*self.lateral_offset_range)
-        yaw_offset = np.random.uniform(*self.yaw_offset_range)
+        if np.random.random() >= float(case_config["probability"]):
+            output = dict(input_data)
+            output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(False)
+            return output
+        longitudinal_range = tuple(case_config["longitudinal_offset_range"])
+        lateral_range = tuple(case_config["lateral_offset_range"])
+        yaw_range = tuple(case_config["yaw_offset_range"])
+        longitudinal_offset = self._sample_offset(longitudinal_range)
+        lateral_offset = self._sample_offset(lateral_range)
+        yaw_offset = self._sample_offset(yaw_range)
         output, _ = apply_pose_augmentation(
             input_data, longitudinal_offset, lateral_offset, yaw_offset
         )
         output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(True)
         return output
+
+    def _select_case(self, input_data: FrameLike) -> PoseAugmentationCase:
+        current_state = input_data["ego_agent_past"][-1]
+        is_stopped = current_state[EGO_VELOCITY_INDEX] <= float(
+            self.stopped_in_intersection["stopped_speed_threshold"]
+        )
+        if is_stopped and is_point_in_intersection(input_data, current_state[:2]):
+            return PoseAugmentationCase.STOPPED_IN_INTERSECTION
+        return PoseAugmentationCase.NORMAL
+
+    @staticmethod
+    def _sample_offset(offset_range: tuple[float, float]) -> float:
+        if offset_range == (0.0, 0.0):
+            return 0.0
+        return float(np.random.uniform(*offset_range))
 
 
 def has_sufficient_future_speed(
@@ -73,6 +92,44 @@ def has_sufficient_future_speed(
         return False
     endpoint = min(check_index, len(future) - 1)
     return bool(future[endpoint, EGO_VELOCITY_INDEX] > speed_threshold)
+
+
+def is_point_in_intersection(input_data: FrameLike, point: NDArray[Any]) -> bool:
+    """Return whether a point lies inside or on any valid intersection polygon."""
+    areas = input_data.get("intersection_area")
+    if areas is None:
+        return False
+    return any(
+        _point_in_polygon(point, polygon)
+        for polygon in areas
+        if np.count_nonzero(polygon) > 0
+    )
+
+
+def _point_in_polygon(point: NDArray[Any], polygon: NDArray[Any]) -> bool:
+    """Return whether a 2D point is inside a polygon using ray casting."""
+    if len(polygon) < 3:
+        return False
+    px, py = map(float, point)
+    inside = False
+    previous = polygon[-1]
+    for current in polygon:
+        x1, y1 = map(float, previous)
+        x2, y2 = map(float, current)
+        cross = (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1)
+        if (
+            abs(cross) <= 1e-9
+            and min(x1, x2) - 1e-9 <= px <= max(x1, x2) + 1e-9
+            and min(y1, y2) - 1e-9 <= py <= max(y1, y2) + 1e-9
+        ):
+            return True
+        crosses_ray = (y1 > py) != (y2 > py)
+        if crosses_ray:
+            intersection_x = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+            if px < intersection_x:
+                inside = not inside
+        previous = current
+    return inside
 
 
 def apply_pose_augmentation(

@@ -220,12 +220,21 @@ def _augment_frame(
         probability=1.0,
     )
     pose_augmentation = PlannerPoseAugmentation(
-        longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
-        lateral_offset_range=(lateral_offset, lateral_offset),
-        yaw_offset_range=(yaw_offset, yaw_offset),
-        pose_probability=1.0,
-        pose_augmentation_endpoint_speed_threshold=ilqr.speed_threshold,
-        pose_augmentation_speed_check_endpoint_index=ilqr.num_refine,
+        normal_case={
+            "probability": 1.0,
+            "longitudinal_offset_range": (longitudinal_offset, longitudinal_offset),
+            "lateral_offset_range": (lateral_offset, lateral_offset),
+            "yaw_offset_range": (yaw_offset, yaw_offset),
+            "pose_augmentation_endpoint_speed_threshold": ilqr.speed_threshold,
+            "pose_augmentation_speed_check_endpoint_index": ilqr.num_refine,
+        },
+        stopped_in_intersection={
+            "probability": 1.0,
+            "stopped_speed_threshold": 0.1,
+            "longitudinal_offset_range": (longitudinal_offset, longitudinal_offset),
+            "lateral_offset_range": (lateral_offset, lateral_offset),
+            "yaw_offset_range": (yaw_offset, yaw_offset),
+        },
     )
     ilqr_refinement = PlannerILQRRefinement(
         num_refine=ilqr.num_refine,

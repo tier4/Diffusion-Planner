@@ -8,6 +8,7 @@ from .ilqr_refinement import PlannerILQRRefinement
 from .normalization import PlannerDataNormalizer
 from .pose_augmentation import (
     PlannerPoseAugmentation,
+    PoseAugmentationCase,
     apply_pose_augmentation,
 )
 from .speed_augmentation import PlannerSpeedAugmentation
@@ -28,6 +29,7 @@ __all__ = [
     "PlannerGoalTransform",
     "PlannerILQRRefinement",
     "PlannerPoseAugmentation",
+    "PoseAugmentationCase",
     "PlannerSpeedAugmentation",
     "PlannerStartDecisionAugmentation",
     "PlannerTurnIndicatorAugmentation",
