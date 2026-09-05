@@ -1,4 +1,4 @@
-"""Ego-pose augmentation with kinematic-bicycle iLQR refinement."""
+"""Kinematic-bicycle iLQR refinement after ego-pose augmentation."""
 
 from __future__ import annotations
 
@@ -8,26 +8,19 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
-from .rigid_augmentation import (
-    apply_rigid_pose_augmentation,
-)
+from .pose_augmentation import POSE_AUGMENTATION_APPLIED_KEY
 
 
 def _wrap(angle: float | NDArray[Any]) -> Any:
     return np.arctan2(np.sin(angle), np.cos(angle))
 
 
-class PlannerILQRAugmentation:
-    """Move the ego pose and reconnect its future using a bicycle-model iLQR."""
+class PlannerILQRRefinement:
+    """Reconnect a pose-augmented ego future using a bicycle-model iLQR."""
 
     def __init__(
         self,
-        longitudinal_offset_range: tuple[float, float] = (0.0, 0.0),
-        lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
-        yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
-        pose_probability: float = 0.5,
         num_refine: int = 20,
         time_step_s: float = 0.1,
         wheelbase_m: float = 2.79,
@@ -41,12 +34,7 @@ class PlannerILQRAugmentation:
         steering_limit_rad: float = 0.7,
         max_iterations: int = 15,
         convergence_tolerance: float = 1e-4,
-        pose_augmentation_endpoint_speed_threshold: float = 0.1,
     ) -> None:
-        self.longitudinal_offset_range = longitudinal_offset_range
-        self.lateral_offset_range = lateral_offset_range
-        self.yaw_offset_range = yaw_offset_range
-        self.pose_probability = pose_probability
         self.num_refine = num_refine
         self.dt = time_step_s
         self.wheelbase = wheelbase_m
@@ -60,44 +48,22 @@ class PlannerILQRAugmentation:
         self.steering_limit = steering_limit_rad
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
-        self.pose_augmentation_endpoint_speed_threshold = (
-            pose_augmentation_endpoint_speed_threshold
-        )
         if self.dt <= 0.0 or self.wheelbase <= 0.0:
             raise ValueError("time_step_s and wheelbase_m must be positive")
 
     def __call__(self, input_data: FrameLike) -> Frame:
-        if (
-            not self._has_sufficient_future_speed(input_data)
-            or np.random.random() >= self.pose_probability
-        ):
-            return dict(input_data)
-
-        longitudinal_offset = 0.0
-        if any(value != 0.0 for value in self.longitudinal_offset_range):
-            longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
-        lateral_offset = np.random.uniform(*self.lateral_offset_range)
-        yaw_offset = np.random.uniform(*self.yaw_offset_range)
-        output, future = apply_rigid_pose_augmentation(
-            input_data, longitudinal_offset, lateral_offset, yaw_offset
-        )
+        output = dict(input_data)
+        applied = input_data.get(POSE_AUGMENTATION_APPLIED_KEY)
+        if applied is None or not bool(np.asarray(applied).item()):
+            return output
+        future = input_data.get("ego_agent_future")
         if future is None:
             return output
-        refined = self.refine_future(future, output["ego_agent_past"])
+        refined = self.refine_future(future, input_data["ego_agent_past"])
         if refined is None:
-            return dict(input_data)
+            return output
         output["ego_agent_future"] = refined
         return output
-
-    def _has_sufficient_future_speed(self, input_data: FrameLike) -> bool:
-        future = input_data.get("ego_agent_future")
-        if future is None or len(future) == 0 or self.num_refine < 0:
-            return False
-        endpoint = min(self.num_refine, len(future) - 1)
-        return bool(
-            future[endpoint, EGO_VELOCITY_INDEX]
-            > self.pose_augmentation_endpoint_speed_threshold
-        )
 
     def refine_future(
         self, future: NDArray[Any], past: NDArray[Any]

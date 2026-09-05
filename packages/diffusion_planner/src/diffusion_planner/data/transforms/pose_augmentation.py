@@ -1,4 +1,4 @@
-"""Ego-pose augmentation without future-trajectory refinement."""
+"""Random ego-pose augmentation and ego-centric scene transformation."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ from numpy.typing import NDArray
 from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
 
+POSE_AUGMENTATION_APPLIED_KEY = "_pose_augmentation_applied"
 
-class PlannerRigidDataAugmentation:
-    """Move the ego pose and rigidly recenter the scene without path refinement."""
+
+class PlannerPoseAugmentation:
+    """Move the ego pose and recenter the scene without refining its future."""
 
     def __init__(
         self,
@@ -36,7 +38,7 @@ class PlannerRigidDataAugmentation:
         )
 
     def __call__(self, input_data: FrameLike) -> Frame:
-        """Apply the pre-refinement pose augmentation behavior."""
+        """Apply a pose offset and record whether it was applied."""
         if (
             not has_sufficient_future_speed(
                 input_data,
@@ -45,15 +47,18 @@ class PlannerRigidDataAugmentation:
             )
             or np.random.random() >= self.pose_probability
         ):
-            return dict(input_data)
+            output = dict(input_data)
+            output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(False)
+            return output
         longitudinal_offset = 0.0
         if any(value != 0.0 for value in self.longitudinal_offset_range):
             longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
         lateral_offset = np.random.uniform(*self.lateral_offset_range)
         yaw_offset = np.random.uniform(*self.yaw_offset_range)
-        output, _ = apply_rigid_pose_augmentation(
+        output, _ = apply_pose_augmentation(
             input_data, longitudinal_offset, lateral_offset, yaw_offset
         )
+        output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(True)
         return output
 
 
@@ -70,13 +75,13 @@ def has_sufficient_future_speed(
     return bool(future[endpoint, EGO_VELOCITY_INDEX] > speed_threshold)
 
 
-def apply_rigid_pose_augmentation(
+def apply_pose_augmentation(
     input_data: FrameLike,
     longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
 ) -> tuple[Frame, NDArray[Any] | None]:
-    """Move the ego pose and rigidly recenter every spatial scene tensor."""
+    """Move the ego pose and recenter every spatial scene tensor."""
     ego_pose = input_data["ego_agent_past"][-1, :4]
     shifted_pose = get_shifted_pose(
         ego_pose, longitudinal_offset, lateral_offset, yaw_offset

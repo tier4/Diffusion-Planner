@@ -12,7 +12,7 @@ import torch
 from numpy.typing import NDArray
 
 from diffusion_planner.data import (
-    PlannerRigidDataAugmentation,
+    PlannerPoseAugmentation,
     PlannerSpeedAugmentation,
     fill_unknown_traffic_light_futures,
 )
@@ -198,7 +198,7 @@ def _augment_frame(
         speed_noise_range=(0.0, 0.0),
         probability=1.0,
     )
-    pose_augmentation = PlannerRigidDataAugmentation(
+    pose_augmentation = PlannerPoseAugmentation(
         longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),

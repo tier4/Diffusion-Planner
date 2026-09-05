@@ -1,10 +1,11 @@
 # The dataset is nested here rather than being its own group: it exists only to feed this
 # loader, and Hydra instantiates it recursively when the loader is built.
 defaults:
-  - /train/dataloader/transforms@_global_.transform_configs.speed_augmentation: speed_augmentation
-  - /train/dataloader/transforms@_global_.transform_configs.trajectory_augmentation: ilqr_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.start_decision_augmentation: start_decision_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.fix_stop_point: fix_stop_point
+  - /train/dataloader/transforms@_global_.transform_configs.pose_augmentation: pose_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.ilqr_refinement: ilqr_refinement
+  - /train/dataloader/transforms@_global_.transform_configs.speed_augmentation: speed_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.goal: goal
   - /train/dataloader/transforms@_global_.transform_configs.ego_shape_augmentation: ego_shape_augmentation
   - /train/dataloader/transforms@_global_.transform_configs.turn_indicator_augmentation: turn_indicator_augmentation
@@ -21,7 +22,8 @@ dataset:
   transforms:
     - ${transform_configs.start_decision_augmentation}
     - ${transform_configs.fix_stop_point}
-    - ${transform_configs.trajectory_augmentation}
+    - ${transform_configs.pose_augmentation}
+    - ${transform_configs.ilqr_refinement}
     - ${transform_configs.speed_augmentation}
     - ${transform_configs.goal}
     - ${transform_configs.ego_shape_augmentation}

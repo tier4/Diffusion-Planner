@@ -1,7 +1,7 @@
-_target_: diffusion_planner.data.transforms.PlannerRigidDataAugmentation
+_target_: diffusion_planner.data.transforms.PlannerPoseAugmentation
 longitudinal_offset_range: [0.0, 0.0]
 lateral_offset_range: [-1.5, 1.5]
 yaw_offset_range: [-0.0872665, 0.0872665]
 pose_probability: 0.5
-pose_augmentation_endpoint_speed_threshold: 2.0
+pose_augmentation_endpoint_speed_threshold: 1.5
 pose_augmentation_speed_check_endpoint_index: 40
