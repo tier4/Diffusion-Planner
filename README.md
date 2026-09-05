@@ -159,11 +159,20 @@ augmenter reproduces the previous behaviour exactly.
 
 - **`--frenet_toward_parked_prob P`** (default 0.0). The corridor is symmetric, so a
   scene that passes a parked vehicle is as likely to be nudged away from it as toward
-  it. This directs that fraction of eligible scenes toward the vehicle and takes the
-  largest feasible offset, making the t=0 state a harder avoidance than the recorded
-  one, while restricting the merge to horizons that rejoin the recording *before* the
-  vehicle. A scene is eligible only when a parked vehicle bounds the corridor and is
-  still ahead at t=0; if it is already alongside there is no avoidance left to harden.
+  it. This directs that fraction of eligible scenes toward the vehicle. A scene is
+  eligible only when a parked vehicle bounds the corridor and is still ahead at t=0; if
+  it is already alongside there is no avoidance left to harden.
+
+  On a row where it can, the augmenter then takes the *largest* feasible offset and
+  restricts the merge to horizons that rejoin the recording **before** the vehicle,
+  which is what makes the t=0 state a harder avoidance than the recorded one. Neither
+  is unconditional: on a tight pass that merge restriction can strike out every
+  horizon, and rather than drop the scene from augmentation the row keeps its ungated
+  candidates and takes the ordinary first-feasible offset. Such a row is still nudged
+  toward the vehicle but is **not** guaranteed to rejoin in front of it, so the
+  proportion of genuinely hardened scenes is lower than `P` suggests. Enabling the flag
+  also reduces the augmented count somewhat — measured at 10,330 → 9,742 accepted rows
+  on a 105k-scene set at `P = 1.0`.
 
 - **`--frenet_hist_jitter_lat L` / `--frenet_hist_jitter_lon G`** (default 0.0).
   Smooth per-sample jitter of the ego history, in metres of standard deviation at the

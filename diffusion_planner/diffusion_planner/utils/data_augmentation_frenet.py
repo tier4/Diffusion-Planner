@@ -277,8 +277,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self._nbr_valid = None
         self._nbr_lo = None
         self._nbr_hi = None
-        # toward-parked rows that kept ungated candidates: augmented, but NOT hardened
-        self._toward_fellback = None
         self.n_draws = n_draws
         self.dy_max = dy_max
         self.dth_max = dth_max
@@ -555,11 +553,11 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         with the floor off keeps the default path from computing a mask that
         :func:`veto_overlapping` would then ignore.
         """
-        if xy is None or self.min_clearance <= 0.0:
+        if self.min_clearance <= 0.0:
             return None
         return (aug_xy - xy).norm(dim=-1) > self.DEVIATION_EPS
 
-    def _veto_true_overlaps(self, inputs, upd, aug_xy, heading, xy=None):
+    def _veto_true_overlaps(self, inputs, upd, aug_xy, heading, xy):
         """Drop winners whose footprint truly overlaps a recorded neighbor."""
         if self._nbr_st is None:
             return upd
@@ -694,18 +692,25 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     def _toward_parked_select(self, admissible, merges, dy, toward, toward_any, t_obs, P):
         """Merge gate and winner index; a no-op on every row that is not toward-parked.
 
-        Two things happen to a toward row. The recovery has to FINISH while the vehicle
-        still matters, so merge horizons reaching past the tightest-corridor timestep are
-        struck out. And the winner is the LARGEST feasible offset rather than the first
-        feasible draw: mirroring the sign only fixes direction; measured on 105k scenes,
+        Two things happen to a toward row, BOTH conditional on the gate leaving the row
+        something to pick. The recovery has to FINISH while the vehicle still matters,
+        so merge horizons reaching past the tightest-corridor timestep are struck out --
+        unless that would strike out every horizon, in which case the row keeps its
+        ungated candidates and is excluded from ``hardened``. And on a hardened row the
+        winner is the LARGEST feasible offset rather than the first feasible draw:
+        mirroring the sign only fixes direction; measured on 105k scenes,
         first-feasible left the baseline harder in 24.5% of rows, largest-feasible in
         9.5% -- the remainder being the merge gate refusing a horizon the baseline was
         allowed. "Harder" has to hold per scene, not on average.
 
         Returns:
-            admissible (gated), draw_ok (B, K), first (B,) winning draw per scene.
+            admissible (gated where the gate leaves something), draw_ok (B, K),
+            first (B,) winning draw per scene, and hardened (B,) -- the toward rows
+            whose merge really is gated in front of the vehicle. ``hardened`` is None
+            when the nudge is off. It is returned rather than stashed on the instance
+            so the recovery path cannot drift from the first selection.
         """
-        fellback = None  # `toward` is None unless the nudge is on
+        fellback = hardened = None  # `toward` is None unless the nudge is on
         if toward_any:
             merge_steps = (merges / DT).round().long()  # (C,)
             in_time = merge_steps[None, :] <= (t_obs - (P - 1))[:, None]  # (B, C)
@@ -729,8 +734,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             # takes the ordinary first-feasible draw
             hardened = toward & ~fellback
             first = torch.where(hardened, self._largest_offset_draw(draw_ok, dy), first)
-        self._toward_fellback = fellback
-        return admissible, draw_ok, first
+        return admissible, draw_ok, first, hardened
 
     # ---------- the augmentation ----------
     @torch.no_grad()
@@ -792,7 +796,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # augment_prob coin, or it is below the low-speed gate -- so the two questions stay
         # separable when reading the selection below.
         admissible = feasible & do_aug[:, None, None]
-        admissible, draw_ok, first = self._toward_parked_select(
+        admissible, draw_ok, first, hardened = self._toward_parked_select(
             admissible, merges, dy, toward, toward_any, t_obs, P
         )
         has = draw_ok.any(-1)  # (B,)
@@ -828,6 +832,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 has,
                 dy,
                 toward,
+                hardened,
                 toward_any,
             )
 
@@ -928,6 +933,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         has,
         dy,
         toward,
+        hardened,
         toward_any,
     ):
         """Re-draw for rows whose winner truly overlapped a recorded neighbour.
@@ -961,7 +967,14 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 break
             cur = draw_ok.float().argmax(-1)
             if toward_any:
-                cur = torch.where(toward[rows], self._largest_offset_draw(draw_ok, dy[rows]), cur)
+                # `hardened`, not `toward`: a row that fell back to ungated candidates
+                # takes the ordinary first-feasible draw here too, exactly as it did in
+                # the first selection. Selecting largest-offset for it would reinstate
+                # the rule that only applies when the merge is gated in front of the
+                # vehicle.
+                cur = torch.where(
+                    hardened[rows], self._largest_offset_draw(draw_ok, dy[rows]), cur
+                )
             feas_k = adm[rows, cur]
             combo_idx, alive = self._sample_merge_then_jerk(feas_k, jerk[rows, cur], merges)
             cand = xy[rows] + L[rows, cur, combo_idx][..., None] * nrm[rows]
@@ -973,7 +986,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             adm[rows, cur, :] = False
         return aug_xy, g, heading, upd
 
-    def _veto_true_overlaps_rows(self, inputs, rows_mask, aug_xy, heading, rows, xy=None):
+    def _veto_true_overlaps_rows(self, inputs, rows_mask, aug_xy, heading, rows, xy):
         """:meth:`_veto_true_overlaps` restricted to a subset of scenes."""
         if self._nbr_st is None:
             return rows_mask
@@ -987,7 +1000,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             inputs["neighbor_agents_past"][rows][:, :, -1][..., [6, 7]],
             self._nbr_near[rows],
             min_clearance=self.min_clearance,
-            floor_mask=self._floor_mask(aug_xy, None if xy is None else xy[rows]),
+            floor_mask=self._floor_mask(aug_xy, xy[rows]),
         )
 
     def _write_back(self, inputs, ego_future, aug_xy, g, heading, upd, wb, P):
