@@ -26,11 +26,21 @@ class PlannerILQRRefinementTest(unittest.TestCase):
         future[:, 2] = 1.0
         future[:, 4] = 3.0
         pose = PlannerPoseAugmentation(
-            lateral_offset_range=(1.0, 1.0),
-            yaw_offset_range=(0.0, 0.0),
-            pose_probability=1.0,
-            pose_augmentation_endpoint_speed_threshold=0.0,
-            pose_augmentation_speed_check_endpoint_index=1,
+            normal_case={
+                "probability": 1.0,
+                "longitudinal_offset_range": (0.0, 0.0),
+                "lateral_offset_range": (1.0, 1.0),
+                "yaw_offset_range": (0.0, 0.0),
+                "pose_augmentation_endpoint_speed_threshold": 0.0,
+                "pose_augmentation_speed_check_endpoint_index": 1,
+            },
+            stopped_in_intersection={
+                "probability": 1.0,
+                "stopped_speed_threshold": 0.1,
+                "longitudinal_offset_range": (0.0, 0.0),
+                "lateral_offset_range": (1.0, 1.0),
+                "yaw_offset_range": (0.0, 0.0),
+            },
         )
 
         pose_augmented = pose({"ego_agent_past": past, "ego_agent_future": future})
