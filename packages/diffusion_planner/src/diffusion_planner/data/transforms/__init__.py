@@ -2,6 +2,7 @@
 
 from .base import Frame, FrameLike, Transform
 from .ego_shape_augmentation import PlannerEgoShapeAugmentation
+from .fix_stop_point import PlannerFixStopPoint
 from .goal import PlannerGoalTransform
 from .ilqr_augmentation import PlannerILQRAugmentation
 from .normalization import PlannerDataNormalizer
@@ -22,6 +23,7 @@ __all__ = [
     "FrameLike",
     "PlannerDataNormalizer",
     "PlannerEgoShapeAugmentation",
+    "PlannerFixStopPoint",
     "PlannerGoalTransform",
     "PlannerILQRAugmentation",
     "PlannerRigidDataAugmentation",
