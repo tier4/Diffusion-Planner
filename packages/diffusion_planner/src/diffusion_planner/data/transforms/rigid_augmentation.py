@@ -21,23 +21,27 @@ class PlannerRigidDataAugmentation:
         lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
         yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
         pose_probability: float = 0.5,
-        pose_augmentation_speed_threshold: float = 0.1,
-        pose_augmentation_speed_check_index: int = 20,
+        pose_augmentation_endpoint_speed_threshold: float = 0.1,
+        pose_augmentation_speed_check_endpoint_index: int = 20,
     ) -> None:
         self.longitudinal_offset_range = longitudinal_offset_range
         self.lateral_offset_range = lateral_offset_range
         self.yaw_offset_range = yaw_offset_range
         self.pose_probability = pose_probability
-        self.pose_augmentation_speed_threshold = pose_augmentation_speed_threshold
-        self.pose_augmentation_speed_check_index = pose_augmentation_speed_check_index
+        self.pose_augmentation_endpoint_speed_threshold = (
+            pose_augmentation_endpoint_speed_threshold
+        )
+        self.pose_augmentation_speed_check_endpoint_index = (
+            pose_augmentation_speed_check_endpoint_index
+        )
 
     def __call__(self, input_data: FrameLike) -> Frame:
         """Apply the pre-refinement pose augmentation behavior."""
         if (
             not has_sufficient_future_speed(
                 input_data,
-                self.pose_augmentation_speed_check_index,
-                self.pose_augmentation_speed_threshold,
+                self.pose_augmentation_speed_check_endpoint_index,
+                self.pose_augmentation_endpoint_speed_threshold,
             )
             or np.random.random() >= self.pose_probability
         ):
@@ -57,19 +61,13 @@ def has_sufficient_future_speed(
     input_data: FrameLike,
     check_index: int,
     speed_threshold: float,
-    peak_speed_threshold: float | None = None,
 ) -> bool:
-    """Check minimum and optional peak speed through a future endpoint index."""
+    """Check speed at a future endpoint index."""
     future = input_data.get("ego_agent_future")
     if future is None or len(future) == 0 or check_index < 0:
         return False
     endpoint = min(check_index, len(future) - 1)
-    speeds = future[: endpoint + 1, EGO_VELOCITY_INDEX]
-    minimum_is_sufficient = bool(np.all(speeds >= speed_threshold))
-    peak_is_sufficient = peak_speed_threshold is None or bool(
-        np.max(speeds) > peak_speed_threshold
-    )
-    return minimum_is_sufficient and peak_is_sufficient
+    return bool(future[endpoint, EGO_VELOCITY_INDEX] > speed_threshold)
 
 
 def apply_rigid_pose_augmentation(

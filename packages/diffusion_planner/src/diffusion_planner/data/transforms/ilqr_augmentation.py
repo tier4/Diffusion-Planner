@@ -8,10 +8,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
 from .rigid_augmentation import (
     apply_rigid_pose_augmentation,
-    has_sufficient_future_speed,
 )
 
 
@@ -41,8 +41,7 @@ class PlannerILQRAugmentation:
         steering_limit_rad: float = 0.7,
         max_iterations: int = 15,
         convergence_tolerance: float = 1e-4,
-        pose_augmentation_speed_threshold: float = 0.1,
-        pose_augmentation_peak_speed_threshold: float = 0.0,
+        pose_augmentation_endpoint_speed_threshold: float = 0.1,
     ) -> None:
         self.longitudinal_offset_range = longitudinal_offset_range
         self.lateral_offset_range = lateral_offset_range
@@ -61,21 +60,15 @@ class PlannerILQRAugmentation:
         self.steering_limit = steering_limit_rad
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
-        self.pose_augmentation_speed_threshold = pose_augmentation_speed_threshold
-        self.pose_augmentation_peak_speed_threshold = (
-            pose_augmentation_peak_speed_threshold
+        self.pose_augmentation_endpoint_speed_threshold = (
+            pose_augmentation_endpoint_speed_threshold
         )
         if self.dt <= 0.0 or self.wheelbase <= 0.0:
             raise ValueError("time_step_s and wheelbase_m must be positive")
 
     def __call__(self, input_data: FrameLike) -> Frame:
         if (
-            not has_sufficient_future_speed(
-                input_data,
-                self.num_refine,
-                self.pose_augmentation_speed_threshold,
-                self.pose_augmentation_peak_speed_threshold,
-            )
+            not self._has_sufficient_future_speed(input_data)
             or np.random.random() >= self.pose_probability
         ):
             return dict(input_data)
@@ -95,6 +88,16 @@ class PlannerILQRAugmentation:
             return dict(input_data)
         output["ego_agent_future"] = refined
         return output
+
+    def _has_sufficient_future_speed(self, input_data: FrameLike) -> bool:
+        future = input_data.get("ego_agent_future")
+        if future is None or len(future) == 0 or self.num_refine < 0:
+            return False
+        endpoint = min(self.num_refine, len(future) - 1)
+        return bool(
+            future[endpoint, EGO_VELOCITY_INDEX]
+            > self.pose_augmentation_endpoint_speed_threshold
+        )
 
     def refine_future(
         self, future: NDArray[Any], past: NDArray[Any]
