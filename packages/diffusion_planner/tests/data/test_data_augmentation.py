@@ -12,9 +12,11 @@ from numpy.typing import NDArray
 from diffusion_planner.data.transforms import (
     PlannerEgoShapeAugmentation,
     PlannerGoalTransform,
-    PlannerILQRAugmentation,
-    PlannerRigidDataAugmentation,
+    PlannerPoseAugmentation,
     PlannerSpeedAugmentation,
+)
+from diffusion_planner.data.transforms.pose_augmentation import (
+    POSE_AUGMENTATION_APPLIED_KEY,
 )
 
 
@@ -51,10 +53,10 @@ def _frame() -> dict[str, NDArray[np.float32]]:
     return frame
 
 
-class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
+class PlannerPoseAugmentationTest(unittest.TestCase):
     def test_transforms_scene_into_augmented_ego_frame(self) -> None:
         frame = _frame()
-        augmentation = PlannerILQRAugmentation(
+        augmentation = PlannerPoseAugmentation(
             lateral_offset_range=(2.0, 2.0),
             yaw_offset_range=(math.pi / 2, math.pi / 2),
             pose_probability=1.0,
@@ -62,6 +64,7 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
 
         result = augmentation(frame)
 
+        self.assertTrue(bool(result[POSE_AUGMENTATION_APPLIED_KEY]))
         np.testing.assert_allclose(
             result["ego_agent_past"][-1, :4], _pose(0.0, 0.0), atol=1e-6
         )
@@ -69,10 +72,6 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
             result["neighbor_agents_past"][0, -1],
             _pose(0.0, -3.0, 0.0, -1.0),
             atol=1e-6,
-        )
-        self.assertTrue(np.all(np.isfinite(result["ego_agent_future"])))
-        np.testing.assert_allclose(
-            np.linalg.norm(result["ego_agent_future"][:, 2:4], axis=-1), 1.0
         )
         np.testing.assert_allclose(
             result["goal_pose"],
@@ -82,7 +81,7 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
 
     def test_preserves_padding_and_non_coordinate_tensors(self) -> None:
         frame = _frame()
-        augmentation = PlannerILQRAugmentation(
+        augmentation = PlannerPoseAugmentation(
             (1.0, 1.0), (0.1, 0.1), pose_probability=1.0
         )
 
@@ -133,24 +132,16 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
         np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
 
     def test_pose_augmentation_checks_future_speed_without_current_speed(self) -> None:
-        for augmentation_type in (
-            PlannerRigidDataAugmentation,
-            PlannerILQRAugmentation,
-        ):
+        for augmentation_type in (PlannerPoseAugmentation,):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_past"][-1, 4] = 0.0
-                check_index = (
-                    {"num_refine": 1}
-                    if augmentation_type is PlannerILQRAugmentation
-                    else {"pose_augmentation_speed_check_endpoint_index": 1}
-                )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
                     pose_augmentation_endpoint_speed_threshold=0.5,
-                    **check_index,
+                    pose_augmentation_speed_check_endpoint_index=1,
                 )
 
                 result = augmentation(frame)
@@ -160,28 +151,21 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
                 )
 
     def test_pose_augmentation_skips_when_speed_before_index_is_too_low(self) -> None:
-        for augmentation_type in (
-            PlannerRigidDataAugmentation,
-            PlannerILQRAugmentation,
-        ):
+        for augmentation_type in (PlannerPoseAugmentation,):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_future"][1, 4] = 0.4
-                check_index = (
-                    {"num_refine": 1}
-                    if augmentation_type is PlannerILQRAugmentation
-                    else {"pose_augmentation_speed_check_endpoint_index": 1}
-                )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
                     pose_augmentation_endpoint_speed_threshold=0.5,
-                    **check_index,
+                    pose_augmentation_speed_check_endpoint_index=1,
                 )
 
                 result = augmentation(frame)
 
+                self.assertFalse(bool(result[POSE_AUGMENTATION_APPLIED_KEY]))
                 self.assertIs(result["goal_pose"], frame["goal_pose"])
 
 

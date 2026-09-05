@@ -1,4 +1,4 @@
-"""Minimal behavioral checks for iLQR trajectory augmentation."""
+"""Minimal behavioral checks for iLQR trajectory refinement."""
 
 from __future__ import annotations
 
@@ -7,45 +7,53 @@ import unittest
 
 import numpy as np
 
-from diffusion_planner.data.transforms import PlannerILQRAugmentation
+from diffusion_planner.data.transforms import (
+    PlannerILQRRefinement,
+    PlannerPoseAugmentation,
+)
+from diffusion_planner.data.transforms.pose_augmentation import (
+    POSE_AUGMENTATION_APPLIED_KEY,
+)
 
 
-class PlannerILQRAugmentationTest(unittest.TestCase):
-    def test_speed_skip_uses_only_refine_endpoint_for_minimum(self) -> None:
-        optimizer = PlannerILQRAugmentation(
-            num_refine=2,
-            pose_augmentation_endpoint_speed_threshold=2.0,
-        )
-        future = np.zeros((4, 6), dtype=np.float32)
-        future[:, 4] = (3.0, 0.0, 3.0, 0.0)
-
-        self.assertTrue(
-            optimizer._has_sufficient_future_speed({"ego_agent_future": future})
-        )
-
-    def test_skips_pose_augmentation_when_future_speed_is_too_low(self) -> None:
-        optimizer = PlannerILQRAugmentation(
-            lateral_offset_range=(1.0, 1.0),
-            yaw_offset_range=(0.1, 0.1),
-            pose_probability=1.0,
-            pose_augmentation_endpoint_speed_threshold=2.0,
-            num_refine=2,
-        )
+class PlannerILQRRefinementTest(unittest.TestCase):
+    def test_refines_after_pose_augmentation_and_keeps_marker(self) -> None:
         past = np.zeros((2, 6), dtype=np.float32)
         past[:, 2] = 1.0
         past[:, 4] = 3.0
-        future = np.zeros((4, 6), dtype=np.float32)
+        future = np.zeros((2, 6), dtype=np.float32)
+        future[:, 0] = (0.3, 0.6)
         future[:, 2] = 1.0
-        future[:, 4] = (3.0, 3.0, 1.0, 3.0)
-        frame = {"ego_agent_past": past, "ego_agent_future": future}
+        future[:, 4] = 3.0
+        pose = PlannerPoseAugmentation(
+            lateral_offset_range=(1.0, 1.0),
+            yaw_offset_range=(0.0, 0.0),
+            pose_probability=1.0,
+            pose_augmentation_endpoint_speed_threshold=0.0,
+            pose_augmentation_speed_check_endpoint_index=1,
+        )
 
-        result = optimizer(frame)
+        pose_augmented = pose({"ego_agent_past": past, "ego_agent_future": future})
+        result = PlannerILQRRefinement(num_refine=1)(pose_augmented)
 
-        self.assertIs(result["ego_agent_past"], past)
+        self.assertTrue(bool(result[POSE_AUGMENTATION_APPLIED_KEY]))
+        self.assertTrue(np.all(np.isfinite(result["ego_agent_future"])))
+
+    def test_skips_without_applied_pose_marker_and_keeps_marker(self) -> None:
+        refinement = PlannerILQRRefinement(num_refine=1)
+        future = np.zeros((2, 6), dtype=np.float32)
+        frame = {
+            "ego_agent_future": future,
+            POSE_AUGMENTATION_APPLIED_KEY: np.asarray(False),
+        }
+
+        result = refinement(frame)
+
         self.assertIs(result["ego_agent_future"], future)
+        self.assertIn(POSE_AUGMENTATION_APPLIED_KEY, result)
 
     def test_tracks_straight_reference_without_steering(self) -> None:
-        optimizer = PlannerILQRAugmentation(
+        optimizer = PlannerILQRRefinement(
             num_refine=19, max_iterations=20, steering_rate_weight=1.0
         )
         horizon = 20
@@ -68,7 +76,7 @@ class PlannerILQRAugmentationTest(unittest.TestCase):
         np.testing.assert_allclose(controls[:, 1], 0.0, atol=1e-8)
 
     def test_finds_steering_for_constant_curvature(self) -> None:
-        optimizer = PlannerILQRAugmentation(
+        optimizer = PlannerILQRRefinement(
             num_refine=39,
             max_iterations=30,
             state_weights=(10.0, 10.0, 5.0),
@@ -102,7 +110,7 @@ class PlannerILQRAugmentationTest(unittest.TestCase):
         )
 
     def test_refined_future_is_finite_and_preserves_suffix(self) -> None:
-        optimizer = PlannerILQRAugmentation(num_refine=5)
+        optimizer = PlannerILQRRefinement(num_refine=5)
         past = np.zeros((2, 6), dtype=np.float32)
         past[:, 2] = 1.0
         past[:, 4] = 3.0

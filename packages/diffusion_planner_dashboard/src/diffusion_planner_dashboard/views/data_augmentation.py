@@ -12,7 +12,8 @@ import streamlit as st
 
 from diffusion_planner.data import (
     PlannerFixStopPoint,
-    PlannerILQRAugmentation,
+    PlannerILQRRefinement,
+    PlannerPoseAugmentation,
     PlannerSpeedAugmentation,
 )
 from diffusion_planner.visualizer import plot_frame
@@ -218,11 +219,15 @@ def _augment_frame(
         speed_noise_range=(0.0, 0.0),
         probability=1.0,
     )
-    pose_augmentation = PlannerILQRAugmentation(
+    pose_augmentation = PlannerPoseAugmentation(
         longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
         pose_probability=1.0,
+        pose_augmentation_endpoint_speed_threshold=ilqr.speed_threshold,
+        pose_augmentation_speed_check_endpoint_index=ilqr.num_refine,
+    )
+    ilqr_refinement = PlannerILQRRefinement(
         num_refine=ilqr.num_refine,
         wheelbase_m=ilqr.wheelbase_m,
         state_weights=ilqr.state_weights,
@@ -234,10 +239,12 @@ def _augment_frame(
         velocity_bounds=(0.0, ilqr.velocity_max),
         steering_limit_rad=ilqr.steering_limit_rad,
         max_iterations=ilqr.max_iterations,
-        pose_augmentation_endpoint_speed_threshold=ilqr.speed_threshold,
     )
     fix_stop_point = PlannerFixStopPoint(stop_speed_threshold=fix_stop_speed_threshold)
-    return fix_stop_point(pose_augmentation(speed_augmentation(frame_data)))
+    speed_augmented = speed_augmentation(frame_data)
+    pose_augmented = pose_augmentation(speed_augmented)
+    refined = ilqr_refinement(pose_augmented)
+    return fix_stop_point(refined)
 
 
 def _difference_frame(
