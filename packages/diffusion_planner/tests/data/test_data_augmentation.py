@@ -143,13 +143,13 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
                 check_index = (
                     {"num_refine": 1}
                     if augmentation_type is PlannerILQRAugmentation
-                    else {"pose_augmentation_speed_check_index": 1}
+                    else {"pose_augmentation_speed_check_endpoint_index": 1}
                 )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
-                    pose_augmentation_speed_threshold=0.5,
+                    pose_augmentation_endpoint_speed_threshold=0.5,
                     **check_index,
                 )
 
@@ -170,13 +170,13 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
                 check_index = (
                     {"num_refine": 1}
                     if augmentation_type is PlannerILQRAugmentation
-                    else {"pose_augmentation_speed_check_index": 1}
+                    else {"pose_augmentation_speed_check_endpoint_index": 1}
                 )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
-                    pose_augmentation_speed_threshold=0.5,
+                    pose_augmentation_endpoint_speed_threshold=0.5,
                     **check_index,
                 )
 
