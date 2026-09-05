@@ -11,6 +11,7 @@ from .rigid_augmentation import (
     apply_rigid_pose_augmentation,
 )
 from .speed_augmentation import PlannerSpeedAugmentation
+from .start_decision_augmentation import PlannerStartDecisionAugmentation
 from .traffic_light import (
     FillUnknownTrafficLightFutures,
     fill_unknown_traffic_light_futures,
@@ -28,6 +29,7 @@ __all__ = [
     "PlannerILQRAugmentation",
     "PlannerRigidDataAugmentation",
     "PlannerSpeedAugmentation",
+    "PlannerStartDecisionAugmentation",
     "PlannerTurnIndicatorAugmentation",
     "Transform",
     "apply_rigid_pose_augmentation",
