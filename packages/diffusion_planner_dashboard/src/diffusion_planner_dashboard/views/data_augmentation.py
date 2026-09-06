@@ -15,6 +15,7 @@ from diffusion_planner.data import (
     PlannerILQRRefinement,
     PlannerPoseAugmentation,
     PlannerSpeedAugmentation,
+    PlannerStartDecisionAugmentation,
 )
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
@@ -77,10 +78,42 @@ class ILQRSettings:
     speed_threshold: float
 
 
-def _render_augmentation_settings() -> tuple[
-    float, float, float, float, ILQRSettings, float
-]:
+@dataclass(frozen=True)
+class AugmentationPipelineSettings:
+    """Controls for the training-order augmentation preview pipeline."""
+
+    apply_start_decision: bool
+    start_stop_speed_threshold: float
+    start_max_shift_steps: int
+    apply_fix_stop_point: bool
+    fix_stop_speed_threshold: float
+    apply_pose: bool
+    apply_ilqr: bool
+    apply_speed: bool
+    longitudinal_offset: float
+    lateral_offset: float
+    yaw_offset: float
+    ego_speed_scale: float
+    ilqr: ILQRSettings
+
+
+def _render_augmentation_settings() -> AugmentationPipelineSettings:
     st.sidebar.subheader("Augmentation")
+    st.sidebar.caption("Training order")
+    apply_start_decision = st.sidebar.checkbox("1. Start Decision", value=False)
+    apply_fix_stop_point = st.sidebar.checkbox("2. Fix Stop Point", value=True)
+    apply_pose = st.sidebar.checkbox("3. Pose Augmentation", value=True)
+    apply_ilqr = st.sidebar.checkbox("4. iLQR Refinement", value=True)
+    apply_speed = st.sidebar.checkbox("5. Speed Augmentation", value=True)
+    with st.sidebar.expander("Start Decision parameters", expanded=False):
+        start_stop_speed_threshold = float(
+            st.number_input(
+                "Start stop-speed threshold [m/s]", 0.0, value=0.1, step=0.05
+            )
+        )
+        start_max_shift_steps = int(
+            st.number_input("Start maximum shift steps", 1, 30, 10, step=1)
+        )
     longitudinal_offset = float(
         st.sidebar.slider(
             "Longitudinal offset [m]",
@@ -182,12 +215,20 @@ def _render_augmentation_settings() -> tuple[
                 help="Hold the ego pose and zero its motion from the first future point at or below this speed.",
             )
         )
-    return (
-        longitudinal_offset,
-        lateral_offset,
-        math.radians(yaw_offset_degrees),
-        ego_speed_scale,
-        ILQRSettings(
+    return AugmentationPipelineSettings(
+        apply_start_decision=apply_start_decision,
+        start_stop_speed_threshold=start_stop_speed_threshold,
+        start_max_shift_steps=start_max_shift_steps,
+        apply_fix_stop_point=apply_fix_stop_point,
+        fix_stop_speed_threshold=fix_stop_speed_threshold,
+        apply_pose=apply_pose,
+        apply_ilqr=apply_ilqr,
+        apply_speed=apply_speed,
+        longitudinal_offset=longitudinal_offset,
+        lateral_offset=lateral_offset,
+        yaw_offset=math.radians(yaw_offset_degrees),
+        ego_speed_scale=ego_speed_scale,
+        ilqr=ILQRSettings(
             num_refine=num_refine,
             wheelbase_m=wheelbase_m,
             state_weights=(q_x, q_y, q_yaw),
@@ -201,39 +242,42 @@ def _render_augmentation_settings() -> tuple[
             max_iterations=max_iterations,
             speed_threshold=speed_threshold,
         ),
-        fix_stop_speed_threshold,
     )
 
 
 def _augment_frame(
     frame_data: dict[str, Any],
-    longitudinal_offset: float,
-    lateral_offset: float,
-    yaw_offset: float,
-    ego_speed_scale: float,
-    ilqr: ILQRSettings,
-    fix_stop_speed_threshold: float,
+    settings: AugmentationPipelineSettings,
 ) -> dict[str, Any]:
+    ilqr = settings.ilqr
+    start_decision = PlannerStartDecisionAugmentation(
+        probability=1.0,
+        stop_speed_threshold=settings.start_stop_speed_threshold,
+        max_shift_steps=settings.start_max_shift_steps,
+    )
+    fix_stop_point = PlannerFixStopPoint(
+        stop_speed_threshold=settings.fix_stop_speed_threshold
+    )
     speed_augmentation = PlannerSpeedAugmentation(
-        speed_scale_range=(ego_speed_scale, ego_speed_scale),
+        speed_scale_range=(settings.ego_speed_scale, settings.ego_speed_scale),
         speed_noise_range=(0.0, 0.0),
         probability=1.0,
     )
     pose_augmentation = PlannerPoseAugmentation(
         normal_case={
             "probability": 1.0,
-            "longitudinal_offset_range": (longitudinal_offset, longitudinal_offset),
-            "lateral_offset_range": (lateral_offset, lateral_offset),
-            "yaw_offset_range": (yaw_offset, yaw_offset),
+            "longitudinal_offset_range": (settings.longitudinal_offset,) * 2,
+            "lateral_offset_range": (settings.lateral_offset,) * 2,
+            "yaw_offset_range": (settings.yaw_offset,) * 2,
             "pose_augmentation_endpoint_speed_threshold": ilqr.speed_threshold,
             "pose_augmentation_speed_check_endpoint_index": ilqr.num_refine,
         },
         stopped_in_intersection={
             "probability": 1.0,
             "stopped_speed_threshold": 0.1,
-            "longitudinal_offset_range": (longitudinal_offset, longitudinal_offset),
-            "lateral_offset_range": (lateral_offset, lateral_offset),
-            "yaw_offset_range": (yaw_offset, yaw_offset),
+            "longitudinal_offset_range": (settings.longitudinal_offset,) * 2,
+            "lateral_offset_range": (settings.lateral_offset,) * 2,
+            "yaw_offset_range": (settings.yaw_offset,) * 2,
         },
     )
     ilqr_refinement = PlannerILQRRefinement(
@@ -249,11 +293,18 @@ def _augment_frame(
         steering_limit_rad=ilqr.steering_limit_rad,
         max_iterations=ilqr.max_iterations,
     )
-    fix_stop_point = PlannerFixStopPoint(stop_speed_threshold=fix_stop_speed_threshold)
-    speed_augmented = speed_augmentation(frame_data)
-    pose_augmented = pose_augmentation(speed_augmented)
-    refined = ilqr_refinement(pose_augmented)
-    return fix_stop_point(refined)
+    output = dict(frame_data)
+    if settings.apply_start_decision:
+        output = start_decision(output)
+    if settings.apply_fix_stop_point:
+        output = fix_stop_point(output)
+    if settings.apply_pose:
+        output = pose_augmentation(output)
+    if settings.apply_ilqr:
+        output = ilqr_refinement(output)
+    if settings.apply_speed:
+        output = speed_augmentation(output)
+    return output
 
 
 def _difference_frame(
@@ -274,14 +325,7 @@ def render_data_augmentation() -> None:
     """Render original and deterministically augmented frame data."""
     st.title("Data Augmentation")
     source_path_text = render_data_source_settings()
-    (
-        longitudinal_offset,
-        lateral_offset,
-        yaw_offset,
-        ego_speed_scale,
-        ilqr,
-        fix_stop_speed_threshold,
-    ) = _render_augmentation_settings()
+    settings = _render_augmentation_settings()
     if source_path_text is None:
         st.info("Configure an H5 file or frame-index Parquet from the sidebar.")
         return
@@ -307,33 +351,28 @@ def render_data_augmentation() -> None:
             row.frame_time_ns,
             h5_modification_time_ns,
         )
-        augmented = _augment_frame(
-            original,
-            longitudinal_offset,
-            lateral_offset,
-            yaw_offset,
-            ego_speed_scale,
-            ilqr,
-            fix_stop_speed_threshold,
-        )
+        augmented = _augment_frame(original, settings)
     except Exception as error:
         st.exception(error)
         return
 
-    yaw_offset_degrees = math.degrees(yaw_offset)
+    enabled = [
+        name
+        for name, applied in (
+            ("Start Decision", settings.apply_start_decision),
+            ("Fix Stop Point", settings.apply_fix_stop_point),
+            ("Pose", settings.apply_pose),
+            ("iLQR", settings.apply_ilqr),
+            ("Speed", settings.apply_speed),
+        )
+        if applied
+    ]
     st.caption(
-        f"Applied fixed longitudinal offset {longitudinal_offset:.2f} m, "
-        f"lateral offset {lateral_offset:.2f} m, and yaw offset "
-        f"{yaw_offset_degrees:.2f} deg, and scaled ego history speed by "
-        f"{ego_speed_scale:.2f} with probability 1.0. Fix Stop Point is always "
-        f"applied with threshold {fix_stop_speed_threshold:.2f} m/s."
+        "Training-order pipeline: Start Decision → Fix Stop Point → Pose → "
+        f"iLQR → Speed. Enabled: {', '.join(enabled) if enabled else 'none'}."
     )
     original_column, augmented_column = st.columns(2)
-    chart_identity = (
-        f"{index.path}::{row.index}::{longitudinal_offset}::{lateral_offset}::"
-        f"{yaw_offset_degrees}::{ego_speed_scale}"
-        f"::{ilqr}::{fix_stop_speed_threshold}"
-    )
+    chart_identity = f"{index.path}::{row.index}::{settings}"
     with original_column:
         st.subheader("Original")
         original_figure = plot_frame(
@@ -361,7 +400,11 @@ def render_data_augmentation() -> None:
             config={"responsive": True, "scrollZoom": True},
         )
 
-    inspection = inspect_augmentation(original, augmented)
+    inspection = inspect_augmentation(
+        original,
+        augmented,
+        nonrigid_keys={"ego_agent_past"} if settings.apply_start_decision else (),
+    )
     failures = sum(not bool(row_data["valid"]) for row_data in inspection)
     metric_columns = st.columns(3)
     metric_columns[0].metric("Checked tensors", len(inspection))
