@@ -18,6 +18,7 @@ from diffusion_planner.data.transforms import (
 )
 from diffusion_planner.data.transforms.pose_augmentation import (
     POSE_AUGMENTATION_APPLIED_KEY,
+    is_point_in_intersection,
 )
 
 
@@ -94,6 +95,17 @@ def _pose_augmentation(**kwargs: Any) -> PlannerPoseAugmentation:
 
 
 class PlannerPoseAugmentationTest(unittest.TestCase):
+    def test_point_in_intersection_handles_inside_and_outside(self) -> None:
+        areas = np.zeros((2, 4, 2), dtype=np.float32)
+        areas[0] = np.asarray(
+            [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            dtype=np.float32,
+        )
+        frame = {"intersection_area": areas}
+
+        self.assertTrue(is_point_in_intersection(frame, np.asarray([0.0, 0.0])))
+        self.assertFalse(is_point_in_intersection(frame, np.asarray([2.0, 0.0])))
+
     def test_uses_stopped_in_intersection_offset_ranges(self) -> None:
         frame = _frame()
         frame["ego_agent_past"][-1, 4] = 0.0
