@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 from ..dimensions import EGO_VELOCITY_INDEX
@@ -95,41 +96,36 @@ def has_sufficient_future_speed(
 
 
 def is_point_in_intersection(input_data: FrameLike, point: NDArray[Any]) -> bool:
-    """Return whether a point lies inside or on any valid intersection polygon."""
+    """Return whether a point lies inside any valid intersection polygon."""
     areas = input_data.get("intersection_area")
     if areas is None:
         return False
-    return any(
-        _point_in_polygon(point, polygon)
-        for polygon in areas
-        if np.count_nonzero(polygon) > 0
-    )
+    return bool(_is_point_in_any_polygon(areas, float(point[0]), float(point[1])))
 
 
-def _point_in_polygon(point: NDArray[Any], polygon: NDArray[Any]) -> bool:
-    """Return whether a 2D point is inside a polygon using ray casting."""
-    if len(polygon) < 3:
-        return False
-    px, py = map(float, point)
-    inside = False
-    previous = polygon[-1]
-    for current in polygon:
-        x1, y1 = map(float, previous)
-        x2, y2 = map(float, current)
-        cross = (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1)
-        if (
-            abs(cross) <= 1e-9
-            and min(x1, x2) - 1e-9 <= px <= max(x1, x2) + 1e-9
-            and min(y1, y2) - 1e-9 <= py <= max(y1, y2) + 1e-9
-        ):
+@njit(cache=True)
+def _is_point_in_any_polygon(areas: NDArray[Any], px: float, py: float) -> bool:
+    """Check fixed-size polygons with ray casting in compiled loops."""
+    for area_index in range(areas.shape[0]):
+        polygon = areas[area_index]
+        if len(polygon) < 3 or not np.any(polygon):
+            continue
+
+        inside = False
+        x1 = polygon[-1, 0]
+        y1 = polygon[-1, 1]
+        for vertex_index in range(len(polygon)):
+            x2 = polygon[vertex_index, 0]
+            y2 = polygon[vertex_index, 1]
+            if (y1 > py) != (y2 > py):
+                intersection_x = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+                if px < intersection_x:
+                    inside = not inside
+            x1 = x2
+            y1 = y2
+        if inside:
             return True
-        crosses_ray = (y1 > py) != (y2 > py)
-        if crosses_ray:
-            intersection_x = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
-            if px < intersection_x:
-                inside = not inside
-        previous = current
-    return inside
+    return False
 
 
 def apply_pose_augmentation(
