@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
 from .pose_augmentation import POSE_AUGMENTATION_APPLIED_KEY
 
@@ -24,6 +25,7 @@ class PlannerILQRRefinement:
         num_refine: int = 20,
         time_step_s: float = 0.1,
         wheelbase_m: float = 2.79,
+        stop_speed_threshold: float = 0.1,
         state_weights: tuple[float, float, float] = (1.0, 1.0, 0.5),
         terminal_weight_scale: float = 10.0,
         velocity_weight: float = 0.2,
@@ -38,6 +40,7 @@ class PlannerILQRRefinement:
         self.num_refine = num_refine
         self.dt = time_step_s
         self.wheelbase = wheelbase_m
+        self.stop_speed_threshold = stop_speed_threshold
         self.q = np.asarray(state_weights, dtype=np.float64)
         self.qf = terminal_weight_scale * self.q
         self.r = np.asarray((velocity_weight, steering_weight), dtype=np.float64)
@@ -58,6 +61,11 @@ class PlannerILQRRefinement:
             return output
         future = input_data.get("ego_agent_future")
         if future is None:
+            return output
+        if np.all(np.abs(future[:, EGO_VELOCITY_INDEX]) <= self.stop_speed_threshold):
+            stopped_future = np.zeros_like(future)
+            stopped_future[:, 2] = 1.0
+            output["ego_agent_future"] = stopped_future
             return output
         refined = self.refine_future(future, input_data["ego_agent_past"])
         if refined is None:

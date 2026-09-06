@@ -62,6 +62,45 @@ class PlannerILQRRefinementTest(unittest.TestCase):
         self.assertIs(result["ego_agent_future"], future)
         self.assertIn(POSE_AUGMENTATION_APPLIED_KEY, result)
 
+    def test_holds_at_current_pose_for_stopped_future_after_augmentation(self) -> None:
+        past = np.zeros((2, 6), dtype=np.float32)
+        past[:, 2] = 1.0
+        future = np.zeros((80, 6), dtype=np.float32)
+        future[:, 0] = 2.0
+        future[:, 1] = -1.0
+        future[:, 2] = math.cos(0.2)
+        future[:, 3] = math.sin(0.2)
+        future[:, 4] = 0.05
+        frame = {
+            "ego_agent_past": past,
+            "ego_agent_future": future,
+            POSE_AUGMENTATION_APPLIED_KEY: np.asarray(True),
+        }
+
+        result = PlannerILQRRefinement()(frame)
+
+        expected = np.zeros_like(future)
+        expected[:, 2] = 1.0
+        np.testing.assert_array_equal(result["ego_agent_future"], expected)
+
+    def test_does_not_hold_when_future_contains_motion(self) -> None:
+        optimizer = PlannerILQRRefinement(num_refine=1)
+        past = np.zeros((2, 6), dtype=np.float32)
+        past[:, 2] = 1.0
+        future = np.zeros((3, 6), dtype=np.float32)
+        future[:, 2] = 1.0
+        future[1:, 0] = (0.1, 0.2)
+        future[1:, 4] = 1.0
+        frame = {
+            "ego_agent_past": past,
+            "ego_agent_future": future,
+            POSE_AUGMENTATION_APPLIED_KEY: np.asarray(True),
+        }
+
+        result = optimizer(frame)
+
+        self.assertFalse(np.all(result["ego_agent_future"][:, :2] == 0.0))
+
     def test_tracks_straight_reference_without_steering(self) -> None:
         optimizer = PlannerILQRRefinement(
             num_refine=19, max_iterations=20, steering_rate_weight=1.0
