@@ -2,6 +2,7 @@ _target_: diffusion_planner.data.transforms.PlannerILQRRefinement
 num_refine: 40
 time_step_s: 0.1
 wheelbase_m: 2.79
+stop_speed_threshold: 0.1
 state_weights: [1.0, 1.0, 0.5]
 terminal_weight_scale: 10.0
 velocity_weight: 0.2
