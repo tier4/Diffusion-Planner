@@ -11,4 +11,4 @@ stopped_in_intersection:
   stopped_speed_threshold: 0.1
   longitudinal_offset_range: [-3.0, 1.0]
   lateral_offset_range: [-1.5, 1.5]
-  yaw_offset_range: [-0.1745, 0.1745]
+  yaw_offset_range: [-0.261799, 0.261799]
