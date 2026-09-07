@@ -213,7 +213,7 @@ def test_seed_and_past_noise_std_are_real_command_line_flags():
     # reaches a training, and that is what silently moved once already.
     from diffusion_planner.utils.augment_defaults import past_noise_std_for
 
-    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.0), ("bridge", 0.0)):
+    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.1), ("bridge", 0.0)):
         resolved = past_noise_std_for(
             build_config(TrainConfig, parser.parse_args(["--augment_type", augment_type]))
         )
@@ -291,17 +291,27 @@ def _past_noise(aug):
     return getattr(aug, "past_noise_std", getattr(aug, "_ego_past_noise_std", None))
 
 
-def test_frenet_perturbs_no_history_unless_asked():
-    """Frenet rewrites the history kinematically; it hard-coded 0.0 before the flag
-    existed, and inheriting quintic's 0.1 would change every frenet run."""
-    assert _past_noise(_from_cli("--augment_type", "frenet")) == 0.0
+def test_frenet_defaults_to_the_same_history_noise_as_quintic():
+    """A DELIBERATE default change: tier4-main hard-passed 0.0 to the frenet augmenter.
+
+    Pinned here because it is the one thing on this branch that alters a stock run --
+    reproducing a pre-branch frenet checkpoint needs `--ego_past_noise_std 0`. Measured
+    as neither helping nor hurting (inside the seed spread on an 8-arm A/B); it is on
+    for flag uniformity, not for a measured gain.
+    """
+    assert _past_noise(_from_cli("--augment_type", "frenet")) == 0.1
+
+
+def test_frenet_history_noise_can_still_be_turned_off():
+    """The escape hatch the reproducibility note points at."""
+    assert _past_noise(_from_cli("--augment_type", "frenet", "--ego_past_noise_std", "0")) == 0.0
 
 
 def test_quintic_keeps_the_history_noise_it_has_always_had():
     assert _past_noise(_from_cli("--augment_type", "quintic")) == 0.1
 
 
-@pytest.mark.parametrize("augment_type,value", [("frenet", 0.1), ("quintic", 0.0)])
+@pytest.mark.parametrize("augment_type,value", [("frenet", 0.3), ("quintic", 0.0)])
 def test_an_explicit_flag_wins_for_either_augmenter(augment_type, value):
     """The per-augmenter default must not make the flag un-sweepable."""
     aug = _from_cli("--augment_type", augment_type, "--ego_past_noise_std", str(value))

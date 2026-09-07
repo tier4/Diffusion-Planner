@@ -124,21 +124,25 @@ scaling the ego history about the t=0 sample. The recorded *shape* is preserved 
 the spacing changes, so it perturbs the implied speed history rather than adding
 per-point noise. t=0 itself never moves.
 
-**Left unset, each augmenter keeps the value it has always used** — `quintic` 0.1,
-`frenet` 0.0 — because the two are not perturbing the same thing:
+Left unset it resolves per augmenter, because they do not perturb the same thing:
 
 | augmenter | default | what the factor scales |
 |---|---|---|
 | `quintic` | 0.1 | the RECORDED history, and the current velocity and acceleration with it |
-| `frenet` | 0.0 | the history it rewrote from the perturbed polyline; `ego_current_state` is left bit-identical |
+| `frenet` | 0.1 | the history it rewrote from the perturbed polyline; `ego_current_state` is left bit-identical |
 | `bridge` | n/a | no history perturbation; passing the flag is an error, not a silent no-op |
 
-Passing a number applies it to whichever augmenter is selected, so the flag is still
-sweepable. Two consequences worth knowing before using it as a control variable: a
-`quintic`-vs-`frenet` A/B on this flag is not measuring the same perturbation, and
-turning it on for `frenet` has no measured benefit — on a 2-seed, 8-arm A/B
-(~1,110 perturbed closed-loop rollouts per arm) it moved recovery 28.3% → 30.2%,
-well inside the 17.2-point spread between the control's own two seeds.
+> **⚠ The frenet default is a change.** `tier4-main` hard-passed `0.0` to the frenet
+> augmenter, so a stock `--augment_type frenet` run here trains a different distribution
+> than the same command on main. **Reproducing an existing frenet checkpoint requires
+> `--ego_past_noise_std 0` explicitly.** It is on for flag uniformity, not because it was
+> shown to help: on a 2-seed, 8-arm A/B (~1,113 perturbed closed-loop rollouts per arm,
+> both trackers, replan intervals 1 and 3) it moved recovery 28.3% → 30.2% at replan 1
+> and 52.7% → 52.2% at replan 3, every difference inside the seed spread.
+
+Passing a number applies it to whichever augmenter is selected, so the flag stays
+sweepable. Note that a `quintic`-vs-`frenet` A/B on it is not measuring the same
+perturbation — quintic also rescales the current velocity and acceleration.
 
 #### Frenet-only options
 

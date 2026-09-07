@@ -5,17 +5,24 @@ Lives in its own module because both :mod:`augmenter_factory` and
 so a resolver in either of those would be a cycle.
 """
 
-# `--ego_past_noise_std` unset means "whatever this augmenter has always used", which is
-# NOT the same number for each. Quintic has perturbed the recorded history at 0.1 since
-# it was written. Frenet rewrites the history kinematically from the perturbed polyline
-# and hard-coded 0.0 before the flag was threaded to it, so inheriting quintic's 0.1
-# would silently change every frenet run and leave existing frenet checkpoints
-# unreproducible at their own seed. Bridge has no history perturbation at all.
+# `--ego_past_noise_std` unset means "the default for this augmenter". Quintic has
+# perturbed the recorded history at 0.1 since it was written. Frenet now matches it.
+# Bridge has no history perturbation at all, so it has no default to speak of and
+# rejects the flag rather than accepting and ignoring it.
 #
-# There is no measured reason to change the frenet default either: on a 2-seed, 8-arm
-# A/B (~1,110 perturbed closed-loop rollouts per arm), turning it on moved recovery
-# 28.3% -> 30.2%, well inside the 17.2-point spread between the control's own two seeds.
-DEFAULT_PAST_NOISE_STD = {"quintic": 0.1, "bridge": 0.0, "frenet": 0.0}
+# The frenet 0.1 is a DELIBERATE DEFAULT CHANGE, not an inherited value. `tier4-main`
+# hard-passed 0.0 to the frenet augmenter, so a stock `--augment_type frenet` run on
+# this branch trains a different distribution than the same command on main, and
+# reproducing an existing frenet checkpoint needs `--ego_past_noise_std 0` explicitly.
+#
+# Measured before choosing it: on a 2-seed, 8-arm A/B (~1,113 perturbed closed-loop
+# rollouts per arm, both trackers, replan intervals 1 and 3), 0.1 vs 0.0 moved recovery
+# 28.3% -> 30.2% at replan 1 and 52.7% -> 52.2% at replan 3, with lost% 20.3 -> 19.8 and
+# 7.7 -> 8.0. Every one of those is inside the seed spread (17.2 points on recovered% at
+# replan 1; 1.0 on lost% at replan 3), so the evidence says the perturbation neither
+# helps nor hurts. It is on by default because the flag is uniform across augmenters
+# that support it, NOT because it was shown to improve anything.
+DEFAULT_PAST_NOISE_STD = {"quintic": 0.1, "bridge": 0.0, "frenet": 0.1}
 
 
 def past_noise_std_for(args) -> float:
