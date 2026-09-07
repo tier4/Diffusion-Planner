@@ -63,10 +63,17 @@ def resolve_history_noise(args) -> None:
         ValueError: if ``--ego_past_noise_std`` was passed with an ``augment_type``
             that cannot honour it.
     """
-    if args.ego_past_noise_std is not None and args.augment_type == "bridge":
-        raise ValueError(
-            "--ego_past_noise_std is not supported by augment_type=bridge "
-            "(the bridge augmenter does not perturb the ego history); "
-            "drop the flag or pick another augment_type"
-        )
+    if args.augment_type == "bridge":
+        if args.ego_past_noise_std is not None:
+            raise ValueError(
+                "--ego_past_noise_std is not supported by augment_type=bridge "
+                "(the bridge augmenter does not perturb the ego history); "
+                "drop the flag or pick another augment_type"
+            )
+        # Left as None deliberately, NOT resolved to a number. Bridge applies no history
+        # perturbation, so None is the honest record: the knob does not apply, rather
+        # than applying at 0. Writing 0.0 here also breaks the second call -- the factory
+        # calls this defensively, and a resolved 0.0 is indistinguishable from a user
+        # passing 0.0, so the rejection above would fire on every ordinary bridge run.
+        return
     args.ego_past_noise_std = past_noise_std_for(args)

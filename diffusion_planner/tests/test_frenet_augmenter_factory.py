@@ -380,18 +380,41 @@ def test_an_explicit_zero_is_recorded_as_zero_not_as_unset():
     assert args.ego_past_noise_std == 0.0
 
 
-def test_resolving_twice_changes_nothing():
-    """The factory calls the resolver defensively, so it runs twice in a real run."""
+@pytest.mark.parametrize(
+    "augment_type,expected", [("quintic", 0.1), ("frenet", 0.1), ("bridge", None)]
+)
+def test_resolving_twice_changes_nothing(augment_type, expected):
+    """The factory calls the resolver defensively, so it runs twice in a real run.
+
+    Covers BRIDGE, which is the case that broke: resolving an omitted bridge value to
+    0.0 made the second call mistake it for an explicitly supplied unsupported flag and
+    raise, so every ordinary bridge run failed. An unset bridge value stays None.
+    """
     from diffusion_planner.utils.augment_defaults import resolve_history_noise
 
-    args = _resolved_config("--augment_type", "quintic")
+    args = _resolved_config("--augment_type", augment_type)
     resolve_history_noise(args)
     resolve_history_noise(args)
-    assert args.ego_past_noise_std == 0.1
+    assert args.ego_past_noise_std == expected
+
+
+@pytest.mark.parametrize("augment_type", ["quintic", "frenet", "bridge"])
+def test_the_exact_production_ordering_builds_an_augmenter(augment_type):
+    """resolve -> serialize -> factory (which resolves again) -> build, for all three.
+
+    The ordering a real trainer uses. Asserting only "it builds" is the point: this is
+    the path that raised for bridge.
+    """
+    from diffusion_planner.utils.augmenter_factory import augmenter_from_args
+
+    args = _resolved_config("--augment_type", augment_type)
+    assert augmenter_from_args(args) is not None
 
 
 def test_bridge_still_rejects_the_flag_at_resolve_time():
     """The rejection moved to the resolver; it must not have been lost in the move."""
     with pytest.raises(ValueError, match="not supported by augment_type=bridge"):
         _resolved_config("--augment_type", "bridge", "--ego_past_noise_std", "0.4")
-    assert _resolved_config("--augment_type", "bridge").ego_past_noise_std == 0.0
+    # an unset bridge value stays None: the knob does not apply to bridge, and writing a
+    # number here is what made the resolver's second call reject every bridge run
+    assert _resolved_config("--augment_type", "bridge").ego_past_noise_std is None
