@@ -7,6 +7,7 @@ import unittest
 import torch
 
 from diffusion_planner.data.dimensions import (
+    AGENT_LABEL_DIM,
     EGO_HISTORY_LENGTH,
     INTERSECTION_AREA_LENGTH,
     LANE_LENGTH,
@@ -35,7 +36,7 @@ def make_input_data() -> dict[str, torch.Tensor]:
         "ego_agent_past": torch.zeros(batch, EGO_HISTORY_LENGTH, 6),
         "neighbor_agents_past": torch.zeros(batch, neighbors, EGO_HISTORY_LENGTH, 4),
         "agent_shape": torch.zeros(batch, neighbors, 2),
-        "agent_label": torch.zeros(batch, neighbors, 3),
+        "agent_label": torch.zeros(batch, neighbors, AGENT_LABEL_DIM),
         "lanes": torch.zeros(batch, 2, LANE_LENGTH, 6),
         "lane_types": torch.zeros(batch, 2, 20),
         "lanes_speed_limit": torch.zeros(batch, 2, 1),

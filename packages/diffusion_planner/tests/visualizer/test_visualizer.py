@@ -6,6 +6,7 @@ import unittest
 
 import numpy as np
 
+from diffusion_planner.data.dimensions import AGENT_LABEL_DIM
 from diffusion_planner.visualizer import FrameData, FramePlotOptions, plot_frame
 
 
@@ -21,7 +22,7 @@ def make_frame() -> dict[str, np.ndarray]:
     neighbors[0, :, 2] = 1.0
     agent_shape = np.zeros((2, 2), dtype=np.float32)
     agent_shape[0] = [1.8, 4.5]
-    agent_label = np.zeros((2, 3), dtype=np.float32)
+    agent_label = np.zeros((2, AGENT_LABEL_DIM), dtype=np.float32)
     agent_label[0, 0] = 1.0
 
     lanes = np.zeros((2, 3, 6), dtype=np.float32)

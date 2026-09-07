@@ -17,6 +17,7 @@ from diffusion_planner.data import (
     fill_unknown_traffic_light_futures,
 )
 from diffusion_planner.visualizer import plot_frame
+from diffusion_planner.visualizer.schema import AgentLabelIndex
 from diffusion_planner_dashboard.services import (
     FrameIndex,
     FrameIndexRow,
@@ -94,6 +95,7 @@ def _cached_prediction(
     remove_neighbor_agents: bool,
     remove_pedestrians: bool,
     remove_bikes: bool,
+    remove_unknowns: bool,
     infer_future_traffic_lights: bool,
 ):
     planner = _cached_planner(model_path, model_modification_time_ns, device)
@@ -105,8 +107,10 @@ def _cached_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
-    elif remove_pedestrians or remove_bikes:
-        frame_data = _remove_agent_types(frame_data, remove_pedestrians, remove_bikes)
+    elif remove_pedestrians or remove_bikes or remove_unknowns:
+        frame_data = _remove_agent_types(
+            frame_data, remove_pedestrians, remove_bikes, remove_unknowns
+        )
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
     frame_data = _fill_unknown_traffic_lights(frame_data)
@@ -153,6 +157,7 @@ def _cached_turn_indicator_prediction(
     remove_neighbor_agents: bool,
     remove_pedestrians: bool,
     remove_bikes: bool,
+    remove_unknowns: bool,
     infer_future_traffic_lights: bool,
     ego_trajectory: NDArray[np.float32],
 ):
@@ -167,8 +172,10 @@ def _cached_turn_indicator_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
-    elif remove_pedestrians or remove_bikes:
-        frame_data = _remove_agent_types(frame_data, remove_pedestrians, remove_bikes)
+    elif remove_pedestrians or remove_bikes or remove_unknowns:
+        frame_data = _remove_agent_types(
+            frame_data, remove_pedestrians, remove_bikes, remove_unknowns
+        )
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
     frame_data = _fill_unknown_traffic_lights(frame_data)
@@ -225,14 +232,17 @@ def _remove_agent_types(
     frame_data: dict[str, Any],
     remove_pedestrians: bool,
     remove_bikes: bool,
+    remove_unknowns: bool,
 ) -> dict[str, Any]:
     """Zero neighbor-agent rows matching the selected label types."""
     labels = np.asarray(frame_data["agent_label"])
     remove_mask = np.zeros(labels.shape[0], dtype=bool)
     if remove_pedestrians:
-        remove_mask |= labels[:, 1] > 0.5
+        remove_mask |= labels[:, AgentLabelIndex.IS_PEDESTRIAN] > 0.5
     if remove_bikes:
-        remove_mask |= labels[:, 2] > 0.5
+        remove_mask |= labels[:, AgentLabelIndex.IS_BICYCLE] > 0.5
+    if remove_unknowns:
+        remove_mask |= labels[:, AgentLabelIndex.IS_UNKNOWN] > 0.5
 
     result = dict(frame_data)
     for key in (
@@ -402,7 +412,7 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float, float]:
     )
 
 
-def _render_input_options() -> tuple[bool, bool, bool, bool]:
+def _render_input_options() -> tuple[bool, bool, bool, bool, bool]:
     """Render optional input transformations."""
     st.sidebar.subheader("Input options")
     remove_neighbor_agents = st.sidebar.checkbox(
@@ -410,6 +420,7 @@ def _render_input_options() -> tuple[bool, bool, bool, bool]:
     )
     remove_pedestrians = st.sidebar.checkbox("Remove pedestrians", value=False)
     remove_bikes = st.sidebar.checkbox("Remove bikes", value=False)
+    remove_unknowns = st.sidebar.checkbox("Remove unknowns", value=False)
     infer_future_traffic_lights = st.sidebar.checkbox(
         "Infer traffic light future from past", value=False
     )
@@ -417,6 +428,7 @@ def _render_input_options() -> tuple[bool, bool, bool, bool]:
         remove_neighbor_agents,
         remove_pedestrians,
         remove_bikes,
+        remove_unknowns,
         infer_future_traffic_lights,
     )
 
@@ -440,6 +452,7 @@ def render_training_results() -> None:
         remove_neighbor_agents,
         remove_pedestrians,
         remove_bikes,
+        remove_unknowns,
         infer_future_traffic_lights,
     ) = _render_input_options()
     if source_path_text is None or checkpoint_path_text is None:
@@ -496,9 +509,9 @@ def render_training_results() -> None:
         )
         if remove_neighbor_agents:
             visualized_frame = _remove_neighbor_agents(frame_data)
-        elif remove_pedestrians or remove_bikes:
+        elif remove_pedestrians or remove_bikes or remove_unknowns:
             visualized_frame = _remove_agent_types(
-                frame_data, remove_pedestrians, remove_bikes
+                frame_data, remove_pedestrians, remove_bikes, remove_unknowns
             )
         else:
             visualized_frame = frame_data
@@ -533,6 +546,7 @@ def render_training_results() -> None:
             remove_neighbor_agents,
             remove_pedestrians,
             remove_bikes,
+            remove_unknowns,
             infer_future_traffic_lights,
         )
         turn_indicator_result = None
@@ -553,6 +567,7 @@ def render_training_results() -> None:
                 remove_neighbor_agents,
                 remove_pedestrians,
                 remove_bikes,
+                remove_unknowns,
                 infer_future_traffic_lights,
                 prediction[0],
             )

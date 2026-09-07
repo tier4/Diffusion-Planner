@@ -67,7 +67,7 @@ chunks = (1, *per_frame_shape)
 | `ego_agent_past` | `(N, 31, 6)` | `[x, y, cos_yaw, sin_yaw, velocity, yaw_rate]` |
 | `neighbor_agents_past` | `(N, 320, 31, 4)` | `[x, y, cos_yaw, sin_yaw]` |
 | `agent_shape` | `(N, 320, 2)` | `[width, length]` |
-| `agent_label` | `(N, 320, 3)` | One-hot `[vehicle, pedestrian, bicycle]` |
+| `agent_label` | `(N, 320, 3)` | One-hot `[vehicle, pedestrian, bicycle]`; see below |
 | `lanes` | `(N, 140, 20, 6)` | Lane geometry; see below |
 | `lane_types` | `(N, 140, 20)` | Left and right boundary line types; see below |
 | `lanes_speed_limit` | `(N, 140, 1)` | Speed limit in m/s; zero means unavailable |
@@ -82,6 +82,18 @@ chunks = (1, *per_frame_shape)
 | `goal_pose` | `(N, 4)` | `[x, y, cos_yaw, sin_yaw]` |
 | `ego_shape` | `(N, 3)` | `[base_link_to_front, vehicle_length, vehicle_width]` |
 | `turn_indicators` | `(N, 31)` | `TurnIndicatorsReport.report` history |
+
+### Agent labels and the unknown class
+
+Shards store the three classes that `create_h5_dataset.py` writes. The model consumes a
+fourth column for the unknown class, appended at load time by
+`PlannerUnknownLabelAugmentation` (`AGENT_LABEL_DIM = 4`), which also relabels a configurable
+share of vehicles, pedestrians, and bicycles as unknown during training. Rows that are all
+zero stay all zero, so an empty neighbor slot never becomes an unknown agent.
+
+Unknown objects are still dropped upstream in Autoware preprocessing, so no shard contains a
+genuinely unknown agent yet; the augmentation is what supplies training examples for the
+class.
 
 ### Lane geometry and type separation
 

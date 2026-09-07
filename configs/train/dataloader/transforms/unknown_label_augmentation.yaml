@@ -1,0 +1,14 @@
+_target_: diffusion_planner.data.transforms.PlannerUnknownLabelAugmentation
+# Base rename rate; per-class values below fall back to it when null.
+# Start at 0.0 so the transform only widens the label to four columns.
+probability: 0.0
+probability_vehicle: null
+probability_pedestrian: null
+probability_bicycle: null
+# Multiplier reached at distance_scale_range_m; 1.0 disables distance scaling.
+distance_scale_max: 1.0
+distance_scale_range_m: 50.0
+# Upper bound after scaling; 1.0 disables capping.
+probability_cap: 1.0
+# Largest share of one frame's labelled agents that may become unknown.
+max_renamed_fraction: 1.0

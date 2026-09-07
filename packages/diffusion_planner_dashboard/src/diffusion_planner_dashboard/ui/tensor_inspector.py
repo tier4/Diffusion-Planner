@@ -62,7 +62,8 @@ _TENSOR_SPECS: dict[str, TensorDisplaySpec] = {
     ),
     "agent_shape": TensorDisplaySpec(row_axis="agent", fields=("width", "length")),
     "agent_label": TensorDisplaySpec(
-        row_axis="agent", fields=("is_vehicle", "is_pedestrian", "is_bicycle")
+        row_axis="agent",
+        fields=("is_vehicle", "is_pedestrian", "is_bicycle", "is_unknown"),
     ),
     "neighbor_agents_future": TensorDisplaySpec(
         leading_axes=("agent",), row_axis="time_index", fields=_POSE_FIELDS

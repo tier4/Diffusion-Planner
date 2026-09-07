@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from diffusion_planner.data import PlannerDataNormalizer
+from diffusion_planner.data.dimensions import AGENT_LABEL_DIM
 
 
 class PlannerDataNormalizerTest(unittest.TestCase):
@@ -39,7 +40,7 @@ class PlannerDataNormalizerTest(unittest.TestCase):
             "route_lanes_speed_limit": np.array([[10.0]]),
             "agent_shape": np.array([[2.0, 4.0]]),
             "ego_shape": np.array([4.0, 6.0, 2.0]),
-            "agent_label": np.ones((1, 3)),
+            "agent_label": np.ones((1, AGENT_LABEL_DIM)),
         }
 
         normalized = self.normalizer(input_data)

@@ -50,6 +50,7 @@ class AgentLabelIndex(IntEnum):
     IS_VEHICLE = 0
     IS_PEDESTRIAN = 1
     IS_BICYCLE = 2
+    IS_UNKNOWN = 3
 
 
 class LaneIndex(IntEnum):

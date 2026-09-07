@@ -572,7 +572,7 @@ def _create_neighbor_boxes(
     current = valid_neighbors[:, -1]
     shapes = agent_shapes[valid_indices]
     labels = agent_labels[valid_indices]
-    label_names = np.array(["vehicle", "pedestrian", "bicycle"])
+    label_names = np.array(["vehicle", "pedestrian", "bicycle", "unknown"])
     traces: list[BaseTraceType] = []
     for neighbor_index, state, shape, label_one_hot in zip(
         valid_indices, current, shapes, labels, strict=True
@@ -587,10 +587,10 @@ def _create_neighbor_boxes(
             label_names[int(np.argmax(label_one_hot))]
             if np.any(
                 label_one_hot[
-                    AgentLabelIndex.IS_VEHICLE : AgentLabelIndex.IS_BICYCLE + 1
+                    AgentLabelIndex.IS_VEHICLE : AgentLabelIndex.IS_UNKNOWN + 1
                 ]
             )
-            else "unknown"
+            else "unlabeled"
         )
         if width <= 0.0 or length <= 0.0 or cos_yaw**2 + sin_yaw**2 <= 0.5:
             continue

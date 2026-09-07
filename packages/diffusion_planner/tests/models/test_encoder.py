@@ -7,6 +7,7 @@ import unittest
 import torch
 
 from diffusion_planner.data.dimensions import (
+    AGENT_LABEL_DIM,
     EGO_HISTORY_LENGTH,
     INTERSECTION_AREA_LENGTH,
     LANE_LENGTH,
@@ -55,7 +56,7 @@ class SceneEncoderTest(unittest.TestCase):
             "ego_agent_past": torch.zeros(2, EGO_HISTORY_LENGTH, 6),
             "neighbor_agents_past": torch.zeros(2, 3, EGO_HISTORY_LENGTH, 4),
             "agent_shape": torch.zeros(2, 3, 2),
-            "agent_label": torch.zeros(2, 3, 3),
+            "agent_label": torch.zeros(2, 3, AGENT_LABEL_DIM),
             "lanes": torch.zeros(2, 2, LANE_LENGTH, 6),
             "lane_types": torch.zeros(2, 2, 20),
             "lanes_speed_limit": torch.zeros(2, 2, 1),
@@ -268,7 +269,7 @@ class NeighborAgentEncoderTest(unittest.TestCase):
             history[0, 0, :, 2] = 1.0
         shape = torch.zeros(2, 3, 2)
         shape[0, 0] = torch.tensor([2.0, 4.5])
-        label = torch.zeros(2, 3, 3)
+        label = torch.zeros(2, 3, AGENT_LABEL_DIM)
         label[0, 0, 0] = 1.0
 
         features, mask = encoder(history, shape, label)

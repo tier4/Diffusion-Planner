@@ -301,7 +301,7 @@ class NeighborAgentEncoder(nn.Module):
         Args:
             neighbor_agents_past: Pose histories with shape `(B, N, T, 4)`.
             agent_shape: Width and length with shape `(B, N, 2)`.
-            agent_label: Class one-hot vectors with shape `(B, N, 3)`.
+            agent_label: Class one-hot vectors with shape `(B, N, 4)`.
 
         Returns:
             Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
