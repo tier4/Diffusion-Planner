@@ -161,8 +161,8 @@ class ClosedLoopConfig:
     closed_loop_unstick_teleport_after: int = 50
     closed_loop_draw_every: int = 2
     closed_loop_draw_workers: int = cli("render on this many worker processes", default=4)
-    closed_loop_replan_interval: int = 1
-    closed_loop_tracker_mode: str = "mpc"
+    closed_loop_replan_interval: int = 8
+    closed_loop_tracker_mode: str = "perfect"
     closed_loop_neighbor_history_mode: str = "recorded"
     closed_loop_yaw_gate: bool = True
     closed_loop_strong_brake_mps2: float = -2.5
