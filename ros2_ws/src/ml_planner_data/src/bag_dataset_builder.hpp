@@ -11,15 +11,15 @@
 
 #include "frame_data.hpp"
 
-#include "autoware/ml_planner/dimensions.hpp"
-#include "autoware/ml_planner/preprocessing/input_builder.hpp"
+#include "autoware/diffusion_planner/dimensions.hpp"
+#include "autoware/diffusion_planner/preprocessing/input_builder.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace autoware::ml_planner::data {
+namespace autoware::diffusion_planner::data {
 
 struct TopicConfig;
 
@@ -36,11 +36,14 @@ struct DatasetBuilderParam {
   TopicDropThresholds topic_drop_thresholds{};
   double traffic_light_timeout_s{0.2};
   double neighbor_observation_timeout_s{0.3};
-  int64_t num_future_steps{autoware::ml_planner::OUTPUT_T};
+  int64_t num_future_steps{autoware::diffusion_planner::OUTPUT_T};
 };
 
 struct BagFrameMetadata {
   int64_t frame_time_ns;
+  double ego_x;
+  double ego_y;
+  double ego_yaw;
   float ego_speed_mps;
   float ego_yaw_rate_rps;
   uint8_t turn_indicator;
@@ -70,6 +73,6 @@ BagDataResult create_bag_frame_data(const std::string &bag_path,
                                     const DatasetBuilderParam &param,
                                     const TopicConfig &topics);
 
-} // namespace autoware::ml_planner::data
+} // namespace autoware::diffusion_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__BAG_DATASET_BUILDER_HPP_

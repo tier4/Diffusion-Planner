@@ -20,13 +20,13 @@
 #include "lru_cache.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/ml_planner/preprocessing/input_builder.hpp"
+#include "autoware/diffusion_planner/preprocessing/input_builder.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 
-namespace autoware::ml_planner::data {
+namespace autoware::diffusion_planner::data {
 
 /**
  * @brief LRU-cached bag readers and map contexts.
@@ -58,6 +58,6 @@ private:
   double line_string_max_step_m_;
 };
 
-} // namespace autoware::ml_planner::data
+} // namespace autoware::diffusion_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__FRAME_DATA_CACHE_HPP_

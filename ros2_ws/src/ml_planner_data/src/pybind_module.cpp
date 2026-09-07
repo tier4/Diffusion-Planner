@@ -14,13 +14,13 @@
 
 // Python bindings to build ML planner model inputs directly from
 // rosbags, sharing the exact preprocessing code used at inference time
-// (autoware::ml_planner::preprocess::create_input_data_map).
+// (autoware::diffusion_planner::preprocess::create_input_data_map).
 
 #include "bag_dataset_builder.hpp"
 #include "frame_data_cache.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/ml_planner/dimensions.hpp"
+#include "autoware/diffusion_planner/dimensions.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -38,11 +38,11 @@ namespace py = pybind11;
 
 namespace {
 
-namespace mpd = autoware::ml_planner::data;
-using autoware::ml_planner::VehicleSpec;
-namespace preprocess = autoware::ml_planner::preprocess;
+namespace mpd = autoware::diffusion_planner::data;
+using autoware::diffusion_planner::VehicleSpec;
+namespace preprocess = autoware::diffusion_planner::preprocess;
 
-py::dict to_numpy_dict(const preprocess::TensorMap &input_data_map) {
+py::dict to_numpy_dict(const preprocess::InputDataMap &input_data_map) {
   py::dict result;
   for (const auto &[key, value] : input_data_map) {
     std::vector<py::ssize_t> shape;
@@ -93,12 +93,18 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   const std::vector<py::ssize_t> shape{
       static_cast<py::ssize_t>(metadata.size())};
   py::array_t<int64_t> frame_time_ns(shape);
+  py::array_t<double> ego_x(shape);
+  py::array_t<double> ego_y(shape);
+  py::array_t<double> ego_yaw(shape);
   py::array_t<float> ego_speed_mps(shape);
   py::array_t<float> ego_yaw_rate_rps(shape);
   py::array_t<uint8_t> turn_indicator(shape);
   py::array_t<int32_t> num_objects(shape);
   for (size_t index = 0; index < metadata.size(); ++index) {
     frame_time_ns.mutable_data()[index] = metadata[index].frame_time_ns;
+    ego_x.mutable_data()[index] = metadata[index].ego_x;
+    ego_y.mutable_data()[index] = metadata[index].ego_y;
+    ego_yaw.mutable_data()[index] = metadata[index].ego_yaw;
     ego_speed_mps.mutable_data()[index] = metadata[index].ego_speed_mps;
     ego_yaw_rate_rps.mutable_data()[index] = metadata[index].ego_yaw_rate_rps;
     turn_indicator.mutable_data()[index] = metadata[index].turn_indicator;
@@ -106,6 +112,9 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   }
   py::dict result;
   result["frame_time_ns"] = std::move(frame_time_ns);
+  result["ego_x"] = std::move(ego_x);
+  result["ego_y"] = std::move(ego_y);
+  result["ego_yaw"] = std::move(ego_yaw);
   result["ego_speed_mps"] = std::move(ego_speed_mps);
   result["ego_yaw_rate_rps"] = std::move(ego_yaw_rate_rps);
   result["turn_indicator"] = std::move(turn_indicator);
@@ -163,8 +172,8 @@ py::dict create_bag_frame_data(const std::string &bag_path,
 } // namespace
 
 PYBIND11_MODULE(_ml_planner_data, m) {
-  using autoware::ml_planner::HISTORY_WINDOW_S;
-  using autoware::ml_planner::OUTPUT_T;
+  using autoware::diffusion_planner::HISTORY_WINDOW_S;
+  using autoware::diffusion_planner::OUTPUT_T;
 
   m.doc() = "Build ML planner model inputs directly from rosbags";
 

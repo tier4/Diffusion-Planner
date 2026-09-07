@@ -11,7 +11,10 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>ament_index_cpp</depend>
-  <depend>autoware_ml_planner</depend>
+  <depend>autoware_object_recognition_utils</depend>
+  <depend>autoware_traffic_light_utils</depend>
+  <depend>autoware_trajectory</depend>
+  <depend>autoware_utils_geometry</depend>
   <depend>autoware_geography_utils</depend>
   <depend>autoware_lanelet2_extension</depend>
   <depend>autoware_map_projection_loader</depend>

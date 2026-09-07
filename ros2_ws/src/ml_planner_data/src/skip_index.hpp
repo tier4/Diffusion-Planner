@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-namespace autoware::ml_planner::data {
+namespace autoware::diffusion_planner::data {
 
 struct DatasetBuilderParam;
 struct TopicConfig;
@@ -55,6 +55,6 @@ std::optional<std::string> check_min_travel_distance(
     const std::vector<std::pair<double, double>> &ego_positions,
     double min_travel_distance);
 
-} // namespace autoware::ml_planner::data
+} // namespace autoware::diffusion_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__SKIP_INDEX_HPP_

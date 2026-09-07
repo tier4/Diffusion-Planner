@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace autoware::ml_planner::data {
+namespace autoware::diffusion_planner::data {
 
 /**
  * @brief Simple LRU cache keyed by string.
@@ -53,6 +53,6 @@ private:
   std::unordered_map<std::string, typename decltype(entries_)::iterator> index_;
 };
 
-} // namespace autoware::ml_planner::data
+} // namespace autoware::diffusion_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__LRU_CACHE_HPP_

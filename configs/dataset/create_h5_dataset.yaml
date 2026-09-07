@@ -10,6 +10,9 @@ output_root: ???
 index_output: ${output_root}/indexes/${split}.parquet
 split: train
 frame_interval: 0.5
+# Evaluation routes need frame inputs through the end of a bag; when this is
+# below 80, recorded future labels are edge-padded back to the model schema.
+future_steps: 80
 jobs: 200
 limit: null
 
