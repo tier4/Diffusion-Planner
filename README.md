@@ -177,9 +177,20 @@ augmenter reproduces the previous behaviour exactly.
 
 - **`--frenet_toward_parked_prob P`** (default 0.0). The corridor is symmetric, so a
   scene that passes a parked vehicle is as likely to be nudged away from it as toward
-  it. This directs that fraction of eligible scenes toward the vehicle. A scene is
-  eligible only when a parked vehicle bounds the corridor and is still ahead at t=0; if
-  it is already alongside there is no avoidance left to harden.
+  it. `P` directs a fraction of scenes toward the vehicle instead.
+
+  Precisely, `P` is an independent per-scene coin ANDed with two other conditions —
+  `toward = eligible & (r < P) & do_aug` — so it is the fraction of scenes that are
+  **both** eligible **and** already selected for augmentation by `--augment_prob`. At
+  `P = 1.0` every such scene is nudged, with no further filtering. At the default
+  `augment_prob 0.5` the realised rate is therefore about half of `P × eligible`.
+
+  A scene is eligible only when a *parked* vehicle (not a kerb, not a moving car) bounds
+  the corridor within `--frenet_dy_max` reach **and** is reached at or after the shortest
+  merge horizon; if it is already alongside at t=0 there is no avoidance left to harden.
+  Eligibility is uncommon: **10,958 of 105,093 scenes (10.4%)** on a full-size corpus, and
+  **zero** on the 2,297-scene pipeline-test set, which contains no parked vehicle bounding
+  the corridor ahead — so on that set the flag does nothing at any `P`.
 
   On a row where it can, the augmenter then takes the *largest* feasible offset and
   restricts the merge to horizons that rejoin the recording **before** the vehicle,
