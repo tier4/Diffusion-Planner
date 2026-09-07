@@ -18,6 +18,7 @@ from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import closed_loop_validate
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.augment_defaults import resolve_history_noise
 from diffusion_planner.utils.augmenter_factory import augmenter_from_args
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
@@ -54,6 +55,11 @@ def model_training(args):
     print(f"{global_rank=}, {rank=}")
 
     save_path = args.save_dir
+    # Resolve the per-augmenter history-noise default BEFORE args.json is written, so
+    # the saved configuration is the configuration used. Every rank, because the value
+    # feeds the augmenter each rank builds; rank 0 alone serializes it.
+    resolve_history_noise(args)
+
     if global_rank == 0:
         print("------------- {} -------------".format(args.exp_name))
         print("Scenes per step (batch_size): {}".format(args.batch_size))

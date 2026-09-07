@@ -19,6 +19,7 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.augment_defaults import resolve_history_noise
 from diffusion_planner.utils.augmenter_factory import augmenter_from_args
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
@@ -218,6 +219,11 @@ def model_training(args: TrainConfig):
     # init ddp
     global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
+
+    # Resolve the per-augmenter history-noise default BEFORE args.json is written, so the
+    # saved configuration is the configuration used. Every rank, because the value feeds
+    # the augmenter each rank builds; rank 0 alone serializes it.
+    resolve_history_noise(args)
 
     if global_rank == 0:
         # Logging

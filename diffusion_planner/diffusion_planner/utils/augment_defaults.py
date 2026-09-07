@@ -31,6 +31,9 @@ def past_noise_std_for(args) -> float:
     ``None`` (the unset default) resolves per augmenter; any number the caller passed
     wins for every augmenter, so a sweep over the flag still sweeps all of them.
 
+    Idempotent, so it is safe to call after :func:`resolve_history_noise` has already
+    written the resolved number back onto ``args``.
+
     Raises:
         KeyError: on an ``augment_type`` with no recorded default, which means a new
             augmenter was added without deciding what this knob means for it.
@@ -38,3 +41,32 @@ def past_noise_std_for(args) -> float:
     if args.ego_past_noise_std is not None:
         return float(args.ego_past_noise_std)
     return DEFAULT_PAST_NOISE_STD[args.augment_type]
+
+
+def resolve_history_noise(args) -> None:
+    """Write the EFFECTIVE history-noise value onto ``args``, in place.
+
+    Call this once at startup, **before the config is serialized**. Both trainers write
+    ``args.json`` before they build the augmenter, so without this a stock frenet run
+    records ``ego_past_noise_std: null`` while training with 0.1 -- a saved experiment
+    configuration that is not the configuration used, and one whose meaning depends on
+    a future code default rather than on the file. That is the defect the augmenter
+    factory exists to prevent, one level up.
+
+    Also the only place the bridge rejection can live. The check needs to distinguish
+    "the user passed a value" from "unset", which is exactly the information this
+    function destroys, so it has to run first.
+
+    Idempotent: a second call is a no-op, since the value is then already a float.
+
+    Raises:
+        ValueError: if ``--ego_past_noise_std`` was passed with an ``augment_type``
+            that cannot honour it.
+    """
+    if args.ego_past_noise_std is not None and args.augment_type == "bridge":
+        raise ValueError(
+            "--ego_past_noise_std is not supported by augment_type=bridge "
+            "(the bridge augmenter does not perturb the ego history); "
+            "drop the flag or pick another augment_type"
+        )
+    args.ego_past_noise_std = past_noise_std_for(args)

@@ -327,3 +327,71 @@ def test_bridge_refuses_a_flag_it_cannot_honour():
 
 def test_bridge_is_fine_without_the_flag():
     assert _from_cli("--augment_type", "bridge") is not None
+
+
+# ───────── the SAVED configuration must be the configuration APPLIED ─────────
+#
+# Both trainers write args.json before they build the augmenter, so a sentinel default
+# that only resolves inside the factory is recorded as null while the run trains with a
+# number. That makes the saved experiment configuration inaccurate and its meaning
+# dependent on a future code default rather than on the file.
+
+
+def _resolved_config(*argv):
+    from diffusion_planner.config.config_cli import build_config, build_parser
+    from diffusion_planner.config.train_config import TrainConfig
+    from diffusion_planner.utils.augment_defaults import resolve_history_noise
+
+    args = build_config(TrainConfig, build_parser(TrainConfig).parse_args(list(argv)))
+    args.device = "cpu"
+    resolve_history_noise(args)  # what the trainers call before serializing
+    return args
+
+
+@pytest.mark.parametrize("augment_type", ["frenet", "quintic"])
+def test_saved_config_equals_applied_config(augment_type):
+    """Serialize the way the trainers do, then build the augmenter, and compare."""
+    import json
+
+    from diffusion_planner.utils.augmenter_factory import augmenter_from_args
+
+    args = _resolved_config("--augment_type", augment_type)
+    saved = json.loads(json.dumps({"ego_past_noise_std": args.ego_past_noise_std}))
+    applied = _past_noise(augmenter_from_args(args))
+
+    assert saved["ego_past_noise_std"] is not None, "args.json would record null"
+    assert saved["ego_past_noise_std"] == applied, (
+        f"{augment_type}: args.json records {saved['ego_past_noise_std']} "
+        f"but the augmenter trains with {applied}"
+    )
+
+
+def test_the_resolved_value_survives_a_json_round_trip():
+    """A reader of args.json must get the effective number, not a sentinel."""
+    import json
+
+    args = _resolved_config("--augment_type", "frenet")
+    assert json.loads(json.dumps(args.ego_past_noise_std)) == 0.1
+
+
+def test_an_explicit_zero_is_recorded_as_zero_not_as_unset():
+    """The reproducibility escape hatch has to be visible in the saved config."""
+    args = _resolved_config("--augment_type", "frenet", "--ego_past_noise_std", "0")
+    assert args.ego_past_noise_std == 0.0
+
+
+def test_resolving_twice_changes_nothing():
+    """The factory calls the resolver defensively, so it runs twice in a real run."""
+    from diffusion_planner.utils.augment_defaults import resolve_history_noise
+
+    args = _resolved_config("--augment_type", "quintic")
+    resolve_history_noise(args)
+    resolve_history_noise(args)
+    assert args.ego_past_noise_std == 0.1
+
+
+def test_bridge_still_rejects_the_flag_at_resolve_time():
+    """The rejection moved to the resolver; it must not have been lost in the move."""
+    with pytest.raises(ValueError, match="not supported by augment_type=bridge"):
+        _resolved_config("--augment_type", "bridge", "--ego_past_noise_std", "0.4")
+    assert _resolved_config("--augment_type", "bridge").ego_past_noise_std == 0.0

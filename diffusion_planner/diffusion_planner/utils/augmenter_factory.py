@@ -12,7 +12,10 @@ falling through to quintic — the parser's ``Literal`` already constrains the f
 and a programmatic caller deserves the error rather than a silent substitution.
 """
 
-from diffusion_planner.utils.augment_defaults import past_noise_std_for
+from diffusion_planner.utils.augment_defaults import (
+    past_noise_std_for,
+    resolve_history_noise,
+)
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
@@ -40,16 +43,13 @@ def augmenter_from_args(args):
     if args.augment_type == "frenet":
         return frenet_augmenter_from_args(args)
     if args.augment_type == "bridge":
-        # Bridge takes neither the history noise nor the quintic refinement knobs. Fail
-        # rather than accept a flag, record it in the run's args.json, and ignore it --
-        # that mismatch between recorded and applied config is what this module exists
-        # to stop, and silently dropping the flag here would reproduce it.
-        if args.ego_past_noise_std is not None:
-            raise ValueError(
-                "--ego_past_noise_std is not supported by augment_type=bridge "
-                "(the bridge augmenter does not perturb the ego history); "
-                "drop the flag or pick another augment_type"
-            )
+        # Bridge takes neither the history noise nor the quintic refinement knobs. The
+        # rejection of an explicitly-passed --ego_past_noise_std lives in
+        # resolve_history_noise, which the trainers call before serializing the config:
+        # it needs to tell "passed" from "unset", and by the time the factory runs the
+        # value has been resolved to a number either way. Called here defensively for
+        # any caller that skipped the resolver.
+        resolve_history_noise(args)
         return BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
     if args.augment_type == "quintic":
         return StatePerturbation(
