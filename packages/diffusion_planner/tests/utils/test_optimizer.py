@@ -31,7 +31,7 @@ class OptimizerTest(unittest.TestCase):
         )
         muon_names = {name for name, _ in groups["muon"]}
 
-        self.assertIn("trajectory_decoder.agent_pose_embedding.weight", muon_names)
+        self.assertIn("trajectory_decoder.ego_pose_embedding.weight", muon_names)
         self.assertIn("trajectory_decoder.time_embedding.mlp.fc1.weight", muon_names)
         self.assertIn("trajectory_decoder.time_embedding.mlp.fc2.weight", muon_names)
 
@@ -42,8 +42,10 @@ class OptimizerTest(unittest.TestCase):
         )
         no_decay_names = {name for name, _ in groups["adamw_no_decay"]}
 
-        self.assertIn("trajectory_decoder.ego_embedding", no_decay_names)
-        self.assertIn("trajectory_decoder.neighbor_embedding", no_decay_names)
+        self.assertIn("scene_encoder.lane_encoder.element_embedding", no_decay_names)
+        self.assertIn(
+            "scene_encoder.neighbor_agent_encoder.element_embedding", no_decay_names
+        )
 
     def test_explicit_output_layer_uses_decayed_adamw(self) -> None:
         model = _model()

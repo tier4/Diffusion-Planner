@@ -70,34 +70,32 @@ def trajectory_huber_loss(
     target: torch.Tensor,
     time: torch.Tensor,
     time_epsilon: float,
-    ego_loss_weight: float = 1.0,
-    neighbor_loss_weight: float = 1.0,
 ) -> torch.Tensor:
-    """Apply agent-weighted Huber loss after target-frame position rotation."""
+    """Apply an elementwise Huber loss after target-frame position rotation."""
     target_frame_error = trajectory_error_in_target_frame(x_prediction - target, target)
     target_frame_error = x0_velocity_error(target_frame_error, time, time_epsilon)
-    elementwise_loss = F.huber_loss(
+    return F.huber_loss(
         target_frame_error,
         torch.zeros_like(target_frame_error),
         reduction="none",
     )
-    agent_weights = torch.cat(
-        (
-            elementwise_loss.new_full((1,), ego_loss_weight),
-            elementwise_loss.new_full(
-                (elementwise_loss.shape[1] - 1,), neighbor_loss_weight
-            ),
-        )
-    )
-    return elementwise_loss * agent_weights.view(1, -1, 1, 1)
 
 
 def create_target_trajectory(
     input_data: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Combine labels into `(B, A, T, 4)` ego and neighbor trajectories."""
-    ego_future = input_data["ego_agent_future"][..., :TRAJECTORY_DIM].unsqueeze(1)
-    return torch.cat((ego_future, input_data["neighbor_agents_future"]), dim=1)
+    """Read the `(B, T, 4)` ego trajectory label."""
+    return input_data["ego_agent_future"][..., :TRAJECTORY_DIM]
+
+
+def create_ego_padding_mask(input_data: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Mark `(B,)` samples whose ego trajectory label contains a padded timestep."""
+    return (
+        torch.count_nonzero(
+            input_data["ego_agent_future"][..., :TRAJECTORY_DIM], dim=-1
+        )
+        == 0
+    ).any(dim=-1)
 
 
 def compute_diffusion_planner_loss(
@@ -109,22 +107,16 @@ def compute_diffusion_planner_loss(
     time_epsilon: float,
     noise_scale: float,
     ego_loss_weight: float = 1.0,
-    neighbor_loss_weight: float = 1.0,
     turn_indicator_loss_weight: float = 1.0,
     turn_indicator_transition_loss_weight: float = 5.0,
 ) -> DiffusionPlannerLoss:
     """Compute the joint planner loss and turn-indicator metrics."""
     target = create_target_trajectory(input_data)
-    training_mask = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
+    training_mask = create_ego_padding_mask(input_data)
     turn_indicator_logits: list[torch.Tensor] = []
 
     def predict(state: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
-        trajectory, logits = model(
-            state,
-            training_mask,
-            input_data,
-            time,
-        )
+        trajectory, logits = model(state, input_data, time)
         turn_indicator_logits.append(logits)
         return trajectory
 
@@ -135,8 +127,6 @@ def compute_diffusion_planner_loss(
             clean_target,
             time,
             time_epsilon,
-            ego_loss_weight,
-            neighbor_loss_weight,
         ),
         target=target,
         mask=training_mask,
@@ -150,7 +140,10 @@ def compute_diffusion_planner_loss(
         transition_weight=turn_indicator_transition_loss_weight,
     )
     return {
-        "total": trajectory_loss + turn_indicator_loss_weight * turn_indicator_loss,
+        "total": (
+            ego_loss_weight * trajectory_loss
+            + turn_indicator_loss_weight * turn_indicator_loss
+        ),
         "trajectory": trajectory_loss,
         "turn_indicator": turn_indicator_loss,
         "turn_indicator_correct": correct,

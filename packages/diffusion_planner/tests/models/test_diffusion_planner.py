@@ -22,7 +22,7 @@ from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.flow_matching import sample_time
 from diffusion_planner.models.loss import (
     compute_diffusion_planner_loss,
-    create_target_trajectory,
+    create_ego_padding_mask,
     trajectory_error_in_target_frame,
     trajectory_huber_loss,
 )
@@ -115,21 +115,16 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
         losses["total"].backward()
 
-    def test_partial_future_padding_masks_complete_agent(self) -> None:
-        target = create_target_trajectory(self.input_data)
-        target[:, 0, TRAJECTORY_LENGTH // 2 :] = 0.0
+    def test_partial_future_padding_masks_the_sample(self) -> None:
+        self.assertFalse(create_ego_padding_mask(self.input_data).any())
 
-        missing_future = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
+        self.input_data["ego_agent_future"][:, TRAJECTORY_LENGTH // 2 :] = 0.0
 
-        self.assertTrue(missing_future[:, 0].all())
-        self.assertFalse(missing_future[:, 1].any())
-        self.assertTrue(missing_future[:, 2].all())
+        self.assertTrue(create_ego_padding_mask(self.input_data).all())
 
     def test_turn_indicator_loss_backpropagates_into_scene_encoder(self) -> None:
-        agent_count = self.input_data["neighbor_agents_past"].shape[1] + 1
         trajectory, logits = self.model(
-            torch.randn(1, agent_count, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
-            torch.zeros(1, agent_count, dtype=torch.bool),
+            torch.randn(1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
             self.input_data,
             torch.full((1,), 0.5),
         )
@@ -172,32 +167,15 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
 
     def test_trajectory_loss_uses_elementwise_huber(self) -> None:
-        error = torch.tensor([[[[0.0, -2.0, 0.5, -0.5]]]])
-        target = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]]]])
+        error = torch.tensor([[[0.0, -2.0, 0.5, -0.5]]])
+        target = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]])
         prediction = target + error
 
         loss = trajectory_huber_loss(
             prediction, target, torch.zeros(1), time_epsilon=1e-5
         )
 
-        torch.testing.assert_close(loss, torch.tensor([[[[0.0, 1.5, 0.125, 0.125]]]]))
-
-    def test_trajectory_loss_applies_ego_and_neighbor_weights(self) -> None:
-        target = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]], [[0.0, 0.0, 1.0, 0.0]]]])
-        prediction = target.clone()
-        prediction[..., 0] += 0.5
-
-        loss = trajectory_huber_loss(
-            prediction,
-            target,
-            torch.zeros(1),
-            time_epsilon=1e-5,
-            ego_loss_weight=2.0,
-            neighbor_loss_weight=0.5,
-        )
-
-        torch.testing.assert_close(loss[0, 0, 0, 0], torch.tensor(0.25))
-        torch.testing.assert_close(loss[0, 1, 0, 0], torch.tensor(0.0625))
+        torch.testing.assert_close(loss, torch.tensor([[[0.0, 1.5, 0.125, 0.125]]]))
 
     def test_logistic_normal_time_is_inside_unit_interval(self) -> None:
         time = sample_time(
@@ -211,7 +189,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.assertTrue(torch.all(time > 0))
         self.assertTrue(torch.all(time < 1))
 
-    def test_sample_encodes_scene_once_and_masks_missing_agents(self) -> None:
+    def test_sample_encodes_scene_once_and_returns_the_ego_trajectory(self) -> None:
         call_count = 0
         decoder_call_count = 0
         turn_indicator_trajectories: list[torch.Tensor] = []
@@ -248,21 +226,18 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
         trajectories, turn_indicator_logits = self.model.sample(
             self.input_data,
-            torch.randn(1, 3, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+            torch.randn(1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
             num_steps=2,
         )
         handle.remove()
         decoder_handle.remove()
         turn_indicator_handle.remove()
 
-        self.assertEqual(trajectories.shape, (1, 3, TRAJECTORY_LENGTH, 4))
+        self.assertEqual(trajectories.shape, (1, TRAJECTORY_LENGTH, TRAJECTORY_DIM))
         self.assertEqual(turn_indicator_logits.shape, (1, 3))
-        torch.testing.assert_close(
-            trajectories[:, 2], torch.zeros_like(trajectories[:, 2])
-        )
         self.assertEqual(call_count, 1)
         self.assertEqual(decoder_call_count, 3)
-        torch.testing.assert_close(turn_indicator_trajectories[0], trajectories[:, 0])
+        torch.testing.assert_close(turn_indicator_trajectories[0], trajectories)
 
 
 if __name__ == "__main__":
