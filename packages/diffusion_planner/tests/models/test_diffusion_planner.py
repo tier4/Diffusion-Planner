@@ -104,6 +104,8 @@ class DiffusionPlannerTest(unittest.TestCase):
             time_std=1.0,
             time_epsilon=1e-5,
             noise_scale=1.0,
+            control_normalizer=self.model.control_normalizer,
+            position_scale=self.model.position_scale,
         )
         handle.remove()
 
@@ -114,6 +116,42 @@ class DiffusionPlannerTest(unittest.TestCase):
             self.input_data["ego_agent_future"][..., :TRAJECTORY_DIM],
         )
         losses["total"].backward()
+
+    def test_loss_only_calls_the_model(self) -> None:
+        """The loss must not read attributes off the planner.
+
+        `accelerator.prepare` hands training a DDP-wrapped, `torch.compile`-wrapped
+        planner, and neither wrapper forwards attribute lookups to the module it
+        holds. Anything the loss reads instead of calls breaks only under
+        distributed training, where it is expensive to find.
+        """
+
+        class OpaqueWrapper(torch.nn.Module):
+            """Forward calls, refuse attribute lookups, like the real wrappers."""
+
+            def __init__(self, planner: DiffusionPlanner) -> None:
+                super().__init__()
+                self.wrapped = planner
+
+            def forward(self, *args: object, **kwargs: object) -> object:
+                return self.wrapped(*args, **kwargs)
+
+        wrapper = OpaqueWrapper(self.model)
+        with self.assertRaises(AttributeError):
+            wrapper.control_normalizer  # noqa: B018
+
+        losses = compute_diffusion_planner_loss(
+            wrapper,
+            self.input_data,
+            time_mean=-0.4,
+            time_std=1.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+            control_normalizer=self.model.control_normalizer,
+            position_scale=self.model.position_scale,
+        )
+
+        self.assertTrue(torch.isfinite(losses["total"]))
 
     def test_partial_future_padding_masks_the_sample(self) -> None:
         self.assertFalse(create_ego_padding_mask(self.input_data).any())
@@ -158,6 +196,8 @@ class DiffusionPlannerTest(unittest.TestCase):
             time_std=1.0,
             time_epsilon=1e-5,
             noise_scale=1.0,
+            control_normalizer=self.model.control_normalizer,
+            position_scale=self.model.position_scale,
             turn_indicator_loss_weight=0.0,
             control_trajectory_loss_weight=0.4,
         )

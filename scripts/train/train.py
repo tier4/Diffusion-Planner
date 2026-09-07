@@ -48,6 +48,9 @@ def main(config: DictConfig) -> None:
         )
 
     planner: DiffusionPlanner = hydra.utils.instantiate(config.model)
+    # Kept before `accelerator.prepare` wraps the planner: DDP and torch.compile
+    # do not forward attribute lookups, so anything that reads the model rather
+    # than calling it has to go through this handle.
     checkpoint_model = planner
     model_config = OmegaConf.to_container(
         config.model, resolve=True, throw_on_missing=True
@@ -137,6 +140,8 @@ def main(config: DictConfig) -> None:
                 time_std=float(config.training.time_std),
                 time_epsilon=float(config.training.time_epsilon),
                 noise_scale=float(config.training.noise_scale),
+                control_normalizer=checkpoint_model.control_normalizer,
+                position_scale=checkpoint_model.position_scale,
                 ego_loss_weight=float(config.training.ego_loss_weight),
                 turn_indicator_loss_weight=float(
                     config.training.turn_indicator_loss_weight

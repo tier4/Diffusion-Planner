@@ -259,16 +259,22 @@ def compute_diffusion_planner_loss(
     time_std: float,
     time_epsilon: float,
     noise_scale: float,
+    control_normalizer: ControlNormalizer,
+    position_scale: float,
     ego_loss_weight: float = 1.0,
     turn_indicator_loss_weight: float = 1.0,
     turn_indicator_transition_loss_weight: float = 5.0,
     control_trajectory_loss_weight: float = 0.4,
     control_trajectory_loss_horizon: int = 80,
 ) -> DiffusionPlannerLoss:
-    """Compute the joint planner loss and turn-indicator metrics."""
-    target = create_control_target(
-        input_data, model.control_normalizer, model.position_scale
-    )
+    """Compute the joint planner loss and turn-indicator metrics.
+
+    `model` is only ever called, never inspected: under DDP and `torch.compile`
+    the planner arrives wrapped, and neither wrapper forwards attribute lookups
+    to the module it holds. Anything the loss needs from the model comes in as an
+    argument instead.
+    """
+    target = create_control_target(input_data, control_normalizer, position_scale)
     training_mask = create_ego_padding_mask(input_data)
     turn_indicator_logits: list[torch.Tensor] = []
     control_predictions: list[torch.Tensor] = []
@@ -296,8 +302,8 @@ def compute_diffusion_planner_loss(
     control_trajectory_loss = compute_control_trajectory_loss(
         control_predictions[0],
         input_data,
-        model.control_normalizer,
-        model.position_scale,
+        control_normalizer,
+        position_scale,
         control_trajectory_loss_horizon,
     )
     turn_indicator_loss, correct, valid_count = compute_turn_indicator_loss(
