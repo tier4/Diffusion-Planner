@@ -270,11 +270,20 @@ def test_every_arg_the_factory_reads_exists_on_the_real_config():
 
 
 def _from_cli(*argv):
+    """Build an augmenter the way a training does: real parser, real config, real factory.
+
+    ``device`` is forced to CPU afterwards. ``TrainConfig.device`` defaults to "cuda", so
+    without this the augmenter's constructor raises ``RuntimeError: No CUDA GPUs are
+    available`` on a CPU-only host and these tests never reach their assertions. The
+    device is not what is under test here -- the flag resolution is -- and every other
+    test in this file constructs on CPU for the same reason.
+    """
     from diffusion_planner.config.config_cli import build_config, build_parser
     from diffusion_planner.config.train_config import TrainConfig
     from diffusion_planner.utils.augmenter_factory import augmenter_from_args
 
     args = build_config(TrainConfig, build_parser(TrainConfig).parse_args(list(argv)))
+    args.device = "cpu"
     return augmenter_from_args(args)
 
 
