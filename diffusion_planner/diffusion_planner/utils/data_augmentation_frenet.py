@@ -972,9 +972,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 # the first selection. Selecting largest-offset for it would reinstate
                 # the rule that only applies when the merge is gated in front of the
                 # vehicle.
-                cur = torch.where(
-                    hardened[rows], self._largest_offset_draw(draw_ok, dy[rows]), cur
-                )
+                cur = torch.where(hardened[rows], self._largest_offset_draw(draw_ok, dy[rows]), cur)
             feas_k = adm[rows, cur]
             combo_idx, alive = self._sample_merge_then_jerk(feas_k, jerk[rows, cur], merges)
             cand = xy[rows] + L[rows, cur, combo_idx][..., None] * nrm[rows]
