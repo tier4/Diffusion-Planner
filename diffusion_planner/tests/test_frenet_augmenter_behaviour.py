@@ -574,6 +574,14 @@ def test_a_3col_history_and_4col_future_are_accepted():
         inputs["ego_agent_past"] = torch.cat(
             [past[..., :2], torch.atan2(past[..., 3], past[..., 2])[..., None]], dim=-1
         )
+        # goal_pose has the same two layouts. This augmenter never reads it, but the
+        # inherited centric_transform rotates its cols 2:4, so a 3-col tensor reaching
+        # that far raises -- which is what happened before the canonicalisation was
+        # added to the frenet __call__.
+        goal = inputs["goal_pose"]
+        inputs["goal_pose"] = torch.cat(
+            [goal[..., :2], torch.atan2(goal[..., 3], goal[..., 2])[..., None]], dim=-1
+        )
         return torch.cat([fut[..., :2], fut[..., 2:3].cos(), fut[..., 2:3].sin()], dim=-1)
 
     alt = FrenetStatePerturbationTensor(1.0, "cpu", seed=9)
@@ -584,6 +592,8 @@ def test_a_3col_history_and_4col_future_are_accepted():
     assert torch.allclose(in_alt["ego_agent_past"], in_ref["ego_agent_past"], atol=1e-5)
     assert torch.allclose(in_alt["ego_current_state"], in_ref["ego_current_state"], atol=1e-5)
     assert torch.allclose(fut_alt, fut_ref, atol=1e-5)
+    assert in_alt["goal_pose"].shape[-1] == 4, "a 3-col goal_pose was not widened"
+    assert torch.allclose(in_alt["goal_pose"], in_ref["goal_pose"], atol=1e-5)
 
 
 # ────────────── 7. both perturbations are input-only, post-veto ───────────────
@@ -751,3 +761,51 @@ def test_the_floor_applies_only_where_the_candidate_left_the_recording():
     mask = aug._floor_mask(aug_xy, xy)
     assert mask is not None
     assert mask.tolist() == [[False, False, True, True]]
+
+
+def test_recovery_cannot_see_the_toward_set_at_all():
+    """Guard for the one invariant `_recover_vetoed` exists to hold.
+
+    A fallback row took first-feasible in the first selection, so its retry must too;
+    a genuinely gated row took largest-offset, so its retry must too. Keying the retry
+    on `toward` instead of `hardened` breaks that, and no behavioural test caught it
+    because the two sets differ on only a handful of rows.
+
+    Rather than assert the selection indirectly, this removes the means: the recovery
+    is not given `toward`, so keying on it cannot compile without also re-adding the
+    parameter -- a visible edit rather than a one-word swap. The second assertion keeps
+    the first from going vacuous by checking the two sets really do differ here.
+    """
+    import inspect
+
+    params = list(inspect.signature(FrenetStatePerturbationTensor._recover_vetoed).parameters)
+    assert "hardened" in params, "the recovery no longer takes the hardened set"
+    assert "toward" not in params, (
+        "`toward` is back in _recover_vetoed's signature -- it is the wrong set to key "
+        "the retry on (a fallback row would retry with largest-offset after being "
+        "selected with first-feasible); the recovery must only see `hardened`"
+    )
+
+    seen = {}
+    real_sel = FrenetStatePerturbationTensor._toward_parked_select
+
+    def sel_spy(self, admissible, merges, dy, toward, toward_any, t_obs, P):
+        out = real_sel(self, admissible, merges, dy, toward, toward_any, t_obs, P)
+        if toward_any:
+            seen["toward"], seen["hardened"] = toward.clone(), out[3].clone()
+        return out
+
+    FrenetStatePerturbationTensor._toward_parked_select = sel_spy
+    try:
+        aug = FrenetStatePerturbationTensor(
+            1.0, "cpu", seed=7, toward_parked_prob=1.0, recovery_rounds=2
+        )
+        _run(aug, batch=128, neighbours=_TIGHT_PASS)
+    finally:
+        FrenetStatePerturbationTensor._toward_parked_select = real_sel
+
+    assert seen, "the toward-parked branch never ran; the test proves nothing"
+    assert bool((seen["toward"] != seen["hardened"]).any()), (
+        "toward and hardened coincide on this scene, so the guard above is vacuous -- "
+        "pick a tighter pass or the distinction has stopped being reachable"
+    )

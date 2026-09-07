@@ -12,6 +12,7 @@ falling through to quintic — the parser's ``Literal`` already constrains the f
 and a programmatic caller deserves the error rather than a silent substitution.
 """
 
+from diffusion_planner.utils.augment_defaults import past_noise_std_for
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
@@ -39,13 +40,23 @@ def augmenter_from_args(args):
     if args.augment_type == "frenet":
         return frenet_augmenter_from_args(args)
     if args.augment_type == "bridge":
+        # Bridge takes neither the history noise nor the quintic refinement knobs. Fail
+        # rather than accept a flag, record it in the run's args.json, and ignore it --
+        # that mismatch between recorded and applied config is what this module exists
+        # to stop, and silently dropping the flag here would reproduce it.
+        if args.ego_past_noise_std is not None:
+            raise ValueError(
+                "--ego_past_noise_std is not supported by augment_type=bridge "
+                "(the bridge augmenter does not perturb the ego history); "
+                "drop the flag or pick another augment_type"
+            )
         return BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
     if args.augment_type == "quintic":
         return StatePerturbation(
             augment_prob=args.augment_prob,
             num_refine=args.num_refine,
             device=args.device,
-            ego_past_noise_std=args.ego_past_noise_std,
+            ego_past_noise_std=past_noise_std_for(args),
             use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
         )
     raise ValueError(f"unknown augment_type {args.augment_type!r}; expected one of {AUGMENT_TYPES}")

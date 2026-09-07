@@ -113,17 +113,32 @@ three augmenters keep the recorded future as the target, so the model is trained
 
 Turn augmentation off entirely with `--use_data_augment False`.
 
-#### Ego history perturbation (all augmenters)
+#### Ego history perturbation (`quintic` and `frenet`)
 
 ```bash
---ego_past_noise_std 0.1        # default; 0 disables
+--ego_past_noise_std 0.2        # unset = each augmenter's own default; 0 disables
 ```
 
 One factor per augmented scene, drawn from `N(1, std)` and clamped to `±2·std`,
 scaling the ego history about the t=0 sample. The recorded *shape* is preserved and
 the spacing changes, so it perturbs the implied speed history rather than adding
-per-point noise. `quintic` scales the recorded history; `frenet` scales the history
-it rewrote. t=0 itself never moves.
+per-point noise. t=0 itself never moves.
+
+**Left unset, each augmenter keeps the value it has always used** — `quintic` 0.1,
+`frenet` 0.0 — because the two are not perturbing the same thing:
+
+| augmenter | default | what the factor scales |
+|---|---|---|
+| `quintic` | 0.1 | the RECORDED history, and the current velocity and acceleration with it |
+| `frenet` | 0.0 | the history it rewrote from the perturbed polyline; `ego_current_state` is left bit-identical |
+| `bridge` | n/a | no history perturbation; passing the flag is an error, not a silent no-op |
+
+Passing a number applies it to whichever augmenter is selected, so the flag is still
+sweepable. Two consequences worth knowing before using it as a control variable: a
+`quintic`-vs-`frenet` A/B on this flag is not measuring the same perturbation, and
+turning it on for `frenet` has no measured benefit — on a 2-seed, 8-arm A/B
+(~1,110 perturbed closed-loop rollouts per arm) it moved recovery 28.3% → 30.2%,
+well inside the 17.2-point spread between the control's own two seeds.
 
 #### Frenet-only options
 
@@ -188,6 +203,15 @@ augmenter reproduces the previous behaviour exactly.
   correctly-shaped history be traversed at the wrong speed, this makes the history
   itself imperfect. Applied after the footprint check and with t=0 pinned, so the
   target and the state the model plans from are unchanged.
+
+  That ordering is deliberate — it keeps acceptance independent of the noise, which is
+  what makes an A/B between the two history perturbations valid — but it has a
+  consequence worth stating: **the jittered history is not re-checked against the
+  footprint constraint.** The corridor bounds certify the clean polyline, so at
+  `L = 0.3` the oldest sample can move ~0.6–0.9 m at 2–3σ, and on a drive that passed a
+  parked vehicle closely the resulting history can put the ego footprint inside that
+  vehicle in the past. The future, the target and t=0 are unaffected; what the encoder
+  reads is. Keep `L` small relative to the clearances in the data.
 
 Frenet also exposes the sampling grid itself — `--frenet_n_draws`, `--frenet_dy_max`,
 `--frenet_dth_max`, `--frenet_merge_times`, `--frenet_anchors`, `--frenet_acc0_fracs`,

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from diffusion_planner.utils.augment_defaults import past_noise_std_for
 from diffusion_planner.utils.augmentation_checks import (
     DT,
     border_lateral_bounds,
@@ -182,7 +183,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
             xy = xy + self._hist_jitter(xy, tan, nrm, xy.shape[1])
         # Same heading convention as the polyline rewrite, including its fallback to the
-        # stored tangent below 0.3 m/step: without this the cos/sin would keep describing
+        # stored tangent below 0.3 m/s: without this the cos/sin would keep describing
         # the clean track and disagree with the positions next to them.
         _, heading = self._headings(xy, tan)
         new = torch.stack([xy[..., 0], xy[..., 1], heading.cos(), heading.sin()], dim=-1).to(
@@ -532,7 +533,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     def _headings(aug_xy, tan):
         """Motion-direction heading of a polyline, falling back to the GT tangent.
 
-        Below 0.3 m/step the finite-difference direction is noise, so the recorded
+        Below 0.3 m/s the finite-difference direction is noise, so the recorded
         heading is kept rather than derived from a near-zero displacement.
         """
         g = ddt(aug_xy, 1)
@@ -742,13 +743,18 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # ---------- the augmentation ----------
     @torch.no_grad()
     def __call__(self, inputs, ego_future, neighbors_future):
-        # Both fields arrive in either layout depending on the entrypoint. The future is
-        # narrowed to a heading angle (centric_transform returns the rebuilt 3-col future
-        # either way, and train_epoch re-converts afterwards); the history is widened,
-        # because everything below indexes its cols 2:4 as a heading VECTOR. Both are
+        # All three fields arrive in either layout depending on the entrypoint. The future
+        # is narrowed to a heading angle (centric_transform returns the rebuilt 3-col
+        # future either way, and train_epoch re-converts afterwards); the history and the
+        # goal pose are widened, because everything below -- and centric_transform, which
+        # rotates goal_pose cols 2:4 -- indexes them as a heading VECTOR. All three are
         # no-ops at the canonical widths the training loop already supplies.
+        # goal_pose is easy to forget here because this __call__ does not read it itself;
+        # it is the inherited centric_transform that does, and a 3-col tensor makes that
+        # rotation raise on a (..., 1) slice.
         ego_future = cos_sin_to_heading(ego_future)
         inputs["ego_agent_past"] = self._ego_past_4col(inputs["ego_agent_past"])
+        inputs["goal_pose"] = pose_to_cos_sin(inputs["goal_pose"])
         past4 = inputs["ego_agent_past"]  # (B, P, 4) x, y, cos, sin
         B, P, _ = past4.shape
         F = ego_future.shape[1]
@@ -1073,7 +1079,7 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         recovery_rounds=int(args.frenet_recovery_rounds),
         toward_parked_prob=float(args.frenet_toward_parked_prob),
         min_clearance=float(args.frenet_min_clearance),
-        ego_past_noise_std=float(args.ego_past_noise_std),
+        ego_past_noise_std=past_noise_std_for(args),
         hist_jitter_lat=float(args.frenet_hist_jitter_lat),
         hist_jitter_lon=float(args.frenet_hist_jitter_lon),
     )

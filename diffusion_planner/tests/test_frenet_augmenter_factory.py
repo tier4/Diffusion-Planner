@@ -118,10 +118,12 @@ def test_factory_dispatches_every_augment_type():
     )
 
     def full(**over):
+        # ego_past_noise_std unset: bridge rejects it outright and the other two resolve
+        # it per augmenter, so None is the only value valid for all three.
         return _args(
             use_data_augment=True,
             num_refine=20,
-            ego_past_noise_std=0.1,
+            ego_past_noise_std=None,
             use_smoothing_future_trajectory=False,
             **over,
         )
@@ -207,8 +209,18 @@ def test_seed_and_past_noise_std_are_real_command_line_flags():
 
     parser = build_parser(TrainConfig, description="t")
     base = build_config(TrainConfig, parser.parse_args([]))
-    assert (base.seed, base.ego_past_noise_std) == (3407, 0.1), "a default moved"
+    assert (base.seed, base.ego_past_noise_std) == (3407, None), "a default moved"
     assert (base.lr_schedule, base.augment_type) == ("constant", "quintic"), "a default moved"
+
+    # The sentinel is only half the contract; what it RESOLVES to is the thing that
+    # reaches a training, and that is what silently moved once already.
+    from diffusion_planner.utils.augment_defaults import past_noise_std_for
+
+    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.0), ("bridge", 0.0)):
+        resolved = past_noise_std_for(
+            build_config(TrainConfig, parser.parse_args(["--augment_type", augment_type]))
+        )
+        assert resolved == expected, f"{augment_type} history noise moved to {resolved}"
 
     over = build_config(
         TrainConfig, parser.parse_args(["--seed", "1234", "--ego_past_noise_std", "0.0"])
@@ -249,3 +261,53 @@ def test_every_arg_the_factory_reads_exists_on_the_real_config():
     assert read, "found no args.* reads — the AST walk is broken, not the config"
     missing = sorted(read - declared)
     assert not missing, f"read from args but not declared on TrainConfig: {missing}"
+
+
+# ─────────── the CLI default is the one that ships; test THAT, not the class ───────────
+#
+# Every behavioural test builds the augmenter directly, where the class default for the
+# history noise is 0.0. The value a training actually gets comes from the parser, and the
+# two diverged once already: the flag was threaded to frenet and picked up quintic's 0.1,
+# silently changing the frenet recipe and leaving existing frenet checkpoints
+# unreproducible at their own seed. These go through the real parser for that reason.
+
+
+def _from_cli(*argv):
+    from diffusion_planner.config.config_cli import build_config, build_parser
+    from diffusion_planner.config.train_config import TrainConfig
+    from diffusion_planner.utils.augmenter_factory import augmenter_from_args
+
+    args = build_config(TrainConfig, build_parser(TrainConfig).parse_args(list(argv)))
+    return augmenter_from_args(args)
+
+
+def _past_noise(aug):
+    return getattr(aug, "past_noise_std", getattr(aug, "_ego_past_noise_std", None))
+
+
+def test_frenet_perturbs_no_history_unless_asked():
+    """Frenet rewrites the history kinematically; it hard-coded 0.0 before the flag
+    existed, and inheriting quintic's 0.1 would change every frenet run."""
+    assert _past_noise(_from_cli("--augment_type", "frenet")) == 0.0
+
+
+def test_quintic_keeps_the_history_noise_it_has_always_had():
+    assert _past_noise(_from_cli("--augment_type", "quintic")) == 0.1
+
+
+@pytest.mark.parametrize("augment_type,value", [("frenet", 0.1), ("quintic", 0.0)])
+def test_an_explicit_flag_wins_for_either_augmenter(augment_type, value):
+    """The per-augmenter default must not make the flag un-sweepable."""
+    aug = _from_cli("--augment_type", augment_type, "--ego_past_noise_std", str(value))
+    assert _past_noise(aug) == value
+
+
+def test_bridge_refuses_a_flag_it_cannot_honour():
+    """Accepting it would record a value in args.json that the run never applied --
+    the exact recorded-config-is-not-used-config defect the factory exists to stop."""
+    with pytest.raises(ValueError, match="not supported by augment_type=bridge"):
+        _from_cli("--augment_type", "bridge", "--ego_past_noise_std", "0.4")
+
+
+def test_bridge_is_fine_without_the_flag():
+    assert _from_cli("--augment_type", "bridge") is not None

@@ -52,14 +52,17 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default="quintic",
     )
     num_refine: int = 20
-    ego_past_noise_std: float = cli(
+    ego_past_noise_std: Optional[float] = cli(
         "std of the single per-scene factor scaling an augmented row's ego history, "
-        "drawn from N(1, std) and clamped to +-2 std. WHAT IT SCALES DIFFERS BY "
+        "drawn from N(1, std) and clamped to +-2 std. Unset means each augmenter keeps "
+        "the value it has always used (quintic 0.1, frenet 0.0); passing a number "
+        "applies it to whichever augmenter is selected. WHAT IT SCALES DIFFERS BY "
         "AUGMENTER: quintic scales the RECORDED history AND the current velocity and "
         "acceleration; frenet scales the history it rewrote from the perturbed polyline "
-        "and leaves ego_current_state bit-identical. Note the default is non-zero, so "
-        "frenet runs perturb the history unless this is set to 0.",
-        default=0.1,
+        "and leaves ego_current_state bit-identical -- so a quintic-vs-frenet A/B on "
+        "this flag is not measuring the same perturbation. augment_type=bridge does not "
+        "support it and rejects the flag rather than ignoring it.",
+        default=None,
     )
     use_smoothing_future_trajectory: bool = True
 
