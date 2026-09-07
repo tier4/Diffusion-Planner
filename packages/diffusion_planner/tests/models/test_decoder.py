@@ -6,36 +6,44 @@ import unittest
 
 import torch
 
-from diffusion_planner.data.dimensions import TRAJECTORY_LENGTH
+from diffusion_planner.data.dimensions import (
+    CONTROL_DIM,
+    TRAJECTORY_DIM,
+    TRAJECTORY_LENGTH,
+)
 from diffusion_planner.models.decoder import TrajectoryDecoder, TrajectoryEncoder
 
 
 class TrajectoryEncoderTest(unittest.TestCase):
-    def test_encodes_one_token_per_agent(self) -> None:
+    def test_encodes_one_token_per_trajectory(self) -> None:
         encoder = TrajectoryEncoder(
             hidden_dim=16,
             mixer_hidden_dim=8,
             depth=2,
+            state_dim=TRAJECTORY_DIM,
         )
-        trajectories = torch.randn(2, 3, TRAJECTORY_LENGTH, 4, requires_grad=True)
+        trajectory = torch.randn(
+            2, TRAJECTORY_LENGTH, TRAJECTORY_DIM, requires_grad=True
+        )
 
-        tokens = encoder(trajectories)
+        tokens = encoder(trajectory)
 
-        self.assertEqual(tokens.shape, (2, 3, 16))
+        self.assertEqual(tokens.shape, (2, 16))
         tokens.sum().backward()
-        self.assertIsNotNone(trajectories.grad)
+        self.assertIsNotNone(trajectory.grad)
 
     def test_uses_separate_mixer_and_output_dimensions(self) -> None:
         encoder = TrajectoryEncoder(
             hidden_dim=16,
             mixer_hidden_dim=8,
             depth=1,
+            state_dim=TRAJECTORY_DIM,
         )
 
-        tokens = encoder(torch.randn(2, 3, TRAJECTORY_LENGTH, 4))
+        tokens = encoder(torch.randn(2, TRAJECTORY_LENGTH, TRAJECTORY_DIM))
 
         self.assertEqual(encoder.input_projection.out_features, 8)
-        self.assertEqual(tokens.shape, (2, 3, 16))
+        self.assertEqual(tokens.shape, (2, 16))
 
 
 class TrajectoryDecoderTest(unittest.TestCase):
@@ -46,21 +54,19 @@ class TrajectoryDecoderTest(unittest.TestCase):
             depth=2,
             feedforward_dim=32,
         )
-        x = torch.randn(2, 3, TRAJECTORY_LENGTH, 4, requires_grad=True)
+        x = torch.randn(2, TRAJECTORY_LENGTH, CONTROL_DIM, requires_grad=True)
         scene = torch.randn(2, 5, 16)
         scene[:, -2:] = 0.0
         scene.requires_grad_()
         time = torch.tensor([0.25, 0.75])
-        x_mask = torch.tensor([[False, False, True], [False, False, False]])
-        agent_pose = torch.randn(2, 3, 4)
+        ego_pose = torch.randn(2, TRAJECTORY_DIM)
         scene_mask = torch.tensor(
             [[False, False, False, True, True], [False, False, False, True, True]]
         )
 
-        output = decoder(x, x_mask, scene, scene_mask, agent_pose, time)
+        output = decoder(x, scene, scene_mask, ego_pose, time)
 
         self.assertEqual(output.shape, x.shape)
-        torch.testing.assert_close(output[x_mask], torch.zeros_like(output[x_mask]))
         output.sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertIsNotNone(scene.grad)
@@ -73,15 +79,14 @@ class TrajectoryDecoderTest(unittest.TestCase):
             feedforward_dim=16,
         )
         output = decoder(
-            torch.zeros(1, 2, TRAJECTORY_LENGTH, 4),
-            torch.tensor([[False, False]]),
+            torch.zeros(1, TRAJECTORY_LENGTH, CONTROL_DIM),
             torch.ones(1, 3, 8),
             torch.tensor([[False, False, False]]),
-            torch.zeros(1, 2, 4),
+            torch.zeros(1, TRAJECTORY_DIM),
             torch.tensor([[0.5]]),
         )
 
-        self.assertEqual(output.shape, (1, 2, TRAJECTORY_LENGTH, 4))
+        self.assertEqual(output.shape, (1, TRAJECTORY_LENGTH, CONTROL_DIM))
 
     def test_decoder_has_no_agent_self_attention(self) -> None:
         decoder = TrajectoryDecoder(
