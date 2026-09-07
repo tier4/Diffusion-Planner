@@ -1,0 +1,20 @@
+_target_: diffusion_planner.data.transforms.PlannerILQRAugmentation
+longitudinal_offset_range: [0.0, 0.0]
+lateral_offset_range: [-1.5, 1.5]
+yaw_offset_range: [-0.0872665, 0.0872665]
+pose_probability: 0.5
+num_refine: 30
+pose_augmentation_speed_threshold: 1.0
+pose_augmentation_peak_speed_threshold: 4.0
+time_step_s: 0.1
+wheelbase_m: 2.79
+state_weights: [1.0, 1.0, 0.5]
+terminal_weight_scale: 10.0
+velocity_weight: 0.2
+steering_weight: 0.1
+velocity_rate_weight: 1.0
+steering_rate_weight: 10.0
+velocity_bounds: [0.0, 30.0]
+steering_limit_rad: 0.7
+max_iterations: 15
+convergence_tolerance: 0.0001
