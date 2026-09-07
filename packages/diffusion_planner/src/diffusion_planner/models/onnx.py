@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from ..data.dimensions import CONTROL_DIM, TRAJECTORY_DIM
 from .diffusion_planner import DiffusionPlanner
 
 PLANNER_INPUT_NAMES = (
@@ -32,7 +33,23 @@ PLANNER_INPUT_NAMES = (
 
 
 class DiffusionPlannerOnnxWrapper(nn.Module):
-    """Expose fixed 10-step Heun sampling as one ONNX graph."""
+    """Expose fixed 10-step Heun sampling as one ONNX graph.
+
+    Both tensors the deployed node builds its TensorRT profile around keep their
+    shape, `(B, 1 + MAX_NUM_NEIGHBORS, T, TRAJECTORY_DIM)`, even though the
+    planner now predicts the ego alone and denoises control rather than poses.
+    Changing either would force a matching change in the node.
+
+    The output needs only the agent axis put back: `sample` already returns poses,
+    so the ego trajectory goes to index 0 and every neighbor slot stays zero --
+    the same encoding the node already receives for an agent with no prediction.
+
+    The input needs one adaptation beyond that axis. What gets denoised here is
+    control, so `sample` wants `(B, T, CONTROL_DIM)`; the node supplies a wider
+    per-agent tensor, and agent 0's first `CONTROL_DIM` channels are taken from
+    it. That is a valid draw because every element of the supplied noise is
+    i.i.d. standard normal.
+    """
 
     def __init__(self, planner: DiffusionPlanner) -> None:
         super().__init__()
@@ -91,6 +108,21 @@ class DiffusionPlannerOnnxWrapper(nn.Module):
                 strict=True,
             )
         )
-        return self.planner.sample(
-            input_data, initial_noise, num_steps=6, time_epsilon=1e-5
+        trajectory, turn_indicator_logits = self.planner.sample(
+            input_data,
+            initial_noise[:, 0, :, :CONTROL_DIM],
+            num_steps=6,
+            time_epsilon=1e-5,
         )
+        # The agent count comes from the noise the caller supplied, so the output
+        # axis always matches the input axis the caller built its profile around.
+        neighbor_trajectory = trajectory.new_zeros(
+            (
+                trajectory.shape[0],
+                initial_noise.shape[1] - 1,
+                trajectory.shape[1],
+                TRAJECTORY_DIM,
+            )
+        )
+        trajectory = torch.cat((trajectory.unsqueeze(1), neighbor_trajectory), dim=1)
+        return trajectory, turn_indicator_logits
