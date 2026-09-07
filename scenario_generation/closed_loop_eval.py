@@ -445,7 +445,6 @@ def aggregate(
     dev_col = _event_family_block(
         rows,
         "deviation_collision",
-        dual=False,
         total_steps=total_steps,
         n_seg=n_seg,
         thresh_key="thresh_m",
