@@ -9,13 +9,13 @@
 #ifndef ML_PLANNER_DATA__SRC__FRAME_DATA_HPP_
 #define ML_PLANNER_DATA__SRC__FRAME_DATA_HPP_
 
-#include "autoware/ml_planner/preprocessing/input_builder.hpp"
+#include "autoware/diffusion_planner/preprocessing/input_builder.hpp"
 
-namespace autoware::ml_planner::data {
+namespace autoware::diffusion_planner::data {
 
-using FrameData = preprocess::TensorMap;
-using FrameDataResult = preprocess::TensorMapResult;
+using FrameData = preprocess::InputDataMap;
+using FrameDataResult = preprocess::InputDataResult;
 
-} // namespace autoware::ml_planner::data
+} // namespace autoware::diffusion_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__FRAME_DATA_HPP_

@@ -22,7 +22,10 @@ import pyarrow.parquet as pq
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-SPLITS = ("train", "valid", "auto")
+# ``override`` is a complete-route source split used for closed-loop
+# evaluation.  The separately exported one-frame override H5 files remain
+# open-loop inputs only.
+SPLITS = ("train", "valid", "auto", "override")
 FORMAT_NAME = "diffusion_planner_frame_dataset"
 FORMAT_VERSION = 4
 
@@ -58,6 +61,7 @@ class WorkerConfig:
     output_root: str
     index_path: str
     frame_interval_s: float
+    future_steps: int
     min_travel_distance: float
     topic_drop_thresholds: dict[str, float]
     traffic_light_timeout_s: float
@@ -112,14 +116,25 @@ def build_builder_param(config: WorkerConfig) -> Any:
         if not hasattr(thresholds, topic):
             raise ValueError(f"unknown topic in topic_drop_thresholds: {topic}")
         setattr(thresholds, topic, float(limit))
-
     param = mpd.DatasetBuilderParam()
     param.frame_interval_s = config.frame_interval_s
+    param.num_future_steps = config.future_steps
     param.min_travel_distance = config.min_travel_distance
     param.topic_drop_thresholds = thresholds
     param.traffic_light_timeout_s = config.traffic_light_timeout_s
     param.neighbor_observation_timeout_s = config.neighbor_observation_timeout_s
     return param
+
+
+def build_topics() -> Any:
+    """Build the fixed source-topic mapping."""
+    topics = mpd.TopicConfig()
+    topics.kinematic_state = "/localization/kinematic_state"
+    topics.tracked_objects = "/perception/object_recognition/tracking/objects"
+    topics.turn_indicators = "/vehicle/status/turn_indicators_status"
+    topics.traffic_signals = "/perception/traffic_light_recognition/traffic_signals"
+    topics.route = "/planning/mission_planning/route"
+    return topics
 
 
 def discover_bags(root: Path, split: str) -> list[BagEntry]:
@@ -134,7 +149,12 @@ def discover_bags(root: Path, split: str) -> list[BagEntry]:
             continue
         info = json.loads(info_path.read_text(encoding="utf-8"))
         map_version = str(info["area_map_version_id"])
-        map_path = bag_path.parents[2] / "map" / map_version / "lanelet2_map.osm"
+        # Standard data is ``<project>/<split>/<route>/<bag>`` whereas the
+        # override source has an extra ``override`` container:
+        # ``<site>/override/<route>/<bag>``.  Its map lives under that
+        # container, not directly below the site.
+        map_root = bag_path.parents[1] if split == "override" else bag_path.parents[2]
+        map_path = map_root / "map" / map_version / "lanelet2_map.osm"
         if not map_path.is_file():
             raise FileNotFoundError(f"map not found for {bag_path}: {map_path}")
         relative = bag_path.relative_to(root)
@@ -181,6 +201,23 @@ def validate_arrays(result: Mapping[str, Any]) -> int:
             if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
                 raise ValueError(f"{group_name}/{key} contains NaN or infinity")
     return num_frames
+
+
+def pad_future_labels(result: Mapping[str, Any], future_steps: int) -> None:
+    """Keep evaluation H5 schema-compatible when a short recorded future is used."""
+    if future_steps == 80:
+        return
+    for key, axis in {
+        "ego_agent_future": 1,
+        "neighbor_agents_future": 2,
+        "turn_indicators_future": 1,
+        "lane_traffic_light_future": 2,
+        "route_traffic_light_future": 2,
+    }.items():
+        values = np.asarray(result["frames"][key])
+        padding = [(0, 0)] * values.ndim
+        padding[axis] = (0, 80 - values.shape[axis])
+        result["frames"][key] = np.pad(values, padding, mode="edge")
 
 
 def write_h5(
@@ -261,6 +298,13 @@ def read_existing_h5(path: Path) -> dict[str, dict[str, np.ndarray]]:
             raise ValueError(f"H5 frames must be a group: {path}")
         if not isinstance(metadata_object, h5py.Group):
             raise ValueError(f"H5 metadata must be a group: {path}")
+        required_metadata = {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
+        missing_metadata = required_metadata.difference(metadata_object.keys())
+        if missing_metadata:
+            raise ValueError(
+                f"H5 is missing required closed-loop pose metadata {sorted(missing_metadata)}: "
+                f"{path}; regenerate with overwrite=true"
+            )
 
         frame_lengths: set[int] = set()
         for key, values in frames_object.items():
@@ -299,6 +343,9 @@ def make_index_table(
             "h5_path": pa.array([stored_h5_path] * num_frames, pa.string()),
             "frame_index": pa.array(np.arange(num_frames, dtype=np.int64)),
             "frame_time_ns": pa.array(metadata["frame_time_ns"], pa.int64()),
+            "ego_x": pa.array(metadata["ego_x"], pa.float64()),
+            "ego_y": pa.array(metadata["ego_y"], pa.float64()),
+            "ego_yaw": pa.array(metadata["ego_yaw"], pa.float64()),
             "ego_speed_mps": pa.array(metadata["ego_speed_mps"], pa.float32()),
             "ego_yaw_rate_rps": pa.array(metadata["ego_yaw_rate_rps"], pa.float32()),
             "turn_indicator": pa.array(metadata["turn_indicator"], pa.uint8()),
@@ -343,7 +390,9 @@ def process_bag(
         map_path=entry.map_path,
         vehicle_spec=spec,
         param=build_builder_param(config),
+        topics=build_topics(),
     )
+    pad_future_labels(result, config.future_steps)
     stats = result["stats"]
     num_frames = validate_arrays(result)
     if num_frames == 0:
@@ -382,6 +431,8 @@ def main(config: DictConfig) -> None:
         raise ValueError(f"split must be one of {', '.join(SPLITS)}: {config.split}")
     if config.jobs < 1:
         raise ValueError(f"jobs must be at least 1: {config.jobs}")
+    if not 1 <= int(config.future_steps) <= 80:
+        raise ValueError(f"future_steps must be in [1, 80]: {config.future_steps}")
 
     root = Path(config.root).expanduser().resolve()
     output_root = Path(config.output_root).expanduser().resolve()
@@ -406,6 +457,7 @@ def main(config: DictConfig) -> None:
         output_root=str(output_root),
         index_path=str(index_output),
         frame_interval_s=float(config.frame_interval),
+        future_steps=int(config.future_steps),
         min_travel_distance=float(config.min_travel_distance),
         topic_drop_thresholds={
             str(topic): float(limit)

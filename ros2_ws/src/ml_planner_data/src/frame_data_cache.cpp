@@ -31,7 +31,7 @@
 #include <string>
 #include <utility>
 
-namespace autoware::ml_planner::data {
+namespace autoware::diffusion_planner::data {
 namespace {
 
 class LocalProjector : public lanelet::Projector {
@@ -118,7 +118,7 @@ FrameDataResult FrameDataCache::create_frame_data(
   preprocess::InputBuilderParams input_params;
   input_params.traffic_light_group_msg_timeout_seconds =
       traffic_light_timeout_s;
-  preprocess::InputBuilderResult input_result = reader.create_input_data(
+  InputFrameDataResult input_result = reader.create_input_data(
       frame_time, *map_context, vehicle_spec, input_params);
   if (!input_result) {
     return tl::unexpected(input_result.error());
@@ -129,7 +129,7 @@ FrameDataResult FrameDataCache::create_frame_data(
   label_params.num_future_steps = num_future_steps;
   label_params.neighbor_observation_timeout_s = neighbor_observation_timeout_s;
   label_params.traffic_light_timeout_s = traffic_light_timeout_s;
-  preprocess::TensorMapResult label_result = reader.create_label_data(
+  preprocess::InputDataResult label_result = reader.create_label_data(
       frame_time, *map_context, label_params, input_output.selected_agents);
   if (!label_result) {
     return label_result;
@@ -141,4 +141,4 @@ FrameDataResult FrameDataCache::create_frame_data(
   return std::move(input_output.tensors);
 }
 
-} // namespace autoware::ml_planner::data
+} // namespace autoware::diffusion_planner::data
