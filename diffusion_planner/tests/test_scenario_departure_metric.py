@@ -5,7 +5,7 @@ import torch
 from planner_metrics.departure import evaluate_departure
 
 
-def test_departure_failure_rate_is_one_hundred_only_for_non_departing_predictions():
+def test_departure_success_rate_is_zero_only_for_non_departing_predictions():
     """Mark only predictions below the displacement threshold as failures."""
     prediction = torch.tensor(
         [
@@ -21,4 +21,4 @@ def test_departure_failure_rate_is_one_hundred_only_for_non_departing_prediction
     )
 
     # The first sample only moves 0.8m in the first 0.3s; the second reaches 1.0m.
-    torch.testing.assert_allclose(values["failure_rate_percent"], torch.tensor([100.0, 0.0]))
+    torch.testing.assert_allclose(values["success_rate_percent"], torch.tensor([0.0, 100.0]))

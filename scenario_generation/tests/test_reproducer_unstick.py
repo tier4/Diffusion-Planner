@@ -139,6 +139,50 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
     assert np.allclose(s.ego_hist[-1], s.live_pose)
 
 
+def test_unstick_teleport_resets_stuck_counter(tmp_path):
+    """The teleport must reset ``s.stuck`` (the ``max_stuck_steps`` counter) alongside
+    ``s.ego_stuck``. ``s.stuck`` is normally driven by ``_pre_step`` comparing
+    ``cursor.max_idx_reached`` to ``s.prev_max_idx``; a fresh queue built right after
+    ``cur.reset(tgt)`` can return ``tgt`` itself as the first pick, so ``max_idx_reached``
+    does not strictly advance on the very next step. Without resetting ``s.stuck`` here,
+    a segment rescued by unstick could be immediately killed by an unrelated, stale
+    stuck count left over from before the rescue.
+    """
+    tl = _make_route(tmp_path)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        N_FRAMES,
+        search_radius=1.5,
+        warmup_steps=1000,  # keep _post_step in the recorded-pose branch (no model/tracker)
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        unstick_after=3,
+        unstick_advance_m=0.05,
+        unstick_radius_mult=1.0,  # disable the gentle radius-widen stage: test the teleport path
+    )
+    pred = np.zeros((80, 4), dtype=np.float32)
+    neighbors = np.zeros((320, 11), dtype=np.float32)
+
+    # This test drives _post_step directly (bypassing _pre_step, see module docstring),
+    # so stand in for a stale count _pre_step would have accumulated before the rescue.
+    s.stuck = 7
+
+    for i in range(20):
+        s.cursor.last_was_repeat = True  # stuck repeating (see module docstring)
+        _post_step(s, pred, neighbors, idx=i, device="cpu", timers=timers)
+        if s.snap_count > 0:
+            break
+    else:
+        pytest.fail("unstick never fired on the synthetic stalled route")
+
+    assert s.stuck == 0, "teleport must reset s.stuck alongside s.ego_stuck"
+
+
 def test_unstick_widens_radius_before_teleporting(tmp_path):
     """Two-stage escalation: a stalled ego first WIDENS the cursor search_radius (gentle,
     no teleport), and only teleports if it is STILL stuck ``unstick_teleport_after`` steps

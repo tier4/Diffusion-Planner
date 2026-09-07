@@ -1,0 +1,101 @@
+# Per-group pass conditions for closed-loop evaluation.
+# See ClosedLoopPassCondition in closed_loop_config.py for field definitions.
+#
+# Each condition is a boolean flag:
+#   - True:  enable the condition; segment must satisfy it to pass
+#   - False: disable the condition; the metric is ignored in pass/fail decision
+#
+# Conditions:
+#   collision:         no collision. object.collision_count == 0
+#   road_border:       no curb / road-border hit. road_border.collision_count == 0
+#   red_light_violation: no red-light running. red_light_violation.count == 0
+#   strong_brake:      no hard brake. strong_brake.count == 0
+#   goal_reach:        reached goal. terminated == "goal"
+#   snap:              no emergency fallback. reproducer.snap_count == 0
+#
+# Structure:
+#   default: applies to all groups (and to groups not explicitly listed below)
+#   groups: per-group overrides; unspecified fields inherit from default
+
+# Default: all conditions enabled (strict mode)
+default:
+  collision: true
+  road_border: true
+  red_light_violation: true
+  strong_brake: true
+  goal_reach: true
+  snap: true
+
+# Per-group overrides
+groups:
+  departure:
+    collision: false
+    road_border: false
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: true
+
+  lane_change:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: true
+
+  lane_keeping:
+    collision: false
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  obstacle_avoidance:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: true
+    goal_reach: true
+    snap: true
+
+  obstacle_stop:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  pedestrian_stop:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  stop_line:
+    collision: true
+    road_border: true
+    red_light_violation: true
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  traffic_light:
+    collision: true
+    road_border: true
+    red_light_violation: true
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  unnecessary_stop:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: true
+    goal_reach: true
+    snap: true

@@ -1,265 +1,702 @@
-"""Build wandb log payloads for full-route (per-site) closed-loop validation."""
+"""Build ``wandb.Table``s and charts for closed-loop evaluation results.
+
+For each json_label (e.g. ``sites_sample``, ``sites_sample__noobj``,
+``close_loop_devops_override_label``) this module produces:
+
+- one **abs** ``wandb.Table`` (raw counts / fraction over the entire run),
+  ready to be logged to W&B directly.
+- one **per_1000steps** ``wandb.Table`` with a Run column, enabling cross-run
+  comparison via W&B Custom Chart (shared axes, dynamic run filtering).
+- one stacked-bar HTML panel per json_label (:func:`build_per_1000steps_stacked_panels`)
+  showing the 5 count-metric columns normalized per 1000 steps.  The panel uses
+  ECharts inlined via ``wandb.Html`` so it can be uploaded without any
+  pre-registered Vega spec on the W&B backend.
+- one **cross-run Custom Chart** per json_label (:func:`log_cross_run_charts`)
+  that automatically appears in W&B Workspace with shared axes.
+
+Cross-run Comparison (Fully Automatic):
+--------------------------------------
+1. Each run calls ``build_closed_loop_tables(by_json, run_name=run.name)``
+2. Call ``log_cross_run_charts(run, by_json, ...)`` to log charts
+3. Open W&B link → charts appear automatically with shared axes
+4. Toggle runs on/off in the left panel to update the comparison
+
+Prerequisites:
+- Run ``python wandb_closed_loop_workspace.py`` once to create the Vega preset
+- The preset is reusable across all runs
+"""
 
 from __future__ import annotations
 
+import json
 import math
-from pathlib import Path
 
 import wandb
 
-from scenario_generation.closed_loop_score_keys import (
-    COMPARISON_OVERVIEW_SUM_KEYS,
-    OBJECTS_ONLY_OVERVIEW_SUM_KEYS,
-    SCORE_KEYS,
-    extract_score,
-)
-from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
+from scenario_generation.closed_loop_score_keys import extract_score
 
+# (display column name, source key in a per-group summary dict)
+_ABS_COLUMNS = [
+    ("Group", "group"),
+    ("Segments", "n_segments"),
+    ("Steps", "total_steps"),
+    ("Route completion (%)", "mean_route_completion"),
+    ("Pass rate (%)", "pass_rate"),
+    ("GT deviation (m)", "mean_gt_deviation_m"),
+    ("Fails", "fail_count"),
+    ("Curb hits", "total_curb_hits"),
+    ("Snaps", "total_snaps"),
+    ("Red light", "total_red_light_violations"),
+    ("Strong brakes", "total_strong_brakes"),
+    ("Segs diverged", "n_segments_diverged"),
+    ("Collisions", "total_collision_events"),
+]
 
-def _is_noobj_label(label: str) -> bool:
-    """True for the empty-world-ablation site label convention (``{site}__noobj``). Used to
-    exclude ablation labels from collision-style aggregates that are 0 by construction in that
-    mode."""
-    return label.endswith("__noobj")
-
-
-def episode_stem(out_dir: str | Path, row: dict) -> str:
-    """Base filename stem for one segments.jsonl row's video/png-dir/colormap files.
-
-    FullRouteClosedLoopEvaluation (PR2, train-time closed-loop validation) names these
-    ``{route}_{start}_{end}`` (segment-suffixed). PR1's ``run_closed_loop_eval`` (the
-    ``valid_predictor_closed_loop.py`` / ``run_all_sites_closed_loop.py`` CLI path) names
-    them just ``{route}`` -- one route = one whole-route rollout, no sub-segmenting.
-    Prefer the segment-suffixed form and fall back to the bare route name when that
-    file/dir doesn't exist, so callers resolve videos correctly for either pipeline.
-    """
-    out_dir = Path(out_dir)
-    start, end = row["segment"]
-    segmented_stem = f"{row['route']}_{start}_{end}"
-    if (out_dir / f"{segmented_stem}.mp4").is_file() or (out_dir / segmented_stem).is_dir():
-        return segmented_stem
-    return row["route"]
-
-
-def _segment_paths(out_dir: str | Path, row: dict) -> tuple[Path, Path]:
-    """(png_dir, mp4_path) for one segments.jsonl row -- see :func:`episode_stem`."""
-    out_dir = Path(out_dir)
-    stem = episode_stem(out_dir, row)
-    return out_dir / stem, out_dir / f"{stem}.mp4"
-
-
-def pick_representative_row(rows: list[dict], mode: str = "worst") -> dict | None:
-    """Pick one segment row to represent a site's whole run (for the 1 video/image W&B keeps).
-
-    ``mode``: ``"worst"`` (default) = most collision steps, tie-broken by smallest
-    min_clearance — the case most worth a human's attention. ``"first"`` = first
-    discovered route/segment (stable, arbitrary). ``"longest"`` = most steps run.
-    """
-    if not rows:
-        return None
-    if mode == "first":
-        return rows[0]
-    if mode == "longest":
-        return max(rows, key=lambda r: r.get("n_steps_run", 0))
-
-    def _worst_key(r: dict) -> tuple[int, float]:
-        obj = r.get("object", {})
-        coll = obj.get("collision_steps", 0)
-        cl = obj.get("clearance_min_m", float("inf"))
-        cl = cl if math.isfinite(cl) else 1e9
-        return (coll, -cl)  # more collisions first, then smaller clearance first
-
-    return max(rows, key=_worst_key)
-
-
-EPISODE_TABLE_COLUMNS = [
-    "site",
-    "route",
-    "segment",
-    "n_steps_run",
-    "terminated",
-    "route_completion",
-    "n_collision_events",
-    "n_curb_hits",
-    "n_snaps",
-    "n_red_light_violations",
-    "n_strong_brakes",
-    "progress_m",
-    "video_path",
+_PER_1000STEPS_COLUMNS = [
+    ("Group", "group"),
+    ("Segments", "n_segments"),
+    ("Steps", "total_steps"),
+    ("Route completion (%)", "mean_route_completion"),
+    ("Pass rate (%)", "pass_rate"),
+    ("GT deviation (m)", "mean_gt_deviation_m"),
+    ("Curb hits / 1k steps", "total_curb_hits"),
+    ("Snaps / 1k steps", "total_snaps"),
+    ("Red light / 1k steps", "total_red_light_violations"),
+    ("Strong brakes / 1k steps", "total_strong_brakes"),
+    ("Segs diverged / 1k steps", "n_segments_diverged"),
+    ("Collisions / 1k steps", "total_collision_events"),
 ]
 
 
-def _episode_row(table: wandb.Table, site: str, r: dict, out_dir: str | Path | None) -> None:
-    seg = r.get("segment")
-    seg_str = f"[{seg[0]},{seg[1]}]" if seg else ""
-    video_path = str(_segment_paths(out_dir, r)[1]) if out_dir is not None else ""
-    comp = r.get("route_completion")
-    table.add_data(
-        site,
-        r.get("route", ""),
-        seg_str,
-        int(r.get("n_steps_run", 0)),
-        r.get("terminated", ""),
-        float(comp) if comp is not None and math.isfinite(comp) else None,
-        int(extract_score(r, "total_collision_events") or 0),
-        int(extract_score(r, "total_curb_hits") or 0),
-        int(extract_score(r, "total_snaps") or 0),
-        int(extract_score(r, "total_red_light_violations") or 0),
-        int(extract_score(r, "total_strong_brakes") or 0),
-        float(r.get("progress_m", 0.0)),
-        video_path,
+def _short_label(group_key: str) -> str:
+    """``sites_sample/group_a`` → ``group_a``. ``group_a`` → ``group_a``."""
+    return group_key.split("/", 1)[1] if "/" in group_key else group_key
+
+
+def _add_run_column(table: wandb.Table, run_name: str) -> wandb.Table:
+    """Prepend a 'Run' column to a table for cross-run comparison."""
+    new_data = [[run_name] + list(row) for row in table.data]
+    return wandb.Table(columns=["Run", *table.columns], data=new_data)
+
+
+def _segment_weighted_mean(values: list[dict], key: str) -> float:
+    """Segment-weighted mean of ``key`` across groups, e.g. mean_route_completion or pass_rate."""
+    n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
+    if n_segments == 0:
+        return 0.0
+    total = sum(float(s.get(key, 0.0) or 0.0) * int(s.get("n_segments", 0) or 0) for s in values)
+    return total / n_segments
+
+
+def _abs_value(source_key: str, summary: dict):
+    """Numeric value for an abs column.
+
+    Looks up the raw key first so the cross-group aggregate row (which is a
+    flat dict like ``{"total_curb_hits": 39, ...}``) is read correctly.
+    Falls back to ``extract_score`` for raw per-group summaries whose
+    headline numbers live in nested categories like ``road_border``. A key the
+    summary simply doesn't carry -- ``pass_rate`` / ``fail_count`` on a run with no
+    pass condition -- resolves to None there and reads as 0, so an old
+    ``summary.json`` still logs instead of blowing up the upload.
+    """
+    # Float fields: direct lookup or extract_score fallback.
+    if source_key in ("mean_route_completion", "pass_rate"):
+        if source_key in summary:
+            val = summary[source_key]
+            return float(val if isinstance(val, (int, float)) else 0.0)
+        return float(extract_score(summary, source_key) or 0.0)
+    if source_key == "mean_gt_deviation_m":
+        # ``inf`` (nothing measured) becomes a blank cell, not a number to be misread.
+        dev = summary.get("mean_gt_deviation_m")
+        return float(dev) if dev is not None and math.isfinite(float(dev)) else None
+
+    # Int fields.
+    if source_key in ("n_segments", "total_steps"):
+        return int(summary.get(source_key, 0) or 0)
+    if source_key in summary:
+        return int(summary[source_key] or 0)
+    return int(extract_score(summary, source_key) or 0)
+
+
+def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
+    """Counts normalized per 1000 steps (or per 1000 segments for ``n_segments_diverged``)."""
+    # Pass-through fields that are already a fraction or count, not a rate.
+    if source_key in (
+        "n_segments",
+        "total_steps",
+        "mean_route_completion",
+        "pass_rate",
+        "mean_gt_deviation_m",  # already a per-step mean
+    ):
+        return _abs_value(source_key, summary)
+    denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
+    denom = int(summary.get(denom_key, 0) or 0)
+    if denom <= 0:
+        return 0.0
+    raw = summary.get(source_key)
+    if raw is None:
+        raw = extract_score(summary, source_key)
+    return int(raw or 0) / denom * 1000.0
+
+
+def _aggregate(group_summaries: dict[str, dict]) -> dict:
+    """Cross-group aggregate, same shape as a per-group summary dict.
+
+    ``__noobj`` groups are excluded from collision sums (they're 0 by
+    construction in the no-object ablation). ``route_completion`` is a
+    segment-weighted mean and ``mean_gt_deviation_m`` a step-weighted one, not
+    plain averages.
+    """
+    if not group_summaries:
+        return {}
+
+    values = list(group_summaries.values())
+    objects_only_values = [s for k, s in group_summaries.items() if "__noobj/" not in k]
+
+    n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
+
+    # Step-weighted mean for mean_gt_deviation_m
+    dev_num = 0.0
+    dev_steps = 0
+    for v in values:
+        dev = v.get("mean_gt_deviation_m", None)
+        steps = int(v.get("total_steps", 0) or 0)
+        if dev is not None and math.isfinite(dev) and steps > 0:
+            dev_num += float(dev) * steps
+            dev_steps += steps
+
+    agg: dict = {
+        "n_groups": len(values),
+        "n_segments": n_segments,
+        "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
+        "mean_route_completion": _segment_weighted_mean(values, "mean_route_completion"),
+        "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
+        "pass_rate": _segment_weighted_mean(values, "pass_rate"),
+        "fail_count": sum(int(s.get("fail_count", 0) or 0) for s in values),
+    }
+    for k in (
+        "total_curb_hits",
+        "total_snaps",
+        "total_red_light_violations",
+        "total_strong_brakes",
+        "n_segments_diverged",
+    ):
+        agg[k] = sum(int(extract_score(s, k) or 0) for s in values)
+    agg["total_collision_events"] = sum(
+        int(extract_score(s, "total_collision_events") or 0) for s in objects_only_values
     )
+    return agg
 
 
-def build_combined_episode_table(
-    site_episodes: list[tuple[str, list[dict], str | Path | None]],
+def _build_table(
+    json_label: str,
+    kind: str,  # "abs" or "per_1000steps"
+    group_summaries: dict[str, dict],
 ) -> wandb.Table:
-    """ONE episode table across every site (``site`` column filled per row), so the W&B UI's
-    native sort/filter/group-by works across the whole run — group by ``site``, sort by
-    ``n_collision_events`` desc, etc. — in a single interactive panel instead of one table
-    per site. ``site_episodes`` is ``[(site_name, rows, out_dir), ...]``.
-    """
-    table = wandb.Table(columns=EPISODE_TABLE_COLUMNS)
-    for site, rows, out_dir in site_episodes:
-        for r in rows:
-            _episode_row(table, site, r, out_dir)
-    return table
+    cols = _ABS_COLUMNS if kind == "abs" else _PER_1000STEPS_COLUMNS
+    value_fn = _abs_value if kind == "abs" else _per_1000steps_value
 
-
-def resolve_report_link(out_dir: str | Path, report_base_url: str | None = None) -> str:
-    """Where the rich local report (all videos + HTML gallery) for this run lives.
-
-    Returns a clickable ``http(s)://...`` URL if ``report_base_url`` is set (the run's
-    ``out_dir`` is being served over HTTP from that base, e.g. on a training server), else
-    the plain local filesystem path (informational only — W&B's web UI cannot open
-    ``file://`` links, so on a local dev machine this is for the human to copy/open by hand).
-    """
-    out_dir = Path(out_dir)
-    if report_base_url:
-        return report_base_url.rstrip("/") + "/" + out_dir.name
-    return str(out_dir.resolve())
-
-
-def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
-    """Cross-site rollup under ``closed_loop_overview/`` (the at-a-glance block): the segment-
-    weighted mean route-completion (so long routes aren't under-weighted), plus the plain
-    cross-site SUM of each event count. Deliberately just the small non-saturating set — no
-    segment-rates / min-clearances / means (those stay in each site's summary.json only).
-
-    ``summaries`` is keyed by site LABEL — a ``{site}__noobj`` label is excluded from
-    collision-style sums (``OBJECTS_ONLY_OVERVIEW_SUM_KEYS``), since those are 0 by
-    construction in the empty-world ablation and would just dilute the objects-mode number
-    with zeros.
-    """
-    log: dict = {}
-    if not summaries:
-        return log
-    values = list(summaries.values())
-    objects_values = [s for label, s in summaries.items() if not _is_noobj_label(label)]
-    n_sites = len(values)
-    total_segments = sum(int(s.get("n_segments", 0)) for s in values)
-
-    log["closed_loop_overview/n_sites"] = n_sites
-    log["closed_loop_overview/n_segments"] = total_segments
-
-    comp_num = sum(
-        float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
-    )
-    log["closed_loop_overview/route_completion"] = (
-        comp_num / total_segments if total_segments else 0.0
-    )
-
-    for key in COMPARISON_OVERVIEW_SUM_KEYS:
-        log[f"closed_loop_overview/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
-    for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
-        log[f"closed_loop_overview/{key}"] = sum(
-            int(extract_score(s, key) or 0) for s in objects_values
+    rows: list[list] = []
+    for group_key in sorted(group_summaries.keys()):
+        summary = group_summaries[group_key]
+        rows.append(
+            [
+                _short_label(group_key) if src == "group" else value_fn(src, summary)
+                for _, src in cols
+            ]
         )
 
-    return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
+    all_agg = _aggregate(group_summaries)
+    rows.append(["All" if src == "group" else value_fn(src, all_agg) for _, src in cols])
+
+    return wandb.Table(columns=[c[0] for c in cols], data=rows)
 
 
-def _site_label(site: str | None) -> str:
-    """W&B-key-safe site token; ``None`` (single-npz_root mode) -> ``"main"``."""
-    return (site or "main").replace("/", "_")
-
-
-def build_full_closed_loop_wandb_log(
-    summary: dict,
+def build_closed_loop_tables(
+    by_json: dict[str, dict[str, dict]],
     *,
-    out_dir: str | Path | None = None,
-    site: str | None = None,
-    video_pick: str = "worst",
-    colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
-    near_miss_thresh: float = 0.5,
-    report_base_url: str | None = None,
-    render_media: bool = True,
-) -> dict:
-    """Per-site full-route closed-loop wandb payload, keyed into role-based sections so the
-    workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
-    blob of 100+ panels:
+    run_name: str | None = None,
+) -> dict[str, wandb.Table]:
+    """Build abs table for each json_label.
 
-    - ``closed_loop_scores/{metric}/{site}`` — scalar trends (metric-first so the same metric's
-      sites sort adjacently; the W&B panel-search box filters by either metric or site token).
-    - ``closed_loop_media/{site}`` — ONE gallery panel holding every ``colormap_metrics`` image
-      for the representative episode (captioned by metric), mirroring the HTML report's
-      per-card metric dropdown; ``closed_loop_media/{site}__video`` — that episode's video.
-    - ``closed_loop_links/{site}`` — where the full report (all videos + HTML) lives.
+    ``by_json`` maps ``json_label`` → ``group_key`` → per-group summary dict.
 
-    ``render_media=False`` skips the video + colormap-image block entirely (scores/links are
-    unaffected) -- for a caller that already skipped rendering (e.g. train.py's RolloutParams
-    ``draw=False`` on most epochs), so there's no colormap image to render from anyway.
-
-    The per-episode table is built once across ALL sites by :func:`build_combined_episode_table`
-    at the caller (so it's a single filterable/groupable panel), not here.
+    Returns:
+        ``Closed-Loop-{json_label}/metrics``: abs table with raw counts and route completion
     """
-    label = _site_label(site)
-    log: dict = {}
-    for key in SCORE_KEYS:
-        val = extract_score(summary, key)
-        if _wandb_scalar(val):
-            log[f"closed_loop_scores/{key}/{label}"] = val
+    if run_name is None:
+        run_name = wandb.run.name if wandb.run is not None else "unknown"
 
-    rows = summary.get("segments") or []
-    rep = pick_representative_row(rows, mode=video_pick)
-    if render_media and rep is not None and out_dir is not None:
-        png_dir, mp4_path = _segment_paths(out_dir, rep)
-        if mp4_path.is_file():
-            log[f"closed_loop_media/{label}__video"] = wandb.Video(str(mp4_path), format="mp4")
-        try:
-            rendered = render_trajectory_colormaps(
-                png_dir,
-                out_dir,
-                mp4_path.stem,
-                metrics=colormap_metrics,
-                near_miss_thresh=near_miss_thresh,
-                strong_brake_mps2=summary.get("strong_brake", {}).get("thresh_mps2", -2.5),
-                title=f"{site or ''} {mp4_path.stem}".strip(),
-            )
-        except Exception as e:  # pragma: no cover - rendering must never break training
-            print(f"closed_loop: trajectory colormap failed for {mp4_path.stem}: {e}")
-            rendered = {}
-        # One gallery panel per site: a list of images under a single key (captioned by metric)
-        # -> the metric becomes an in-panel selector, not N separate panels. Ordered by the
-        # requested colormap_metrics so the gallery is stable across epochs/sites.
-        gallery = [
-            wandb.Image(str(rendered[m]), caption=m) for m in colormap_metrics if m in rendered
-        ]
-        if gallery:
-            log[f"closed_loop_media/{label}"] = gallery
+    out: dict[str, wandb.Table] = {}
 
-    if out_dir is not None:
-        log[f"closed_loop_links/{label}"] = resolve_report_link(out_dir, report_base_url)
-    elif summary.get("npz_root"):
-        log[f"closed_loop_links/{label}"] = str(summary["npz_root"])
-    return log
+    for json_label, group_summaries in sorted(by_json.items()):
+        abs_table = _build_table(json_label, "abs", group_summaries)
+        out[f"Closed-Loop-{json_label}/metrics"] = abs_table
+
+    return out
 
 
-def _wandb_scalar(val) -> bool:
-    if val is None:
-        return False
-    if isinstance(val, (int, bool)):
-        return True
-    if isinstance(val, float):
-        return math.isfinite(val)
-    return False
+# Metrics stacked into the per-1000-steps bar chart. Order is preserved so
+# colors stay stable across runs in the rendered ECharts panel.
+_STACKED_METRICS = (
+    ("Curb hits / 1k steps", "#4C78A8"),
+    ("Snaps / 1k steps", "#F58518"),
+    ("Red light / 1k steps", "#E45756"),
+    ("Strong brakes / 1k steps", "#72B7B2"),
+    ("Collisions / 1k steps", "#EECA3B"),
+)
+
+
+# Metrics for cross-run stacked bar chart
+_CROSS_RUN_METRICS = (
+    ("Curb hits / 1k steps", "curb_hits"),
+    ("Snaps / 1k steps", "snaps"),
+    ("Red light / 1k steps", "red_light"),
+    ("Strong brakes / 1k steps", "strong_brakes"),
+    ("Collisions / 1k steps", "collisions"),
+)
+
+
+def _build_cross_run_vega_spec() -> dict:
+    """Build the Vega-Lite spec for cross-run grouped stacked bar chart.
+
+    Uses W&B template variables (${field:...}) for dynamic data binding.
+    Supports clicking legend items to show/hide individual event types.
+    """
+    return {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "description": "Closed-loop events per 1k steps, grouped by run and stacked by event type.",
+        "data": {"name": "wandb"},
+        "params": [
+            {
+                "name": "selected_event_types",
+                "select": {"type": "point", "fields": ["event_type"]},
+                "bind": "legend",
+            }
+        ],
+        "transform": [
+            {"filter": "datum['${field:group}'] !== 'All'"},
+            {
+                "joinaggregate": [
+                    {
+                        "op": "distinct",
+                        "field": "${field:run}",
+                        "as": "visible_run_count",
+                    }
+                ],
+            },
+            {
+                "calculate": "max(14, min(20, 30 / datum.visible_run_count))",
+                "as": "bar_thickness",
+            },
+            {
+                "fold": [
+                    "${field:curb_hits}",
+                    "${field:snaps}",
+                    "${field:red_light}",
+                    "${field:strong_brakes}",
+                    "${field:collisions}",
+                ],
+                "as": ["event_key", "event_value"],
+            },
+            {
+                "calculate": "datum.event_key === '${field:curb_hits}' ? 'Curb hits' : datum.event_key === '${field:snaps}' ? 'Snaps' : datum.event_key === '${field:red_light}' ? 'Red light' : datum.event_key === '${field:strong_brakes}' ? 'Strong brakes' : 'Collisions'",
+                "as": "event_type",
+            },
+            {"filter": {"param": "selected_event_types"}},
+        ],
+        "mark": {"type": "bar", "tooltip": True},
+        "encoding": {
+            "y": {
+                "field": "${field:group}",
+                "type": "nominal",
+                "title": "Group",
+                "axis": {"labelLimit": 320},
+            },
+            "yOffset": {"field": "${field:run}", "type": "nominal"},
+            "x": {
+                "aggregate": "sum",
+                "field": "event_value",
+                "type": "quantitative",
+                "stack": "zero",
+                "title": "Events / 1k steps",
+                "scale": {"zero": True},
+            },
+            "size": {
+                "field": "bar_thickness",
+                "type": "quantitative",
+                "scale": None,
+                "legend": None,
+            },
+            "color": {
+                "field": "event_type",
+                "type": "nominal",
+                "title": "Event type",
+                "scale": {
+                    "domain": [
+                        "Curb hits",
+                        "Snaps",
+                        "Red light",
+                        "Strong brakes",
+                        "Collisions",
+                    ],
+                    "range": ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#EECA3B"],
+                },
+            },
+            "order": {
+                "field": "event_type",
+                "sort": [
+                    "Curb hits",
+                    "Snaps",
+                    "Red light",
+                    "Strong brakes",
+                    "Collisions",
+                ],
+            },
+            "tooltip": [
+                {"field": "${field:group}", "type": "nominal", "title": "Group"},
+                {"field": "${field:run}", "type": "nominal", "title": "Run"},
+                {"field": "event_type", "type": "nominal", "title": "Event"},
+                {
+                    "aggregate": "sum",
+                    "field": "event_value",
+                    "type": "quantitative",
+                    "title": "Events / 1k steps",
+                    "format": ".3f",
+                },
+            ],
+        },
+        "height": {"step": 42},
+    }
+
+
+def _build_table_vega_spec() -> dict:
+    """Build a table-like Vega-Lite spec for cross-run metrics comparison.
+
+    Each Group × Run pair occupies one row. The visible row label contains only
+    the Group name, while the row background color identifies the Run. The full
+    Run name remains available in the legend and tooltip.
+
+    W&B replaces ``${field:...}`` expressions using the mapping passed to
+    ``wandb.plot_table(fields=...)``.
+    """
+    metric_field_ids = [source_key for _, source_key in _ABS_COLUMNS[1:]]
+    metric_titles = [display_name for display_name, _ in _ABS_COLUMNS[1:]]
+
+    return {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "description": ("Closed-loop metrics table with colored rows for cross-run comparison."),
+        "data": {"name": "wandb"},
+        "transform": [
+            # Build an internal unique row key. The axis label later strips the
+            # Run suffix so long Run names are not rendered as row labels.
+            {
+                "calculate": ("datum['${field:group}'] + '|||' + datum['${field:run}']"),
+                "as": "row_key",
+            },
+            # Keep normal groups alphabetically ordered and put All last.
+            {
+                "calculate": (
+                    "(datum['${field:group}'] === 'All' "
+                    "? '~~~~All' : datum['${field:group}']) "
+                    "+ '|' + datum['${field:run}']"
+                ),
+                "as": "row_sort",
+            },
+            # Convert the fixed metric columns into table cells.
+            # Group and Run are dimensions, so they must not be folded.
+            {
+                "fold": [f"${{field:{field_id}}}" for field_id in metric_field_ids],
+                "as": ["column_name", "column_value"],
+            },
+            # Format integer counts without decimals and other numeric values
+            # to three decimal places.
+            {
+                "calculate": (
+                    "!isValid(datum.column_value) "
+                    "? '—' "
+                    ": isNumber(datum.column_value) "
+                    "? (datum.column_value % 1 === 0 "
+                    "   ? format(datum.column_value, ',.0f') "
+                    "   : format(datum.column_value, ',.3f')) "
+                    ": datum.column_value"
+                ),
+                "as": "display_value",
+            },
+        ],
+        # x/y/tooltip are shared by both the background and text layers.
+        "encoding": {
+            "x": {
+                "field": "column_name",
+                "type": "nominal",
+                "title": None,
+                "sort": metric_titles,
+                "axis": {
+                    "orient": "top",
+                    "labelAngle": 0,
+                    "labelLimit": 180,
+                    "labelPadding": 8,
+                    "title": None,
+                },
+            },
+            "y": {
+                "field": "row_key",
+                "type": "nominal",
+                "title": "Group",
+                "sort": {
+                    "field": "row_sort",
+                    "op": "min",
+                    "order": "ascending",
+                },
+                "axis": {
+                    # "group|||very-long-run-name" -> "group"
+                    "labelExpr": "split(datum.label, '|||')[0]",
+                    "labelLimit": 280,
+                    "labelPadding": 8,
+                    "titlePadding": 12,
+                },
+            },
+            "tooltip": [
+                {
+                    "field": "${field:group}",
+                    "type": "nominal",
+                    "title": "Group",
+                },
+                {
+                    "field": "${field:run}",
+                    "type": "nominal",
+                    "title": "Run",
+                },
+                {
+                    "field": "column_name",
+                    "type": "nominal",
+                    "title": "Metric",
+                },
+                {
+                    "field": "display_value",
+                    "type": "nominal",
+                    "title": "Value",
+                },
+            ],
+        },
+        "layer": [
+            {
+                # One lightly colored cell background per Run.
+                "mark": {
+                    "type": "rect",
+                    "opacity": 0.16,
+                },
+                "encoding": {
+                    "color": {
+                        "field": "${field:run}",
+                        "type": "nominal",
+                        "title": "Run",
+                        "scale": {
+                            "scheme": "tableau10",
+                        },
+                        "legend": {
+                            "labelLimit": 180,
+                            "symbolType": "square",
+                            "symbolOpacity": 0.7,
+                            "titleLimit": 180,
+                        },
+                    },
+                },
+            },
+            {
+                # Text is deliberately dark rather than colored, preserving
+                # readability over the lightly colored row background.
+                "mark": {
+                    "type": "text",
+                    "align": "center",
+                    "baseline": "middle",
+                    "fontSize": 12,
+                    "color": "#222222",
+                },
+                "encoding": {
+                    "text": {
+                        "field": "display_value",
+                        "type": "nominal",
+                    },
+                },
+            },
+        ],
+        "height": {
+            "step": 26,
+        },
+        "width": {
+            "step": 120,
+        },
+        "config": {
+            "view": {
+                "stroke": None,
+            },
+            "axis": {
+                "grid": False,
+                "domain": False,
+                "tickSize": 0,
+            },
+        },
+    }
+
+
+def log_metrics_tables(
+    run: wandb.sdk.wandb_run.Run,
+    by_json: dict[str, dict[str, dict]],
+) -> None:
+    entity = getattr(run, "entity", None)
+    if not entity:
+        raise ValueError("W&B run.entity is unavailable")
+
+    # create_custom_chart does not update an existing preset.
+    # Increment this suffix whenever the Vega spec changes.
+    preset_name = "closed_loop_metrics_table"
+    vega_spec_name = f"{entity}/{preset_name}"
+
+    try:
+        wandb.Api().create_custom_chart(
+            entity=entity,
+            name=preset_name,
+            display_name="Closed-Loop Metrics Table",
+            spec_type="vega2",
+            access="private",
+            spec=_build_table_vega_spec(),
+        )
+        print(f"wandb: created custom chart preset '{vega_spec_name}'")
+    except Exception as exc:
+        message = str(exc).lower()
+        if "already exists" in message or "duplicate" in message:
+            print(f"wandb: using existing preset '{vega_spec_name}'")
+        else:
+            raise RuntimeError(f"Failed to create W&B preset '{vega_spec_name}'") from exc
+
+    fields = {
+        "run": "Run",
+        "group": "Group",
+        **{source: display for display, source in _ABS_COLUMNS[1:]},
+    }
+
+    for json_label in sorted(by_json):
+        abs_table = _build_table(
+            json_label,
+            "abs",
+            by_json[json_label],
+        )
+        table_with_run = _add_run_column(abs_table, run.name)
+
+        chart = wandb.plot_table(
+            vega_spec_name=vega_spec_name,
+            data_table=table_with_run,
+            fields=fields,
+            split_table=True,
+        )
+        run.log(
+            {
+                f"Closed-Loop-{json_label}/metrics_table": chart,
+            }
+        )
+        print(f"wandb: logged Closed-Loop-{json_label}/metrics_table")
+
+
+def log_cross_run_charts(
+    run: wandb.sdk.wandb_run.Run,
+    by_json: dict[str, dict[str, dict]],
+) -> None:
+    """Log cross-run Custom Charts for grouped stacked bar comparison.
+
+    This function:
+    1. Creates a Vega preset (if not exists) for cross-run stacked bar
+    2. Logs a Custom Chart for each json_label
+
+    Args:
+        run: W&B run instance (from wandb.init() or passed in)
+        by_json: Mapping of json_label -> group_key -> summary dict
+    """
+    entity = getattr(run, "entity", None) or "unknown"
+
+    # Create the Vega preset once
+    vega_spec_name = f"{entity}/closed_loop_cross_run_stacked_bar"
+    try:
+        api = wandb.Api()
+        api.create_custom_chart(
+            entity=entity,
+            name="closed_loop_cross_run_stacked_bar",
+            display_name="Closed-Loop Cross-Run Stacked Bar",
+            spec_type="vega2",
+            access="private",
+            spec=_build_cross_run_vega_spec(),
+        )
+        print(f"wandb: created custom chart preset '{vega_spec_name}'")
+    except Exception as e:
+        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+            print(f"wandb: custom chart preset '{vega_spec_name}' already exists")
+        else:
+            print(f"wandb: warning - failed to create custom chart preset: {e}")
+
+    # Build fields mapping: Vega field name -> table column name
+    chart_fields = {
+        "run": "Run",
+        "group": "Group",
+    }
+    for display_name, field_key in _CROSS_RUN_METRICS:
+        chart_fields[field_key] = display_name
+
+    # Log a Custom Chart for each json_label
+    for json_label in sorted(by_json.keys()):
+        table = _build_table(json_label, "per_1000steps", by_json[json_label])
+        table_with_run = _add_run_column(table, run.name)
+
+        chart = wandb.plot_table(
+            vega_spec_name=vega_spec_name,
+            data_table=table_with_run,
+            fields=chart_fields,
+            split_table=True,
+        )
+        run.log({f"Closed-Loop-{json_label}/cross_run_chart": chart})
+        print(f"wandb: logged Closed-Loop-{json_label}/cross_run_chart")
+
+
+def log_closed_loop_to_wandb(
+    cfg: "ClosedLoopConfig | None",
+    group_names: list[str],
+    group_summaries: dict[str, dict],
+    run: "wandb.sdk.wandb_run.Run | None" = None,
+) -> None:
+    """Push per-group closed-loop scalar metrics + Custom Charts to W&B.
+
+    Reuses ``run`` if given, else starts its own.
+    Sets up W&B Custom Chart presets for cross-run comparison.
+
+    Args:
+        cfg: Closed-loop config exposing ``wandb_project_name`` and ``exp_name``.
+             If None, wandb.init falls back to its own defaults.
+        group_names: List of group keys.
+        group_summaries: Dict mapping group key -> summary dict.
+        run: W&B run instance. If None, starts a new one.
+    """
+    if not group_summaries:
+        return
+
+    if run is None:
+        project = getattr(cfg, "wandb_project_name", None) or None
+        name = getattr(cfg, "exp_name", None) or None
+        run = wandb.init(project=project, name=name)
+        own_run = True
+    else:
+        own_run = False
+
+    try:
+        by_json: dict[str, dict[str, dict]] = {}
+        for key in group_names:
+            summary = group_summaries[key]
+            if "__noobj/" in key:
+                json_label = key.split("__noobj/", 1)[0] + "__noobj"
+            else:
+                json_label = key.split("/", 1)[0]
+            by_json.setdefault(json_label, {})[key] = summary
+
+        log_metrics_tables(run, by_json)
+        log_cross_run_charts(run, by_json)
+    finally:
+        if own_run:
+            wandb.finish()

@@ -19,6 +19,12 @@ import numpy as np
 import torch
 from diffusion_planner.utils.dist_init import dist_init_file_path
 
+from rlvr.autoresearch.tools.refresh_replay_targets import build_rows as _refresh_build_rows
+from rlvr.autoresearch.tools.refresh_replay_targets import join as _refresh_join
+from rlvr.autoresearch.tools.refresh_replay_targets import (
+    persist_into_memory as _refresh_persist_memory,
+)
+
 _CONFIG_REQUIRED = {
     "rounds",
     "epochs_per_round",
@@ -223,6 +229,41 @@ def _apply_repair_refresh_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def _reject_removed_knobs(*, repair_generation: dict, event_mining: dict) -> None:
+    """Fail loudly when a config still sets a knob that was measured, rejected and
+    REMOVED — the cherry-picking parsers would otherwise silently ignore it and the
+    run would not do what the config says."""
+    removed = {
+        "repair_generation": (
+            "lagging_expert_target",
+            "expert_target_require_clear",
+            "state_class_mode",
+        ),
+        "event_mining": ("expert_min_end_progress_m",),
+    }
+    for section_name, section in (
+        ("repair_generation", repair_generation),
+        ("event_mining", event_mining),
+    ):
+        present = [k for k in removed[section_name] if k in (section or {})]
+        if present:
+            raise ValueError(
+                f"{section_name}.{present[0]} was removed (tested and rejected); "
+                "delete it from the config"
+            )
+
+
+def _non_negative_min_gain(value) -> float:
+    v = float(value)
+    if v < 0.0:
+        raise ValueError(
+            f"replay_refresh_min_gain must be >= 0 (got {v}): a negative gain would let a "
+            "WORSE fresh target replace the frozen one and be persisted, breaking the "
+            "refresh's monotonicity guarantee"
+        )
+    return v
+
+
 def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     workflow_source = contract.get("workflow_config")
     if workflow_source is None:
@@ -242,6 +283,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     event_mining = dict(workflow.get("event_mining") or {})
     reproducer = dict(workflow.get("perception_reproducer") or {})
     repair = dict(workflow.get("repair_generation") or {})
+    _reject_removed_knobs(repair_generation=repair, event_mining=event_mining)
     replay = dict(workflow.get("replay_memory") or {})
     rounds = dict(workflow.get("rounds") or {})
     refresh = dict(rounds.get("repair_refresh") or workflow.get("repair_refresh") or {})
@@ -334,8 +376,19 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     }
     if repair.get("prototypes_path"):
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
-    if repair.get("enable_depart_morph"):
-        repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
+    if repair.get("max_expert_dev_m") is not None:
+        repair_cfg["max_expert_dev_m"] = float(repair["max_expert_dev_m"])
+    if repair.get("progress_reference_expert"):
+        repair_cfg["progress_reference_expert"] = bool(repair["progress_reference_expert"])
+    if repair.get("save_candidates"):
+        repair_cfg["save_candidates"] = bool(repair["save_candidates"])
+    for _mk in ("expert_morph_w_max", "expert_morph_max_accel", "expert_morph_max_jerk"):
+        if repair.get(_mk) is not None:
+            repair_cfg[_mk] = float(repair[_mk])
+    # Depart morph defaults ON: the campaign's primary repair label is
+    # expert_disagreement and the departure response must not depend on remembering a flag.
+    # An explicit false in the workflow is the opt-out.
+    repair_cfg["enable_depart_morph"] = bool(repair.get("enable_depart_morph", True))
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
@@ -438,6 +491,20 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
+        "initial_replay_memory": workflow.get("initial_replay_memory"),
+        # Replay memory as a floor: re-repair replayed scenes with the CURRENT policy and
+        # keep max(frozen, fresh) by reward (see refresh_replay_targets).
+        "replay_refresh": bool(workflow.get("replay_refresh", False)),
+        "replay_refresh_min_gain": _non_negative_min_gain(
+            workflow.get("replay_refresh_min_gain", 0.0)
+        ),
+        # repoint the outgoing replay memory at refreshed targets (default on)
+        "replay_refresh_persist": bool(workflow.get("replay_refresh_persist", True)),
+        "reuse_completed_mining": bool(workflow.get("reuse_completed_mining", False)),
+        "progress_reference_expert": bool(workflow.get("progress_reference_expert", False)),
+        "repair_reward_config": (
+            str(workflow["repair_reward_config"]) if workflow.get("repair_reward_config") else None
+        ),
         "replay_memory": {
             "capacity": _required_replay_capacity(replay),
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
@@ -488,6 +555,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
         "realized_reward": bool(workflow.get("realized_reward", False)),
+        **(
+            {"release_bands": dict(workflow["release_bands"] or {})}
+            if "release_bands" in workflow
+            else {}
+        ),
         "final_round_mining": bool(
             workflow.get("final_round_mining", workflow.get("realized_reward", False))
         ),
@@ -536,6 +608,10 @@ def _load_config(path: Path) -> dict[str, Any]:
         missing.append("repair_config")
     if missing:
         raise ValueError(f"{path} is missing required fields: {missing}")
+    _reject_removed_knobs(
+        repair_generation=dict(cfg.get("repair_config") or {}),
+        event_mining=dict(cfg.get("event_mining") or {}),
+    )
     _validate_output_dir(cfg["output_dir"])
     _required_replay_capacity(dict(cfg.get("replay_memory") or {}))
     mining = dict(cfg.get("perception_mining") or {})
@@ -912,6 +988,8 @@ def _perception_mining_cmd(
         # same rollout (no extra sim, no disk save/reload) and write it to the
         # mining summary. The reward reflects the checkpoint THIS mine ran with.
         cmd.append("--realized_reward")
+        if bool(cfg.get("progress_reference_expert")):
+            cmd.append("--progress_reference_expert")
     return cmd, danger_save_dir
 
 
@@ -997,6 +1075,64 @@ def _args_json_for_model(model_path: Path) -> Path:
     raise FileNotFoundError(f"Could not find args.json next to {model_path}")
 
 
+_EMA_INFER_CACHE: dict[str, Path] = {}
+# Set in main() to <output_dir>/ema_infer_cache; used when the checkpoint's own
+# directory is not writable (e.g. a shared base model owned by another user).
+_EMA_INFER_FALLBACK_ROOT: Path | None = None
+
+
+def _ema_inference_model_path(model_path: Path | str) -> Path:
+    """Weights for closed-loop inference phases (mining / repair / guards).
+
+    Base-training checkpoints store the raw optimizer iterates under "model" and
+    the deployable EMA under "ema_state_dict"; simulate.load_model reads "model",
+    so handing the training checkpoint straight to an inference phase silently
+    drives the raw iterates. Extract the EMA once, next to the checkpoint, and
+    return that path. Checkpoints without an EMA pass through unchanged.
+    Training resume must keep the original checkpoint (it needs optimizer/EMA
+    state), so only inference call sites go through here.
+    """
+    import shutil
+
+    model_path = Path(model_path).resolve()
+    key = str(model_path)
+    if key in _EMA_INFER_CACHE:
+        return _EMA_INFER_CACHE[key]
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    if not (isinstance(ckpt, dict) and "ema_state_dict" in ckpt):
+        _EMA_INFER_CACHE[key] = model_path
+        return model_path
+    out_dir = model_path.parent / f"{model_path.stem}_ema_infer"
+    if not os.access(model_path.parent, os.W_OK):
+        if _EMA_INFER_FALLBACK_ROOT is None:
+            raise PermissionError(
+                f"cannot write EMA extraction next to read-only checkpoint {model_path} "
+                "and no fallback cache root is set"
+            )
+        digest = hashlib.sha1(key.encode()).hexdigest()[:12]
+        out_dir = _EMA_INFER_FALLBACK_ROOT / f"{model_path.stem}_{digest}_ema_infer"
+    out = out_dir / "best_model.pth"
+    # Existence alone is not enough: a crash-resume that re-trains and overwrites
+    # the SAME checkpoint path (latest.pth-style) must not reuse the previous
+    # attempt's extraction. Fingerprint the source by (mtime_ns, size) and
+    # re-extract whenever it changed.
+    src_stat = model_path.stat()
+    fingerprint = f"{src_stat.st_mtime_ns}:{src_stat.st_size}"
+    fp_file = out_dir / "source_fingerprint.txt"
+    stale = not out.exists() or not fp_file.exists() or fp_file.read_text() != fingerprint
+    if stale:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state = {k.replace("module.", ""): v for k, v in ckpt["ema_state_dict"].items()}
+        tmp = out_dir / f"best_model.pth.tmp.{os.getpid()}"
+        torch.save({"model": state}, tmp)
+        tmp.replace(out)
+        shutil.copy2(_args_json_for_model(model_path), out_dir / "args.json")
+        fp_file.write_text(fingerprint)
+    print(f"[ema] closed-loop inference weights: {out} (EMA of {model_path})")
+    _EMA_INFER_CACHE[key] = out
+    return out
+
+
 def _checkpoint_epoch(model_path: Path) -> int:
     try:
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
@@ -1041,6 +1177,54 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
     _write_json(out_path, merged)
 
 
+def _anchor_stratum(anchor_cfg: dict[str, Any], name: str) -> tuple[list[str], float] | None:
+    """Resolve one stratified anchor slice (``<name>_scene_list``/``<name>_fraction``).
+
+    Both keys must be given together; the fraction must sit in (0, 1); the
+    referenced list must be non-empty. Returns (pool, fraction) or None when
+    the stratum is not configured.
+    """
+    list_key = f"{name}_scene_list"
+    frac_key = f"{name}_fraction"
+    scene_list = anchor_cfg.get(list_key)
+    fraction = anchor_cfg.get(frac_key)
+    if (scene_list is None) != (fraction is None):
+        raise ValueError(f"training.anchor.{list_key} and {frac_key} must be set together")
+    if scene_list is None:
+        return None
+    frac = float(fraction)
+    if not 0.0 < frac < 1.0:
+        raise ValueError(f"training.anchor.{frac_key} must be in (0, 1): {frac}")
+    pool = [str(p) for p in _read_json_list(Path(scene_list))]
+    if not pool:
+        raise ValueError(f"training.anchor.{list_key} is empty: {scene_list}")
+    return pool, frac
+
+
+def _validated_anchor_strata(
+    anchor_cfg: dict[str, Any],
+) -> tuple[float, list[tuple[list[str], float]]]:
+    """Validate ``training.anchor`` and resolve its special strata (fail loudly)."""
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    ratio = float(anchor_cfg["ratio"])
+    if ratio <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
+    strata = [
+        stratum
+        for name in ("waits", "takeoff")
+        if (stratum := _anchor_stratum(anchor_cfg, name)) is not None
+    ]
+    fractions = [frac for _, frac in strata]
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {fractions}"
+        )
+    return ratio, strata
+
+
 def _anchor_slice_paths(
     anchor_cfg: dict[str, Any] | None, n_focus: int, round_idx: int
 ) -> list[str]:
@@ -1056,21 +1240,15 @@ def _anchor_slice_paths(
     Config (``training.anchor`` in the workflow JSON): ``scene_list`` +
     ``ratio`` are required when the section is present (fail loudly, no silent
     defaults); ``waits_scene_list``/``waits_fraction`` must be given together;
-    ``seed`` (default 0) is offset by the round index so each round redraws
-    reproducibly.
+    ``takeoff_scene_list``/``takeoff_fraction`` (also set together) stratify a
+    green take-off slice into the anchors — the release-side evidence that the
+    failure-window corpus under-represents (build with
+    ``build_r2lpl_pools takeoff``); ``seed`` (default 0) is offset by the round
+    index so each round redraws reproducibly.
     """
     if not anchor_cfg:
         return []
-    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
-    if missing:
-        raise ValueError(f"training.anchor is missing required fields: {missing}")
-    ratio = float(anchor_cfg["ratio"])
-    if ratio <= 0.0:
-        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
-    waits_list = anchor_cfg.get("waits_scene_list")
-    waits_fraction = anchor_cfg.get("waits_fraction")
-    if (waits_list is None) != (waits_fraction is None):
-        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+    ratio, strata = _validated_anchor_strata(anchor_cfg)
 
     import math as _math
     import random as _random
@@ -1089,15 +1267,14 @@ def _anchor_slice_paths(
     if not normal_pool:
         raise ValueError(f"training.anchor.scene_list is empty: {anchor_cfg['scene_list']}")
     picked: list[str] = []
-    if waits_list is not None:
-        frac = float(waits_fraction)
-        if not 0.0 < frac < 1.0:
-            raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {frac}")
-        waits_pool = [str(p) for p in _read_json_list(Path(waits_list))]
-        if not waits_pool:
-            raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
-        n_waits = int(round(frac * n_anchor))
-        picked.extend(_sample(waits_pool, n_waits))
+    # Floor each special stratum: independent rounding could consume the whole
+    # budget on tiny n_anchor (e.g. 0.4+0.4 with n_anchor=2 rounds to 1+1),
+    # eliminating the normal slice the fraction-sum validation promised.
+    # With sum(fractions) < 1, the floors sum to at most n_anchor - 1.
+    for pool, frac in strata:
+        n_slice = int(_math.floor(frac * n_anchor))
+        already = set(picked)
+        picked.extend(_sample([p for p in pool if p not in already], n_slice))
     picked_set = set(picked)
     picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
     return picked
@@ -1336,12 +1513,17 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
         raise ValueError(f"training.anchor is missing required fields: {missing}")
     if float(anchor_cfg["ratio"]) <= 0.0:
         raise ValueError(f"training.anchor.ratio must be > 0: {anchor_cfg['ratio']}")
-    if (anchor_cfg.get("waits_scene_list") is None) != (anchor_cfg.get("waits_fraction") is None):
-        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
-    waits_fraction = anchor_cfg.get("waits_fraction")
-    if waits_fraction is not None and not 0.0 < float(waits_fraction) < 1.0:
-        raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {waits_fraction}")
-    for key in ("scene_list", "waits_scene_list"):
+    fractions: list[float] = []
+    for name in ("waits", "takeoff"):
+        stratum = _anchor_stratum(anchor_cfg, name)  # pairing/range/emptiness
+        if stratum is not None:
+            fractions.append(stratum[1])
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {fractions}"
+        )
+    for key in ("scene_list", "waits_scene_list", "takeoff_scene_list"):
         value = anchor_cfg.get(key)
         if value is None:
             continue
@@ -1404,6 +1586,110 @@ def _validate_repair_generation_config(cfg: dict[str, Any]) -> None:
             f"repair variant {variant_name!r} needs K >= {min_k} "
             f"(det + {min_k - 1} fixed slots), got K={k}"
         )
+
+
+_RELEASE_BANDS_REQUIRED = (
+    "post_window_s",
+    "stride_s",
+    "min_takeoff_travel_m",
+    "frame_hz",
+    "ratio",
+    "seed",
+    "workers",
+)
+
+
+def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on release_bands misconfiguration.
+
+    The block extends each round's training corpus with post-offense recorded
+    frames from the SAME events the repair phase mined (see
+    build_release_bands): pairing every failure window with its recorded
+    resolution keeps the corpus from being one-sidedly deceleration-flavoured.
+    All knobs are required — no silent defaults.
+    """
+    bands_cfg = cfg.get("release_bands")
+    if "release_bands" in cfg and not bands_cfg:
+        raise ValueError(
+            "config has an empty 'release_bands' section; remove it or fill in "
+            f"{list(_RELEASE_BANDS_REQUIRED)}"
+        )
+    if not bands_cfg:
+        return
+    _validate_release_bands_knobs(bands_cfg)
+    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
+        raise ValueError(
+            "release_bands is only wired into the base_sft training backend; "
+            f"got training_backend={cfg.get('training_backend')!r}"
+        )
+    manifest = _release_bands_manifest(cfg)
+    if manifest is None:
+        raise ValueError(
+            "release_bands requires a chunk manifest (event -> source sequence "
+            "provenance); scene_list-only mining cannot locate post-offense frames"
+        )
+    if not Path(manifest).is_file():
+        raise ValueError(f"release_bands chunk manifest does not exist: {manifest}")
+
+
+def _validate_release_bands_knobs(bands_cfg: dict[str, Any]) -> None:
+    """Per-knob checks for a non-empty release_bands section (fail loudly)."""
+    missing = [k for k in _RELEASE_BANDS_REQUIRED if bands_cfg.get(k) is None]
+    if missing:
+        raise ValueError(f"release_bands is missing required fields: {missing}")
+    for key in ("post_window_s", "stride_s", "min_takeoff_travel_m", "frame_hz", "ratio"):
+        if float(bands_cfg[key]) <= 0.0:
+            raise ValueError(f"release_bands.{key} must be > 0: {bands_cfg[key]}")
+    if int(bands_cfg["workers"]) < 1:
+        raise ValueError(f"release_bands.workers must be >= 1: {bands_cfg['workers']}")
+    if int(round(float(bands_cfg["post_window_s"]) * float(bands_cfg["frame_hz"]))) < 1:
+        raise ValueError(
+            f"release_bands.post_window_s={bands_cfg['post_window_s']} at "
+            f"frame_hz={bands_cfg['frame_hz']} rounds to zero post-offense frames — "
+            "the band would degenerate to the offense frame itself"
+        )
+
+
+def _release_bands_manifest(cfg: dict[str, Any]) -> str | None:
+    mining = cfg.get("perception_mining") or {}
+    return mining.get("chunk_manifest") or cfg.get("chunk_manifest")
+
+
+def _release_band_paths(
+    cfg: dict[str, Any],
+    credit_jsonl: Path,
+    rdir: Path,
+    round_idx: int,
+    n_focus: int,
+) -> list[str]:
+    """Extract + sample this round's release bands (see build_release_bands)."""
+    bands_cfg = cfg.get("release_bands")
+    if not bands_cfg:
+        return []
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    manifest = _release_bands_manifest(cfg)
+    out_json = rdir / f"round_{round_idx}_release_bands.json"
+    rows = build_release_bands(
+        credit_jsonl,
+        Path(str(manifest)),
+        out_json,
+        post_window_s=float(bands_cfg["post_window_s"]),
+        stride_s=float(bands_cfg["stride_s"]),
+        min_takeoff_travel_m=float(bands_cfg["min_takeoff_travel_m"]),
+        frame_hz=float(bands_cfg["frame_hz"]),
+        workers=int(bands_cfg["workers"]),
+    )
+    # Never round a configured feature down to nothing: tiny rounds keep at
+    # least one band row per event corpus rather than silently disabling it.
+    n_keep = max(1, int(round(float(bands_cfg["ratio"]) * n_focus)))
+    if len(rows) > n_keep:
+        import random as _random
+
+        rng = _random.Random(int(bands_cfg["seed"]) + round_idx)
+        rows = sorted(rng.sample(rows, n_keep))
+        _write_json(out_json, rows)
+    return rows
 
 
 def _validate_guards_config(cfg: dict[str, Any]) -> None:
@@ -1786,7 +2072,7 @@ def _repair_cmd(
         "--scene_rows_jsonl",
         str(credit_jsonl),
         "--config",
-        str(cfg["reward_config"]),
+        str(cfg.get("repair_reward_config") or cfg["reward_config"]),
         "--threshold_config",
         str(cfg["threshold_config"]),
         "--ego_shape",
@@ -1831,10 +2117,20 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if "expert_stop_anchor" in repair_cfg:
         cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
-    if bool(repair_cfg.get("enable_depart_morph", False)):
+    # Always pass the depart flag EXPLICITLY so subprocess behaviour never depends on the
+    # tool's CLI default (which a mid-run code update could change under a live runner).
+    if bool(repair_cfg.get("enable_depart_morph", True)):
         cmd.append("--enable_depart_morph")
+    else:
+        cmd.append("--disable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
+    if repair_cfg.get("max_expert_dev_m") is not None:
+        cmd.extend(["--max_expert_dev_m", str(repair_cfg["max_expert_dev_m"])])
+    if repair_cfg.get("progress_reference_expert"):
+        cmd.append("--progress_reference_expert")
+    if repair_cfg.get("save_candidates"):
+        cmd.append("--save_candidates")
     if cfg.get("repair_labels"):
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
@@ -1969,6 +2265,60 @@ def _repair_refresh_chunk_targets(
     return targets
 
 
+def _emit_train_args(
+    cmd: list[str],
+    merged: dict[str, Any],
+    passthrough: tuple[str, ...],
+    save_dir: Path,
+) -> None:
+    """Split training knobs between CLI flags and the overrides file.
+
+    The trainer's CLI deliberately exposes only ``cli()``-marked TrainConfig
+    fields; every other knob is handed over via ``--train_overrides_json``
+    (the trainer fails loudly on keys that are not TrainConfig fields, so a
+    rename upstream surfaces here instead of silently training at defaults).
+    Keys are emitted in passthrough order first for stable, diffable commands.
+    """
+    from diffusion_planner.config import TrainConfig as _TrainConfig
+    from diffusion_planner.config import cli_fields as _cli_fields
+
+    cli_exposed = {f.name for f in _cli_fields(_TrainConfig)}
+    reserved = {
+        "exp_name",
+        "save_dir",
+        "train_set_list",
+        "valid_set_list",
+        "train_epochs",
+        "resume_model_path",
+        "train_overrides_json",
+    }
+    clashing = sorted(reserved & set(merged))
+    if clashing:
+        raise ValueError(
+            f"train_args must not set runner-owned keys {clashing}: the round runner "
+            "computes these (cumulative epochs, per-round scene list, warm-start "
+            "checkpoint) and a duplicate flag would override them argparse-last-wins"
+        )
+    if "train_overrides_json" not in cli_exposed:
+        raise RuntimeError(
+            "train_predictor's TrainConfig lacks the train_overrides_json channel; "
+            "cannot pass non-CLI training knobs (learning_rate, ema_decay, ...)"
+        )
+    ordered = [*passthrough, *[k for k in merged if k not in passthrough]]
+    overrides_payload: dict[str, Any] = {}
+    for key in ordered:
+        value = merged.get(key)
+        if value is None:
+            continue
+        if key in cli_exposed:
+            _append_train_arg(cmd, key, value)
+        else:
+            overrides_payload[key] = value
+    overrides_file = save_dir / "train_overrides.json"
+    overrides_file.write_text(json.dumps(overrides_payload, indent=2, sort_keys=True))
+    cmd.extend(["--train_overrides_json", str(overrides_file)])
+
+
 def _base_train_invocation(
     cfg: dict[str, Any],
     *,
@@ -2041,9 +2391,8 @@ def _base_train_invocation(
         str(total_epochs),
         "--resume_model_path",
         str(model_path),
-        "--normalization_file_path",
-        normalization_path,
     ]
+    overrides.setdefault("normalization_file_path", normalization_path)
 
     passthrough = (
         "train_subsample_step",
@@ -2119,9 +2468,7 @@ def _base_train_invocation(
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
     if "warm_up_epoch" in merged:
         merged["warm_up_epoch"] = max(0, min(int(merged["warm_up_epoch"]), total_epochs))
-    for key in passthrough:
-        if key in merged:
-            _append_train_arg(cmd, key, merged[key])
+    _emit_train_args(cmd, merged, passthrough, save_dir)
 
     env = dict(os.environ)
     repo_root = Path(__file__).resolve().parents[3]
@@ -2202,6 +2549,40 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         )
         aggregate["realized_cl_reward"] = rr_sum / rr_poses
         aggregate["realized_cl_reward_poses"] = rr_poses
+        # Sum the per-shard reward-component telemetry so the round summary carries the
+        # decomposition (which reward terms / which gates drive the total), not just the mean.
+        comp_totals: dict[str, float] = {}
+        for shard in summaries:
+            for key, value in (shard.get("realized_cl_reward_components") or {}).items():
+                comp_totals[key] = comp_totals.get(key, 0) + value
+        if comp_totals:
+            aggregate["realized_cl_reward_components"] = comp_totals
+        # Pooled spread across shards (law of total variance over per-shard
+        # segment groups); without it multi-GPU rounds lose exactly the SD/SEM
+        # telemetry that stops small reward deltas being over-read.
+        groups = [
+            (
+                float(s["realized_cl_reward_segment_mean"]),
+                float(s["realized_cl_reward_sd"]),
+                int(s["realized_cl_reward_segments"]),
+            )
+            for s in summaries
+            if s.get("realized_cl_reward_sd") is not None
+            and s.get("realized_cl_reward_segment_mean") is not None
+            and int(s.get("realized_cl_reward_segments") or 0) > 0
+        ]
+        n_total = sum(n for _, _, n in groups)
+        if n_total >= 1:
+            pooled_mean = sum(m * n for m, _, n in groups) / n_total
+            # n_total == 1 -> zero spread, matching the single-GPU miner's contract
+            # (pstdev of one sample is 0.0), so sharding never drops the telemetry.
+            pooled_var = (
+                sum(n * (sd**2) + n * (m - pooled_mean) ** 2 for m, sd, n in groups) / n_total
+            )
+            aggregate["realized_cl_reward_sd"] = pooled_var**0.5
+            aggregate["realized_cl_reward_sem"] = (pooled_var**0.5) / (n_total**0.5)
+            aggregate["realized_cl_reward_segments"] = n_total
+            aggregate["realized_cl_reward_segment_mean"] = pooled_mean
     _write_json(output, aggregate)
     return aggregate
 
@@ -2284,16 +2665,66 @@ def _run_mining_phase(
     return elapsed
 
 
+def _replay_row_sources(cfg: dict[str, Any], out: Path, round_idx: int) -> list[str]:
+    """Artifacts carrying previous rounds' repaired rows, for the replay-refresh join.
+
+    A chain link is handed only the previous link's replay-seed memory JSON (whose
+    ``entries`` carry scene_path / source_scene_path / selected_total); a multi-round run
+    also has its own earlier rounds' ``repaired_targets.jsonl``. Both are accepted, and order
+    does not matter because the join keys on the target path.
+    """
+    sources: list[str] = []
+    seed = cfg.get("initial_replay_memory")
+    if seed and Path(seed).is_file():
+        sources.append(str(seed))
+    for prev in range(1, round_idx):
+        prev_dir = out / f"r2lpl_round_{prev:03d}"
+        cand = prev_dir / "repaired_targets.jsonl"
+        if cand.is_file():
+            sources.append(str(cand))
+        # After a persist, replayed scenes are named by their REFRESHED target paths, whose
+        # rows live in the previous round's memory (persist keeps source_scene_path and
+        # updates selected_total) and in its replay_refresh jsonls — not in
+        # repaired_targets.jsonl, which keys the ORIGINAL paths. Without these the round-3
+        # lookup fails on every repointed scene.
+        mem = prev_dir / f"round_{prev}_memory.json"
+        if mem.is_file():
+            sources.append(str(mem))
+        for fresh in sorted(
+            prev_dir.glob("replay_refresh/repair_shards/shard_*/repaired_targets.jsonl")
+        ):
+            sources.append(str(fresh))
+        flat = prev_dir / "replay_refresh" / "repaired_targets.jsonl"
+        if flat.is_file():
+            sources.append(str(flat))
+    return sources
+
+
 def _run_repair_phase(
     cfg: dict[str, Any],
     model_path: Path,
     rdir: Path,
     gpu_ids: list[int],
+    *,
+    allow_empty: bool = False,
 ) -> float:
     credit_jsonl = rdir / "credit_windows.jsonl"
     rows = _read_jsonl(credit_jsonl)
     if not rows:
         raise RuntimeError(f"{credit_jsonl} is empty; no mined scenes to repair")
+    # A resume with FEWER GPUs than a crashed attempt must not leave that
+    # attempt's extra shard outputs behind: downstream globs (e.g. the replay
+    # refresh join) would merge stale rows — and on a 1-GPU resume they would
+    # SHADOW the flat single-GPU output entirely.
+    shard_root = rdir / "repair_shards"
+    if shard_root.exists():
+        import shutil
+
+        for stale in sorted(shard_root.glob("shard_*")):
+            if int(stale.name.split("_")[1]) >= max(len(gpu_ids), 1):
+                shutil.rmtree(stale)
+        if len(gpu_ids) <= 1:
+            shutil.rmtree(shard_root)
     if len(gpu_ids) <= 1:
         gpu_id = gpu_ids[0] if gpu_ids else None
         overrides = {"device": "cuda"} if gpu_id is not None else None
@@ -2303,10 +2734,10 @@ def _run_repair_phase(
             credit_jsonl,
             rdir,
             repair_overrides=overrides,
+            allow_empty=allow_empty,
         )
         return _run(cmd, rdir / "repair.log", env=_env_for_gpu(gpu_id))
 
-    shard_root = rdir / "repair_shards"
     shard_inputs = [
         shard_root / f"shard_{idx:02d}" / "credit_windows.jsonl" for idx in range(len(gpu_ids))
     ]
@@ -2369,7 +2800,7 @@ def _run_repair_phase(
     repaired_paths = _merge_json_lists(repaired_lists, rdir / "repaired_targets.json")
     _merge_jsonl_files(repaired_rows_jsonls, rdir / "repaired_targets.jsonl")
     _merge_unrepaired_lists(unrepaired_lists, rdir / "repaired_targets_unrepaired.json")
-    if not repaired_paths:
+    if not repaired_paths and not allow_empty:
         raise RuntimeError("No repaired targets were produced across repair shards")
     return elapsed
 
@@ -2730,6 +3161,17 @@ def _summarize_round(
     if mining_summary.get("realized_cl_reward") is not None:
         summary["realized_cl_reward"] = mining_summary["realized_cl_reward"]
         summary["realized_cl_reward_poses"] = int(mining_summary.get("realized_cl_reward_poses", 0))
+        # Spread + decomposition travel with the mean: a mean alone invites
+        # over-reading small deltas.
+        for key in (
+            "realized_cl_reward_sd",
+            "realized_cl_reward_sem",
+            "realized_cl_reward_segments",
+            "realized_cl_reward_segment_mean",
+            "realized_cl_reward_components",
+        ):
+            if mining_summary.get(key) is not None:
+                summary[key] = mining_summary[key]
     if guard_metrics is not None:
         summary["guards"] = guard_metrics
     _write_json(rdir / "round_summary.json", summary)
@@ -2749,14 +3191,26 @@ def main() -> None:
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
     _validate_anchor_config(cfg)
+    _validate_release_bands_config(cfg)
     _validate_guards_config(cfg)
     _validate_repair_generation_config(cfg)
     _validate_normal_scene_list_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    global _EMA_INFER_FALLBACK_ROOT
+    _EMA_INFER_FALLBACK_ROOT = out / "ema_infer_cache"
     model_path = Path(cfg["model_path"])
+    # Cross-campaign lifelong continuity: seed round 1's replay-memory union from a
+    # previous campaign's memory JSON so chained single-round jobs keep retraining
+    # earlier repairs. Absent/None -> fresh memory (single-campaign behavior).
     previous_memory: Path | None = None
+    initial_memory = cfg.get("initial_replay_memory")
+    if initial_memory:
+        initial_memory = Path(initial_memory)
+        if not initial_memory.is_file():
+            raise ValueError(f"initial_replay_memory does not exist: {initial_memory}")
+        previous_memory = initial_memory
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
     guards_cfg = cfg.get("guards")
     reference_metrics: dict[str, Any] | None = None
@@ -2784,9 +3238,16 @@ def main() -> None:
                     "[round 0] guard_closed_loop: "
                     f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
                 )
+        elif bool(cfg.get("reuse_completed_mining")) and (gdir0 / "guard_metrics.json").is_file():
+            # Crash-resume: the reference row was already measured on the frozen assets in a
+            # previous attempt; re-running would also fail the miner's non-empty-out_dir guard.
+            print(f"[round 0] guards SKIPPED — reusing reference metrics in {gdir0}")
+            reference_metrics = json.loads((gdir0 / "guard_metrics.json").read_text())
         else:
             print("[round 0] guards on the starting model (reference row)")
-            reference_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+            reference_metrics = _run_guard_phase(
+                cfg, _ema_inference_model_path(model_path), gdir0, gpu_ids0, tag="round_000"
+            )
     guard_rows: list[tuple[int, dict[str, Any]]] = []
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
@@ -2844,18 +3305,119 @@ def main() -> None:
             _print_dry_run_plan(cfg, model_path, rdir, gpu_ids, memory_cmd, round_idx)
             continue
 
-        print(f"[round {round_idx}] perception_mine")
-        phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
+        infer_model = _ema_inference_model_path(model_path)
+        # Crash-resume: mining is the most expensive phase and its artifacts are
+        # self-contained, so a re-run that lands in the SAME round dir can reuse a
+        # previous complete mining pass instead of re-simulating the whole slice.
+        mining_complete = (rdir / "perception_direct_summary.json").is_file() and (
+            rdir / "credit_windows.jsonl"
+        ).is_file()
+        if bool(cfg.get("reuse_completed_mining")) and mining_complete:
+            print(
+                f"[round {round_idx}] perception_mine SKIPPED — reusing complete output in {rdir}"
+            )
+            phase_times["perception_mine"] = 0.0
+        else:
+            print(f"[round {round_idx}] perception_mine")
+            phase_times["perception_mine"] = _run_mining_phase(cfg, infer_model, rdir, gpu_ids)
+        # Fail loudly at the SOURCE if mining simulated nothing: --skip_bad_chunks makes the
+        # miner skip unloadable chunks silently, and the only downstream symptom is an empty
+        # credit_windows.jsonl at the repair phase (which hides the real cause).
+        mine_summary_path = rdir / "perception_direct_summary.json"
+        if mine_summary_path.is_file():
+            _ms = json.loads(mine_summary_path.read_text())
+            if int(_ms.get("simulated_chunks") or 0) == 0:
+                raise RuntimeError(
+                    f"mining simulated 0 of {_ms.get('planned_chunks')} planned chunks "
+                    f"({_ms.get('skipped_chunks')} skipped) — the scenes could not be loaded. "
+                    "Inspect the segments.skipped.jsonl next to the miner output "
+                    f"(under {rdir}, or per-shard under perception_mine_shards/) "
+                    "(a staged/incomplete dataset copy missing sidecar files does this)."
+                )
         print(f"[round {round_idx}] repair")
-        phase_times["repair"] = _run_repair_phase(cfg, model_path, rdir, gpu_ids)
+        phase_times["repair"] = _run_repair_phase(cfg, infer_model, rdir, gpu_ids)
         print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
         phase_times["memory"] = _run(memory_cmd, rdir / "memory.log")
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
-        anchor_paths = _anchor_slice_paths(
-            cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
-        )
+        # Only targets from EARLIER rounds can be stale. The memory step's replay list also
+        # contains THIS round's repaired targets (memory is updated before it is sampled), and
+        # those were just produced by the current policy: refreshing them is wasted GPU, and
+        # their rows live in this round's jsonl rather than any previous one -- which is what
+        # made the first multi-round smoke abort on the guard below.
+        current_target_set = set(repaired_paths)
+        refreshable = [p for p in replay_paths if p not in current_target_set]
+        if bool(cfg.get("replay_refresh")) and refreshable:
+            # Replay memory as a FLOOR, not a leash: a replayed scene's target was chosen by
+            # a policy that no longer exists, so re-generate candidates with the CURRENT
+            # policy and keep max(frozen, fresh) by reward. Taking the max is what preserves
+            # retention -- if the policy drifted, its fresh candidates are worse and the
+            # frozen fix keeps teaching. The pass reuses the ordinary repair phase, so the
+            # GPU path is the same tested code.
+            row_sources = [Path(p) for p in _replay_row_sources(cfg, out, round_idx)]
+            if not row_sources:
+                raise RuntimeError(
+                    f"replay_refresh is on and {len(refreshable)} replayed scenes come from "
+                    "earlier rounds, but no previous-round rows were found (need the "
+                    "replay-seed memory JSON or an earlier round's repaired_targets.jsonl); "
+                    "refusing to silently skip the refresh"
+                )
+            ref_dir = rdir / "replay_refresh"
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            # Refresh ONLY the stale subset; this round's own targets pass through untouched.
+            stale_list = ref_dir / "replay_stale.json"
+            _write_json(stale_list, refreshable)
+            build_stats = _refresh_build_rows(
+                stale_list, row_sources, ref_dir / "credit_windows.jsonl"
+            )
+            print(f"[round {round_idx}] replay_refresh: rows {json.dumps(build_stats)}")
+            t_ref = time.perf_counter()
+            # Zero fresh gate-passing candidates is a legitimate refresh outcome
+            # (frozen targets are kept via the join's no_fresh_candidate branch)
+            # and must not abort the round.
+            _run_repair_phase(cfg, infer_model, ref_dir, gpu_ids, allow_empty=True)
+            fresh_rows = sorted(ref_dir.glob("repair_shards/shard_*/repaired_targets.jsonl")) or [
+                ref_dir / "repaired_targets.jsonl"
+            ]
+            join_stats = _refresh_join(
+                stale_list,
+                row_sources,
+                list(fresh_rows),
+                ref_dir / "replay_refreshed.json",
+                ref_dir / "refresh_stats.json",
+                min_gain=float(cfg.get("replay_refresh_min_gain", 0.0)),
+                out_map=ref_dir / "refresh_map.json",
+            )
+            # Carry the gain FORWARD: the memory step runs before the refresh (it produces the
+            # replay list the refresh consumes), so without this the memory handed to the next
+            # link still names the ORIGINAL targets and every link re-generates candidates for
+            # scenes an earlier link already improved. Monotone by construction: a refreshed
+            # target only entered the map by beating the frozen one on the same ruler.
+            if bool(cfg.get("replay_refresh_persist", True)) and memory_json.is_file():
+                persist_stats = _refresh_persist_memory(memory_json, ref_dir / "refresh_map.json")
+                print(f"[round {round_idx}] replay_refresh persist: {json.dumps(persist_stats)}")
+            phase_times["replay_refresh"] = time.perf_counter() - t_ref
+            print(f"[round {round_idx}] replay_refresh: {json.dumps(join_stats)}")
+            # Refreshed stale targets + this round's own targets, which never needed refreshing.
+            refreshed = [str(p) for p in _read_json_list(ref_dir / "replay_refreshed.json")]
+            replay_paths = refreshed + [p for p in replay_paths if p in current_target_set]
+            # The trainer receives --replay_scenes to TAG replay rows; handing it the
+            # pre-refresh list would train this round on the stale targets the refresh
+            # just replaced. Point it at the spliced list instead.
+            replay_json = rdir / f"round_{round_idx}_replay_scenes_refreshed.json"
+            _write_json(replay_json, replay_paths)
+        n_focus = len(set(repaired_paths) | set(replay_paths))
+        band_paths = _release_band_paths(cfg, credit_jsonl, rdir, round_idx, n_focus)
+        if band_paths:
+            band_paths = _ensure_4col_neighbor_futures(
+                band_paths, rdir.parent / "release_bands_4col"
+            )
+            print(
+                f"[round {round_idx}] release bands: {len(band_paths)} recorded "
+                f"post-offense rows paired with {n_focus} focus scenes"
+            )
+        anchor_paths = _anchor_slice_paths(cfg.get("anchor"), n_focus, round_idx)
         if anchor_paths:
             # Campaign-level cache dir: the anchor pool is largely the same
             # scenes every round, so convert once per campaign, not per round.
@@ -2866,7 +3428,9 @@ def main() -> None:
                 f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
                 f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"
             )
-        _union_scene_lists(repaired_paths, [*replay_paths, *anchor_paths], train_input_list)
+        _union_scene_lists(
+            repaired_paths, [*replay_paths, *band_paths, *anchor_paths], train_input_list
+        )
         if bool(cfg.get("validate_on_repaired_targets", False)):
             cfg["val_scenes"] = str(train_input_list)
 
@@ -2924,7 +3488,11 @@ def main() -> None:
             print(f"[round {round_idx}] guards")
             t0 = time.perf_counter()
             guard_metrics = _run_guard_phase(
-                cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
+                cfg,
+                _ema_inference_model_path(model_path),
+                rdir / "guards",
+                gpu_ids,
+                tag=f"round_{round_idx:03d}",
             )
             phase_times["guards"] = time.perf_counter() - t0
             guard_rows.append((round_idx, guard_metrics))
@@ -2954,7 +3522,9 @@ def main() -> None:
         fdir = out / "final_round_mine"
         fdir.mkdir(parents=True, exist_ok=True)
         print(f"[final] mining residual problems + realized reward with {model_path}")
-        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        _run_mining_phase(
+            cfg, _ema_inference_model_path(model_path), fdir, _gpu_ids_from_config(cfg)
+        )
         fsum = _load_json(fdir / "perception_direct_summary.json")
         # Represent the final-round mine in the operator-facing summary contract, not
         # just stdout: the last round's checkpoint has no successor mine, so this is the
@@ -2968,6 +3538,18 @@ def main() -> None:
             "realized_cl_reward": fsum.get("realized_cl_reward"),
             "realized_cl_reward_poses": int(fsum.get("realized_cl_reward_poses", 0)),
         }
+        # The final checkpoint has no successor mine, so this entry is its ONLY
+        # workflow-level result — it must carry the same spread/decomposition
+        # telemetry as the per-round summaries.
+        for key in (
+            "realized_cl_reward_sd",
+            "realized_cl_reward_sem",
+            "realized_cl_reward_segments",
+            "realized_cl_reward_segment_mean",
+            "realized_cl_reward_components",
+        ):
+            if fsum.get(key) is not None:
+                final_round[key] = fsum[key]
         print(
             f"[final] residual credit_rows={final_round['residual_credit_rows']} "
             f"realized_cl_reward={final_round['realized_cl_reward']}"

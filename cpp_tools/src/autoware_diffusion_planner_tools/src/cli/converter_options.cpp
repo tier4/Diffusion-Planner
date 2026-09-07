@@ -111,6 +111,9 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "Write ONE npz and ONE json per sequence (frames stacked along a leading frame axis) "
     "instead of one file per frame. Forces write_skipped_npz on so the packed sequence is "
     "gap-free. Mutually exclusive with --sidecar_only.");
+  app.add_flag(
+    "--extract_override_segments", extract_override_segments,
+    "Read vehicle control-mode messages and write control_mode_4_intervals.json.");
 }
 
 std::string ConverterPaths::get_rosbag_dir_name() const
@@ -161,6 +164,7 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.sidecar_only = false;
   // One file per frame by default; --pack_sequence packs a whole sequence into one npz/json.
   options.pack_sequence = false;
+  options.extract_override_segments = false;
   options.use_interpolation = static_cast<bool>(options.interpolation);
   return options;
 }

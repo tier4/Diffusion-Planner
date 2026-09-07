@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -12,18 +13,21 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+from diffusion_planner.config import TrainConfig
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
-from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
+from diffusion_planner.utils.data_augmentation_frenet import (
+    frenet_augmenter_from_args,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
 from diffusion_planner.utils.normalizer import (
     ControlNormalizer,
     ObservationNormalizer,
@@ -130,55 +134,14 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-_OBJECT_MODE_DROP_FLAGS = {"objects": False, "noobj": True}
+def closed_loop_validate(model, args: TrainConfig, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + videos to wandb."""
+    import os
 
-
-def _object_mode_pairs(modes: list[str]) -> tuple[tuple[str, bool], ...]:
-    """Canonical (tag, drop_objects) pairs for the requested object modes.
-
-    Order is always "objects" before "noobj" regardless of the CLI list order, so labels/output
-    dirs are deterministic.
-    """
-    return tuple((m, _OBJECT_MODE_DROP_FLAGS[m]) for m in ("objects", "noobj") if m in modes)
-
-
-def closed_loop_validate(
-    model, args, epoch: int, out_dir: str, *, is_final_save: bool = False
-) -> None:
-    """Closed-loop rendered rollout; logs metrics + videos to wandb.
-
-    Runs one :class:`~scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`
-    per (site, object-mode) pair: ``closed_loop_npz_root`` (single arbitrary path) and
-    ``closed_loop_sites_npz_root`` (a curated ``.json`` path-list manifest grouped into
-    per-site route pools by
-    :func:`~scenario_generation.site_discovery.discover_sites_from_json`) are independent — both
-    fire in the same call when both are set, each contributing its own rows to the combined
-    episode table / cross-site aggregate. Called on the checkpoint-save cadence, rank-0 only:
-    pass the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler
-    runs and produces ``prediction``) and restored afterwards.
-
-    Per-step matplotlib rendering (PNGs/video/colormap images) is the dominant per-call cost, so
-    it's deferred to the last call only (``is_final_save=True``, computed by the caller as "is
-    this the last time the checkpoint-save cadence fires in this run" -- NOT simply
-    ``epoch == train_epochs - 1``, since train_epochs may not land on a save_utd-multiple)
-    -- every other call still runs the full rollout and logs metrics/wandb scalars, just without
-    that cost.
-    """
-    if not args.closed_loop_npz_root and not args.closed_loop_sites_npz_root:
+    if not args.closed_loop_npz_root:
         return
 
-    from scenario_generation.closed_loop_evaluation import (
-        ClosedLoopEvalConfig,
-        FullRouteClosedLoopEvaluation,
-        RolloutParams,
-    )
-    from scenario_generation.closed_loop_html_report import build_html_report
-    from scenario_generation.site_discovery import discover_sites_from_json
-    from scenario_generation.wandb_closed_loop import (
-        build_combined_episode_table,
-        build_full_closed_loop_wandb_log,
-        build_sites_aggregate_log,
-    )
+    from run_all_groups_closed_loop import _load_group_results, run_closed_loop_main
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
@@ -192,135 +155,87 @@ def closed_loop_validate(
     prev_ego_prediction_from_control = net.decoder._ego_prediction_from_control
     net.decoder._ego_prediction_from_control = args.closed_loop_ego_prediction_from_control
 
-    def run_one(npz_root, site_out_dir: str, site_name: str | None, drop_objects: bool = False):
-        site_label = f" [{site_name}]" if site_name else ""
-        evaluator = FullRouteClosedLoopEvaluation(
-            net,
-            args,
-            ClosedLoopEvalConfig(
-                out_dir=Path(site_out_dir),
-                params=RolloutParams(
-                    device=args.device,
-                    near_miss_thresh=args.closed_loop_near_miss_thresh,
-                    search_radius=args.closed_loop_search_radius,
-                    warmup_steps=args.closed_loop_warmup_steps,
-                    unstick_after=args.closed_loop_unstick_after,
-                    unstick_advance_m=args.closed_loop_unstick_advance_m,
-                    unstick_radius_mult=args.closed_loop_unstick_radius_mult,
-                    unstick_teleport_after=args.closed_loop_unstick_teleport_after,
-                    draw_every=args.closed_loop_draw_every if is_final_save else None,
-                    replan_interval=args.closed_loop_replan_interval,
-                    neighbor_history_mode="recorded",
-                    abort_deviation_m=args.closed_loop_abort_deviation_m,
-                    abort_after=args.closed_loop_abort_after,
-                    abort_max_snaps=args.closed_loop_abort_max_snaps,
-                    drop_objects=drop_objects,
-                ),
-                fps=float(args.closed_loop_fps),
-                verbose=False,
-            ),
-            npz_root,
-            seg_len=args.closed_loop_seg_len,
-        )
-        summary = evaluator.run()
-        if not summary:
-            return {}, {}
-        site_log = build_full_closed_loop_wandb_log(
-            summary,
-            out_dir=site_out_dir,
-            site=site_name,
-            video_pick=args.closed_loop_wandb_video_pick,
-            colormap_metrics=args.closed_loop_colormap_metrics,
-            near_miss_thresh=args.closed_loop_near_miss_thresh,
-            report_base_url=args.closed_loop_report_base_url or None,
-            render_media=is_final_save,
-        )
-        print(
-            f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
-            f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
-            f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
-            f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
-            f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
-            f"{len(summary['video_mp4s'])} video(s)"
-        )
-        return site_log, summary
-
-    log: dict = {}
-    site_summaries: dict[str, dict] = {}
-    episode_data: list = []  # (label, rows, out_dir) for the ONE combined table, across BOTH sources
-    site_report_labels: list[str] = []
-
-    def run_labeled(
-        base_name: str | None,
-        npz_root,
-        mode_pairs: tuple[tuple[str, bool], ...],
-        *,
-        track_for_report: bool = False,
-    ) -> None:
-        """Run ``npz_root`` once per requested object-mode, merging into log/site_summaries/episode_data.
-
-        "noobj" gets a distinct label (suffix) rather than a separate axis, so it rides the
-        existing per-site machinery (wandb keys, metric_regex overlay, combined episode table)
-        unchanged. When only "objects" is requested (the common single-mode case), the
-        label/out_dir stay exactly as a bare single call would use (``base_name`` verbatim, no
-        subdir).
-        """
-        multi = len(mode_pairs) > 1
-        for tag, drop_objects in mode_pairs:
-            if multi:
-                base = base_name or "main"
-                label = f"{base}__noobj" if tag == "noobj" else base
-            else:
-                label = base_name
-            site_out_dir = os.path.join(out_dir, label) if label else out_dir
-            site_log, summary = run_one(npz_root, site_out_dir, label, drop_objects=drop_objects)
-            if not summary:
-                continue
-            episode_label = label or "main"
-            log.update(site_log)
-            site_summaries[episode_label] = summary
-            episode_data.append((episode_label, summary.get("segments") or [], site_out_dir))
-            if track_for_report:
-                site_report_labels.append(episode_label)
-
     try:
-        if args.closed_loop_npz_root:
-            npz_modes = _object_mode_pairs(args.closed_loop_npz_object_modes)
-            run_labeled(None, args.closed_loop_npz_root, npz_modes)
+        run_closed_loop_main(
+            model=net,
+            model_args=args,
+            cfg=args,
+            out_root=out_dir,
+            wandb_run=wandb.run,
+            only_json=None,
+            render_media=args.render_media,
+        )
 
-        if args.closed_loop_sites_npz_root:
-            sites = discover_sites_from_json(args.closed_loop_sites_npz_root)
-            if not sites:
-                print(f"closed-loop: no sites found under {args.closed_loop_sites_npz_root}")
-            sites_modes = _object_mode_pairs(args.closed_loop_sites_object_modes)
-            for site_name, npz_root in sites.items():
-                run_labeled(site_name, npz_root, sites_modes, track_for_report=True)
+        if ddp.get_rank() == 0:
+            for group_key, summary in _load_group_results(out_dir).items():
+                print(
+                    f"closed-loop [{group_key}] @epoch {epoch + 1}: {summary.get('n_segments', 0)} seg in "
+                    f"{summary.get('elapsed_sec', 0):.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                    f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+                    f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+                    f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+                    f"{len(summary.get('video_mp4s', []))} video(s)"
+                )
 
-        # One combined, filterable/groupable episode table across every source/site/mode.
-        if episode_data:
-            log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
-        # Cross-source/site pooled rollup under closed_loop_overview/*.
-        if len(site_summaries) > 1:
-            log.update(build_sites_aggregate_log(site_summaries))
-        # Local HTML gallery, sites only (see site_report_labels above) -- only built on
-        # is_final_save, same as the media (videos/colormap images) it links to.
-        if is_final_save and site_report_labels:
-            report_path = build_html_report(out_dir, site_report_labels)
-            if report_path:
-                print(f"closed-loop: wrote {report_path}")
     finally:
         net.decoder._ego_prediction_from_control = prev_ego_prediction_from_control
         net.train(was_training)
 
-    if log:
-        wandb.log(log, step=epoch + 1)
+
+def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> None:
+    """Evaluate a just-saved checkpoint against the OpenSCENARIO suite, out of process.
+
+    Rank 0 only, on the checkpoint-save cadence. The other ranks wait at the next epoch's
+    ``torch.distributed.barrier()``, which inherits the process group's timeout.
+
+    The driver fans out one process per scenario, which is the configuration the suite's
+    throughput was measured with: the rollout saturates the GPUs in time only near 96-way
+    concurrency, so sharding one scenario per rank inside this process would leave most of that
+    throughput unused. It also keeps the ROS overlay out of the training process -- the driver
+    sources it for its own children, so nothing here imports the interpreter.
+
+    A failed evaluation is reported and training continues: losing a data point costs less than
+    losing the run.
+    """
+    if not args.scenario_sim_driver:
+        return
+
+    started = time.perf_counter()
+    rc = subprocess.run(
+        ["bash", args.scenario_sim_driver],
+        env={**os.environ, "CKPT": ckpt_path, "OUT": out_dir},
+    ).returncode
+    elapsed = time.perf_counter() - started
+    status = "ok" if rc == 0 else f"FAILED rc={rc}"
+    print(f"scenario_sim @epoch {epoch + 1}: {status} in {elapsed:.1f}s -> {out_dir}", flush=True)
+
+    if rc != 0 or not args.use_wandb or wandb.run is None:
+        return
+
+    try:
+        from scenario_generation.wandb_scenario_sim import (
+            build_scenario_sim_wandb_payload,
+            load_case_rows,
+        )
+
+        out_p = Path(out_dir)
+        payload = build_scenario_sim_wandb_payload(load_case_rows(out_p), media_root=out_p)
+        wandb.run.log(payload, step=epoch + 1)
+        print(
+            f"wandb: logged scenario_sim @epoch {epoch + 1} "
+            f"(pass rate {payload.get('scenario_sim/pass_rate')}%)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"Warning: Failed to log scenario_sim to wandb: {exc}", flush=True)
 
 
 def model_training(args: TrainConfig):
+    save_path = args.save_dir
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp
-    global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
+    global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
 
     if global_rank == 0:
@@ -330,9 +245,6 @@ def model_training(args: TrainConfig):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
         print("Deterministic mode: {}".format(args.deterministic))
-
-        save_path = args.save_dir
-        os.makedirs(save_path, exist_ok=True)
 
         # Save args
         args_dict = vars(args)
@@ -344,11 +256,9 @@ def model_training(args: TrainConfig):
         }
         args_dict["major_version"] = 5
 
+        os.makedirs(save_path, exist_ok=True)
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
-
-    else:
-        save_path = None
 
     # set seed
     set_seed(args.seed + global_rank)
@@ -369,6 +279,8 @@ def model_training(args: TrainConfig):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        elif args.augment_type == "frenet":
+            aug = frenet_augmenter_from_args(args)
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
@@ -474,7 +386,12 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    scheduler = CosineAnnealingWarmUpRestarts(
+        optimizer,
+        train_epochs,
+        args.warm_up_epoch,
+        lr_schedule=args.lr_schedule,
+    )
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
@@ -573,14 +490,10 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs
-        final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
-                adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
-                adjusted_lr = base_lr * 0.1
+        # Adjust learning rate for the final 10 epochs (constant schedule only —
+        # the cosine schedule already anneals to 0 and must not be overridden)
+        adjusted_lr = final_phase_lr(args.learning_rate, epoch, train_epochs, args.lr_schedule)
+        if adjusted_lr is not None:
             for param_group in optimizer.param_groups:
                 param_group["lr"] = adjusted_lr
             if global_rank == 0:
@@ -683,7 +596,19 @@ def model_training(args: TrainConfig):
                 step=epoch + 1,
             )
 
-            scenario_based_open_loop_validate(diffusion_planner, args, epoch)
+            scenario_output_dir = None
+            if (epoch + 1 - init_epoch) % save_utd == 0:
+                scenario_output_dir = os.path.join(
+                    save_path,
+                    f"epoch{epoch + 1:04d}",
+                    "open_loop_override",
+                )
+            scenario_based_open_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                output_dir=scenario_output_dir,
+            )
 
             curr_data = {
                 "epoch": epoch + 1,
@@ -733,17 +658,11 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
-                    train_epochs - init_epoch
-                ) // save_utd
-                closed_loop_validate(
-                    diffusion_planner,
+                scenario_sim_validate(
                     args,
                     epoch,
-                    os.path.join(curr_dir, "closed_loop"),
-                    is_final_save=is_final_save,
+                    f"{curr_dir}/best_model.pth",
+                    os.path.join(curr_dir, "scenario_sim"),
                 )
 
             if valid_loss_ego_position_lat_loss < best_loss:
@@ -768,8 +687,25 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
+        if epoch + 1 == train_epochs:
+            # closed-loop validation runs on all ranks, only at the final epoch
+            curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
+            os.makedirs(curr_dir, exist_ok=True)
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(curr_dir, "closed_loop"),
+            )
+
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+
+    # Tear down the DDP process group explicitly: without this, NCCL's heartbeat +
+    # IB event threads can intermittently deadlock interpreter shutdown and the
+    # training process never exits (observed hanging a full R2LPL round).
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()

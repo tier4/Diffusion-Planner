@@ -39,7 +39,7 @@ repositories:
   universe/autoware_universe:
     type: git
     url: https://github.com/autowarefoundation/autoware_universe.git
-    version: c7a6d0a1aac3a00c1c26277f66277bcfb25d8bf6
+    version: 38fdac624d1eaa981913857325bb4eea953c7e3c
   universe/external/tier4_autoware_msgs:
     type: git
     url: https://github.com/tier4/tier4_autoware_msgs.git

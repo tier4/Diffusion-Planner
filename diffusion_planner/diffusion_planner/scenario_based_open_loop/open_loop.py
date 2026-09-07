@@ -13,10 +13,23 @@ from torch.utils.data import DataLoader
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
+from planner_metrics.gt_lateral_deviation import evaluate_gt_lateral_deviation_with_details
+from planner_metrics.object_avoidance import evaluate_object_avoidance_with_details
+from planner_metrics.scene_data import extract_metric_scene_data
+from planner_metrics.stop_overshoot import evaluate_stop_overshoot_with_details
+from planner_metrics.yield_progress import evaluate_yield_progress_with_details
 
 METRICS = {
     "centerline": evaluate_centerline_with_details,
     "departure": evaluate_departure_with_details,
+    "traffic_light_go": evaluate_departure_with_details,
+    "simple_turn": evaluate_gt_lateral_deviation_with_details,
+    "object_avoidance": evaluate_object_avoidance_with_details,
+    "pedestrian_yield": evaluate_yield_progress_with_details,
+    "vehicle_yield": evaluate_yield_progress_with_details,
+    "temporal_stop": evaluate_yield_progress_with_details,
+    "obstacle_stop": evaluate_stop_overshoot_with_details,
+    "traffic_light_stop": evaluate_stop_overshoot_with_details,
 }
 
 
@@ -149,9 +162,11 @@ def run_scenario_based_open_loop_validation(
                 }
                 prepared = _prepare_validation_inputs(inputs, args, args.device)
                 _, outputs = model(prepared.inputs)
-                # Match validate_model's convention: predictions are physical
-                # coordinates and metric inputs are denormalized.
-                metric_inputs = args.observation_normalizer.inverse(prepared.inputs)
+                # Scorers see only the raw scene fields they declare needing
+                # (planner_metrics.scene_data), never the model's prepared/
+                # normalized batch — this keeps metric evaluation decoupled
+                # from the NPZ-driven model-input pipeline.
+                metric_inputs = extract_metric_scene_data(raw_inputs)
                 batch_size = int(outputs["prediction"].shape[0])
                 ego_prediction = outputs["prediction"][:, 0]
                 batch_start = count
@@ -172,9 +187,10 @@ def run_scenario_based_open_loop_validation(
 
                 for batch_index in range(batch_size):
                     sample_index = batch_start + batch_index
+                    source_npz = paths[sample_index]
                     detail = {
                         "sample_index": sample_index,
-                        "source_npz": str(paths[sample_index]),
+                        "source_npz": str(source_npz),
                         "metrics": {
                             key: float(value[batch_index].detach().float().item())
                             for key, value in per_sample_scores.items()
@@ -191,19 +207,20 @@ def run_scenario_based_open_loop_validation(
                             else value
                             for key, value in raw_inputs.items()
                         }
+                        # Named after the source NPZ (rather than a bare sample
+                        # index) so the PNG is identifiable without cross-
+                        # referencing details.jsonl; the title matches.
+                        npz_stem = Path(source_npz).stem
+                        png_path = visualization_root / metric_name / f"{sample_index:06d}_{npz_stem}.png"
                         visualize_scenario_prediction(
                             sample_inputs,
                             ego_prediction[batch_index],
-                            visualization_root
-                            / metric_name
-                            / f"sample_{batch_start + batch_index:08d}.png",
-                            f"{metric_name} sample {sample_index}",
+                            png_path,
+                            npz_stem,
                             show_neighbors=True,
                             view_range=60.0,
                         )
-                        detail["visualization_png"] = str(
-                            visualization_root / metric_name / f"sample_{sample_index:08d}.png"
-                        )
+                        detail["visualization_png"] = str(png_path)
                     details.append(detail)
 
             if details_root is not None:
@@ -214,8 +231,7 @@ def run_scenario_based_open_loop_validation(
                     encoding="utf-8",
                 )
 
-            summaries[metric_name] = {"sample_count": float(count)}
-            summaries[metric_name].update(
+            summaries[metric_name] = (
                 {key: total / count for key, total in totals.items()} if count else {}
             )
     finally:

@@ -278,6 +278,17 @@ _ANCHOR_SLOTS_6 = [_anchor_slot(i) for i in range(6)]
 # The full prototype library (rows 0-15) as a pure anchor fan.
 _ANCHOR_SLOTS_16 = [_anchor_slot(i) for i in range(16)]
 
+# Route-centerline guided slots for the repair fan: candidates pulled
+# toward the route centerline so curve repairs have an on-centerline mode to select instead
+# of a prototype shortcut. Scales <= 3 (route-CL guidance rule); noise (0.3, 0.8) sits at
+# and slightly below the proven [0.5, 2.0] envelope's low edge — deliberately tighter than
+# the sampling envelope so the guided slots stay close to their centerline mode.
+_ROUTE_CL_SLOTS_3 = [
+    {"cl": 2.0, "spd": 0.0, "noise": (0.0, 0.0), "label": "routeCL2_det"},
+    {"cl": 3.0, "spd": 0.0, "noise": (0.3, 0.8), "label": "routeCL3_n0308"},
+    {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "label": "routeCL3_SPD3_n0308"},
+]
+
 # Noise sweeps
 _NOISE_SWEEP_FULL = [
     {"noise": (0.1, 0.3), "label": "noise_n0103"},
@@ -323,6 +334,13 @@ _VARIANTS: dict[str, GenerationVariant] = {
         "noise. Multimodal exploration via prototype paths.",
         cl_spd_configs=_GUIDED_RSFT_V2 + _ANCHOR_SLOTS_6,
         noise_configs=_NOISE_SWEEP_FULL[2:5],
+    ),
+    "anchor_fan_16_cl3": GenerationVariant(
+        description="anchor_fan_16 + 3 route-centerline guided slots (cl 2-3, "
+        "requires use_route_cl_guidance) — K=20. Gives repair selection an "
+        "on-centerline mode so curve fixes need not come from prototype paths.",
+        cl_spd_configs=_ANCHOR_SLOTS_16 + _ROUTE_CL_SLOTS_3,
+        noise_configs=[],
     ),
     "anchor_fan_16": GenerationVariant(
         description="Pure prototype fan: det + one anchor-mode slot per "

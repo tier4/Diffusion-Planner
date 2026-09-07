@@ -19,8 +19,49 @@ EGO_AGENT_PAST_IDX_Y = 1
 EGO_AGENT_PAST_IDX_COS = 2
 EGO_AGENT_PAST_IDX_SIN = 3
 
+
+class EGOSHAPE:
+    WHEEL_BASE = 0
+    LENGTH = 1
+    WIDTH = 2
+
+
+class LINESTRING:
+    X = 0
+    Y = 1
+    STOP_LINE_FLAG = 2
+    ROAD_BORDER_FLAG = 3
+
+
+class EGOSTATE:
+    X = 0
+    Y = 1
+    COS = 2
+    SIN = 3
+    VX = 4
+    VY = 5
+    AX = 6
+    AY = 7
+    STEERING = 8
+    YAW_RATE = 9
+
+
+class NEIGHBORSTATE:
+    X = 0
+    Y = 1
+    COS = 2
+    SIN = 3
+    VX = 4
+    VY = 5
+    AX = 6
+    AY = 7
+    VEHICLE_FLAG = 8
+    PEDESTRIAN_FLAG = 9
+    CYCLIST_FLAG = 10
+
+
 LINE_TYPE_NUM = 10
-# Index for each field
+# Index for each field for lane/route lanes
 X = 0
 Y = 1
 dX = 2

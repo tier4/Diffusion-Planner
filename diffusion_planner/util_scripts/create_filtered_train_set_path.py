@@ -11,27 +11,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("root_dir", type=Path)
     parser.add_argument("--save_path", type=Path, required=True)
     parser.add_argument("--time_filter_json", type=Path, required=True)
+    parser.add_argument("--no_exclude_skipped", action="store_true")
     return parser.parse_args()
 
 
-def extract_timestamp_from_path(file_path: Path) -> int | None:
-    """Extract timestamp from corresponding JSON file.
+def read_frame_meta(file_path: Path) -> tuple[int | None, bool | None]:
+    """Read (timestamp, is_skipped) from the sibling JSON of an npz file.
 
-    For an npz file path, reads the corresponding .json file and extracts the timestamp field.
+    For an npz file path, reads the corresponding .json file.
     Expected format: .../YYYY-MM-DD/HH-MM-SS/HH-MM-SS_TIMESTAMP.npz
     Corresponding JSON: .../YYYY-MM-DD/HH-MM-SS/HH-MM-SS_TIMESTAMP.json
-    Returns the timestamp as integer, or None if not found.
+    Each element is None when it cannot be read, so the caller can tell a missing
+    or unreadable json apart from an explicit value.
     """
-    # Convert .npz path to .json path
     json_path = file_path.with_suffix(".json")
 
-    # Check if JSON file exists
-    if json_path.exists():
+    try:
         with open(json_path, "r") as f:
             data = json.load(f)
-            if "timestamp" in data:
-                return int(data["timestamp"])
-    return None
+    except (OSError, json.JSONDecodeError):
+        return None, None
+
+    timestamp = int(data["timestamp"]) if "timestamp" in data else None
+    return timestamp, bool(data.get("is_skipped", False))
 
 
 def load_time_ranges(filter_json_path: Path) -> list[tuple[int, int]]:
@@ -114,13 +116,30 @@ if __name__ == "__main__":
     log.write(f"Loaded {len(time_ranges)} time ranges\n")
 
     filtered_list = []
+    n_dropped_skipped = 0
+    n_unverified = 0
     for file_path in all_list:
-        timestamp = extract_timestamp_from_path(file_path)
-        if is_timestamp_in_ranges(timestamp, time_ranges):
-            filtered_list.append(file_path)
+        timestamp, is_skipped = read_frame_meta(file_path)
+        if not is_timestamp_in_ranges(timestamp, time_ranges):
+            continue
+        # Same policy as create_train_set_path.py: drop is_skipped=True, keep
+        # unverifiable frames (missing/unreadable json) so nothing is silently lost.
+        if not args.no_exclude_skipped:
+            if is_skipped is True:
+                n_dropped_skipped += 1
+                continue
+            if is_skipped is None:
+                n_unverified += 1
+        filtered_list.append(file_path)
 
-    print(f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total")
-    log.write(f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total\n")
+    msg = f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total"
+    if not args.no_exclude_skipped:
+        msg += (
+            f" (is_skipped filter: dropped {n_dropped_skipped}, "
+            f"kept-but-unverified (missing json) {n_unverified})"
+        )
+    print(msg)
+    log.write(msg + "\n")
 
     all_list = filtered_list
 

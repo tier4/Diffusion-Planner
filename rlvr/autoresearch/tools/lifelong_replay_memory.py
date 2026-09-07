@@ -79,6 +79,20 @@ def _row_label(row: dict[str, Any]) -> str:
     return str(row.get("label") or row.get("failure_label") or "unknown")
 
 
+def _row_quota_keys(row: dict[str, Any]) -> list[str]:
+    """Quota keys a row can satisfy: its label, plus ``label/reason`` for rows
+    that carry an expert-disagreement reason, so the two behavioral teacher
+    classes (rushing = ``expert_wait_model_forward``, lagging/take-off =
+    ``model_lagging_expert``) can be reserved separately from the umbrella
+    label instead of competing inside it."""
+    label = _row_label(row)
+    keys = [label]
+    reason = row.get("expert_disagreement_reason")
+    if reason:
+        keys.append(f"{label}/{reason}")
+    return keys
+
+
 def build_memory(
     current_rows: list[dict[str, Any]],
     previous_memory: dict[str, Any],
@@ -106,9 +120,16 @@ def build_memory(
     difficulty_raw = {}
     utility_raw = {}
     for path, row in entries.items():
-        difficulty_raw[path] = float(
-            row.get("difficulty", row.get("credit_width", row.get("window_width", 1.0))) or 1.0
-        )
+        explicit = row.get("difficulty", row.get("credit_width", row.get("window_width")))
+        if explicit is None and row.get("selected_total") is not None:
+            # Repaired rows carry no width fields but do carry the winning
+            # candidate's reward total: a LOWER total means every candidate
+            # scored badly there, i.e. a harder scene. Negate so harder rows
+            # rank higher. Without this every row ties at 1.0 and eviction
+            # degenerates to the alphabetical tiebreak.
+            difficulty_raw[path] = -float(row["selected_total"])
+        else:
+            difficulty_raw[path] = float(explicit if explicit is not None else 1.0)
         utility_raw[path] = float(per_scene_loss.get(path, row.get("utility", 0.0)) or 0.0)
     difficulty = _normalize(difficulty_raw)
     utility = _normalize(utility_raw)
@@ -144,7 +165,8 @@ def build_memory(
     if label_quotas:
         by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in scored_rows:
-            by_label[_row_label(row)].append(row)
+            for key in _row_quota_keys(row):
+                by_label[key].append(row)
         for label, frac in sorted(label_quotas.items()):
             reserve = int(frac * capacity)
             pool = sorted(

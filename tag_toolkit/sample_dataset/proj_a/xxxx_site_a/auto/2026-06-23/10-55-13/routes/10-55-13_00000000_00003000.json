@@ -1,0 +1,11 @@
+{
+ "bag_time": "10-55-13",
+ "date": "2026-06-23",
+ "project_id": "proj_a",
+ "tags": [
+  "longitudinal:yield",
+  "override_metric:centerline",
+  "site:xxxx_site_a",
+  "split:auto"
+ ]
+}

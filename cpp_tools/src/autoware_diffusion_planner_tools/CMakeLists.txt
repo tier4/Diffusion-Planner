@@ -43,6 +43,7 @@ ament_auto_add_executable(data_converter
   src/data_converter.cpp
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
+  src/conversion/override_segments.cpp
   src/io/frame_writer.cpp
   src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
@@ -63,6 +64,7 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
   src/parse_rosbag_for_directory_with_map_version.cpp
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
+  src/conversion/override_segments.cpp
   src/io/frame_writer.cpp
   src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
@@ -78,6 +80,14 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
 )
 target_include_directories(parse_rosbag_for_directory_with_map_version PRIVATE include src)
 target_link_libraries(parse_rosbag_for_directory_with_map_version yaml-cpp ZLIB::ZLIB Threads::Threads CLI11::CLI11 fmt::fmt)
+
+ament_auto_add_executable(override_interval_extractor
+  src/override_interval_extractor.cpp
+  src/conversion/override_segments.cpp
+  src/rosbag/parsed_bag_data.cpp
+)
+target_include_directories(override_interval_extractor PRIVATE include src)
+target_link_libraries(override_interval_extractor CLI11::CLI11)
 
 ament_auto_add_executable(inference_tool
   src/inference_tool.cpp

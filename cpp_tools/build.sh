@@ -11,10 +11,14 @@ if [[ "${1:-}" == "--test" ]]; then
   exit 0
 fi
 
+# openscenario_utility converts the .yml a webauto pull produces into the .xosc the
+# interpreter reads, expanding ScenarioModifier into one case per combination.
 colcon build \
   --symlink-install \
   --cmake-args \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
   -DBUILD_TESTING=0 \
-  --packages-up-to autoware_diffusion_planner_tools
+  -DSSV2_HEADLESS_EGO=ON \
+  -DCMAKE_CXX_FLAGS=-DSSV2_HEADLESS_EGO \
+  --packages-up-to autoware_diffusion_planner_tools openscenario_python autoware_lanelet2_extension_python behavior_tree_plugin openscenario_utility

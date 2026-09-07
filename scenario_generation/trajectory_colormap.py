@@ -5,10 +5,9 @@ Reads the per-step trace ``reproducer_rollout.render_segment`` already writes to
 one line per step) and draws a colored polyline (risk metric -> color) with a colorbar
 legend, similar in spirit to a routing app's "road risk" heatmap overlay.
 
-Used by both the local HTML gallery (one PNG per route/segment, all routes) and the
-W&B representative-case image (one PNG per site, ``wandb.Image``, worst-case route
-only) — same renderer, same look, so a human comparing the two is looking at the
-same visualization either way.
+Used by both the W&B representative-case image (one PNG per group, ``wandb.Image``,
+worst-case route) and the local video/colormap output — same renderer, same look,
+so a human comparing the two is looking at the same visualization either way.
 """
 
 from __future__ import annotations
@@ -39,6 +38,20 @@ _DT = 0.1
 # adds clutter without adding information the title ("metric: collision") doesn't already
 # give, so it's skipped for these.
 _BINARY_METRICS = ("collision", "near_miss", "red_light", "strong_brake")
+
+# The trace key each metric is derived from. A producer that never observed a quantity omits its
+# key entirely, and every accessor below defaults to the safe value -- which would paint a
+# uniform "no event" picture indistinguishable from a measured zero. Checking for the key lets
+# an unobserved metric be skipped instead, for any producer and for runs already on disk.
+_METRIC_TRACE_KEYS = {
+    "clearance": "clearance_m",
+    "collision": "collision",
+    "near_miss": "clearance_m",
+    "speed": "speed",
+    "road_border": "rb_dist_m",
+    "red_light": "red_light_violation",
+    "strong_brake": "speed",
+}
 
 # Short colorbar axis label. The ticks themselves (see _risk_and_ticks) carry the actual
 # units/values — qualitative low/medium/high/very high labels alone aren't legible without
@@ -178,10 +191,14 @@ def render_trajectory_colormap(
     scheme as ``"clearance"``; ``None`` on frames with no lane geometry -> treated as safe),
     ``"red_light"`` (binary), ``"strong_brake"`` (binary, accel <= ``strong_brake_mps2``).
     Returns ``out_png`` on success, or ``None`` if there was no per-step trace to draw
-    (e.g. a 0-frame segment, or an old run predating the trace fields).
+    (e.g. a 0-frame segment, or an old run predating the trace fields), or if the run never
+    observed the quantity ``metric`` is derived from -- an unobserved metric has to be absent
+    rather than drawn as a flat "no event", which reads as a measurement that was taken.
     """
     rows = load_step_trace(png_dir)
     if len(rows) < 2:
+        return None
+    if not any(_METRIC_TRACE_KEYS[metric] in r for r in rows):
         return None
 
     import matplotlib
@@ -200,7 +217,7 @@ def render_trajectory_colormap(
 
     # Fixed figure size + fixed axes positions (NOT plt.subplots + bbox_inches="tight"): every
     # metric's PNG must come out at IDENTICAL pixel dimensions, else W&B's gallery panel (which
-    # stacks a site's 5 metric images in one panel) warns "Images sizes do not match" and lays
+    # stacks a group's 5 metric images in one panel) warns "Images sizes do not match" and lays
     # them out wrong. The colorbar area on the right is always reserved; binary metrics
     # (collision/near_miss) simply leave it blank instead of shrinking the plot.
     fig = plt.figure(figsize=(6.4, 4.8), dpi=dpi, facecolor="white")
@@ -293,8 +310,7 @@ def render_trajectory_colormaps(
     """Render one trajectory-colormap PNG per metric in ``metrics`` (default: all of
     :data:`METRIC_CHOICES`), named ``{out_dir}/{stem}_trajcolormap_{metric}.png``.
 
-    Used to feed a single episode's metric-switcher (the local HTML report's per-card
-    dropdown, and W&B's per-metric keys for the one representative episode) — one trajectory,
+    Used to feed W&B's per-metric keys for the one representative episode — one trajectory,
     several colorings, instead of forcing a single metric choice up front. Returns a dict of
     only the metrics that actually rendered (a metric can legitimately be skipped, e.g. no
     per-step trace at all -> every metric skipped; this never raises).

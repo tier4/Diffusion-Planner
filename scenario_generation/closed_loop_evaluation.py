@@ -25,51 +25,68 @@ from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
     enumerate_multi_root_routes,
+    evaluate_segment_pass,
     format_summary_lines,
     load_segment_rows_with_tdigests,
     segment_row_for_json,
     tdigest_sidecar_row,
 )
+from scenario_generation.inference_compile import compiled_for_inference
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
+from tag_toolkit import TagStore
 
 
 @dataclass
 class RolloutParams:
     """Rollout knobs for full-route segment evaluation."""
 
-    device: str = "cuda"
-    near_miss_thresh: float = 0.5
-    search_radius: float = 1.5
-    warmup_steps: int = 0
-    unstick_after: int = 300
-    unstick_advance_m: float = 2.5
-    unstick_radius_mult: float = 10.0
-    unstick_teleport_after: int = 300
+    device: str
+    near_miss_thresh: float
+    search_radius: float
+    warmup_steps: int
+    unstick_after: int
+    unstick_advance_m: float
+    unstick_radius_mult: float
+    unstick_teleport_after: int
     # write a PNG only every N steps; None skips the per-step render entirely (no PNGs, no
     # video, no colormap images -- see build_full_closed_loop_wandb_log's matching
     # render_media) while metrics/wandb scalars are unaffected -- lets a caller (e.g.
     # train.py, most epochs) skip the dominant per-epoch cost and only pay it on the one call
     # that actually needs media (e.g. the final epoch).
-    draw_every: int | None = 8
-    replan_interval: int = 10
-    tracker_mode: str = "mpc"
-    neighbor_history_mode: str = "recorded"
-    yaw_gate: bool = True
-    strong_brake_mps2: float = -2.5
+    draw_every: int | None
+    # Not a render_kwarg: the runner opens the pool and passes it down.
+    draw_workers: int
+    replan_interval: int
+    tracker_mode: str
+    neighbor_history_mode: str
+    yaw_gate: bool
+    strong_brake_mps2: float
     # Early-abort a badly-diverged segment instead of burning the full step budget on a
     # rollout that will never recover (e.g. an undertrained model driving off-lane). Set well
     # above the unstick_* knobs above: unstick snaps the ego back onto GT to let a merely-stuck
     # rollout continue; abort gives up on a rollout unstick can't save. 0 = disabled for either
     # knob. See ``reproducer_rollout.render_segment`` for the exact trigger condition.
-    abort_deviation_m: float = 50.0
-    abort_after: int = 30
-    abort_max_snaps: int = 0
+    abort_deviation_m: float
+    abort_after: int
+    abort_max_snaps: int
     # Empty-world ablation: zero neighbor_agents_past + static_objects each step (map kept) —
     # separates "reacts badly to traffic" from "can't follow the route/map". collision/near-miss
     # are 0 by construction when this is set.
-    drop_objects: bool = False
+    drop_objects: bool
+    goal_mode: str
+    title_prefix: str | None
+    distance_label_offset_m: float
+    view_half_m: float
+    max_stuck_steps: int
+    goal_reach_m: float
+    interpolate: bool
+    color_by_uuid: bool
+    window: tuple[int, int] | None
+    max_steps: int | None
+    timeline_progress_mode: str
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -82,6 +99,7 @@ class RolloutParams:
             "unstick_radius_mult": self.unstick_radius_mult,
             "unstick_teleport_after": self.unstick_teleport_after,
             "draw_every": self.draw_every,
+            # Not need draw_workers here: the runner opens the pool and passes it down.
             "replan_interval": self.replan_interval,
             "tracker_mode": self.tracker_mode,
             "neighbor_history_mode": self.neighbor_history_mode,
@@ -91,6 +109,17 @@ class RolloutParams:
             "abort_after": self.abort_after,
             "abort_max_snaps": self.abort_max_snaps,
             "drop_objects": self.drop_objects,
+            "goal_mode": self.goal_mode,
+            "title_prefix": self.title_prefix,
+            "distance_label_offset_m": self.distance_label_offset_m,
+            "view_half_m": self.view_half_m,
+            "max_stuck_steps": self.max_stuck_steps,
+            "goal_reach_m": self.goal_reach_m,
+            "interpolate": self.interpolate,
+            "color_by_uuid": self.color_by_uuid,
+            "window": self.window,
+            "max_steps": self.max_steps,
+            "timeline_progress_mode": self.timeline_progress_mode,
         }
 
 
@@ -100,10 +129,19 @@ class ClosedLoopEvalConfig:
 
     out_dir: Path
     params: RolloutParams
-    fps: float = 10.0
-    verbose: bool = True
-    profile: bool = False
-    max_jobs: int | None = None
+    fps: float
+    verbose: bool
+    profile: bool
+    max_jobs: int | None
+    # Pass-condition for per-segment pass/fail + aggregated pass stats in the summary.
+    # ``None`` disables pass evaluation entirely — the segment row never gains a ``passed``
+    # field and the summary never carries ``pass_count`` / ``pass_rate`` / ``pass_condition``.
+    # Callers that don't care (e.g. scenario_sim viewer export, training validation without
+    # a pass YAML) leave it at the default and see no change in summary shape. The CLI
+    # pipeline (``run_all_groups_closed_loop``) always sets it from ``cfg.pass_conditions``
+    # (which itself falls back to an all-True default), so its summaries always include
+    # pass stats.
+    pass_condition: "ClosedLoopPassCondition | None" = None
 
 
 @dataclass
@@ -167,7 +205,8 @@ class ClosedLoopEvaluation(ABC):
                 f"{len(jobs)} job(s) -> {[j.job_id for j in jobs]}"
             )
 
-        result = self.execute_jobs(jobs)
+        with compiled_for_inference(self.model):
+            result = self.execute_jobs(jobs)
         elapsed_sec = time.perf_counter() - t0
 
         if self.ddp_world_size > 1:
@@ -336,7 +375,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
 
     ``npz_root`` accepts anything ``closed_loop_eval.resolve_npz_roots`` does: a single
     directory tree, a ``.json`` path-list file, or an already-resolved list of root paths
-    (e.g. one site's several curated date/time entries from a JSON-manifest-based site
+    (e.g. one group's several curated date/time entries from a JSON-manifest-based group
     discovery) -- ``discover_jobs`` merges routes across all of them.
     """
 
@@ -349,9 +388,10 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         config: ClosedLoopEvalConfig,
         npz_root: Path | str | list[Path | str],
         *,
-        seg_len: int = 100_000,
-        ddp_rank: int = 0,
-        ddp_world_size: int = 1,
+        seg_len: int,
+        ddp_rank: int,
+        ddp_world_size: int,
+        tag_store=None,
     ) -> None:
         super().__init__(
             model,
@@ -362,6 +402,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         )
         self.npz_root = npz_root
         self.seg_len = seg_len
+        self.tag_store = tag_store
 
     @classmethod
     def from_checkpoint(
@@ -370,9 +411,10 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         npz_root: Path | str | list[Path | str],
         config: ClosedLoopEvalConfig,
         *,
-        seg_len: int = 100_000,
-        ddp_rank: int = 0,
-        ddp_world_size: int = 1,
+        seg_len: int,
+        ddp_rank: int,
+        ddp_world_size: int,
+        tag_store=None,
     ) -> FullRouteClosedLoopEvaluation:
         model, model_args = cls.load_model_pair(model_path, config.params.device)
         return cls(
@@ -383,6 +425,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             seg_len=seg_len,
             ddp_rank=ddp_rank,
             ddp_world_size=ddp_world_size,
+            tag_store=tag_store,
         )
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
@@ -412,10 +455,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         with (
             segments_path.open("w", encoding="utf-8") as fout,
             digests_path.open("w", encoding="utf-8") as fdigest,
+            # One pool for every segment: a spawned worker re-imports torch and matplotlib.
+            render_pool(self.config.params.draw_workers) as draw_pool,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
-                partial = self.run_job(job, segments_file=fout, digest_file=fdigest)
+                partial = self.run_job(
+                    job, segments_file=fout, digest_file=fdigest, draw_pool=draw_pool
+                )
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
                 merged.extras["route_keys"].append(job.route_key)
@@ -428,6 +475,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         *,
         segments_file=None,
         digest_file=None,
+        draw_pool=None,
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
@@ -446,8 +494,13 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 end,
                 png_dir,
                 **params.render_kwargs(),
+                draw_pool=draw_pool,
             )
             row = {"route": job.route_key, **metrics}
+            if self.config.pass_condition is not None:
+                row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
+            if self.tag_store:
+                row["tags"] = self.tag_store.tags_of(scope=job.route_paths, granularity="route")
             if segments_file is not None:
                 # Human-readable segments.jsonl never carries the raw _tdigest blobs; those go to
                 # the sidecar so a later DDP merge (or a re-load of this run) can still pool an
@@ -499,6 +552,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             result.rows,
             self.config.params.near_miss_thresh,
             strong_brake_mps2=self.config.params.strong_brake_mps2,
+            pass_condition=self.config.pass_condition,
         )
         summary["npz_root"] = str(self.npz_root)
         # Derived straight from the merged rows (each carries its own "route") rather than

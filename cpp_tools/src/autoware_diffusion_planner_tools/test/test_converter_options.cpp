@@ -49,6 +49,7 @@ static ConverterOptions make_default_opts()
   o.write_skipped_npz = false;
   o.sidecar_only = false;
   o.pack_sequence = false;
+  o.extract_override_segments = false;
   return o;
 }
 
@@ -78,6 +79,7 @@ TEST(DefaultConverterOptionsTest, UsesSharedDefaults)
   EXPECT_FALSE(opts.write_skipped_npz);
   EXPECT_FALSE(opts.sidecar_only);   // full conversion (writes npz) by default
   EXPECT_FALSE(opts.pack_sequence);  // one file per frame by default
+  EXPECT_FALSE(opts.extract_override_segments);
 }
 
 TEST(NormalizeOptionsTest, PackSequenceForcesWriteSkippedNpz)

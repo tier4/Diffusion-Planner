@@ -7,3 +7,4 @@ install
 /src/core/
 /src/universe/
 /src/sensor_component/
+/src/simulator/

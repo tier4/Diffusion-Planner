@@ -37,6 +37,12 @@
 template <typename T>
 using TimedMsg = std::pair<int64_t, T>;
 
+struct ControlModeSample
+{
+  int64_t rosbag_time;
+  int32_t mode;
+};
+
 struct ParsedBagData
 {
   std::deque<TimedMsg<nav_msgs::msg::Odometry>> kinematic_states;
@@ -45,6 +51,7 @@ struct ParsedBagData
   std::deque<TimedMsg<autoware_vehicle_msgs::msg::TurnIndicatorsReport>> turn_indicators;
   std::vector<TimedMsg<autoware_planning_msgs::msg::LaneletRoute>> route_msgs;
   std::deque<TimedMsg<autoware_perception_msgs::msg::TrafficLightGroupArray>> traffic_signals;
+  std::vector<ControlModeSample> control_modes;
   timestamp_stats::TimestampStatsMap timestamp_stats_map;
 
   explicit ParsedBagData(const std::vector<std::string> & target_topics)
@@ -53,7 +60,8 @@ struct ParsedBagData
   }
 };
 
-ParsedBagData load_rosbag(const std::string & rosbag_path, int64_t limit);
+ParsedBagData load_rosbag(
+  const std::string & rosbag_path, int64_t limit, bool load_control_modes = false);
 
 // Returns std::nullopt if no topics are missing; otherwise returns SkippingInfo describing
 // which topics are missing.

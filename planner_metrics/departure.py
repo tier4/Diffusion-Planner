@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from planner_metrics.evaluation import MetricEvaluation
+from planner_metrics.horizon import resolve_horizon_steps
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
 
@@ -59,7 +60,7 @@ def evaluate_departure(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> dict[str, torch.Tensor]:
-    """Return departure failure as 0 or 100 percent per trajectory."""
+    """Return departure success as 0 or 100 percent per trajectory."""
     return evaluate_departure_with_details(ego_trajs, data, parameters).scores
 
 
@@ -70,21 +71,22 @@ def evaluate_departure_with_details(
 ) -> MetricEvaluation:
     """Evaluate departure metrics and return per-sample diagnostic details.
 
-    The aggregate score is the departure failure rate in percent. The detail
+    The aggregate score is the departure success rate in percent. The detail
     section additionally records the configured threshold and horizon, the
     maximum displacement observed for each sample, and the resulting departure
     decision.
     """
     horizon_seconds = float(parameters["horizon_seconds"])
     minimum = float(parameters["minimum_displacement_m"])
-    if horizon_seconds <= 0:
-        raise ValueError("departure horizon_seconds must be positive")
-    steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), ego_trajs.shape[1])
-    if steps < 1:
-        raise ValueError("departure horizon selects zero prediction steps")
+    steps = resolve_horizon_steps(
+        horizon_seconds,
+        ego_trajs.shape[1],
+        label="departure",
+        timestep_seconds=_PREDICTION_TIMESTEP_SECONDS,
+    )
     maximum = compute_max_displacement_batch(ego_trajs, data, steps)
     return MetricEvaluation(
-        scores={"failure_rate_percent": (maximum < minimum).to(ego_trajs.dtype) * 100.0},
+        scores={"success_rate_percent": (maximum >= minimum).to(ego_trajs.dtype) * 100.0},
         details={
             "departure": {
                 "horizon_seconds": torch.full_like(maximum, horizon_seconds),

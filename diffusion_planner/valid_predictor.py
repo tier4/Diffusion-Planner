@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from diffusion_planner.config import ValidConfig
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.open_loop import (
     run_scenario_based_open_loop_validation,
@@ -14,7 +15,6 @@ from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
-from diffusion_planner.valid_config import ValidConfig
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
     aggregate_valid_metrics,
@@ -187,11 +187,44 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_centerline_horizon_seconds=getattr(
                     config_obj, "scenario_centerline_horizon_seconds", 8.0
                 ),
+                scenario_simple_turn_horizon_seconds=getattr(
+                    config_obj, "scenario_simple_turn_horizon_seconds", 8.0
+                ),
                 scenario_departure_horizon_seconds=getattr(
                     config_obj, "scenario_departure_horizon_seconds", 3.0
                 ),
                 scenario_departure_minimum_displacement_m=getattr(
                     config_obj, "scenario_departure_minimum_displacement_m", 2.0
+                ),
+                scenario_traffic_light_go_horizon_seconds=getattr(
+                    config_obj, "scenario_traffic_light_go_horizon_seconds", 3.0
+                ),
+                scenario_traffic_light_go_minimum_displacement_m=getattr(
+                    config_obj, "scenario_traffic_light_go_minimum_displacement_m", 2.0
+                ),
+                scenario_pedestrian_yield_horizon_seconds=getattr(
+                    config_obj, "scenario_pedestrian_yield_horizon_seconds", 3.0
+                ),
+                scenario_pedestrian_yield_maximum_forward_progress_m=getattr(
+                    config_obj, "scenario_pedestrian_yield_maximum_forward_progress_m", 0.5
+                ),
+                scenario_vehicle_yield_horizon_seconds=getattr(
+                    config_obj, "scenario_vehicle_yield_horizon_seconds", 3.0
+                ),
+                scenario_vehicle_yield_maximum_forward_progress_m=getattr(
+                    config_obj, "scenario_vehicle_yield_maximum_forward_progress_m", 0.5
+                ),
+                scenario_temporal_stop_horizon_seconds=getattr(
+                    config_obj, "scenario_temporal_stop_horizon_seconds", 3.0
+                ),
+                scenario_temporal_stop_maximum_forward_progress_m=getattr(
+                    config_obj, "scenario_temporal_stop_maximum_forward_progress_m", 0.5
+                ),
+                scenario_obstacle_stop_tolerance_m=getattr(
+                    config_obj, "scenario_obstacle_stop_tolerance_m", 0.5
+                ),
+                scenario_traffic_light_stop_tolerance_m=getattr(
+                    config_obj, "scenario_traffic_light_stop_tolerance_m", 0.5
                 ),
                 batch_size=valid_cfg.batch_size,
                 num_workers=valid_cfg.num_workers,

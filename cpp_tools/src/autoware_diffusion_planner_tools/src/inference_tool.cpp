@@ -33,8 +33,7 @@
 #include <geometry_msgs/msg/accel_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
-#include <boost/geometry/algorithms/distance.hpp>
-#include <boost/geometry/algorithms/intersects.hpp>
+#include <boost/geometry.hpp>
 
 #include <lanelet2_io/Io.h>
 #include <rcl_yaml_param_parser/parser.h>
