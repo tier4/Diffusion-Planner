@@ -299,6 +299,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # knobs with a different augmentation realisation, which is the opposite of what
         # applying them after the veto is for. Off this stream they cannot reach it.
         self.hist_gen = torch.Generator(device="cpu").manual_seed(seed + rank + 1)
+        # Same reasoning as hist_gen, for the toward-parked coin: see __call__.
+        self.toward_gen = torch.Generator(device="cpu").manual_seed(seed + rank + 2)
         self.ranked_temp_s = float(ranked_temp_s)
         # Rounds of draw-level re-selection allowed after an exact-OBB veto. 0 keeps
         # the original behaviour: a vetoed row falls back to plain GT.
@@ -675,7 +677,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         )
 
     # ---------- toward-parked nudge: draws and selection ----------
-    def _toward_parked_draws(self, r, K, P, half_w, do_aug, dy):
+    def _toward_parked_draws(self, r_toward, K, P, half_w, do_aug, dy):
         """Point a fraction of the eligible scenes' drawn offsets AT a parked vehicle.
 
         On the scenes where a PARKED vehicle bounds the corridor further ahead than the
@@ -696,7 +698,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             return None, False, dy, None
         merge_steps_min = int(min(self.knobs.merge_times) / DT)
         eligible, side, t_obs = self._parked_vehicle_ahead(P, half_w, merge_steps_min)
-        toward = eligible & (r[:, 2 * K + 1] < self.toward_parked_prob) & do_aug
+        toward = eligible & (r_toward[:, 0] < self.toward_parked_prob) & do_aug
         toward_any = bool(toward.any())
         if toward_any:
             dy = torch.where(toward[:, None], side[:, None] * dy.abs(), dy)
@@ -795,10 +797,23 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         lo, hi = self._corridor(inputs, xy, tan, nrm, half_w, half_w_nbr, half_l, wb)
 
         K = self.n_draws
-        # One extra column ONLY when the toward-parked nudge is on, so at
-        # toward_parked_prob = 0 the RNG stream is byte-for-byte what it has always been.
+        # The toward-parked coin comes off a SEPARATE stream, and not for tidiness. Drawn
+        # from self.gen it would be one extra column per batch whenever the nudge is on,
+        # which shifts every later corridor and merge draw -- so enabling the flag changed
+        # which scenes were accepted even where no scene was eligible to be nudged.
+        # Measured on the 2,297-scene campaign set, where eligibility is 0 for every row:
+        # 4 of 72 batches accepted a different set, 1824 rows vs 1822, while the
+        # augmentation of any row both arms accepted stayed bit-identical. An A/B on this
+        # flag was therefore comparing a reseed, not the feature. Off this stream the
+        # corridor draws are identical whether the nudge is on or off, and the default
+        # path is unchanged because self.gen is consumed exactly as before.
+        r = torch.rand((B, 2 * K + 1), generator=self.gen).to(dev)
         toward_on = self.toward_parked_prob > 0.0
-        r = torch.rand((B, 2 * K + 1 + int(toward_on)), generator=self.gen).to(dev)
+        r_toward = (
+            torch.rand((B, 1), generator=self.toward_gen).to(dev)
+            if toward_on
+            else torch.zeros((B, 1), device=dev)
+        )
         do_aug = r[:, 2 * K] < self._augment_prob
         # Low-speed / reverse gate (same threshold as the quintic augmenter): a
         # near-stationary ego makes every path-relative feasibility metric
@@ -809,7 +824,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         dy = (r[:, :K] * 2 - 1) * self.dy_max
         dth = (r[:, K : 2 * K] * 2 - 1) * self.dth_max
 
-        toward, toward_any, dy, t_obs = self._toward_parked_draws(r, K, P, half_w_nbr, do_aug, dy)
+        toward, toward_any, dy, t_obs = self._toward_parked_draws(
+            r_toward, K, P, half_w_nbr, do_aug, dy
+        )
 
         L, in_corr, merges = self._candidate_profiles(
             combos, dy, dth, v0, speed, half_l, lo, hi, dev, dtype

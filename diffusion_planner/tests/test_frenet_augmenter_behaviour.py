@@ -177,19 +177,48 @@ def test_new_flags_at_their_off_values_change_nothing(monkeypatch):
     assert torch.equal(fut_a, fut_b)
 
 
-def test_toward_parked_off_draws_no_extra_column(monkeypatch):
-    """Pinned separately from the output check: the RNG stream is the fragile part."""
+def test_the_toward_parked_flag_does_not_shift_the_corridor_stream(monkeypatch):
+    """The corridor draw must be the same WIDTH whether the nudge is on or off.
+
+    It used to be one column wider when the nudge was on, taken from the same
+    generator, so enabling the flag shifted every later corridor and merge draw and
+    changed which scenes were accepted -- even on a corpus where no scene is eligible
+    to be nudged. An A/B on the flag then compared a reseed, not the feature. The coin
+    now comes off a dedicated generator, so the shared stream is flag-independent.
+    """
     shapes = _rand_spy(monkeypatch)
     off = FrenetStatePerturbationTensor(1.0, "cpu", seed=3)
     _run(off, batch=2)
-    width_off = [s for s in shapes if s == (2, 2 * off.n_draws + 1)]
+    off_widths = {s for s in shapes if len(s) == 2 and s[0] == 2}
 
     shapes.clear()
     on = FrenetStatePerturbationTensor(1.0, "cpu", seed=3, toward_parked_prob=0.5)
     _run(on, batch=2)
-    width_on = [s for s in shapes if s == (2, 2 * on.n_draws + 2)]
+    on_widths = {s for s in shapes if len(s) == 2 and s[0] == 2}
 
-    assert width_off and width_on
+    corridor = (2, 2 * off.n_draws + 1)
+    assert corridor in off_widths, f"corridor draw not seen with the nudge off: {off_widths}"
+    assert corridor in on_widths, f"corridor draw not seen with the nudge on: {on_widths}"
+    assert (2, 2 * off.n_draws + 2) not in on_widths, (
+        "the nudge is back to widening the shared corridor draw"
+    )
+
+
+def test_the_toward_parked_flag_cannot_change_which_scenes_are_augmented():
+    """The consequence of the above, asserted end to end.
+
+    On a scene with no parked vehicle in reach the nudge can never fire, so switching
+    it on must leave the accepted set and the augmented state untouched.
+    """
+    off = FrenetStatePerturbationTensor(1.0, "cpu", seed=3)
+    in_off, fut_off = _run(off, batch=16)
+    on = FrenetStatePerturbationTensor(1.0, "cpu", seed=3, toward_parked_prob=1.0)
+    in_on, fut_on = _run(on, batch=16)
+
+    assert bool(off._aug_rows.any()), "nothing was augmented; the test proves nothing"
+    assert torch.equal(off._aug_rows, on._aug_rows), "the flag moved the accepted set"
+    assert torch.equal(in_off["ego_current_state"], in_on["ego_current_state"])
+    assert torch.equal(fut_off, fut_on)
 
 
 # ───────────────────────── 2. recovery after a veto ──────────────────────────
