@@ -9,13 +9,45 @@ import pytest
 
 from scenario_generation.simulate import CPU_EP, CUDA_EP, TENSORRT_EP, _require_accelerator
 
+# Distinct from every index the cases ask for, so a device_id off the wrong source shows up.
+_CURRENT_DEVICE = 2
+_TRT_CACHE = "/engines"
+_TRT_CACHE_OPTIONS = {
+    "trt_engine_cache_enable": True,
+    "trt_engine_cache_path": _TRT_CACHE,
+    "trt_timing_cache_enable": True,
+}
+
 
 class _Session:
-    def __init__(self, active):
-        self._active = active
+    """Stands in for ``ort.InferenceSession``, reporting the providers it was handed as active."""
+
+    def __init__(self, providers, provider_options=None):
+        self.providers = providers
+        self.provider_options = provider_options
 
     def get_providers(self):
-        return self._active
+        return self.providers
+
+    def get_inputs(self):
+        return []
+
+    def get_outputs(self):
+        return []
+
+
+def _open_session(monkeypatch, device, providers=None, **kwargs):
+    """Build an ``_OnnxModel`` against a fake onnxruntime and hand back the session it opened."""
+    import scenario_generation.simulate as simulate
+
+    def _factory(path, providers, provider_options):
+        return _Session(providers, provider_options)
+
+    monkeypatch.setattr(simulate.torch.cuda, "current_device", lambda: _CURRENT_DEVICE)
+    monkeypatch.setitem(
+        sys.modules, "onnxruntime", types.SimpleNamespace(InferenceSession=_factory)
+    )
+    return simulate._OnnxModel("m.onnx", device, providers, **kwargs).session
 
 
 def test_a_gpu_request_that_landed_on_cpu_raises():
@@ -46,52 +78,33 @@ def test_asking_for_cpu_is_not_a_failure():
 def test_the_default_does_not_reach_for_tensorrt(monkeypatch):
     """TensorRT partitions the graph up front and refuses ops it cannot build, so defaulting to
     it turns a model it dislikes into a session that never opens. It has to be asked for."""
-    seen = {}
-
-    class _Session:
-        def __init__(self, path, providers=None, provider_options=None):
-            seen["providers"] = providers
-
-        def get_providers(self):
-            return [CUDA_EP, CPU_EP]
-
-        def get_inputs(self):
-            return []
-
-        def get_outputs(self):
-            return []
-
-    import scenario_generation.simulate as simulate
-
-    monkeypatch.setitem(
-        sys.modules, "onnxruntime", types.SimpleNamespace(InferenceSession=_Session)
-    )
-    simulate._OnnxModel("m.onnx", "cuda")
-
-    assert seen["providers"] == [CUDA_EP, CPU_EP]
+    assert _open_session(monkeypatch, "cuda").providers == [CUDA_EP, CPU_EP]
 
 
 def test_asking_for_cpu_by_device_does_not_request_a_gpu_provider(monkeypatch):
-    seen = {}
+    assert _open_session(monkeypatch, "cpu").providers == [CPU_EP]
 
-    class _Session:
-        def __init__(self, path, providers=None, provider_options=None):
-            seen["providers"] = providers
 
-        def get_providers(self):
-            return [CPU_EP]
+@pytest.mark.parametrize(
+    "device,providers,expected",
+    [
+        # 0 is a real GPU, not "unset": it must not read as absent and fall back to the default.
+        ("cuda:0", [CUDA_EP, CPU_EP], {CUDA_EP: {"device_id": 0}, CPU_EP: {}}),
+        ("cuda", [CUDA_EP, CPU_EP], {CUDA_EP: {"device_id": _CURRENT_DEVICE}, CPU_EP: {}}),
+        (
+            "cuda:1",
+            [TENSORRT_EP, CUDA_EP, CPU_EP],
+            {
+                TENSORRT_EP: {"device_id": 1, **_TRT_CACHE_OPTIONS},
+                CUDA_EP: {"device_id": 1},
+                CPU_EP: {},
+            },
+        ),
+    ],
+)
+def test_gpu_providers_follow_requested_device(monkeypatch, device, providers, expected):
+    """ORT ignores torch.cuda.set_device() and defaults to GPU 0, so every rank of a distributed
+    run piles onto the first visible GPU unless the provider itself carries the index."""
+    session = _open_session(monkeypatch, device, providers, engine_cache_dir=_TRT_CACHE)
 
-        def get_inputs(self):
-            return []
-
-        def get_outputs(self):
-            return []
-
-    import scenario_generation.simulate as simulate
-
-    monkeypatch.setitem(
-        sys.modules, "onnxruntime", types.SimpleNamespace(InferenceSession=_Session)
-    )
-    simulate._OnnxModel("m.onnx", "cpu")
-
-    assert seen["providers"] == [CPU_EP]
+    assert dict(zip(session.providers, session.provider_options)) == expected
