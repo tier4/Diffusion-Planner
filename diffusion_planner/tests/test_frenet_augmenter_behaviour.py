@@ -666,3 +666,88 @@ def test_stored_history_headings_describe_the_perturbed_track(kw):
     g = past[:, 2:, :2] - past[:, :-2, :2]
     stored = torch.atan2(past[:, 1:-1, 3], past[:, 1:-1, 2])
     assert torch.allclose(torch.atan2(g[..., 1], g[..., 0]), stored, atol=1e-4)
+
+
+# ──────────────── 8. the toward-parked fallback and the floor mask ────────────────
+# Regression cover for the three fixes in a00a98588 / a3a77f888 / 74609f900. The
+# defect they answer was silent: the augmenter kept working and simply stopped
+# augmenting the scene family the flag exists for.
+
+_TIGHT_PASS = [{"lon": 25.0, "lat": 1.8, "v": (0.0, 0.0)}]
+
+
+def test_toward_parked_does_not_delete_the_scenes_it_exists_to_harden():
+    """The merge gate can strike out every horizon on a tight pass.
+
+    Applying it unconditionally took this family from 91/128 accepted to 0/128 --
+    the flag deleted its own target. The fallback keeps the row on its ungated
+    candidates instead. It is a floor, not a repair: most rows are still lost to
+    the exact footprint check (a 2.0 m ego does not fit a 1.8 m gap), so this
+    asserts survival, not recovery.
+    """
+    off = _accepted(FrenetStatePerturbationTensor(1.0, "cpu", seed=7), 128, neighbours=_TIGHT_PASS)
+    on = _accepted(
+        FrenetStatePerturbationTensor(1.0, "cpu", seed=7, toward_parked_prob=1.0),
+        128,
+        neighbours=_TIGHT_PASS,
+    )
+    assert int(off.sum()) > 0, "nothing was accepted with the nudge off; the test proves nothing"
+    assert int(on.sum()) > 0, (
+        f"the toward-parked gate deleted the whole tight-pass family: {int(on.sum())}/128 "
+        f"accepted with the nudge on vs {int(off.sum())}/128 without it"
+    )
+
+
+def test_a_row_that_fell_back_is_not_counted_as_hardened():
+    """`hardened` is what the recovery path keys on, so it must exclude fallbacks.
+
+    If a fallback row were reported as hardened, the first selection would take
+    first-feasible while the retry took largest-offset -- an un-hardened row trained
+    as if its merge were gated in front of the vehicle.
+    """
+    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, toward_parked_prob=1.0)
+    seen = {}
+    real = FrenetStatePerturbationTensor._toward_parked_select
+
+    def spy(self, admissible, merges, dy, toward, toward_any, t_obs, P):
+        out = real(self, admissible, merges, dy, toward, toward_any, t_obs, P)
+        if toward_any:
+            seen["toward"], seen["hardened"] = toward.clone(), out[3].clone()
+        return out
+
+    FrenetStatePerturbationTensor._toward_parked_select = spy
+    try:
+        _run(aug, batch=128, neighbours=_TIGHT_PASS)
+    finally:
+        FrenetStatePerturbationTensor._toward_parked_select = real
+
+    assert seen, "the toward-parked branch never ran; the test proves nothing"
+    assert bool((seen["toward"] & ~seen["hardened"]).any()), (
+        "no row fell back on a scene built to empty the gate -- if the geometry changed, "
+        "pick a tighter pass, otherwise the fallback is dead code"
+    )
+    assert bool((seen["hardened"] & ~seen["toward"]).sum() == 0), (
+        "a row is hardened without being toward-parked"
+    )
+
+
+def test_the_clearance_floor_is_off_by_default_and_builds_no_mask():
+    """The default path must not pay for, or be changed by, a feature that is off."""
+    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=3)
+    xy = torch.zeros(2, 5, 2)
+    assert aug._floor_mask(xy + 1.0, xy) is None, "a mask was built with the floor off"
+
+
+def test_the_floor_applies_only_where_the_candidate_left_the_recording():
+    """A timestep identical to ground truth is judged at threshold 0, not at the floor.
+
+    Without this, a scene is rejected for the clearance of the drive that was actually
+    recorded -- the augmenter vetoing reality.
+    """
+    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=3, min_clearance=2.0)
+    xy = torch.zeros(1, 4, 2)
+    aug_xy = xy.clone()
+    aug_xy[0, 2:] = 1.0  # departs only at the last two timesteps
+    mask = aug._floor_mask(aug_xy, xy)
+    assert mask is not None
+    assert mask.tolist() == [[False, False, True, True]]

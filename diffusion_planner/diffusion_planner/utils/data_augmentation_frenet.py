@@ -719,9 +719,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             )
             # The gate strikes out horizons reaching past the vehicle. On a tight pass it
             # can strike out ALL of them, and the scene would then train on plain GT --
-            # the option would delete exactly the scenes it exists to harden (measured:
-            # one stationary vehicle 25 m ahead at 1.8 m lateral took acceptance from
-            # 88/128 to 0/128). So the gate is applied only where it leaves something;
+            # the option would delete exactly the scenes it exists to harden (measured on
+            # one stationary vehicle 25 m ahead at 1.8 m lateral, B=128: 91 accepted with
+            # the nudge off, 0 with the gate unconditional). The fallback is a floor, not
+            # a repair: it takes that family to 8/128, because the remaining 120 rows are
+            # genuinely hardened and then lose to the exact OBB veto -- a 2.0 m ego does
+            # not fit a 1.8 m gap. So the gate is applied only where it leaves something;
             # elsewhere the row keeps its ungated candidates and is recorded as NOT
             # hardened, because its merge is no longer guaranteed to finish in front of
             # the vehicle.
@@ -831,7 +834,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 upd,
                 has,
                 dy,
-                toward,
                 hardened,
                 toward_any,
             )
@@ -932,7 +934,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         upd,
         has,
         dy,
-        toward,
         hardened,
         toward_any,
     ):
@@ -946,9 +947,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         blocked geometrically, and re-rolling does not move geometry.
 
         The retry keeps each row's own selection rule: first-feasible everywhere, and
-        LARGEST-feasible on the toward-parked rows. Falling back to first-feasible for a
-        toward row would let it recover on a 3 cm offset and still be counted as a
-        hardened example, which is the whole reason the rule exists (see
+        LARGEST-feasible on the HARDENED rows -- those whose merge is actually gated in
+        front of the parked vehicle. Falling back to first-feasible for a hardened row
+        would let it recover on a 3 cm offset and still be counted as a hardened example,
+        which is the whole reason the rule exists. A toward-parked row that found no
+        feasible gated draw is NOT hardened (it fell back to the ungated set), so it
+        takes first-feasible here exactly as it did in the first selection (see
         :meth:`_toward_parked_select`).
 
         Rows that never recover keep upd False and train on plain GT, exactly as

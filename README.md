@@ -170,9 +170,16 @@ augmenter reproduces the previous behaviour exactly.
   horizon, and rather than drop the scene from augmentation the row keeps its ungated
   candidates and takes the ordinary first-feasible offset. Such a row is still nudged
   toward the vehicle but is **not** guaranteed to rejoin in front of it, so the
-  proportion of genuinely hardened scenes is lower than `P` suggests. Enabling the flag
-  also reduces the augmented count somewhat — measured at 10,330 → 9,742 accepted rows
-  on a 105k-scene set at `P = 1.0`.
+  proportion of genuinely hardened scenes is lower than `P` suggests.
+
+  Enabling the flag costs augmented rows, and the aggregate hides how uneven that cost
+  is. On a 105k-scene set at `P = 1.0` the count goes 10,330 → 9,742 (−6%). But on the
+  tight passes the flag exists to serve it is far more expensive: pointing every offset
+  at the vehicle means most candidates are then rejected by the exact footprint check.
+  Measured on one stationary vehicle 25 m ahead at 1.8 m lateral, 128 draws — 91 rows
+  accepted with the flag off, 8 with it on. The fallback above is what keeps that from
+  being 0; it does not recover the rest, and no selection rule can, because a 2.0 m ego
+  does not fit a 1.8 m gap. Use `P` as a small fraction, not a global setting.
 
 - **`--frenet_hist_jitter_lat L` / `--frenet_hist_jitter_lon G`** (default 0.0).
   Smooth per-sample jitter of the ego history, in metres of standard deviation at the

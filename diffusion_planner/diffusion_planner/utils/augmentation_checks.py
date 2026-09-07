@@ -336,8 +336,8 @@ def veto_overlapping(
     valid: torch.Tensor,
     shapes_wl: torch.Tensor,
     near: torch.Tensor,
-    min_clearance: float = 0.0,
-    floor_mask: torch.Tensor | None = None,
+    min_clearance: float,
+    floor_mask: torch.Tensor | None,
 ) -> torch.Tensor:
     """Clear rows whose footprint truly overlaps a recorded neighbor.
 
@@ -345,6 +345,12 @@ def veto_overlapping(
     footprint clearance from every checked neighbour, not merely avoid overlap.
     The sign-only fast path is used when the floor is 0, so the default is
     unchanged.
+
+    ``min_clearance`` and ``floor_mask`` are REQUIRED, with no defaults on purpose:
+    omitting the mask once meant "apply the floor over the whole horizon", which
+    silently deleted legitimate tight passes. A caller must now say which it wants.
+    ``floor_mask=None`` still selects the overlap-only fast path, but only when a
+    caller asks for it explicitly.
 
     ``floor_mask`` says WHERE the floor applies. Outside it, only true overlap is
     vetoed. This matters because a candidate coincides with the recorded drive
