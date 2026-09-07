@@ -11,6 +11,7 @@ import onnxruntime as ort
 import torch
 
 from diffusion_planner.data.dimensions import (
+    MAX_NUM_NEIGHBORS,
     PLANNER_INPUT_SHAPES,
     TRAJECTORY_DIM,
     TRAJECTORY_LENGTH,
@@ -66,6 +67,7 @@ def _make_onnx_inputs(
     generator = torch.Generator().manual_seed(seed)
     initial_noise = torch.randn(
         batch_size,
+        MAX_NUM_NEIGHBORS + 1,
         TRAJECTORY_LENGTH,
         TRAJECTORY_DIM,
         generator=generator,
@@ -85,6 +87,7 @@ def _make_validation_inputs(
     generator = torch.Generator().manual_seed(seed)
     initial_noise = torch.randn(
         batch_size,
+        MAX_NUM_NEIGHBORS + 1,
         TRAJECTORY_LENGTH,
         TRAJECTORY_DIM,
         generator=generator,

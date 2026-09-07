@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from ..data.dimensions import TRAJECTORY_DIM
 from .diffusion_planner import DiffusionPlanner
 
 PLANNER_INPUT_NAMES = (
@@ -32,7 +33,15 @@ PLANNER_INPUT_NAMES = (
 
 
 class DiffusionPlannerOnnxWrapper(nn.Module):
-    """Expose fixed 10-step Heun sampling as one ONNX graph."""
+    """Expose fixed 10-step Heun sampling as one ONNX graph.
+
+    The graph keeps the agent axis the deployed node builds its TensorRT profile
+    around -- `(B, 1 + MAX_NUM_NEIGHBORS, T, 4)` on both the noise input and the
+    trajectory output -- even though the planner itself now predicts the ego
+    alone. The ego occupies index 0; every neighbor slot is zero, which is the
+    same encoding the node already receives for an agent with no prediction.
+    Changing the tensor shapes here would force a matching change in the node.
+    """
 
     def __init__(self, planner: DiffusionPlanner) -> None:
         super().__init__()
@@ -91,6 +100,18 @@ class DiffusionPlannerOnnxWrapper(nn.Module):
                 strict=True,
             )
         )
-        return self.planner.sample(
-            input_data, initial_noise, num_steps=6, time_epsilon=1e-5
+        trajectory, turn_indicator_logits = self.planner.sample(
+            input_data, initial_noise[:, 0], num_steps=6, time_epsilon=1e-5
         )
+        # The agent count comes from the noise the caller supplied, so the output
+        # axis always matches the input axis the caller built its profile around.
+        neighbor_trajectory = trajectory.new_zeros(
+            (
+                trajectory.shape[0],
+                initial_noise.shape[1] - 1,
+                trajectory.shape[1],
+                TRAJECTORY_DIM,
+            )
+        )
+        trajectory = torch.cat((trajectory.unsqueeze(1), neighbor_trajectory), dim=1)
+        return trajectory, turn_indicator_logits
