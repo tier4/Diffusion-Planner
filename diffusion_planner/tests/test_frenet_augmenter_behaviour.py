@@ -357,39 +357,68 @@ def test_min_clearance_does_not_move_the_border_bounds():
 # ─────────────────────────── 5. ego-history noise ────────────────────────────
 
 
-def test_past_noise_scales_each_accepted_history_by_one_factor():
-    """One scalar per scene, on the rewritten history and the state it implies."""
-    plain = FrenetStatePerturbationTensor(1.0, "cpu", seed=7)
-    in_ref, _ = _run(plain, batch=8, pad_steps=3)
-    noisy = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, ego_past_noise_std=0.2)
-    in_new, _ = _run(noisy, batch=8, pad_steps=3)
+def _scaled_pair(std=0.2, batch=8, pad_steps=3, seed=7):
+    """The same batch augmented twice, with and without the history scale.
 
+    Returns the shared accepted-row mask plus both (past, current_state) pairs, so each
+    property below can be one short assertion instead of a loop with six of them.
+    """
+    plain = FrenetStatePerturbationTensor(1.0, "cpu", seed=seed)
+    in_ref, _ = _run(plain, batch=batch, pad_steps=pad_steps)
+    noisy = FrenetStatePerturbationTensor(1.0, "cpu", seed=seed, ego_past_noise_std=std)
+    in_new, _ = _run(noisy, batch=batch, pad_steps=pad_steps)
     rows = plain._aug_rows
     assert torch.equal(rows, noisy._aug_rows), "the scale draw must not shift the decisions"
-    assert bool(rows.any())
+    assert bool(rows.any()), "nothing was augmented; the tests prove nothing"
+    return rows, in_ref, in_new
 
+
+def _row_ratios(rows, in_ref, in_new):
+    """Per accepted row, the elementwise new/old ratio over the samples with a length."""
     past_ref, past_new = in_ref["ego_agent_past"], in_new["ego_agent_past"]
-    cur_ref, cur_new = in_ref["ego_current_state"], in_new["ego_current_state"]
-
-    # untouched rows train on plain ground truth, unscaled
-    assert torch.equal(past_ref[~rows], past_new[~rows])
-    assert torch.equal(cur_ref, cur_new), "the scale is history-only"
-
     for b in torch.nonzero(rows, as_tuple=True)[0].tolist():
         real = past_ref[b, :, 0].abs() > 1e-3  # the samples with a length to scale
-        ratio = past_new[b, real, 0] / past_ref[b, real, 0]
+        yield b, past_new[b, real, 0] / past_ref[b, real, 0]
+
+
+def test_past_noise_is_one_factor_per_scene():
+    """One scalar per scene, applied to the whole rewritten history."""
+    rows, in_ref, in_new = _scaled_pair()
+    for b, ratio in _row_ratios(rows, in_ref, in_new):
+        assert torch.allclose(ratio, ratio[0].expand_as(ratio), atol=1e-5), (
+            f"row {b}: not one factor"
+        )
+
+
+def test_past_noise_factor_stays_within_two_sigma():
+    std = 0.2
+    rows, in_ref, in_new = _scaled_pair(std=std)
+    for b, ratio in _row_ratios(rows, in_ref, in_new):
         s = float(ratio[0])
-        assert 1 - 2 * 0.2 <= s <= 1 + 2 * 0.2, s
-        assert torch.allclose(ratio, ratio[0].expand_as(ratio), atol=1e-5), "not one factor"
-        # ...and NOTHING but the history moves: the current state is an input in its own
-        # right, not a summary of the history, and vx is a loss weight (see
-        # _perturb_history), so scaling it would re-weight the loss rather than perturb
-        assert torch.equal(cur_new[b], cur_ref[b])
-        # t=0 is pinned by construction: the scale is taken about that sample, so it
-        # is the SAMPLE, not the frame origin, that cannot move
-        assert torch.equal(past_new[b, -1], past_ref[b, -1])
-        # "no history" stays no history
-        assert torch.equal(past_new[b, :3], torch.zeros(3, 4))
+        assert 1 - 2 * std <= s <= 1 + 2 * std, f"row {b}: {s} outside +-2 sigma"
+
+
+def test_past_noise_leaves_the_current_state_alone():
+    """``ego_current_state`` is an input in its own right, not a summary of the history,
+    and its vx is a LOSS WEIGHT (see _perturb_history) -- scaling it would re-weight the
+    scene's loss rather than perturb what the encoder reads."""
+    rows, in_ref, in_new = _scaled_pair()
+    assert torch.equal(in_ref["ego_current_state"], in_new["ego_current_state"])
+
+
+def test_past_noise_leaves_unaugmented_rows_on_plain_ground_truth():
+    rows, in_ref, in_new = _scaled_pair()
+    assert torch.equal(in_ref["ego_agent_past"][~rows], in_new["ego_agent_past"][~rows])
+
+
+def test_past_noise_pins_t0_and_the_zero_padding():
+    """t=0 is pinned by construction: the scale is about that SAMPLE, not the frame
+    origin. And "no history" has to stay no history."""
+    rows, in_ref, in_new = _scaled_pair()
+    past_ref, past_new = in_ref["ego_agent_past"], in_new["ego_agent_past"]
+    for b in torch.nonzero(rows, as_tuple=True)[0].tolist():
+        assert torch.equal(past_new[b, -1], past_ref[b, -1]), f"row {b}: t=0 moved"
+        assert torch.equal(past_new[b, :3], torch.zeros(3, 4)), f"row {b}: padding written"
 
 
 def test_past_noise_at_zero_changes_nothing(monkeypatch):

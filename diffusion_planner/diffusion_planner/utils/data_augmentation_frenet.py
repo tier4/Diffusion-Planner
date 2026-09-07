@@ -229,7 +229,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         """
         w = self.past_noise_std
         scale = (
-            torch.normal(1.0, w, size=(xy.shape[0], 1, 1), generator=self.gen)
+            torch.normal(1.0, w, size=(xy.shape[0], 1, 1), generator=self.hist_gen)
             .clamp(1.0 - 2 * w, 1.0 + 2 * w)
             .to(device=xy.device, dtype=xy.dtype)
         )
@@ -288,6 +288,17 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             else 0
         )
         self.gen = torch.Generator(device="cpu").manual_seed(seed + rank)
+        # SEPARATE stream for the history perturbations, and not a stylistic choice.
+        # They draw a data-dependent number of values (one factor per ACCEPTED row,
+        # and one coefficient block per axis), so drawing them from self.gen advances
+        # it by an amount that depends on the perturbation being enabled at all. Every
+        # later batch's corridor and merge draws then shift, and the augmenter accepts
+        # a DIFFERENT set of scenes -- measured: turning either perturbation on changed
+        # the accepted set from batch 2 onward, 6 of 16 batches differing, 116 accepted
+        # rows vs 118 (scale) and 110 (jitter). That silently confounds any A/B on these
+        # knobs with a different augmentation realisation, which is the opposite of what
+        # applying them after the veto is for. Off this stream they cannot reach it.
+        self.hist_gen = torch.Generator(device="cpu").manual_seed(seed + rank + 1)
         self.ranked_temp_s = float(ranked_temp_s)
         # Rounds of draw-level re-selection allowed after an exact-OBB veto. 0 keeps
         # the original behaviour: a vetoed row falls back to plain GT.
@@ -431,7 +442,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         phi = self._hist_jitter_basis(P, xy.device, xy.dtype)  # (K, P)
         axes = self._hist_jitter_axes(tan, nrm)
         c = torch.normal(
-            0.0, 1.0, size=(xy.shape[0], len(axes), phi.shape[0]), generator=self.gen
+            0.0, 1.0, size=(xy.shape[0], len(axes), phi.shape[0]), generator=self.hist_gen
         ).to(device=xy.device, dtype=xy.dtype)
         d = c @ phi  # (B, A, P)
         off = torch.zeros_like(xy)
