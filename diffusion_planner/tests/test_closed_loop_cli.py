@@ -28,6 +28,19 @@ def _load_run_all_groups():
     return mod
 
 
+def _load_valid_predictor_closed_loop():
+    """Lazy-load the standalone validation CLI without executing ``main``."""
+    import importlib.util
+    import sys
+
+    path = _REPO_ROOT / "diffusion_planner" / "valid_predictor_closed_loop.py"
+    spec = importlib.util.spec_from_file_location("valid_predictor_closed_loop_for_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_build_parser_required_and_defaults(tmp_path: Path):
     parser = build_parser(TrainConfig, "test parser")
     train_list = str(tmp_path / "train.json")
@@ -232,3 +245,52 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         "objects": str(tmp_path / "sites" / "alpha"),
         "noobj": str(tmp_path / "sites__noobj" / "alpha"),
     }
+
+
+def test_validation_cli_builds_window_config_and_strips_driver_knobs(monkeypatch, tmp_path):
+    mod = _load_valid_predictor_closed_loop()
+    anchors = tmp_path / "anchors.json"
+    anchors.write_text('{"2026-06-16_10-27-57": [120, 480]}')
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/model.pth",
+            "--npz_root",
+            "/tmp/route",
+            "--eval_windows",
+            "anchor",
+            "--anchors_json",
+            str(anchors),
+            "--anchor_pre_s",
+            "5",
+        ],
+    )
+    args = mod.parse_args()
+    cfg = mod._window_config(args).validate()
+    assert cfg.mode == "anchor"
+    assert cfg.anchors == {"2026-06-16_10-27-57": [120, 480]}
+    assert cfg.anchor_pre_s == 5.0 and cfg.anchor_post_s == 10.0
+    assert cfg.coverage_abort_m == 100.0
+    kwargs = mod._window_render_kwargs(mod._eval_knobs(args))
+    assert "fps" not in kwargs and "draw_workers" not in kwargs
+    assert kwargs["tracker_mode"] == "perfect"
+    assert kwargs["replan_interval"] == args.replan_interval
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "valid_predictor_closed_loop.py",
+            "--model_path",
+            "/tmp/m.pth",
+            "--npz_root",
+            "/tmp/r",
+            "--eval_windows",
+            "anchor",
+        ],
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="requires --anchors_json"):
+        mod._window_config(mod.parse_args())
