@@ -10,8 +10,10 @@ range) must match the baseline's exactly, and every in-range cell for a requeste
 be present and numeric — an incomplete or NaN-erased candidate is refused with a ValueError
 naming the problem, never silently averaged down to a passing mean over fewer rows.
 
-Comparability hazard: this tool only checks the logged metric columns, it has no way to tell
-that two runs used different validation settings. In particular, ``--valid_num_workers``
+Comparability hazard: this tool only checks the logged metric columns, and does not itself
+verify that the two runs used the same validation settings. It could: ``train.py`` writes
+``args.json`` (which records both worker counts) into the same directory as ``train_log.tsv``,
+so a sibling cross-check is available to a future caller. In particular, ``--valid_num_workers``
 changes the shard loader's plan-slot count, which changes how many padded duplicate samples
 ``validate_model.aggregate_valid_metrics`` double-counts into the aggregate (see
 ``utils/shard_ddp.py`` and ``validate_model.py``). Two runs being compared here MUST have been
