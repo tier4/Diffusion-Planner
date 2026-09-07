@@ -1358,6 +1358,484 @@ def test_anchor_slice_paths_ratio_and_waits_stratification(tmp_path):
         )
 
 
+def test_anchor_slice_paths_takeoff_stratification(tmp_path):
+    normal = [f"/tmp/normal_{i}.npz" for i in range(100)]
+    waits = [f"/tmp/waits_{i}.npz" for i in range(50)]
+    takeoff = [f"/tmp/takeoff_{i}.npz" for i in range(50)]
+    normal_json = tmp_path / "normal.json"
+    waits_json = tmp_path / "waits.json"
+    takeoff_json = tmp_path / "takeoff.json"
+    normal_json.write_text(json.dumps(normal))
+    waits_json.write_text(json.dumps(waits))
+    takeoff_json.write_text(json.dumps(takeoff))
+
+    cfg = {
+        "scene_list": str(normal_json),
+        "ratio": 2.0,
+        "waits_scene_list": str(waits_json),
+        "waits_fraction": 0.3,
+        "takeoff_scene_list": str(takeoff_json),
+        "takeoff_fraction": 0.2,
+        "seed": 3,
+    }
+    picked = round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=1)
+    assert len(picked) == 20
+    assert sum(1 for p in picked if "waits_" in p) == 6  # round(0.3 * 20)
+    assert sum(1 for p in picked if "takeoff_" in p) == 4  # round(0.2 * 20)
+    assert len(set(picked)) == len(picked)
+
+    # loud on partial config and on fractions that leave no normal slice
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths(
+            {"scene_list": str(normal_json), "ratio": 1.0, "takeoff_fraction": 0.2}, 10, 1
+        )
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths(
+            {
+                "scene_list": str(normal_json),
+                "ratio": 1.0,
+                "waits_scene_list": str(waits_json),
+                "waits_fraction": 0.6,
+                "takeoff_scene_list": str(takeoff_json),
+                "takeoff_fraction": 0.4,
+            },
+            10,
+            1,
+        )
+
+
+def test_base_train_invocation_uses_override_channel(tmp_path):
+    """Non-CLI training knobs must travel via --train_overrides_json: the slim
+    trainer CLI rejects them as flags, and training a fine-tune at TrainConfig
+    defaults (learning_rate 1e-4 vs an intended 5e-6) is a silent disaster."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "best_model.pth").write_bytes(b"x")
+    (model_dir / "args.json").write_text(
+        json.dumps({"learning_rate": 1e-4, "batch_size": 64, "seed": 3407, "ddp": True})
+    )
+    train_list = tmp_path / "train.json"
+    train_list.write_text(json.dumps([str(tmp_path / f"s{i}.npz") for i in range(4)]))
+    training_cfg = tmp_path / "training.json"
+    training_cfg.write_text(
+        json.dumps(
+            {
+                "backend": "base_sft",
+                "train_args": {"learning_rate": 5e-6, "warm_up_epoch": 0},
+            }
+        )
+    )
+    cfg = {
+        "training_config": str(training_cfg),
+        "val_scenes": "/tmp/val.json",
+        "epochs_per_round": 1,
+        "gpu_ids": [0],
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+    cmd, next_model, _cwd, _env = round_runner._base_train_invocation(
+        cfg,
+        model_path=model_dir / "best_model.pth",
+        train_list=train_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    joined = " ".join(cmd)
+    assert "--learning_rate" not in joined
+    assert "--train_overrides_json" in joined
+    overrides_file = Path(cmd[cmd.index("--train_overrides_json") + 1])
+    payload = json.loads(overrides_file.read_text())
+    assert payload["learning_rate"] == 5e-6
+    assert payload["warm_up_epoch"] == 0
+    assert "normalization_file_path" in payload
+    # CLI-exposed knobs stay flags
+    assert "--batch_size" in joined
+
+
+def test_trainer_applies_and_rejects_overrides(tmp_path):
+    import importlib
+
+    tp = importlib.import_module("train_predictor")
+    from diffusion_planner.config import TrainConfig
+
+    cfg = TrainConfig(train_set_list="", valid_set_list="")
+    good = tmp_path / "ok.json"
+    good.write_text(json.dumps({"learning_rate": 5e-6, "warm_up_epoch": 0}))
+    cfg = tp.apply_overrides_json(cfg, str(good))
+    assert cfg.learning_rate == 5e-6
+    assert cfg.warm_up_epoch == 0
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"learning_rte": 5e-6}))
+    with pytest.raises(ValueError):
+        tp.apply_overrides_json(cfg, str(bad))
+
+    # CLI-exposed fields must go through flags, not the file
+    clash = tmp_path / "clash.json"
+    clash.write_text(json.dumps({"batch_size": 8}))
+    with pytest.raises(ValueError):
+        tp.apply_overrides_json(cfg, str(clash))
+
+    # silent-coercion guards: truthy-string bool and float-for-int
+    for payload in ({"use_ema": "false"}, {"num_workers": 4.0}, {"seed": True}):
+        f = tmp_path / "typ.json"
+        f.write_text(json.dumps(payload))
+        with pytest.raises(ValueError):
+            tp.apply_overrides_json(cfg, str(f))
+
+
+def test_release_band_paths_ratio_sampling_and_rewrite(tmp_path, monkeypatch):
+    """Runner-side wiring: ratio subsample, seed+round offset, out_json rewrite,
+    and the manifest fallback to the top-level cfg key."""
+    rows = [str(tmp_path / f"band_{i}.npz") for i in range(10)]
+
+    def _fake_build(credit, manifest, out, **kw):
+        out.write_text(json.dumps(rows))
+        return list(rows)
+
+    import rlvr.autoresearch.tools.build_release_bands as brb
+
+    monkeypatch.setattr(brb, "build_release_bands", _fake_build)
+    cfg = {
+        "release_bands": {
+            "post_window_s": 10.0,
+            "stride_s": 0.5,
+            "min_takeoff_travel_m": 10.0,
+            "frame_hz": 10,
+            "ratio": 0.5,
+            "seed": 0,
+            "workers": 1,
+        },
+        "chunk_manifest": "/tmp/manifest.jsonl",
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+    credit = rdir / "credit.jsonl"
+    credit.write_text("{}")
+    picked = round_runner._release_band_paths(cfg, credit, rdir, round_idx=1, n_focus=8)
+    assert len(picked) == 4  # round(0.5 * 8)
+    out_json = rdir / "round_1_release_bands.json"
+    assert json.loads(out_json.read_text()) == picked  # rewrite matches selection
+    # seeded + round-offset: same round reproduces, next round redraws
+    again = round_runner._release_band_paths(cfg, credit, rdir, round_idx=1, n_focus=8)
+    assert again == picked
+    other = round_runner._release_band_paths(cfg, credit, rdir, round_idx=2, n_focus=8)
+    assert other != picked
+    # tiny rounds keep at least one row instead of silently disabling the feature
+    one = round_runner._release_band_paths(cfg, credit, rdir, round_idx=1, n_focus=1)
+    assert len(one) == 1
+
+
+def test_emit_train_args_rejects_runner_owned_keys(tmp_path):
+    cmd: list[str] = []
+    with pytest.raises(ValueError):
+        round_runner._emit_train_args(
+            cmd, {"train_epochs": 80, "learning_rate": 5e-6}, ("learning_rate",), tmp_path
+        )
+
+
+def test_takeoff_worker_tl_and_creep_alignment(tmp_path):
+    from rlvr.autoresearch.tools.build_r2lpl_pools import _takeoff_worker
+
+    go = _release_band_fixture(tmp_path, tl_state="green", future_travel_m=20.0, frame=1)
+    creep = _release_band_fixture(tmp_path, tl_state="green", future_travel_m=2.0, frame=2)
+    red = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=20.0, frame=3)
+    assert _takeoff_worker((str(go), 10, 0.5, 10.0)) == (str(go), True)
+    assert _takeoff_worker((str(creep), 10, 0.5, 10.0)) == (str(creep), False)
+    assert _takeoff_worker((str(red), 10, 0.5, 10.0)) == (str(red), False)
+
+
+def test_future_pathlen_masks_zero_padding(tmp_path):
+    """A short valid motion followed by zero padding must NOT count the phantom
+    jump back to the origin as travel — in both the band builder and the
+    take-off filter (they share valid_future_pathlen)."""
+    from rlvr.autoresearch.tools.build_r2lpl_pools import _takeoff_worker
+    from rlvr.autoresearch.tools.build_release_bands import valid_future_pathlen
+
+    # 2 m of real motion, then 80-10 padded rows: raw diffs would report ~4 m
+    # (2 m out + 2 m phantom return); the masked length must stay ~2 m.
+    fut = np.zeros((80, 3), dtype=np.float32)
+    fut[:10, 0] = np.linspace(0.5, 2.5, 10, dtype=np.float32)
+    assert valid_future_pathlen(fut) == pytest.approx(2.0, abs=1e-4)
+
+    padded_creep = _release_band_fixture(
+        tmp_path, tl_state="green", future_travel_m=20.0, frame=5, valid_steps=10
+    )
+    # raw length ~2.3 m valid + ~2.3 m phantom jump: must be rejected at 4 m
+    assert _takeoff_worker((str(padded_creep), 10, 0.5, 4.0)) == (str(padded_creep), False)
+
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    start = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=0.0, frame=200)
+    manifest = tmp_path / "pad_manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"chunk_key": "g001_logB_00000000", "start_scene_path": str(start)}) + "\n"
+    )
+    credit = tmp_path / "pad_credit.jsonl"
+    credit.write_text(
+        json.dumps(
+            {
+                "event_key": "g001_logB_00000000_0_16_danger_expert_disagreement",
+                "offense_frame_id": 200,
+            }
+        )
+        + "\n"
+    )
+    _release_band_fixture(
+        tmp_path, tl_state="green", future_travel_m=20.0, frame=210, valid_steps=10
+    )
+    rows = build_release_bands(
+        credit,
+        manifest,
+        tmp_path / "pad_bands.json",
+        post_window_s=2.0,
+        stride_s=1.0,
+        min_takeoff_travel_m=4.0,
+        frame_hz=10.0,
+        workers=1,
+    )
+    # only the red patience frame survives; the padded green pseudo-departure is out
+    assert rows == [str(start)]
+
+
+def test_build_release_bands_rejects_subframe_window(tmp_path):
+    """post_window_s that rounds to zero frames must fail loudly, not silently
+    degenerate the two-sided corpus to offense frames only."""
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    start = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=0.0, frame=300)
+    manifest = tmp_path / "sub_manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"chunk_key": "g002_logC_00000000", "start_scene_path": str(start)}) + "\n"
+    )
+    credit = tmp_path / "sub_credit.jsonl"
+    credit.write_text(
+        json.dumps(
+            {
+                "event_key": "g002_logC_00000000_0_16_danger_expert_disagreement",
+                "offense_frame_id": 300,
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="zero post-offense frames"):
+        build_release_bands(
+            credit,
+            manifest,
+            tmp_path / "sub_bands.json",
+            post_window_s=0.01,
+            stride_s=1.0,
+            min_takeoff_travel_m=4.0,
+            frame_hz=10.0,
+            workers=1,
+        )
+
+    # the startup validator must reject the same configuration
+    with pytest.raises(ValueError, match="zero post-offense frames"):
+        round_runner._validate_release_bands_config(
+            {
+                "training_backend": "base_sft",
+                "chunk_manifest": str(manifest),
+                "release_bands": {
+                    "post_window_s": 0.01,
+                    "stride_s": 1.0,
+                    "min_takeoff_travel_m": 4.0,
+                    "frame_hz": 10,
+                    "ratio": 1.0,
+                    "seed": 0,
+                    "workers": 1,
+                },
+            }
+        )
+
+
+def test_anchor_slice_paths_small_budget_keeps_normal_slice(tmp_path):
+    """Independent per-stratum rounding must not consume the whole anchor
+    budget: fractions summing to 0.8 with n_anchor=2 previously rounded to
+    1 + 1 and produced zero normal anchors despite passing validation."""
+    normal = [f"/tmp/normal_{i}.npz" for i in range(10)]
+    waits = [f"/tmp/waits_{i}.npz" for i in range(10)]
+    takeoff = [f"/tmp/takeoff_{i}.npz" for i in range(10)]
+    normal_json = tmp_path / "normal.json"
+    waits_json = tmp_path / "waits.json"
+    takeoff_json = tmp_path / "takeoff.json"
+    normal_json.write_text(json.dumps(normal))
+    waits_json.write_text(json.dumps(waits))
+    takeoff_json.write_text(json.dumps(takeoff))
+    cfg = {
+        "scene_list": str(normal_json),
+        "ratio": 1.0,
+        "waits_scene_list": str(waits_json),
+        "waits_fraction": 0.4,
+        "takeoff_scene_list": str(takeoff_json),
+        "takeoff_fraction": 0.4,
+        "seed": 0,
+    }
+    picked = round_runner._anchor_slice_paths(cfg, n_focus=2, round_idx=1)
+    assert len(picked) == 2
+    assert any("normal_" in p for p in picked)
+
+
+def test_workflow_contract_carries_release_bands(tmp_path):
+    """The contract builder must not silently drop the release_bands block —
+    a dropped block disables the extraction with no error (dark-lever class)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    bands = {
+        "post_window_s": 10.0,
+        "stride_s": 0.5,
+        "min_takeoff_travel_m": 10.0,
+        "frame_hz": 10,
+        "ratio": 1.0,
+        "seed": 0,
+        "workers": 2,
+    }
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+                "replay_memory": {"capacity": 200},
+                "training": {"val_scenes": "/tmp/valid.json"},
+                "release_bands": bands,
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "out"),
+        }
+    )
+    assert cfg.get("release_bands") == bands
+
+
+def test_validate_release_bands_config_requires_all_knobs(tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("{}")
+    base = {
+        "training_backend": "base_sft",
+        "perception_mining": {"chunk_manifest": str(manifest)},
+    }
+    # absent section is fine; empty section is loud
+    round_runner._validate_release_bands_config(dict(base))
+    with pytest.raises(ValueError):
+        round_runner._validate_release_bands_config({**base, "release_bands": {}})
+    full = {
+        "post_window_s": 10.0,
+        "stride_s": 0.5,
+        "min_takeoff_travel_m": 10.0,
+        "frame_hz": 10.0,
+        "ratio": 1.0,
+        "seed": 0,
+        "workers": 4,
+    }
+    round_runner._validate_release_bands_config({**base, "release_bands": dict(full)})
+    for key in full:
+        broken = {k: v for k, v in full.items() if k != key}
+        with pytest.raises(ValueError):
+            round_runner._validate_release_bands_config({**base, "release_bands": broken})
+    # a chunk manifest is mandatory provenance
+    with pytest.raises(ValueError):
+        round_runner._validate_release_bands_config(
+            {"training_backend": "base_sft", "release_bands": dict(full)}
+        )
+
+
+def _release_band_fixture(
+    tmp_path, *, tl_state: str, future_travel_m: float, frame: int, valid_steps: int = 80
+):
+    """One frame NPZ with a route-lane TL one-hot and a straight-line future.
+
+    ``valid_steps`` < 80 zero-pads the tail, reproducing a truncated future.
+    """
+    seq = tmp_path / "seq"
+    seq.mkdir(exist_ok=True)
+    onehot = {"green": 8, "red": 10}[tl_state]
+    route = np.zeros((2, 20, 33), dtype=np.float32)
+    route[0, :, 0] = 1.0  # mark the lane valid
+    route[0, 0, onehot] = 1.0
+    step = future_travel_m / 79.0
+    future = np.zeros((80, 3), dtype=np.float32)
+    future[:, 0] = np.arange(80, dtype=np.float32) * step
+    future[valid_steps:] = 0.0
+    path = seq / f"scene_{frame:016d}.npz"
+    np.savez(
+        path,
+        ego_agent_past=np.zeros((31, 3), dtype=np.float32),
+        ego_agent_future=future,
+        route_lanes=route,
+    )
+    return path
+
+
+def test_build_release_bands_tl_alignment(tmp_path):
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    start = _release_band_fixture(tmp_path, tl_state="red", future_travel_m=0.0, frame=100)
+    _release_band_fixture(tmp_path, tl_state="green", future_travel_m=2.0, frame=110)  # creep
+    kept_go = _release_band_fixture(tmp_path, tl_state="green", future_travel_m=20.0, frame=120)
+
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"chunk_key": "g000_logA_00000000", "start_scene_path": str(start)}) + "\n"
+    )
+    credit = tmp_path / "credit.jsonl"
+    credit.write_text(
+        json.dumps(
+            {
+                "event_key": "g000_logA_00000000_0_16_danger_expert_disagreement",
+                "offense_frame_id": 100,
+            }
+        )
+        + "\n"
+    )
+    out = tmp_path / "bands.json"
+    rows = build_release_bands(
+        credit,
+        manifest,
+        out,
+        post_window_s=3.0,
+        stride_s=1.0,
+        min_takeoff_travel_m=10.0,
+        frame_hz=10.0,
+        workers=1,
+    )
+    # red frame kept (patience), green take-off kept (release), green creep dropped
+    assert str(start) in rows
+    assert str(kept_go) in rows
+    assert len(rows) == 2
+    assert json.loads(out.read_text()) == rows
+
+    # unmatched chunk keys fail loudly
+    bad_credit = tmp_path / "bad_credit.jsonl"
+    bad_credit.write_text(
+        json.dumps({"event_key": "g999_other_00000000_0_1_danger_x", "offense_frame_id": 1}) + "\n"
+    )
+    with pytest.raises(ValueError):
+        build_release_bands(
+            bad_credit,
+            manifest,
+            tmp_path / "x.json",
+            post_window_s=1.0,
+            stride_s=1.0,
+            min_takeoff_travel_m=10.0,
+            frame_hz=10.0,
+            workers=1,
+        )
+
+
 def test_round_runner_checkpoint_policy_prefers_latest_lora(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -3386,8 +3864,10 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
     assert cmd[cmd.index("--train_epochs") + 1] == "7"
     assert cmd[cmd.index("--batch_size") + 1] == "2"
     # ema_decay must survive the train_args passthrough — 0.999 is too slow
-    # to absorb behavior changes within a short per-round fine-tune.
-    assert cmd[cmd.index("--ema_decay") + 1] == "0.996"
+    # to absorb behavior changes within a short per-round fine-tune. It is not
+    # CLI-exposed, so it travels via the overrides channel.
+    overrides_file = Path(cmd[cmd.index("--train_overrides_json") + 1])
+    assert json.loads(overrides_file.read_text())["ema_decay"] == 0.996
 
 
 def test_torchrun_subprocess_cleanup_removes_stale_file_store(tmp_path, monkeypatch):
@@ -5853,3 +6333,58 @@ def test_direct_config_rejects_removed_knobs(tmp_path):
     path.write_text(_json.dumps(cfg))
     with pytest.raises(ValueError, match="state_class_mode"):
         round_runner._load_config(path)
+
+
+def test_ego_dims_filter_splits_platforms(tmp_path):
+    import json as _json
+
+    from rlvr.autoresearch.tools.build_r2lpl_pools import _ego_dims_worker
+    from rlvr.autoresearch.tools.build_r2lpl_pools import main as pools_main
+
+    def scene(name, wheelbase):
+        p = tmp_path / name
+        np.savez(p, ego_shape=np.array([wheelbase, 7.24, 2.29], dtype=np.float32))
+        return str(p)
+
+    big = scene("big.npz", 4.76)
+    small = scene("small.npz", 2.79)
+    no_shape = tmp_path / "no_shape.npz"
+    np.savez(no_shape, ego_agent_future=np.zeros((80, 3), dtype=np.float32))
+
+    assert _ego_dims_worker((big, 4.0)) == (big, True)
+    assert _ego_dims_worker((small, 4.0)) == (small, False)
+    assert _ego_dims_worker((str(no_shape), 4.0)) is None  # unreadable, not a crash
+
+    scene_list = tmp_path / "pool.json"
+    scene_list.write_text(_json.dumps([big, small, str(no_shape)]))
+    out = tmp_path / "j6_only.json"
+    pools_main(
+        [
+            "ego-dims",
+            "--scene_list",
+            str(scene_list),
+            "--min_wheelbase_m",
+            "4.0",
+            "--workers",
+            "1",
+            "--out",
+            str(out),
+        ]
+    )
+    assert _json.loads(out.read_text()) == [big]
+
+    # a threshold no platform clears must fail loudly, never emit an empty pool
+    with pytest.raises(RuntimeError, match="ego-dims filter kept 0"):
+        pools_main(
+            [
+                "ego-dims",
+                "--scene_list",
+                str(scene_list),
+                "--min_wheelbase_m",
+                "99.0",
+                "--workers",
+                "1",
+                "--out",
+                str(tmp_path / "never.json"),
+            ]
+        )

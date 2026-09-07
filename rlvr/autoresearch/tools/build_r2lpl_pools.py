@@ -13,6 +13,10 @@ ad-hoc job scripts. Stages (each a subcommand, chainable via files):
   arc-region   build a route-region point set from full drives in a route cache
                (arc-length window along the driven path)
   arc-exclude  drop scenes whose recorded pose lies within radius of a region
+  takeoff      stopped-input + route-green + departing-future pool (release
+               evidence; see build_release_bands for the per-event variant)
+  ego-dims     platform slice: keep scenes whose ego_shape wheelbase exceeds
+               a threshold (geometry-sensitive pools must not mix platforms)
 
 Every threshold is an explicit required argument — there are no defaults for
 values that change the output, so a config cannot silently drift from the
@@ -132,6 +136,106 @@ def _moving_filter(paths: list[str], thresh: float, workers: int) -> tuple[list[
             "or (for stopgo) a stop pool where genuinely no scene takes off"
         )
     return keep, unreadable
+
+
+def _takeoff_worker(args: tuple[str, int, float, float]) -> tuple[str, bool] | None:
+    from rlvr.autoresearch.tools.build_release_bands import (
+        _route_tl_state,
+        valid_future_pathlen,
+    )
+
+    path, recent_steps, max_recent_travel_m, min_future_travel_m = args
+    try:
+        with np.load(path) as d:
+            past = d["ego_agent_past"][:, :2]
+            recent = float(
+                np.linalg.norm(np.diff(past[-(recent_steps + 1) :], axis=0), axis=1).sum()
+            )
+            if recent >= max_recent_travel_m:
+                return (path, False)
+            green, _red = _route_tl_state(d)
+            if not green:
+                return (path, False)
+            travel = valid_future_pathlen(d["ego_agent_future"])
+    except Exception:
+        return None
+    return (path, travel >= min_future_travel_m)
+
+
+def cmd_takeoff(args: argparse.Namespace) -> None:
+    """Green take-off pool: stopped input + route-lane GREEN + genuinely departing future.
+
+    These are the frames where the recorded driver commits to GO at a signal —
+    the decision the failure-window corpus systematically under-teaches. The
+    departure threshold must reject creeps: a slow roll-forward re-teaches the
+    deceleration bias instead of cancelling it.
+    """
+    paths = _read_list(args.scene_list)
+    keep: list[str] = []
+    unreadable = 0
+    jobs = (
+        (p, args.recent_past_steps, args.max_recent_travel_m, args.min_future_travel_m)
+        for p in paths
+    )
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        for result in ex.map(_takeoff_worker, jobs, chunksize=256):
+            if result is None:
+                unreadable += 1
+            elif result[1]:
+                keep.append(result[0])
+    if paths and not keep:
+        raise RuntimeError(
+            f"takeoff filter kept 0 of {len(paths)} scenes ({unreadable} unreadable) — "
+            "wrong dataset root, a corpus without route-lane TL states, or thresholds "
+            "no recorded departure satisfies"
+        )
+    print(
+        f"[takeoff] kept {len(keep)}/{len(paths)} "
+        f"(recent < {args.max_recent_travel_m} m over {args.recent_past_steps} steps, "
+        f"route green, future >= {args.min_future_travel_m} m; {unreadable} unreadable)"
+    )
+    _write_list(keep, args.out)
+
+
+def _ego_dims_worker(args: tuple[str, float]) -> tuple[str, bool] | None:
+    path, min_wheelbase_m = args
+    try:
+        with np.load(path) as d:
+            wheelbase = float(np.asarray(d["ego_shape"]).reshape(-1)[0])
+    except Exception:
+        return None
+    return (path, wheelbase > min_wheelbase_m)
+
+
+def cmd_ego_dims(args: argparse.Namespace) -> None:
+    """Platform slice by recorded ego dimensions (``ego_shape[0]`` = wheelbase).
+
+    Mixed catalogs interleave platforms, and geometry-sensitive slices
+    (take-off pools, anchors) must not mix them: a row recorded by a smaller
+    vehicle is geometrically invalid for a larger one. Strictly-greater
+    comparison, so the threshold sits BETWEEN the platform wheelbases.
+    """
+    paths = _read_list(args.scene_list)
+    keep: list[str] = []
+    unreadable = 0
+    jobs = ((p, args.min_wheelbase_m) for p in paths)
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        for result in ex.map(_ego_dims_worker, jobs, chunksize=256):
+            if result is None:
+                unreadable += 1
+            elif result[1]:
+                keep.append(result[0])
+    if paths and not keep:
+        raise RuntimeError(
+            f"ego-dims filter kept 0 of {len(paths)} scenes ({unreadable} unreadable) — "
+            "wrong dataset root, NPZs without ego_shape, or a threshold above every "
+            "platform in the catalog"
+        )
+    print(
+        f"[ego-dims] kept {len(keep)}/{len(paths)} "
+        f"(wheelbase > {args.min_wheelbase_m} m; {unreadable} unreadable)"
+    )
+    _write_list(keep, args.out)
 
 
 def cmd_stopgo(args: argparse.Namespace) -> None:
@@ -292,6 +396,24 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--workers", type=int, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_moving)
+
+    p = sub.add_parser(
+        "takeoff", help="stopped-input + route-green + departing-future pool (release evidence)"
+    )
+    p.add_argument("--scene_list", type=Path, required=True)
+    p.add_argument("--recent_past_steps", type=int, required=True)
+    p.add_argument("--max_recent_travel_m", type=float, required=True)
+    p.add_argument("--min_future_travel_m", type=float, required=True)
+    p.add_argument("--workers", type=int, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=cmd_takeoff)
+
+    p = sub.add_parser("ego-dims", help="keep scenes whose ego_shape wheelbase exceeds a threshold")
+    p.add_argument("--scene_list", type=Path, required=True)
+    p.add_argument("--min_wheelbase_m", type=float, required=True)
+    p.add_argument("--workers", type=int, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=cmd_ego_dims)
 
     p = sub.add_parser("stopgo", help="moving filter over a stop-events pool (+ optional union)")
     p.add_argument(

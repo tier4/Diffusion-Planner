@@ -20,7 +20,11 @@ dependencies = [
     "pytorch-lightning",
     "scipy",
     "timm",
-    "torch",
+    "torch==2.11.0",
+    # Not imported here, but timm pulls it and its compiled operators must have been built
+    # against the same torch. Declared so it can be pinned to the same index; a mismatch shows
+    # up as `operator torchvision::nms does not exist` when timm is imported.
+    "torchvision==0.26.0",
     "tqdm",
     "wandb",
     "zstandard>=0.25.0",

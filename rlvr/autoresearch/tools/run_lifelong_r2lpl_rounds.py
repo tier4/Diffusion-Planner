@@ -555,6 +555,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
         "realized_reward": bool(workflow.get("realized_reward", False)),
+        **(
+            {"release_bands": dict(workflow["release_bands"] or {})}
+            if "release_bands" in workflow
+            else {}
+        ),
         "final_round_mining": bool(
             workflow.get("final_round_mining", workflow.get("realized_reward", False))
         ),
@@ -1172,6 +1177,54 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
     _write_json(out_path, merged)
 
 
+def _anchor_stratum(anchor_cfg: dict[str, Any], name: str) -> tuple[list[str], float] | None:
+    """Resolve one stratified anchor slice (``<name>_scene_list``/``<name>_fraction``).
+
+    Both keys must be given together; the fraction must sit in (0, 1); the
+    referenced list must be non-empty. Returns (pool, fraction) or None when
+    the stratum is not configured.
+    """
+    list_key = f"{name}_scene_list"
+    frac_key = f"{name}_fraction"
+    scene_list = anchor_cfg.get(list_key)
+    fraction = anchor_cfg.get(frac_key)
+    if (scene_list is None) != (fraction is None):
+        raise ValueError(f"training.anchor.{list_key} and {frac_key} must be set together")
+    if scene_list is None:
+        return None
+    frac = float(fraction)
+    if not 0.0 < frac < 1.0:
+        raise ValueError(f"training.anchor.{frac_key} must be in (0, 1): {frac}")
+    pool = [str(p) for p in _read_json_list(Path(scene_list))]
+    if not pool:
+        raise ValueError(f"training.anchor.{list_key} is empty: {scene_list}")
+    return pool, frac
+
+
+def _validated_anchor_strata(
+    anchor_cfg: dict[str, Any],
+) -> tuple[float, list[tuple[list[str], float]]]:
+    """Validate ``training.anchor`` and resolve its special strata (fail loudly)."""
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    ratio = float(anchor_cfg["ratio"])
+    if ratio <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
+    strata = [
+        stratum
+        for name in ("waits", "takeoff")
+        if (stratum := _anchor_stratum(anchor_cfg, name)) is not None
+    ]
+    fractions = [frac for _, frac in strata]
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {fractions}"
+        )
+    return ratio, strata
+
+
 def _anchor_slice_paths(
     anchor_cfg: dict[str, Any] | None, n_focus: int, round_idx: int
 ) -> list[str]:
@@ -1187,21 +1240,15 @@ def _anchor_slice_paths(
     Config (``training.anchor`` in the workflow JSON): ``scene_list`` +
     ``ratio`` are required when the section is present (fail loudly, no silent
     defaults); ``waits_scene_list``/``waits_fraction`` must be given together;
-    ``seed`` (default 0) is offset by the round index so each round redraws
-    reproducibly.
+    ``takeoff_scene_list``/``takeoff_fraction`` (also set together) stratify a
+    green take-off slice into the anchors — the release-side evidence that the
+    failure-window corpus under-represents (build with
+    ``build_r2lpl_pools takeoff``); ``seed`` (default 0) is offset by the round
+    index so each round redraws reproducibly.
     """
     if not anchor_cfg:
         return []
-    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
-    if missing:
-        raise ValueError(f"training.anchor is missing required fields: {missing}")
-    ratio = float(anchor_cfg["ratio"])
-    if ratio <= 0.0:
-        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
-    waits_list = anchor_cfg.get("waits_scene_list")
-    waits_fraction = anchor_cfg.get("waits_fraction")
-    if (waits_list is None) != (waits_fraction is None):
-        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+    ratio, strata = _validated_anchor_strata(anchor_cfg)
 
     import math as _math
     import random as _random
@@ -1220,15 +1267,14 @@ def _anchor_slice_paths(
     if not normal_pool:
         raise ValueError(f"training.anchor.scene_list is empty: {anchor_cfg['scene_list']}")
     picked: list[str] = []
-    if waits_list is not None:
-        frac = float(waits_fraction)
-        if not 0.0 < frac < 1.0:
-            raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {frac}")
-        waits_pool = [str(p) for p in _read_json_list(Path(waits_list))]
-        if not waits_pool:
-            raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
-        n_waits = int(round(frac * n_anchor))
-        picked.extend(_sample(waits_pool, n_waits))
+    # Floor each special stratum: independent rounding could consume the whole
+    # budget on tiny n_anchor (e.g. 0.4+0.4 with n_anchor=2 rounds to 1+1),
+    # eliminating the normal slice the fraction-sum validation promised.
+    # With sum(fractions) < 1, the floors sum to at most n_anchor - 1.
+    for pool, frac in strata:
+        n_slice = int(_math.floor(frac * n_anchor))
+        already = set(picked)
+        picked.extend(_sample([p for p in pool if p not in already], n_slice))
     picked_set = set(picked)
     picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
     return picked
@@ -1467,12 +1513,17 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
         raise ValueError(f"training.anchor is missing required fields: {missing}")
     if float(anchor_cfg["ratio"]) <= 0.0:
         raise ValueError(f"training.anchor.ratio must be > 0: {anchor_cfg['ratio']}")
-    if (anchor_cfg.get("waits_scene_list") is None) != (anchor_cfg.get("waits_fraction") is None):
-        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
-    waits_fraction = anchor_cfg.get("waits_fraction")
-    if waits_fraction is not None and not 0.0 < float(waits_fraction) < 1.0:
-        raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {waits_fraction}")
-    for key in ("scene_list", "waits_scene_list"):
+    fractions: list[float] = []
+    for name in ("waits", "takeoff"):
+        stratum = _anchor_stratum(anchor_cfg, name)  # pairing/range/emptiness
+        if stratum is not None:
+            fractions.append(stratum[1])
+    if len(fractions) > 1 and sum(fractions) >= 1.0:
+        raise ValueError(
+            "training.anchor waits_fraction + takeoff_fraction must leave room for the "
+            f"normal slice (< 1.0): {fractions}"
+        )
+    for key in ("scene_list", "waits_scene_list", "takeoff_scene_list"):
         value = anchor_cfg.get(key)
         if value is None:
             continue
@@ -1535,6 +1586,110 @@ def _validate_repair_generation_config(cfg: dict[str, Any]) -> None:
             f"repair variant {variant_name!r} needs K >= {min_k} "
             f"(det + {min_k - 1} fixed slots), got K={k}"
         )
+
+
+_RELEASE_BANDS_REQUIRED = (
+    "post_window_s",
+    "stride_s",
+    "min_takeoff_travel_m",
+    "frame_hz",
+    "ratio",
+    "seed",
+    "workers",
+)
+
+
+def _validate_release_bands_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on release_bands misconfiguration.
+
+    The block extends each round's training corpus with post-offense recorded
+    frames from the SAME events the repair phase mined (see
+    build_release_bands): pairing every failure window with its recorded
+    resolution keeps the corpus from being one-sidedly deceleration-flavoured.
+    All knobs are required — no silent defaults.
+    """
+    bands_cfg = cfg.get("release_bands")
+    if "release_bands" in cfg and not bands_cfg:
+        raise ValueError(
+            "config has an empty 'release_bands' section; remove it or fill in "
+            f"{list(_RELEASE_BANDS_REQUIRED)}"
+        )
+    if not bands_cfg:
+        return
+    _validate_release_bands_knobs(bands_cfg)
+    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
+        raise ValueError(
+            "release_bands is only wired into the base_sft training backend; "
+            f"got training_backend={cfg.get('training_backend')!r}"
+        )
+    manifest = _release_bands_manifest(cfg)
+    if manifest is None:
+        raise ValueError(
+            "release_bands requires a chunk manifest (event -> source sequence "
+            "provenance); scene_list-only mining cannot locate post-offense frames"
+        )
+    if not Path(manifest).is_file():
+        raise ValueError(f"release_bands chunk manifest does not exist: {manifest}")
+
+
+def _validate_release_bands_knobs(bands_cfg: dict[str, Any]) -> None:
+    """Per-knob checks for a non-empty release_bands section (fail loudly)."""
+    missing = [k for k in _RELEASE_BANDS_REQUIRED if bands_cfg.get(k) is None]
+    if missing:
+        raise ValueError(f"release_bands is missing required fields: {missing}")
+    for key in ("post_window_s", "stride_s", "min_takeoff_travel_m", "frame_hz", "ratio"):
+        if float(bands_cfg[key]) <= 0.0:
+            raise ValueError(f"release_bands.{key} must be > 0: {bands_cfg[key]}")
+    if int(bands_cfg["workers"]) < 1:
+        raise ValueError(f"release_bands.workers must be >= 1: {bands_cfg['workers']}")
+    if int(round(float(bands_cfg["post_window_s"]) * float(bands_cfg["frame_hz"]))) < 1:
+        raise ValueError(
+            f"release_bands.post_window_s={bands_cfg['post_window_s']} at "
+            f"frame_hz={bands_cfg['frame_hz']} rounds to zero post-offense frames — "
+            "the band would degenerate to the offense frame itself"
+        )
+
+
+def _release_bands_manifest(cfg: dict[str, Any]) -> str | None:
+    mining = cfg.get("perception_mining") or {}
+    return mining.get("chunk_manifest") or cfg.get("chunk_manifest")
+
+
+def _release_band_paths(
+    cfg: dict[str, Any],
+    credit_jsonl: Path,
+    rdir: Path,
+    round_idx: int,
+    n_focus: int,
+) -> list[str]:
+    """Extract + sample this round's release bands (see build_release_bands)."""
+    bands_cfg = cfg.get("release_bands")
+    if not bands_cfg:
+        return []
+    from rlvr.autoresearch.tools.build_release_bands import build_release_bands
+
+    manifest = _release_bands_manifest(cfg)
+    out_json = rdir / f"round_{round_idx}_release_bands.json"
+    rows = build_release_bands(
+        credit_jsonl,
+        Path(str(manifest)),
+        out_json,
+        post_window_s=float(bands_cfg["post_window_s"]),
+        stride_s=float(bands_cfg["stride_s"]),
+        min_takeoff_travel_m=float(bands_cfg["min_takeoff_travel_m"]),
+        frame_hz=float(bands_cfg["frame_hz"]),
+        workers=int(bands_cfg["workers"]),
+    )
+    # Never round a configured feature down to nothing: tiny rounds keep at
+    # least one band row per event corpus rather than silently disabling it.
+    n_keep = max(1, int(round(float(bands_cfg["ratio"]) * n_focus)))
+    if len(rows) > n_keep:
+        import random as _random
+
+        rng = _random.Random(int(bands_cfg["seed"]) + round_idx)
+        rows = sorted(rng.sample(rows, n_keep))
+        _write_json(out_json, rows)
+    return rows
 
 
 def _validate_guards_config(cfg: dict[str, Any]) -> None:
@@ -2110,6 +2265,60 @@ def _repair_refresh_chunk_targets(
     return targets
 
 
+def _emit_train_args(
+    cmd: list[str],
+    merged: dict[str, Any],
+    passthrough: tuple[str, ...],
+    save_dir: Path,
+) -> None:
+    """Split training knobs between CLI flags and the overrides file.
+
+    The trainer's CLI deliberately exposes only ``cli()``-marked TrainConfig
+    fields; every other knob is handed over via ``--train_overrides_json``
+    (the trainer fails loudly on keys that are not TrainConfig fields, so a
+    rename upstream surfaces here instead of silently training at defaults).
+    Keys are emitted in passthrough order first for stable, diffable commands.
+    """
+    from diffusion_planner.config import TrainConfig as _TrainConfig
+    from diffusion_planner.config import cli_fields as _cli_fields
+
+    cli_exposed = {f.name for f in _cli_fields(_TrainConfig)}
+    reserved = {
+        "exp_name",
+        "save_dir",
+        "train_set_list",
+        "valid_set_list",
+        "train_epochs",
+        "resume_model_path",
+        "train_overrides_json",
+    }
+    clashing = sorted(reserved & set(merged))
+    if clashing:
+        raise ValueError(
+            f"train_args must not set runner-owned keys {clashing}: the round runner "
+            "computes these (cumulative epochs, per-round scene list, warm-start "
+            "checkpoint) and a duplicate flag would override them argparse-last-wins"
+        )
+    if "train_overrides_json" not in cli_exposed:
+        raise RuntimeError(
+            "train_predictor's TrainConfig lacks the train_overrides_json channel; "
+            "cannot pass non-CLI training knobs (learning_rate, ema_decay, ...)"
+        )
+    ordered = [*passthrough, *[k for k in merged if k not in passthrough]]
+    overrides_payload: dict[str, Any] = {}
+    for key in ordered:
+        value = merged.get(key)
+        if value is None:
+            continue
+        if key in cli_exposed:
+            _append_train_arg(cmd, key, value)
+        else:
+            overrides_payload[key] = value
+    overrides_file = save_dir / "train_overrides.json"
+    overrides_file.write_text(json.dumps(overrides_payload, indent=2, sort_keys=True))
+    cmd.extend(["--train_overrides_json", str(overrides_file)])
+
+
 def _base_train_invocation(
     cfg: dict[str, Any],
     *,
@@ -2182,9 +2391,8 @@ def _base_train_invocation(
         str(total_epochs),
         "--resume_model_path",
         str(model_path),
-        "--normalization_file_path",
-        normalization_path,
     ]
+    overrides.setdefault("normalization_file_path", normalization_path)
 
     passthrough = (
         "train_subsample_step",
@@ -2260,9 +2468,7 @@ def _base_train_invocation(
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
     if "warm_up_epoch" in merged:
         merged["warm_up_epoch"] = max(0, min(int(merged["warm_up_epoch"]), total_epochs))
-    for key in passthrough:
-        if key in merged:
-            _append_train_arg(cmd, key, merged[key])
+    _emit_train_args(cmd, merged, passthrough, save_dir)
 
     env = dict(os.environ)
     repo_root = Path(__file__).resolve().parents[3]
@@ -2985,6 +3191,7 @@ def main() -> None:
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
     _validate_anchor_config(cfg)
+    _validate_release_bands_config(cfg)
     _validate_guards_config(cfg)
     _validate_repair_generation_config(cfg)
     _validate_normal_scene_list_config(cfg)
@@ -3200,9 +3407,17 @@ def main() -> None:
             # just replaced. Point it at the spliced list instead.
             replay_json = rdir / f"round_{round_idx}_replay_scenes_refreshed.json"
             _write_json(replay_json, replay_paths)
-        anchor_paths = _anchor_slice_paths(
-            cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
-        )
+        n_focus = len(set(repaired_paths) | set(replay_paths))
+        band_paths = _release_band_paths(cfg, credit_jsonl, rdir, round_idx, n_focus)
+        if band_paths:
+            band_paths = _ensure_4col_neighbor_futures(
+                band_paths, rdir.parent / "release_bands_4col"
+            )
+            print(
+                f"[round {round_idx}] release bands: {len(band_paths)} recorded "
+                f"post-offense rows paired with {n_focus} focus scenes"
+            )
+        anchor_paths = _anchor_slice_paths(cfg.get("anchor"), n_focus, round_idx)
         if anchor_paths:
             # Campaign-level cache dir: the anchor pool is largely the same
             # scenes every round, so convert once per campaign, not per round.
@@ -3213,7 +3428,9 @@ def main() -> None:
                 f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
                 f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"
             )
-        _union_scene_lists(repaired_paths, [*replay_paths, *anchor_paths], train_input_list)
+        _union_scene_lists(
+            repaired_paths, [*replay_paths, *band_paths, *anchor_paths], train_input_list
+        )
         if bool(cfg.get("validate_on_repaired_targets", False)):
             cfg["val_scenes"] = str(train_input_list)
 

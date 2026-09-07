@@ -5,10 +5,9 @@ from __future__ import annotations
 import torch
 
 from planner_metrics.evaluation import MetricEvaluation
-from planner_metrics.geometry import (
-    _point_to_segments_error_components,
-    _point_to_segments_min_dist,
-)
+from planner_metrics.geometry import _point_to_segments_min_dist
+from planner_metrics.horizon import resolve_horizon_steps
+from planner_metrics.lateral_deviation import compute_lateral_longitudinal_error_batch
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
 _CENTERLINE_SEGMENT_MIN_LENGTH = 1e-6
@@ -111,21 +110,10 @@ def compute_centerline_error_components_batch(
             f"got {tuple(lanes.shape)} for N={ego_trajs.shape[0]}"
         )
 
-    lateral_errors = []
-    longitudinal_errors = []
-    for index in range(ego_trajs.shape[0]):
-        scene_lanes = lanes[0 if lanes.shape[0] == 1 else index]
-        seg_p1, seg_p2 = _centerline_segments(scene_lanes)
-        points = ego_trajs[index, :horizon_steps, :2]
-        lateral, longitudinal = _point_to_segments_error_components(
-            points, seg_p1.to(points), seg_p2.to(points)
-        )
-        lateral_errors.append(lateral)
-        longitudinal_errors.append(longitudinal)
-    return {
-        "lateral_error_m": torch.stack(lateral_errors, dim=0),
-        "longitudinal_error_m": torch.stack(longitudinal_errors, dim=0),
-    }
+    def segments_for_sample(index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return _centerline_segments(lanes[0 if lanes.shape[0] == 1 else index])
+
+    return compute_lateral_longitudinal_error_batch(ego_trajs, horizon_steps, segments_for_sample)
 
 
 @torch.no_grad()
@@ -159,11 +147,12 @@ def evaluate_centerline(
 ) -> dict[str, torch.Tensor]:
     """Return average/final lateral error using a configurable horizon."""
     horizon_seconds = float(parameters.get("horizon_seconds", 8.0))
-    if horizon_seconds <= 0:
-        raise ValueError("centerline horizon_seconds must be positive")
-    steps = min(int(round(horizon_seconds / _PREDICTION_TIMESTEP_SECONDS)), ego_trajs.shape[1])
-    if steps < 1:
-        raise ValueError("centerline horizon selects zero prediction steps")
+    steps = resolve_horizon_steps(
+        horizon_seconds,
+        ego_trajs.shape[1],
+        label="centerline",
+        timestep_seconds=_PREDICTION_TIMESTEP_SECONDS,
+    )
     components = compute_centerline_error_components_batch(ego_trajs, data, steps)
     lateral_error = components["lateral_error_m"]
     return {
