@@ -31,6 +31,7 @@ import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
 
+from planner_metrics.pdms_navsim import CollisionType
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.inference_compile import mark_inference_step
@@ -41,6 +42,7 @@ from scenario_generation.metrics import (
     score_road_border_step,
     strong_brake_mask,
 )
+from scenario_generation.metrics.at_fault import at_fault_block
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
@@ -410,6 +412,12 @@ class _SegState:
     # ``clearances``); stays None for manually-built states that never step.
     accels: np.ndarray | None = None
     strong_brake_mps2: float = -2.5
+    # Opt-in per-step at-fault classification of OBB collisions (windowed eval gates).
+    at_fault_scoring: bool = False
+    at_fault: np.ndarray | None = None
+    collision_types: list | None = None
+    collided_uuids: dict | None = None  # track uuid -> first CollisionType (navsim dedup)
+    rear_under_hard_brake: int = 0
     last_collision_uuid: object = None
     in_episode: bool = False
     episode_eligible: bool = False
@@ -527,6 +535,7 @@ def _seed_state(
     tracker_mode="mpc_batched",
     strong_brake_mps2=-2.5,
     yaw_gate: bool = True,
+    at_fault_scoring: bool = False,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -598,6 +607,10 @@ def _seed_state(
         unstick_teleport_after=int(unstick_teleport_after),
         replay_mode=str(replay_mode),
         nbr_tracker=nbr_tracker,
+        at_fault_scoring=bool(at_fault_scoring),
+        at_fault=np.zeros(cap, dtype=bool) if at_fault_scoring else None,
+        collision_types=[[] for _ in range(cap)] if at_fault_scoring else None,
+        collided_uuids={} if at_fault_scoring else None,
     )
 
 
@@ -746,11 +759,14 @@ def _score_into(
     *,
     object_cl: float | None = None,
     object_col: bool | None = None,
+    slot_uuids: list | None = None,
 ):
     """Score this step's object / road-border / red-light metrics into the segment state.
 
     When ``object_cl`` / ``object_col`` are provided (batched path already scored
     neighbors), reuse them instead of calling ``score_object_step`` again.
+    ``slot_uuids`` (slot -> track UUID, same order as ``neighbors_live``) lets the opt-in
+    at-fault scorer classify each track once (``classify_new_collisions``).
     """
     with timers("score"):
         if object_cl is not None and object_col is not None:
@@ -760,6 +776,26 @@ def _score_into(
             cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
             s.clearances[s.k] = cl
             s.collisions[s.k] = col
+        if s.at_fault_scoring and bool(s.collisions[s.k]):
+            from scenario_generation.metrics.at_fault import classify_new_collisions
+
+            fault, types, _uuids = classify_new_collisions(
+                neighbors_live,
+                s.ego_shape,
+                float(s.dyn.speed),
+                device,
+                slot_uuids=slot_uuids,
+                collided=s.collided_uuids,
+            )
+            s.at_fault[s.k] = fault
+            s.collision_types[s.k] = types
+            if types and s.accels is not None:
+                recent = s.accels[max(0, s.k - 10) : s.k]
+                hard = bool(len(recent)) and float(recent.min()) <= float(s.strong_brake_mps2)
+                if hard:
+                    s.rear_under_hard_brake += sum(
+                        1 for t in types if t == int(CollisionType.ACTIVE_REAR_COLLISION)
+                    )
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
@@ -1046,6 +1082,19 @@ def _finalize(s: _SegState) -> dict:
             "normal_steps": int(s.cursor.normal_steps),
             "repeat_steps": int(s.cursor.repeat_steps),
         },
+        **(
+            {
+                "at_fault": at_fault_block(
+                    s.at_fault[: s.k],
+                    s.collision_types[: s.k],
+                    _event_count,
+                    collided=s.collided_uuids,
+                    rear_under_hard_brake=s.rear_under_hard_brake,
+                )
+            }
+            if s.at_fault_scoring
+            else {}
+        ),
     }
 
 
@@ -1495,6 +1544,7 @@ def render_segment(
     max_steps: int | None,
     timeline_progress_mode: str,
     draw_pool: Executor | None,
+    at_fault_scoring: bool = False,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1595,6 +1645,7 @@ def render_segment(
         goal_mode=goal_mode,
         strong_brake_mps2=strong_brake_mps2,
         yaw_gate=yaw_gate,
+        at_fault_scoring=at_fault_scoring,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1709,7 +1760,7 @@ def render_segment(
             # Scored here (before the replan/draw below) so this step's clearance/collision/
             # road-border-distance are available for the per-step trace line right below — used by
             # trajectory_colormap.py to color the rendered path by risk.
-            _score_into(s, neighbors_live, device, timers, np_dict)
+            _score_into(s, neighbors_live, device, timers, np_dict, slot_uuids=nids)
 
             # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
             # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
@@ -1741,6 +1792,14 @@ def render_segment(
                         else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        **(
+                            {
+                                "at_fault": bool(s.at_fault[k]),
+                                "collision_types": list(s.collision_types[k]),
+                            }
+                            if s.at_fault_scoring
+                            else {}
+                        ),
                     }
                 )
                 + "\n"
