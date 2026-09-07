@@ -26,6 +26,7 @@ from concurrent.futures import Executor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -471,6 +472,13 @@ class _SegState:
     # the model trains. Accumulated only in render_segment's loop; 0 count -> reported inf.
     gt_dev_sum: float = 0.0
     gt_dev_count: int = 0
+    # Per-step GT deviation (m), parallel to ``clearances``/``collisions`` -- lets
+    # ``deviation_collision_block`` AND it against ``collisions`` positionally.
+    # None for manually-built states that never step (like ``accels``/``clearances``).
+    gt_devs: np.ndarray | None = None
+    # A collision counts as "deviation collision" when the live ego was more than this far
+    # off the recorded GT path at the same step (see ``deviation_collision_block``).
+    deviation_collision_thresh_m: float = 2.0
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -527,6 +535,7 @@ def _seed_state(
     tracker_mode="mpc_batched",
     strong_brake_mps2=-2.5,
     yaw_gate: bool = True,
+    deviation_collision_thresh_m: float = 2.0,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -589,6 +598,8 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
+        gt_devs=np.full(cap, np.inf, dtype=np.float32),
+        deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
         max_steps=cap,
@@ -689,9 +700,18 @@ def _wrap_pi(a):
     return (a + np.pi) % (2.0 * np.pi) - np.pi
 
 
+class GTDeviation(NamedTuple):
+    """Result of ``_gt_deviation_m``: the min distance plus enough to visualize it."""
+
+    dist_m: float
+    nearest_xy: np.ndarray | None  # world (2,); None when no valid/yaw-gated window point
+    lo: int  # recorded-pose window bounds ([lo, hi)) the distance was searched over
+    hi: int
+
+
 def _gt_deviation_m(
     tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cursor_idx: int
-) -> float:
+) -> GTDeviation:
     """Min yaw-gated point-to-polyline distance from ``live_xy`` to a ±15 s window of
     recorded poses centered on ``cursor_idx``.
 
@@ -713,12 +733,12 @@ def _gt_deviation_m(
     hi = min(n, int(cursor_idx) + _GT_DEV_WINDOW_FRAMES + 1)
     window = tl.poses[lo:hi]  # (M, 3) -- xy + yaw
     if len(window) == 0:
-        return _GT_DEV_INF
+        return GTDeviation(_GT_DEV_INF, None, lo, hi)
     if len(window) == 1:
         pose = window[0]
         if abs(_wrap_pi(float(pose[2]) - float(live_yaw))) > (np.pi / 2.0):
-            return _GT_DEV_INF
-        return float(np.linalg.norm(live_xy - pose[:2]))
+            return GTDeviation(_GT_DEV_INF, None, lo, hi)
+        return GTDeviation(float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi)
     a = window[:-1, :2]
     b = window[1:, :2]
     ab = b - a  # (M-1, 2)
@@ -734,7 +754,10 @@ def _gt_deviation_m(
     seg_yaw = np.arctan2(ab[:, 1], ab[:, 0])
     wrong_heading = np.abs(_wrap_pi(seg_yaw - float(live_yaw))) > (np.pi / 2.0)
     d = np.where(wrong_heading, _GT_DEV_INF, d)
-    return float(d.min())
+    i = int(np.argmin(d))
+    if not np.isfinite(d[i]):
+        return GTDeviation(_GT_DEV_INF, None, lo, hi)
+    return GTDeviation(float(d[i]), proj[i].copy(), lo, hi)
 
 
 def _score_into(
@@ -908,6 +931,33 @@ def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, time
     _advance_step(s, pred, idx, device, timers)
 
 
+def _event_onsets(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> list:
+    """Onset step index of each rising-edge event in ``mask``, with falling-edge debounce.
+
+    Entering True from outside an event starts a new event (its onset is recorded). While
+    in an event, a False gap shorter than ``clear_frames`` keeps the latch (no new onset on
+    the next True); only ``clear_frames`` consecutive Falses release it so a later True is a
+    new event. ``len(_event_onsets(mask)) == _event_count(mask)`` always.
+    """
+    onsets = []
+    if mask.size == 0:
+        return onsets
+    in_event = False
+    false_run = 0
+    for i, v in enumerate(mask.astype(bool)):
+        if v:
+            if not in_event:
+                onsets.append(i)
+                in_event = True
+            false_run = 0
+        elif in_event:
+            false_run += 1
+            if false_run >= clear_frames:
+                in_event = False
+                false_run = 0
+    return onsets
+
+
 def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> int:
     """Rising-edge event count with falling-edge debounce.
 
@@ -916,23 +966,7 @@ def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES)
     ``clear_frames`` consecutive Falses release it so a later True is a new event. Used for
     collision / near-miss / strong-brake ``*_count`` (``*_steps`` stay raw).
     """
-    if mask.size == 0:
-        return 0
-    count = 0
-    in_event = False
-    false_run = 0
-    for v in mask.astype(bool):
-        if v:
-            if not in_event:
-                count += 1
-                in_event = True
-            false_run = 0
-        elif in_event:
-            false_run += 1
-            if false_run >= clear_frames:
-                in_event = False
-                false_run = 0
-    return count
+    return len(_event_onsets(mask, clear_frames))
 
 
 def _clearance_stats(values: np.ndarray) -> dict:
@@ -1006,6 +1040,33 @@ def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
     }
 
 
+def deviation_collision_block(collisions: np.ndarray, gt_devs: np.ndarray, thresh_m: float) -> dict:
+    """The ``deviation_collision`` segment-row block: object collisions that happened while
+    the live ego was more than ``thresh_m`` off the recorded GT path at that same step.
+
+    A breakdown of ``object.collision_count``, not a replacement -- every deviation
+    collision is also counted there. ``gt_devs`` steps with no valid GT window (``inf``,
+    see ``_gt_deviation_m``) are treated as deviated (conservative: can't confirm the ego
+    was on-path).
+
+    ``count`` classifies each raw collision event (as delimited by ``_event_onsets`` on
+    ``collisions``, same debounce as ``object.collision_count``) exactly once, at its onset
+    step -- not by re-running the debounced event counter over the AND-filtered per-step
+    mask. A single uninterrupted collision that dips in and out of deviation mid-event would
+    otherwise be double-counted here while staying one event in ``object.collision_count``,
+    breaking the breakdown invariant. ``steps`` stays a raw per-step tally.
+    """
+    thresh_m = float(thresh_m)
+    mask = collisions & (gt_devs > thresh_m)
+    onsets = _event_onsets(collisions)
+    count = sum(1 for i in onsets if gt_devs[i] > thresh_m)
+    return {
+        "thresh_m": thresh_m,
+        "steps": int(mask.sum()),
+        "count": count,
+    }
+
+
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
     rb = s.rb_dists[: s.k]
@@ -1032,6 +1093,13 @@ def _finalize(s: _SegState) -> dict:
         else float("inf"),
         "progress_m": progress_m,
         "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
+        "deviation_collision": (
+            deviation_collision_block(
+                s.collisions[: s.k], s.gt_devs[: s.k], s.deviation_collision_thresh_m
+            )
+            if s.gt_devs is not None
+            else {"thresh_m": float(s.deviation_collision_thresh_m), "steps": 0, "count": 0}
+        ),
         "road_border": clearance_family_block(
             rb, road_border_collision_mask(rb), miss_thresh=s.near_miss_thresh
         ),
@@ -1402,6 +1470,7 @@ def _draw_step(
     view_half_m: float = 50.0,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
+    gt_deviation_viz: tuple[np.ndarray, np.ndarray, float] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1418,6 +1487,11 @@ def _draw_step(
 
     ``reproducer_ego``: optional ``(x, y, heading)`` of the recorded cursor ego in
     the live-ego frame, drawn as a hollow outline matching the live ego color.
+
+    ``gt_deviation_viz``: optional ``(window_xy, nearest_xy, dist_m)`` -- the recorded-path
+    window and nearest point (both already in the live-ego frame, see ``_gt_deviation_m``)
+    this step's GT deviation was measured against, drawn as a thin path line plus the
+    perpendicular from the live ego to ``nearest_xy``.
     """
     from pathlib import Path
 
@@ -1454,6 +1528,7 @@ def _draw_step(
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
         extra_ego_trajectories=extra_ego_trajectories,
         reproducer_ego=reproducer_ego,
+        gt_deviation_viz=gt_deviation_viz,
     )
 
 
@@ -1482,6 +1557,7 @@ def render_segment(
     abort_deviation_m: float,
     abort_after: int,
     abort_max_snaps: int,
+    deviation_collision_thresh_m: float,
     drop_objects: bool,
     goal_mode: str,
     title_prefix: str | None,
@@ -1598,6 +1674,7 @@ def render_segment(
         goal_mode=goal_mode,
         strong_brake_mps2=strong_brake_mps2,
         yaw_gate=yaw_gate,
+        deviation_collision_thresh_m=deviation_collision_thresh_m,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1678,9 +1755,12 @@ def render_segment(
             # from the live ego to a ±15 s window of recorded poses around the cursor's current frame
             # (see ``_gt_deviation_m``). Pure xy distance to the cursor frame would over-report drift
             # whenever the cursor is mid-repeat / mid-cooldown.
-            gt_deviation_m = _gt_deviation_m(tl, s.live_pose[:2], s.live_pose[2], idx)
+            gt_dev = _gt_deviation_m(tl, s.live_pose[:2], s.live_pose[2], idx)
+            gt_deviation_m = gt_dev.dist_m
             s.gt_dev_sum += gt_deviation_m
             s.gt_dev_count += 1
+            if s.gt_devs is not None:
+                s.gt_devs[k] = gt_deviation_m
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
                 deviation_streak += 1
             else:
@@ -1745,6 +1825,12 @@ def render_segment(
                         else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        # collision AND off the recorded GT path by > deviation_collision_thresh_m
+                        # (see ``deviation_collision_block``); same per-step definition the
+                        # segment-level "deviation_collision" metric rolls up from.
+                        "deviation_collision": bool(
+                            s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
+                        ),
                     }
                 )
                 + "\n"
@@ -1810,6 +1896,23 @@ def render_segment(
                 and k % draw_every == 0
             ):
                 repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
+                gt_dev_viz = None
+                if gt_dev.nearest_xy is not None:
+                    window_xy = _world_plan_to_ego(
+                        tl.poses[gt_dev.lo : gt_dev.hi, :2],
+                        tl.poses[gt_dev.lo : gt_dev.hi, 2],
+                        s.live_pose[0],
+                        s.live_pose[1],
+                        s.live_pose[2],
+                    )[:, :2]
+                    nearest_xy = _world_plan_to_ego(
+                        gt_dev.nearest_xy[None, :],
+                        np.zeros(1),
+                        s.live_pose[0],
+                        s.live_pose[1],
+                        s.live_pose[2],
+                    )[0, :2]
+                    gt_dev_viz = (window_xy, nearest_xy, gt_deviation_m)
                 with timers("render_submit"):
                     pending.append(
                         draw.submit(
@@ -1825,6 +1928,7 @@ def render_segment(
                             distance_label_offset_m=distance_label_offset_m,
                             view_half_m=view_half_m,
                             reproducer_ego=repro_xyh,
+                            gt_deviation_viz=gt_dev_viz,
                         )
                     )
             snaps_before = s.snap_count

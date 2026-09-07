@@ -12,7 +12,11 @@ from scenario_generation.metrics.ego_traj import ego_traj_ego_frame
 from scenario_generation.metrics.red_light import score_red_light_step
 from scenario_generation.metrics.road_border import score_road_border_step
 from scenario_generation.metrics.strong_brake import strong_brake_mask
-from scenario_generation.reproducer_rollout import _clearance_stats, _event_count
+from scenario_generation.reproducer_rollout import (
+    _clearance_stats,
+    _event_count,
+    deviation_collision_block,
+)
 
 
 def _default_hist(live: np.ndarray) -> np.ndarray:
@@ -311,6 +315,11 @@ def _segment_row(**overrides) -> dict:
             TDIGEST_KEY: tdigest_dict_from_values(rb_vals),
         },
         "red_light_violation": {"steps": 1, "count": 1},
+        "deviation_collision": {
+            "thresh_m": 2.0,
+            "steps": 0,
+            "count": 0,
+        },
         "strong_brake": {
             "thresh_mps2": -2.5,
             "strongest_mps2": float("inf"),
@@ -435,3 +444,22 @@ def test_segment_row_for_json_strips_tdigest():
 
 def test_event_count_debounce_unchanged():
     assert _event_count(np.array([1, 0, 0, 0, 1], dtype=bool)) == 2
+
+
+def test_deviation_collision_block_classifies_one_collision_event_once():
+    # A single uninterrupted collision event (never drops out, so
+    # object.collision_count == _event_count(collisions) == 1) whose GT deviation dips
+    # below threshold for >= EVENT_COUNT_CLEAR_FRAMES steps mid-event and then rises again.
+    # Filtering-then-event-counting the AND mask would (wrongly) see this as two
+    # deviation-collision events; classifying the one collision event at its onset must not.
+    collisions = np.ones(12, dtype=bool)
+    gt_devs = np.array([3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0])
+    thresh_m = 2.0
+
+    assert _event_count(collisions) == 1
+
+    block = deviation_collision_block(collisions, gt_devs, thresh_m)
+
+    assert block["count"] == 1
+    assert block["count"] <= _event_count(collisions)
+    assert block["steps"] == int((collisions & (gt_devs > thresh_m)).sum())

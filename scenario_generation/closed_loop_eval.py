@@ -342,6 +342,7 @@ def aggregate(
     near_miss_thresh: float,
     *,
     strong_brake_mps2: float = -2.5,
+    deviation_collision_thresh_m: float = 2.0,
     pass_condition: "ClosedLoopPassCondition | None" = None,
 ) -> dict:
     """Aggregate per-segment nested metric rows into a closed-loop summary.
@@ -398,6 +399,15 @@ def aggregate(
     red = _event_family_block(
         rows, "red_light_violation", dual=False, total_steps=total_steps, n_seg=n_seg
     )
+    dev_col = _event_family_block(
+        rows,
+        "deviation_collision",
+        dual=False,
+        total_steps=total_steps,
+        n_seg=n_seg,
+        thresh_key="thresh_m",
+        thresh_value=float(deviation_collision_thresh_m),
+    )
     brake = _event_family_block(
         rows,
         "strong_brake",
@@ -425,6 +435,7 @@ def aggregate(
         "n_segments_diverged": n_seg_diverged,
         "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "object": obj,
+        "deviation_collision": dev_col,
         "road_border": rb,
         "red_light_violation": red,
         "strong_brake": brake,

@@ -1183,6 +1183,8 @@ _LANE_BORDER_COLOR = "#888888"
 _ROAD_BORDER_COLOR = "#dd2222"
 _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
+_GT_PATH_COLOR = "#e69138"
+_GT_DEV_COLOR = "#cc0000"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
 _ROAD_BORDER_FLAG_THRESH = 0.5
 _ROAD_BORDER_COORD_EPS_M = 1e-3
@@ -1566,6 +1568,7 @@ def save_step_figure(
     metrics: dict | None = None,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
+    gt_deviation_viz: tuple[np.ndarray, np.ndarray, float] | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -1574,6 +1577,12 @@ def save_step_figure(
 
     ``reproducer_ego``: optional ``(x, y, heading)`` in the live-ego frame for the
     recorded cursor ego, drawn as a hollow outline in ``_EGO_COLOR``.
+
+    ``gt_deviation_viz``: optional ``(window_xy, nearest_xy, dist_m)``, all already in the
+    live-ego frame (same convention as ``reproducer_ego`` -- no further transform here).
+    ``window_xy`` is the recorded-path window the GT-deviation distance was searched over
+    (drawn as a thin line); ``nearest_xy`` is the closest point on it, connected to the ego
+    with a dashed perpendicular labeled with ``dist_m``.
     """
     from matplotlib.figure import Figure
 
@@ -1768,6 +1777,31 @@ def save_step_figure(
             textcoords="offset points",
             zorder=24,
         )
+
+    # 3a-2) GT-deviation visualization: the recorded-path window this step's deviation was
+    # measured against, plus the perpendicular from the live ego to the nearest point on it.
+    if gt_deviation_viz is not None:
+        window_xy, nearest_xy, dist_m = gt_deviation_viz
+        if window_xy is not None and len(window_xy) >= 2:
+            ax.plot(
+                window_xy[:, 0],
+                window_xy[:, 1],
+                "-",
+                color=_GT_PATH_COLOR,
+                lw=1.3,
+                alpha=0.55,
+                zorder=6,
+            )
+        if nearest_xy is not None:
+            nx, ny = float(nearest_xy[0]), float(nearest_xy[1])
+            ax.plot([ex, nx], [ey, ny], "--", color=_GT_DEV_COLOR, lw=1.5, zorder=22)
+            ax.annotate(
+                f"{float(dist_m):.2f} m",
+                ((ex + nx) / 2, (ey + ny) / 2),
+                fontsize=7,
+                color=_GT_DEV_COLOR,
+                zorder=24,
+            )
 
     # 3b) Extra ego-frame trajectories (e.g. GT vs model output side by side).
     # Each entry: (traj[T, >=4] with x, y, cos, sin in the CURRENT ego frame,

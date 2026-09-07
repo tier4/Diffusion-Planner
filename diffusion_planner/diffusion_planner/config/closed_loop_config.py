@@ -169,6 +169,10 @@ class ClosedLoopConfig:
     closed_loop_abort_deviation_m: float = 50.0
     closed_loop_abort_after: int = 30
     closed_loop_abort_max_snaps: int = 0
+    # Object collisions that happened while the live ego was more than this far off the
+    # recorded GT path at that same step are reported separately as "deviation_collision"
+    # (a breakdown of object.collision_count, not a replacement for it).
+    closed_loop_deviation_collision_thresh_m: float = 2.0
     closed_loop_goal_mode: str = "segment"
     closed_loop_title_prefix: str | None = None
     closed_loop_distance_label_offset_m: float = 1.2

@@ -87,6 +87,10 @@ class RolloutParams:
     window: tuple[int, int] | None
     max_steps: int | None
     timeline_progress_mode: str
+    # A collision counts as "deviation collision" (reported alongside, not instead of,
+    # object.collision_count) when the live ego was more than this far off the recorded
+    # GT path at that same step. See ``reproducer_rollout.deviation_collision_block``.
+    deviation_collision_thresh_m: float = 2.0
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -120,6 +124,7 @@ class RolloutParams:
             "window": self.window,
             "max_steps": self.max_steps,
             "timeline_progress_mode": self.timeline_progress_mode,
+            "deviation_collision_thresh_m": self.deviation_collision_thresh_m,
         }
 
 
@@ -555,6 +560,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             result.rows,
             self.config.params.near_miss_thresh,
             strong_brake_mps2=self.config.params.strong_brake_mps2,
+            deviation_collision_thresh_m=self.config.params.deviation_collision_thresh_m,
             pass_condition=self.config.pass_condition,
         )
         summary["npz_root"] = str(self.npz_root)
