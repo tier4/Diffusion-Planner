@@ -508,12 +508,8 @@ class DelayedPlantTracker:
 
         # Match the established 10 Hz simulator contract: physical dead time
         # is represented on the discrete grid with Python's round-to-nearest.
-        self.steer_delay_steps = int(
-            round(self.plant_parameters.steer_dead_time_s / self.dt)
-        )
-        self.accel_delay_steps = int(
-            round(self.plant_parameters.accel_dead_time_s / self.dt)
-        )
+        self.steer_delay_steps = int(round(self.plant_parameters.steer_dead_time_s / self.dt))
+        self.accel_delay_steps = int(round(self.plant_parameters.accel_dead_time_s / self.dt))
         self.max_speed = float(getattr(self.inner, "max_speed", 20.0))
         self.max_steer = float(getattr(self.inner, "max_steer", 0.6))
 

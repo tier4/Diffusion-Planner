@@ -41,9 +41,7 @@ def _tracker(params, *, accel=2.0, steer=0.4, compensate=False):
 
 
 def _step(tracker, x0):
-    ref = np.column_stack(
-        [np.linspace(1.0, 8.0, 8), np.zeros(8), np.zeros(8)]
-    )
+    ref = np.column_stack([np.linspace(1.0, 8.0, 8), np.zeros(8), np.zeros(8)])
     pose, speed = tracker.track(np.asarray(x0, dtype=np.float64), ref)
     return np.r_[pose, speed]
 
@@ -95,9 +93,7 @@ def test_controller_compensation_previews_pending_ticks_and_shifts_reference():
     params = PlantParameters(0.2, 0.0, 0.1, 0.0)
     tracker, inner = _tracker(params, compensate=True)
     x0 = np.array([1.0, 2.0, 0.0, 5.0])
-    ref = np.column_stack(
-        [np.arange(10, dtype=np.float64), np.zeros(10), np.zeros(10)]
-    )
+    ref = np.column_stack([np.arange(10, dtype=np.float64), np.zeros(10), np.zeros(10)])
 
     tracker.track(x0, ref)
 
@@ -111,9 +107,7 @@ def test_no_compensation_passes_current_state_and_full_reference():
     params = PlantParameters(0.2, 0.0, 0.1, 0.0)
     tracker, inner = _tracker(params, compensate=False)
     x0 = np.array([1.0, 2.0, 0.0, 5.0])
-    ref = np.column_stack(
-        [np.arange(10, dtype=np.float64), np.zeros(10), np.zeros(10)]
-    )
+    ref = np.column_stack([np.arange(10, dtype=np.float64), np.zeros(10), np.zeros(10)])
 
     tracker.track(x0, ref)
 

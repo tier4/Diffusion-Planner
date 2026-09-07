@@ -80,9 +80,7 @@ def _model_args(future_len=8):
     )
 
 
-def test_delay_plan_activation_serial_and_batched_match_one_segment(
-    tmp_path, monkeypatch
-):
+def test_delay_plan_activation_serial_and_batched_match_one_segment(tmp_path, monkeypatch):
     tl = _timeline(tmp_path)
     args = _model_args()
     model = _StraightModel(args.future_len)

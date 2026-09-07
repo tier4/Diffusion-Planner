@@ -1,5 +1,4 @@
 import torch
-
 from diffusion_planner.model.module.decoder import (
     apply_inference_prefix,
     future_prefix_mask,

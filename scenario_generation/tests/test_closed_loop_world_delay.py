@@ -173,4 +173,3 @@ def test_pre_step_keeps_metrics_on_truth_clock(monkeypatch):
         ("build", 12, None),
         ("build", 10, "lag"),
     ]
-

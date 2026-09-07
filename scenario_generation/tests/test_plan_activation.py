@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from scenario_generation.reproducer_rollout import (
-    _PlanSchedule,
     _attach_committed_prefix,
+    _PlanSchedule,
 )
 
 
@@ -19,9 +19,7 @@ def _plan(base: float, length: int = 8):
 def test_pending_plans_activate_at_absolute_ticks_even_when_replan_is_faster():
     schedule = _PlanSchedule()
     xy0, h0 = _plan(0.0)
-    schedule.enqueue(
-        born_step=0, world_xy=xy0, world_heading=h0, delay_step=2, immediate=True
-    )
+    schedule.enqueue(born_step=0, world_xy=xy0, world_heading=h0, delay_step=2, immediate=True)
     np.testing.assert_array_equal(
         schedule.reference(1, 2, strict_horizon=True)[0][:, 0], [1.0, 2.0]
     )
@@ -74,9 +72,7 @@ def test_first_replan_has_zero_delay_fallback():
 def test_prefix_is_live_ego_frame_then_state_normalized():
     schedule = _PlanSchedule()
     xy, heading = _plan(1.0)
-    schedule.enqueue(
-        born_step=0, world_xy=xy, world_heading=heading, delay_step=2, immediate=True
-    )
+    schedule.enqueue(born_step=0, world_xy=xy, world_heading=heading, delay_step=2, immediate=True)
     scene = {}
 
     effective = _attach_committed_prefix(scene, _state(schedule, k=1), _model_args())
@@ -100,9 +96,7 @@ def test_velocity_representation_uses_per_tick_displacements_before_normalizatio
     schedule = _PlanSchedule()
     xy = np.array([[1.0, 0.0], [3.0, 0.0], [6.0, 0.0]], dtype=np.float32)
     heading = np.zeros(3, dtype=np.float32)
-    schedule.enqueue(
-        born_step=0, world_xy=xy, world_heading=heading, delay_step=2, immediate=True
-    )
+    schedule.enqueue(born_step=0, world_xy=xy, world_heading=heading, delay_step=2, immediate=True)
     args = _model_args(velocity=True)
     # Identity normalization makes the displacement contract direct to inspect.
     args.state_normalizer.mean[0, 0] = 0.0
