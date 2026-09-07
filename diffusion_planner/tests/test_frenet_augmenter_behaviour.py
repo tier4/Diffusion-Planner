@@ -408,159 +408,6 @@ def test_past_noise_at_zero_changes_nothing(monkeypatch):
     assert torch.equal(fut_off, fut_on)
 
 
-# ────────────────────── 6. smooth ego-history jitter ─────────────────────────
-
-
-def _straight_frame(batch: int):
-    """A straight +x polyline with its path frame, as ``__call__`` builds them."""
-    T = P_STEPS + F_STEPS
-    xy = torch.zeros(batch, T, 2)
-    xy[..., 0] = torch.arange(T, dtype=torch.float32) * EGO_V * DT
-    tan = torch.zeros(batch, T, 2)
-    tan[..., 0] = 1.0
-    nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
-    return xy, tan, nrm
-
-
-def _jitter_offset(batch: int, seed: int = 5, **kw):
-    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=seed, **kw)
-    xy, tan, nrm = _straight_frame(batch)
-    return aug._hist_jitter(xy, tan, nrm, P_STEPS), aug
-
-
-def test_hist_jitter_is_exactly_zero_at_t0():
-    """The current pose is what the model plans from; the history must not move it."""
-    off, aug = _jitter_offset(64, hist_jitter_lat=0.4)
-    # the basis itself, before any amplitude: every mode vanishes at u = 0
-    phi = aug._hist_jitter_basis(P_STEPS, torch.device("cpu"), torch.float32)
-    assert torch.equal(phi[:, -1], torch.zeros(phi.shape[0]))
-    # and so does the offset actually applied, exactly -- not "to within a tolerance"
-    assert torch.equal(off[:, P_STEPS - 1], torch.zeros(64, 2))
-    assert torch.equal(off[:, P_STEPS:], torch.zeros(64, F_STEPS, 2)), "the future moved"
-    assert float(off[:, 0].abs().max()) > 0.0, "nothing was jittered; the test proves nothing"
-
-
-def test_hist_jitter_std_at_the_oldest_sample_is_the_requested_one():
-    """The flag is defined as the std at the oldest sample: A = sigma / ||phi[:, 0]||."""
-    sigma = 0.35
-    n = 40000
-    off, _ = _jitter_offset(n, hist_jitter_lat=sigma)
-    emp = float(off[:, 0, 1].std())
-    # Monte-Carlo error on a std from n samples is ~ sigma / sqrt(2n) = 1.2e-3 here;
-    # 5% is many times that and still catches a wrong normalisation constant
-    # (sqrt(2) = 1.41 or K = 3 would both be off by tens of percent).
-    assert abs(emp - sigma) / sigma < 0.05, emp
-    assert abs(float(off[:, 0, 0].mean())) < 1e-2, "lateral jitter moved the path tangent"
-
-
-def test_hist_jitter_is_smooth_not_white():
-    """Independent per-sample noise is a jagged track a model learns to ignore."""
-    sigma = 0.3
-    off, _ = _jitter_offset(4000, hist_jitter_lat=sigma)
-    lat = off[:, :P_STEPS, 1]
-    d2 = lat[:, 2:] - 2 * lat[:, 1:-1] + lat[:, :-2]
-    # white noise of the same per-sample std has second-difference std sigma*sqrt(6)
-    white = float(sigma * (6.0**0.5))
-    assert float(d2.std()) < white / 20.0, (float(d2.std()), white)
-
-
-def _spacing_ratio(**kw):
-    """Mean along-path sample spacing of the jittered history, over the unjittered one."""
-    xy, _, _ = _straight_frame(4000)
-    off, _ = _jitter_offset(4000, **kw)
-    step0 = (xy[:, 1:P_STEPS] - xy[:, : P_STEPS - 1]).norm(dim=-1)
-    step1 = ((xy + off)[:, 1:P_STEPS] - (xy + off)[:, : P_STEPS - 1]).norm(dim=-1)
-    return abs(float(step1.std() / step0.mean()))
-
-
-def test_lateral_jitter_leaves_the_along_path_spacing_alone():
-    """Bending the track sideways must not smuggle in a speed perturbation."""
-    xy, _, _ = _straight_frame(4000)
-    off, _ = _jitter_offset(4000, hist_jitter_lat=0.3)
-    step0 = (xy[:, 1:P_STEPS] - xy[:, : P_STEPS - 1]).norm(dim=-1)
-    step1 = ((xy + off)[:, 1:P_STEPS] - (xy + off)[:, : P_STEPS - 1]).norm(dim=-1)
-    # a purely lateral bend only lengthens the step at second order in the bend angle
-    assert abs(float(step1.mean() / step0.mean()) - 1.0) < 0.01
-
-
-def test_longitudinal_jitter_is_what_moves_the_spacing():
-    """The point of the second axis: the implied speed history wobbles."""
-    lat_only = _spacing_ratio(hist_jitter_lat=0.3, hist_jitter_lon=0.0)
-    lon_only = _spacing_ratio(hist_jitter_lat=0.0, hist_jitter_lon=0.3)
-    assert lat_only < 0.01, lat_only
-    assert lon_only > 20 * lat_only, (lon_only, lat_only)
-
-
-def test_longitudinal_jitter_std_at_the_oldest_sample_is_the_requested_one():
-    sigma = 0.35
-    off, _ = _jitter_offset(40000, hist_jitter_lon=sigma)
-    assert abs(float(off[:, 0, 0].std()) - sigma) / sigma < 0.05
-    assert float(off[:, 0, 1].abs().max()) == 0.0, "longitudinal jitter moved the path normal"
-    assert torch.equal(off[:, P_STEPS - 1], torch.zeros(40000, 2)), "t=0 moved"
-
-
-def test_the_two_axes_are_drawn_independently():
-    """A lateral-only run must not have its wobble mirrored along the path."""
-    off, _ = _jitter_offset(20000, hist_jitter_lat=0.3, hist_jitter_lon=0.3)
-    lon, lat = off[:, 0, 0], off[:, 0, 1]
-    corr = float((lon * lat).mean() / (lon.std() * lat.std()))
-    assert abs(corr) < 0.05, corr
-
-
-def test_hist_jitter_headings_match_the_perturbed_polyline():
-    """The jitter runs after the veto, so the stored cos/sin are re-derived from it."""
-    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=13, hist_jitter_lat=0.3)
-    inputs, _ = _run(aug, batch=8)
-    rows = aug._aug_rows
-    assert bool(rows.any()), "nothing was augmented; the test proves nothing"
-    past = inputs["ego_agent_past"][rows]
-    # interior history samples: ddt is a central difference there, and the batch-wide
-    # re-centering is rigid, so the stored heading must be the polyline's own direction
-    g = past[:, 2:, :2] - past[:, :-2, :2]
-    stored = torch.atan2(past[:, 1:-1, 3], past[:, 1:-1, 2])
-    assert torch.allclose(torch.atan2(g[..., 1], g[..., 0]), stored, atol=1e-4)
-    # and the jitter really did bend it away from the straight recording
-    assert float(stored.abs().max()) > 1e-3
-
-
-def _normal_spy(monkeypatch):
-    """Record the shape of every torch.normal drawn from here on."""
-    shapes = []
-    real = torch.normal
-
-    def spy(*args, **kwargs):
-        shapes.append(kwargs.get("size"))
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(torch, "normal", spy)
-    return shapes
-
-
-def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
-    shapes = _normal_spy(monkeypatch)
-    off = FrenetStatePerturbationTensor(1.0, "cpu", seed=7)
-    in_off, fut_off = _run(off, batch=8, pad_steps=3)
-    shapes_off, _ = list(shapes), shapes.clear()
-
-    explicit = FrenetStatePerturbationTensor(
-        1.0, "cpu", seed=7, hist_jitter_lat=0.0, hist_jitter_lon=0.0
-    )
-    in_on, fut_on = _run(explicit, batch=8, pad_steps=3)
-
-    assert shapes_off == list(shapes), "the off value changed how much randomness is drawn"
-    assert torch.equal(off.gen.get_state(), explicit.gen.get_state())
-    assert torch.equal(in_off["ego_agent_past"], in_on["ego_agent_past"])
-    assert torch.equal(in_off["ego_current_state"], in_on["ego_current_state"])
-    assert torch.equal(fut_off, fut_on)
-
-
-def test_hist_jitter_refuses_a_negative_std():
-    with pytest.raises(ValueError, match="hist_jitter_lat"):
-        FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lat=-0.1)
-    with pytest.raises(ValueError, match="hist_jitter_lon"):
-        FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lon=-0.1)
-
-
 # ───────────────────── layout robustness (3-col / 4-col) ─────────────────────
 
 
@@ -596,17 +443,14 @@ def test_a_3col_history_and_4col_future_are_accepted():
     assert torch.allclose(in_alt["goal_pose"], in_ref["goal_pose"], atol=1e-5)
 
 
-# ────────────── 7. both perturbations are input-only, post-veto ───────────────
+# ────────────── 6. the history perturbation is input-only, post-veto ──────────
 #
-# The property that makes an A/B between the two history perturbations valid: they are
-# applied to the ACCEPTED history and nothing else, so they cannot move which scenes are
-# augmented, cannot move the training target, and cannot move the pose the model plans
-# from. Everything below is parametrised over both of them for exactly that reason.
+# The property that makes an A/B on the history perturbation valid: it is applied to the
+# ACCEPTED history and nothing else, so it cannot move which scenes are augmented, cannot
+# move the training target, and cannot move the pose the model plans from.
 
 _PERTURBATIONS = [
     pytest.param({"ego_past_noise_std": 0.2}, id="multiplicative"),
-    pytest.param({"hist_jitter_lat": 0.3}, id="jitter_lat"),
-    pytest.param({"hist_jitter_lat": 0.3, "hist_jitter_lon": 0.3}, id="jitter_lat_lon"),
 ]
 
 
@@ -678,7 +522,7 @@ def test_stored_history_headings_describe_the_perturbed_track(kw):
     assert torch.allclose(torch.atan2(g[..., 1], g[..., 0]), stored, atol=1e-4)
 
 
-# ──────────────── 8. the toward-parked fallback and the floor mask ────────────────
+# ──────────────── 7. the toward-parked fallback and the floor mask ────────────────
 # Regression cover for the three fixes in a00a98588 / a3a77f888 / 74609f900. The
 # defect they answer was silent: the augmenter kept working and simply stopped
 # augmenting the scene family the flag exists for.

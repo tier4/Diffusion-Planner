@@ -149,9 +149,7 @@ augmenter reproduces the previous behaviour exactly.
 --augment_type frenet \
   --frenet_recovery_rounds 1 \      # retry after a footprint veto
   --frenet_min_clearance 0.2 \      # metres of clearance to keep from recorded vehicles
-  --frenet_toward_parked_prob 0.3 \ # fraction of eligible scenes nudged toward a parked vehicle
-  --frenet_hist_jitter_lat 0.3 \    # smooth lateral jitter of the history, metres at the oldest sample
-  --frenet_hist_jitter_lon 0.3      # same, along the direction of travel
+  --frenet_toward_parked_prob 0.3   # fraction of eligible scenes nudged toward a parked vehicle
 ```
 
 - **`--frenet_recovery_rounds N`** (default 0). A candidate whose footprint overlaps a
@@ -195,23 +193,6 @@ augmenter reproduces the previous behaviour exactly.
   accepted with the flag off, 8 with it on. The fallback above is what keeps that from
   being 0; it does not recover the rest, and no selection rule can, because a 2.0 m ego
   does not fit a 1.8 m gap. Use `P` as a small fraction, not a global setting.
-
-- **`--frenet_hist_jitter_lat L` / `--frenet_hist_jitter_lon G`** (default 0.0).
-  Smooth per-sample jitter of the ego history, in metres of standard deviation at the
-  oldest sample, perpendicular to and along the direction of travel. The two axes are
-  drawn independently. Unlike `--ego_past_noise_std`, which can only make a
-  correctly-shaped history be traversed at the wrong speed, this makes the history
-  itself imperfect. Applied after the footprint check and with t=0 pinned, so the
-  target and the state the model plans from are unchanged.
-
-  That ordering is deliberate — it keeps acceptance independent of the noise, which is
-  what makes an A/B between the two history perturbations valid — but it has a
-  consequence worth stating: **the jittered history is not re-checked against the
-  footprint constraint.** The corridor bounds certify the clean polyline, so at
-  `L = 0.3` the oldest sample can move ~0.6–0.9 m at 2–3σ, and on a drive that passed a
-  parked vehicle closely the resulting history can put the ego footprint inside that
-  vehicle in the past. The future, the target and t=0 are unaffected; what the encoder
-  reads is. Keep `L` small relative to the clearances in the data.
 
 Frenet also exposes the sampling grid itself — `--frenet_n_draws`, `--frenet_dy_max`,
 `--frenet_dth_max`, `--frenet_merge_times`, `--frenet_anchors`, `--frenet_acc0_fracs`,

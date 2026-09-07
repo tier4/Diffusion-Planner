@@ -104,19 +104,6 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "neighbour cut only, never the road edge. 0 (default) keeps the overlap-only veto.",
         default=0.0,
     )
-    frenet_hist_jitter_lat: float = cli(
-        "frenet: std (m) of a smooth per-scene LATERAL wobble of the rewritten ego "
-        "history, measured at the oldest history sample and tapering to exactly 0 at "
-        "t=0. Three low-frequency modes, so the track bends rather than looking noisy. "
-        "0 (default) draws nothing.",
-        default=0.0,
-    )
-    frenet_hist_jitter_lon: float = cli(
-        "frenet: as frenet_hist_jitter_lat, but ALONG the direction of travel. Varies "
-        "the spacing of the history samples, i.e. makes the implied speed history "
-        "wobble rather than be uniformly wrong. 0 (default) draws nothing.",
-        default=0.0,
-    )
     frenet_recovery_rounds: int = cli(
         "frenet: rounds of re-selection allowed after a candidate is vetoed for truly "
         "overlapping a recorded neighbour. Each round burns the losing draw and tries "

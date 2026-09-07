@@ -62,11 +62,6 @@ PARKED_SPEED = 0.5  # m/s
 # what makes the "MOVING vehicles are excluded" claim true rather than aspirational.
 PARKED_MAX_DISPLACEMENT = 1.0  # m
 
-# Number of low-frequency modes in the ego-history jitter basis. Independent
-# per-sample noise makes a visibly jagged track a model can learn to ignore; three
-# half-sine modes give a smooth, correlated wobble instead.
-HIST_JITTER_MODES = 3
-
 
 def quintic_basis(t0: float, t1: float, t: np.ndarray):
     """Rows: response of l, l', l'', l''' to unit (pos, vel, acc) BCs at t1.
@@ -152,36 +147,30 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         Ordering within centric_transform. The parent re-centers the history about the
         augmented t=0 pose, so by the time this runs the history is expressed in the
         frame the model sees, and the stored cos/sin are that frame's directions -- which
-        is what the jitter's path frame is taken from below. Both perturbations are also
-        frame-agnostic by construction (the scale is about the t=0 SAMPLE, the jitter's
-        basis vanishes there), so re-centering before or after them would give the same
-        answer; doing it before simply means only one frame is ever involved.
+        is what the path frame is taken from below. The perturbation is also
+        frame-agnostic by construction (the scale is about the t=0 SAMPLE), so
+        re-centering before or after it would give the same answer; doing it before
+        simply means only one frame is ever involved.
 
         What moves and what does not. NOTHING outside ``ego_agent_past`` columns 0:4 --
         the positions, and the cos/sin re-derived from them so the stored heading
         describes the track that is actually written, at every sample except the pinned
-        t = 0 one. The future is untouched and so is ``ego_current_state``, for BOTH
-        perturbations: every arm of an A/B then perturbs exactly what the encoder sees
-        and nothing else. Nor is there any state consistency to maintain, because the
+        t = 0 one. The future is untouched and so is ``ego_current_state``: every arm of
+        an A/B then perturbs exactly what the encoder sees and nothing else. Nor is there any state consistency to maintain, because the
         history carries no velocity -- ``ego_agent_past`` is (x, y, cos, sin). Of the
         current state, only ``[:4]`` (pose) and ``[4:5]`` (vx) are read anywhere in the
         model, loss or eval path: vy, ax, ay, steering and yaw rate are dead inputs, and
         vx is not an encoder input either -- its only consumer is the longitudinal loss
         WEIGHT in decoder.py (``position_lon_loss / clamp_min(|vx|, 1)``, and frenet's
         2 m/s gate means the clamp never binds). Scaling it would re-weight that scene's
-        loss by 1/s rather than perturb its history, which is a second mechanism the
-        jitter does not have and would make the arms incomparable.
+        loss by 1/s rather than perturb its history -- a second mechanism that would
+        make the arms of an A/B on this flag incomparable.
         """
-        if not (self.past_noise_std > 0.0 or self._hist_jitter_on):
+        if self.past_noise_std <= 0.0:
             return  # nothing drawn, nothing written: the default path is bit-identical
         past = inputs["ego_agent_past"]
         xy, tan = past[rows, :, :2], past[rows, :, 2:4]
-        if self.past_noise_std > 0.0:
-            xy = self._scale_history(xy)
-        if self._hist_jitter_on:
-            # jitter the SCALED track, so its flagged amplitude is not itself rescaled
-            nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
-            xy = xy + self._hist_jitter(xy, tan, nrm, xy.shape[1])
+        xy = self._scale_history(xy)
         # Same heading convention as the polyline rewrite, including its fallback to the
         # stored tangent below 0.3 m/s: without this the cos/sin would keep describing
         # the clean track and disagree with the positions next to them.
@@ -250,8 +239,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         toward_parked_prob: float = 0.0,
         min_clearance: float = 0.0,
         ego_past_noise_std: float = 0.0,
-        hist_jitter_lat: float = 0.0,
-        hist_jitter_lon: float = 0.0,
     ):
         super().__init__(
             augment_prob=augment_prob,
@@ -316,22 +303,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self.past_noise_std = float(ego_past_noise_std)
         if self.past_noise_std < 0.0:
             raise ValueError(f"ego_past_noise_std must be >= 0, got {ego_past_noise_std}")
-        # Std (m) of the smooth history jitter AT THE OLDEST history sample, per axis of
-        # the path frame. A different perturbation from past_noise_std above: that one
-        # scales a correctly-shaped track so it is traversed at the wrong speed, this one
-        # bends the track itself. Applied after the veto, like the scale, so neither can
-        # move acceptance. 0 draws nothing and is bit-identical. See _hist_jitter.
-        self.hist_jitter_lat = float(hist_jitter_lat)
-        if self.hist_jitter_lat < 0.0:
-            raise ValueError(f"hist_jitter_lat must be >= 0, got {hist_jitter_lat}")
-        # The longitudinal axis varies the SPACING of the history samples, i.e. makes the
-        # implied speed history wobble, rather than being uniformly wrong as it is under
-        # past_noise_std. Same basis, same normalisation, independent coefficients.
-        self.hist_jitter_lon = float(hist_jitter_lon)
-        if self.hist_jitter_lon < 0.0:
-            raise ValueError(f"hist_jitter_lon must be >= 0, got {hist_jitter_lon}")
         self._basis_cache = {}
-        self._jitter_basis_cache = {}
 
     # ---------- shared basis (depends only on the time grid + knobs) ----------
     def _bases(self, P, F, device, dtype):
@@ -371,68 +343,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         return out
 
     # ---------- corridor, fully batched ----------
-    # ---------- smooth ego-history jitter (opt-in, depends only on P) ----------
-    @property
-    def _hist_jitter_on(self) -> bool:
-        return self.hist_jitter_lat > 0.0 or self.hist_jitter_lon > 0.0
-
-    def _hist_jitter_axes(self, tan, nrm):
-        """(std, unit direction) of every axis the jitter is drawn along."""
-        return ((self.hist_jitter_lat, nrm), (self.hist_jitter_lon, tan))
-
-    def _hist_jitter_basis(self, P, device, dtype):
-        """Cached (K, P) low-frequency displacement basis, normalised in amplitude.
-
-        u = 0 at the t=0 sample (column P-1) and u = 1 at the oldest one (column 0),
-        with phi_k(u) = sin(k*pi*u/2) for k = 1..K. Two properties come for free:
-        every mode is smooth, and every mode is EXACTLY zero at u = 0, so the current
-        pose the model plans from cannot be displaced whatever is drawn.
-
-        Amplitude normalisation. The displacement is d(u) = A * sum_k c_k phi_k(u) with
-        c_k iid N(0, 1), so Var[d(u)] = A^2 * sum_k phi_k(u)^2 -- the modes are
-        independent, so their variances (not their amplitudes) add. The flag is defined
-        as the std AT THE OLDEST sample, u = 1, hence
-
-            sigma^2 = A^2 * sum_k phi_k(1)^2   =>   A = sigma / ||phi[:, 0]||_2 ,
-
-        and sum_k sin(k*pi/2)^2 = 1 + 0 + 1 = 2 at K = 3, i.e. A = sigma / sqrt(2). The
-        norm is taken from the basis itself rather than written out, so changing K or
-        the mode family keeps the flag meaning what it says.
-        """
-        key = (P, device, dtype)
-        hit = self._jitter_basis_cache.get(key)
-        if hit is not None:
-            return hit
-        u = np.arange(P - 1, -1, -1, dtype=np.float64) / max(P - 1, 1)
-        k = np.arange(1, HIST_JITTER_MODES + 1, dtype=np.float64)[:, None]
-        phi = np.sin(k * np.pi * u[None, :] / 2.0)  # (K, P), phi[:, P-1] == 0 exactly
-        phi = phi / np.linalg.norm(phi[:, 0])
-        out = torch.tensor(phi, device=device, dtype=dtype)
-        self._jitter_basis_cache[key] = out
-        return out
-
-    def _hist_jitter(self, xy, tan, nrm, P):
-        """Per-scene smooth jitter of the HISTORY, as a (B, T, 2) offset on the polyline.
-
-        Only the first ``P`` samples are moved; anything past them stays exactly zero, so
-        handing in the whole time grid leaves the future untouched. The caller applies
-        this to the ACCEPTED history only, after the veto, and re-derives the stored
-        cos/sin from the result (see :meth:`_perturb_history`).
-
-        One coefficient draw and one GEMM for the whole batch -- no python loop over
-        scenes or samples; the loop below runs once per AXIS (one or two).
-        """
-        phi = self._hist_jitter_basis(P, xy.device, xy.dtype)  # (K, P)
-        axes = self._hist_jitter_axes(tan, nrm)
-        c = torch.normal(
-            0.0, 1.0, size=(xy.shape[0], len(axes), phi.shape[0]), generator=self.gen
-        ).to(device=xy.device, dtype=xy.dtype)
-        d = c @ phi  # (B, A, P)
-        off = torch.zeros_like(xy)
-        for i, (std, direction) in enumerate(axes):
-            off[:, :P] += (std * d[:, i, :, None]) * direction[:, :P]
-        return off
-
     def _corridor(self, inputs, xy, tan, nrm, half_w, half_w_nbr, half_l, wb):
         """Lateral free space per timestep: where can this ego go sideways.
 
@@ -1080,6 +990,4 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         toward_parked_prob=float(args.frenet_toward_parked_prob),
         min_clearance=float(args.frenet_min_clearance),
         ego_past_noise_std=past_noise_std_for(args),
-        hist_jitter_lat=float(args.frenet_hist_jitter_lat),
-        hist_jitter_lon=float(args.frenet_hist_jitter_lon),
     )
