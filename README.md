@@ -150,8 +150,7 @@ augmenter reproduces the previous behaviour exactly.
   --frenet_recovery_rounds 1 \      # retry after a footprint veto
   --frenet_min_clearance 0.2 \      # metres of clearance to keep from recorded vehicles
   --frenet_toward_parked_prob 0.3 \ # fraction of eligible scenes nudged toward a parked vehicle
-  --frenet_hist_jitter_lat 0.3 \    # smooth lateral jitter of the history, metres at the oldest sample
-  --frenet_hist_jitter_lon 0.3      # same, along the direction of travel
+  --frenet_hist_jitter_lat 0.3      # smooth lateral jitter of the history, metres at the oldest sample
 ```
 
 - **`--frenet_recovery_rounds N`** (default 0). A candidate whose footprint overlaps a
@@ -196,13 +195,19 @@ augmenter reproduces the previous behaviour exactly.
   being 0; it does not recover the rest, and no selection rule can, because a 2.0 m ego
   does not fit a 1.8 m gap. Use `P` as a small fraction, not a global setting.
 
-- **`--frenet_hist_jitter_lat L` / `--frenet_hist_jitter_lon G`** (default 0.0).
-  Smooth per-sample jitter of the ego history, in metres of standard deviation at the
-  oldest sample, perpendicular to and along the direction of travel. The two axes are
-  drawn independently. Unlike `--ego_past_noise_std`, which can only make a
-  correctly-shaped history be traversed at the wrong speed, this makes the history
-  itself imperfect. Applied after the footprint check and with t=0 pinned, so the
-  target and the state the model plans from are unchanged.
+- **`--frenet_hist_jitter_lat L`** (default 0.0). Smooth per-sample jitter of the ego
+  history, in metres of standard deviation at the oldest sample, perpendicular to the
+  direction of travel. Unlike `--ego_past_noise_std`, which can only make a
+  correctly-shaped history be traversed at the wrong speed, this bends the history
+  itself. Applied after the footprint check and with t=0 pinned, so the target and the
+  state the model plans from are unchanged.
+
+  **There is no longitudinal counterpart.** One existed and was removed on measurement:
+  jittering along the path varies the sample spacing, and that arm was the worst of the
+  campaign in all four eval cells on both metrics (8 arms × 2 seeds, ~1,113 perturbed
+  closed-loop rollouts per arm, scored under both trackers at replan intervals 1 and 3).
+  Lateral alone was the best arm on recovery in both cells that had the resolution to
+  tell — and had the smallest seed spread of any arm — which is why it survived.
 
   That ordering is deliberate — it keeps acceptance independent of the noise, which is
   what makes an A/B between the two history perturbations valid — but it has a

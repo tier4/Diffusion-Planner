@@ -45,7 +45,6 @@ def _args(**over):
         frenet_min_clearance=0.0,
         ego_past_noise_std=0.0,
         frenet_hist_jitter_lat=0.0,
-        frenet_hist_jitter_lon=0.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -186,11 +185,9 @@ def test_frenet_reads_the_shared_ego_past_noise_std():
 
 def test_hist_jitter_defaults_off_and_reaches_the_augmenter():
     plain = frenet_augmenter_from_args(_args())
-    assert plain.hist_jitter_lat == 0.0 and plain.hist_jitter_lon == 0.0
-    aug = frenet_augmenter_from_args(
-        _args(frenet_hist_jitter_lat="0.25", frenet_hist_jitter_lon="0.1")
-    )
-    assert aug.hist_jitter_lat == 0.25 and aug.hist_jitter_lon == 0.1
+    assert plain.hist_jitter_lat == 0.0
+    aug = frenet_augmenter_from_args(_args(frenet_hist_jitter_lat="0.25"))
+    assert aug.hist_jitter_lat == 0.25
 
 
 def test_negative_past_noise_std_is_refused():

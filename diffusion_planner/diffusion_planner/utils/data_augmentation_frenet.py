@@ -251,7 +251,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         min_clearance: float = 0.0,
         ego_past_noise_std: float = 0.0,
         hist_jitter_lat: float = 0.0,
-        hist_jitter_lon: float = 0.0,
     ):
         super().__init__(
             augment_prob=augment_prob,
@@ -324,12 +323,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self.hist_jitter_lat = float(hist_jitter_lat)
         if self.hist_jitter_lat < 0.0:
             raise ValueError(f"hist_jitter_lat must be >= 0, got {hist_jitter_lat}")
-        # The longitudinal axis varies the SPACING of the history samples, i.e. makes the
-        # implied speed history wobble, rather than being uniformly wrong as it is under
-        # past_noise_std. Same basis, same normalisation, independent coefficients.
-        self.hist_jitter_lon = float(hist_jitter_lon)
-        if self.hist_jitter_lon < 0.0:
-            raise ValueError(f"hist_jitter_lon must be >= 0, got {hist_jitter_lon}")
         self._basis_cache = {}
         self._jitter_basis_cache = {}
 
@@ -374,11 +367,24 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # ---------- smooth ego-history jitter (opt-in, depends only on P) ----------
     @property
     def _hist_jitter_on(self) -> bool:
-        return self.hist_jitter_lat > 0.0 or self.hist_jitter_lon > 0.0
+        return self.hist_jitter_lat > 0.0
 
     def _hist_jitter_axes(self, tan, nrm):
-        """(std, unit direction) of every axis the jitter is drawn along."""
-        return ((self.hist_jitter_lat, nrm), (self.hist_jitter_lon, tan))
+        """(std, unit direction) of every axis the jitter is drawn along.
+
+        Only the LATERAL axis has a knob. A longitudinal one existed and was removed on
+        measurement: varying the sample spacing made that arm the worst of the campaign
+        in all four eval cells on both metrics, where lateral alone was the best on
+        recovery.
+
+        The along-path axis is still LISTED, at a hard-zero std. That is deliberate and
+        not dead weight: the coefficient draw below is shaped ``(B, len(axes), K)``, so
+        dropping the entry would shrink the draw and shift the generator stream, and the
+        lateral jitter would produce different numbers for the same seed. Keeping it
+        means the measured lateral configuration reproduces bit-for-bit. ``0.0 * d`` is
+        exactly zero, so nothing is added along the path.
+        """
+        return ((self.hist_jitter_lat, nrm), (0.0, tan))
 
     def _hist_jitter_basis(self, P, device, dtype):
         """Cached (K, P) low-frequency displacement basis, normalised in amplitude.
@@ -1081,5 +1087,4 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         min_clearance=float(args.frenet_min_clearance),
         ego_past_noise_std=past_noise_std_for(args),
         hist_jitter_lat=float(args.frenet_hist_jitter_lat),
-        hist_jitter_lon=float(args.frenet_hist_jitter_lon),
     )

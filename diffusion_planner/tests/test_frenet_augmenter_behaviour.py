@@ -483,28 +483,28 @@ def test_lateral_jitter_leaves_the_along_path_spacing_alone():
     assert abs(float(step1.mean() / step0.mean()) - 1.0) < 0.01
 
 
-def test_longitudinal_jitter_is_what_moves_the_spacing():
-    """The point of the second axis: the implied speed history wobbles."""
-    lat_only = _spacing_ratio(hist_jitter_lat=0.3, hist_jitter_lon=0.0)
-    lon_only = _spacing_ratio(hist_jitter_lat=0.0, hist_jitter_lon=0.3)
-    assert lat_only < 0.01, lat_only
-    assert lon_only > 20 * lat_only, (lon_only, lat_only)
+def test_there_is_no_longitudinal_axis():
+    """The lon axis was measured and removed; the flag must not quietly come back.
 
+    It made the arm the worst of the campaign in all four eval cells on both metrics,
+    where lateral alone was the best on recovery.
+    """
+    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=5, hist_jitter_lat=0.3)
+    assert not hasattr(aug, "hist_jitter_lon"), "the longitudinal knob came back"
+    with pytest.raises(TypeError):
+        FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lon=0.3)
 
-def test_longitudinal_jitter_std_at_the_oldest_sample_is_the_requested_one():
-    sigma = 0.35
-    off, _ = _jitter_offset(40000, hist_jitter_lon=sigma)
-    assert abs(float(off[:, 0, 0].std()) - sigma) / sigma < 0.05
-    assert float(off[:, 0, 1].abs().max()) == 0.0, "longitudinal jitter moved the path normal"
-    assert torch.equal(off[:, P_STEPS - 1], torch.zeros(40000, 2)), "t=0 moved"
+    # The axis is still LISTED at a hard-zero std, on purpose: the coefficient draw is
+    # shaped (B, len(axes), K), so dropping it would shift the generator stream and the
+    # lateral jitter would give different numbers for the same seed.
+    _, tan, nrm = _straight_frame(2)
+    axes = aug._hist_jitter_axes(tan, nrm)
+    assert len(axes) == 2, "the draw shape changed; the lateral jitter is no longer reproducible"
+    assert axes[1][0] == 0.0, "the along-path axis has a non-zero std again"
 
-
-def test_the_two_axes_are_drawn_independently():
-    """A lateral-only run must not have its wobble mirrored along the path."""
-    off, _ = _jitter_offset(20000, hist_jitter_lat=0.3, hist_jitter_lon=0.3)
-    lon, lat = off[:, 0, 0], off[:, 0, 1]
-    corr = float((lon * lat).mean() / (lon.std() * lat.std()))
-    assert abs(corr) < 0.05, corr
+    # and it really contributes nothing along the path
+    off, _ = _jitter_offset(4000, hist_jitter_lat=0.3)
+    assert float(off[:, 0, 0].abs().max()) == 0.0, "the zero axis moved the path tangent"
 
 
 def test_hist_jitter_headings_match_the_perturbed_polyline():
@@ -542,9 +542,7 @@ def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
     in_off, fut_off = _run(off, batch=8, pad_steps=3)
     shapes_off, _ = list(shapes), shapes.clear()
 
-    explicit = FrenetStatePerturbationTensor(
-        1.0, "cpu", seed=7, hist_jitter_lat=0.0, hist_jitter_lon=0.0
-    )
+    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, hist_jitter_lat=0.0)
     in_on, fut_on = _run(explicit, batch=8, pad_steps=3)
 
     assert shapes_off == list(shapes), "the off value changed how much randomness is drawn"
@@ -557,8 +555,6 @@ def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
 def test_hist_jitter_refuses_a_negative_std():
     with pytest.raises(ValueError, match="hist_jitter_lat"):
         FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lat=-0.1)
-    with pytest.raises(ValueError, match="hist_jitter_lon"):
-        FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lon=-0.1)
 
 
 # ───────────────────── layout robustness (3-col / 4-col) ─────────────────────
@@ -606,7 +602,6 @@ def test_a_3col_history_and_4col_future_are_accepted():
 _PERTURBATIONS = [
     pytest.param({"ego_past_noise_std": 0.2}, id="multiplicative"),
     pytest.param({"hist_jitter_lat": 0.3}, id="jitter_lat"),
-    pytest.param({"hist_jitter_lat": 0.3, "hist_jitter_lon": 0.3}, id="jitter_lat_lon"),
 ]
 
 
