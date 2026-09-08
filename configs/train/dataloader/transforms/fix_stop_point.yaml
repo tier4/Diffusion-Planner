@@ -1,0 +1,2 @@
+_target_: diffusion_planner.data.transforms.PlannerFixStopPoint
+stop_speed_threshold: 0.1

@@ -2,14 +2,17 @@
 
 from .base import Frame, FrameLike, Transform
 from .ego_shape_augmentation import PlannerEgoShapeAugmentation
+from .fix_stop_point import PlannerFixStopPoint
 from .goal import PlannerGoalTransform
-from .ilqr_augmentation import PlannerILQRAugmentation
+from .ilqr_refinement import PlannerILQRRefinement
 from .normalization import PlannerDataNormalizer
-from .rigid_augmentation import (
-    PlannerRigidDataAugmentation,
-    apply_rigid_pose_augmentation,
+from .pose_augmentation import (
+    PlannerPoseAugmentation,
+    PoseAugmentationCase,
+    apply_pose_augmentation,
 )
 from .speed_augmentation import PlannerSpeedAugmentation
+from .start_decision_augmentation import PlannerStartDecisionAugmentation
 from .traffic_light import (
     FillUnknownTrafficLightFutures,
     fill_unknown_traffic_light_futures,
@@ -22,12 +25,15 @@ __all__ = [
     "FrameLike",
     "PlannerDataNormalizer",
     "PlannerEgoShapeAugmentation",
+    "PlannerFixStopPoint",
     "PlannerGoalTransform",
-    "PlannerILQRAugmentation",
-    "PlannerRigidDataAugmentation",
+    "PlannerILQRRefinement",
+    "PlannerPoseAugmentation",
+    "PoseAugmentationCase",
     "PlannerSpeedAugmentation",
+    "PlannerStartDecisionAugmentation",
     "PlannerTurnIndicatorAugmentation",
     "Transform",
-    "apply_rigid_pose_augmentation",
+    "apply_pose_augmentation",
     "fill_unknown_traffic_light_futures",
 ]

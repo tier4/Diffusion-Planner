@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 import numpy as np
@@ -75,7 +75,10 @@ def _yaw_norm_error(key: str, augmented: np.ndarray) -> float | None:
 
 
 def inspect_augmentation(
-    original: Mapping[str, Any], augmented: Mapping[str, Any]
+    original: Mapping[str, Any],
+    augmented: Mapping[str, Any],
+    *,
+    nonrigid_keys: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Return per-tensor invariants and differences for dashboard display."""
     rows: list[dict[str, Any]] = []
@@ -89,7 +92,11 @@ def inspect_augmentation(
             else 0.0
         )
         padding_preserved = _padding_preserved(key, original_array, augmented_array)
-        rigid_error = _rigid_distance_error(key, original_array, augmented_array)
+        rigid_error = (
+            None
+            if key in nonrigid_keys
+            else _rigid_distance_error(key, original_array, augmented_array)
+        )
         yaw_error = _yaw_norm_error(key, augmented_array)
         unchanged_required = key not in COORDINATE_KEYS
         valid = padding_preserved

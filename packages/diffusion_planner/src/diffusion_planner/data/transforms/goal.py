@@ -6,7 +6,7 @@ import numpy as np
 
 from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
-from .rigid_augmentation import recenter_frame_to_pose
+from .pose_augmentation import recenter_frame_to_pose
 
 
 class PlannerGoalTransform:

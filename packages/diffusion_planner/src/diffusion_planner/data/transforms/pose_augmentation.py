@@ -1,84 +1,140 @@
-"""Ego-pose augmentation without future-trajectory refinement."""
+"""Random ego-pose augmentation and ego-centric scene transformation."""
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping
+from enum import Enum
 from typing import Any
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
 
+POSE_AUGMENTATION_APPLIED_KEY = "_pose_augmentation_applied"
 
-class PlannerRigidDataAugmentation:
-    """Move the ego pose and rigidly recenter the scene without path refinement."""
+
+class PoseAugmentationCase(Enum):
+    """Pose-noise profile selected for one planner frame."""
+
+    NORMAL = "normal_case"
+    STOPPED_IN_INTERSECTION = "stopped_in_intersection"
+
+
+class PlannerPoseAugmentation:
+    """Move the ego pose and recenter the scene without refining its future."""
 
     def __init__(
         self,
-        longitudinal_offset_range: tuple[float, float] = (0.0, 0.0),
-        lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
-        yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
-        pose_probability: float = 0.5,
-        pose_augmentation_speed_threshold: float = 0.1,
-        pose_augmentation_speed_check_index: int = 20,
+        normal_case: Mapping[str, Any],
+        stopped_in_intersection: Mapping[str, Any],
     ) -> None:
-        self.longitudinal_offset_range = longitudinal_offset_range
-        self.lateral_offset_range = lateral_offset_range
-        self.yaw_offset_range = yaw_offset_range
-        self.pose_probability = pose_probability
-        self.pose_augmentation_speed_threshold = pose_augmentation_speed_threshold
-        self.pose_augmentation_speed_check_index = pose_augmentation_speed_check_index
+        self.normal_case = dict(normal_case)
+        self.stopped_in_intersection = dict(stopped_in_intersection)
+        self._case_configs = {
+            PoseAugmentationCase.NORMAL: self.normal_case,
+            PoseAugmentationCase.STOPPED_IN_INTERSECTION: self.stopped_in_intersection,
+        }
 
     def __call__(self, input_data: FrameLike) -> Frame:
-        """Apply the pre-refinement pose augmentation behavior."""
-        if (
-            not has_sufficient_future_speed(
-                input_data,
-                self.pose_augmentation_speed_check_index,
-                self.pose_augmentation_speed_threshold,
-            )
-            or np.random.random() >= self.pose_probability
+        """Apply a pose offset and record whether it was applied."""
+        case = self._select_case(input_data)
+        case_config = self._case_configs[case]
+        if case is PoseAugmentationCase.NORMAL and not has_sufficient_future_speed(
+            input_data,
+            int(case_config["pose_augmentation_speed_check_endpoint_index"]),
+            float(case_config["pose_augmentation_endpoint_speed_threshold"]),
         ):
-            return dict(input_data)
-        longitudinal_offset = 0.0
-        if any(value != 0.0 for value in self.longitudinal_offset_range):
-            longitudinal_offset = np.random.uniform(*self.longitudinal_offset_range)
-        lateral_offset = np.random.uniform(*self.lateral_offset_range)
-        yaw_offset = np.random.uniform(*self.yaw_offset_range)
-        output, _ = apply_rigid_pose_augmentation(
+            output = dict(input_data)
+            output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(False)
+            return output
+        if np.random.random() >= float(case_config["probability"]):
+            output = dict(input_data)
+            output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(False)
+            return output
+        longitudinal_range = tuple(case_config["longitudinal_offset_range"])
+        lateral_range = tuple(case_config["lateral_offset_range"])
+        yaw_range = tuple(case_config["yaw_offset_range"])
+        longitudinal_offset = self._sample_offset(longitudinal_range)
+        lateral_offset = self._sample_offset(lateral_range)
+        yaw_offset = self._sample_offset(yaw_range)
+        output, _ = apply_pose_augmentation(
             input_data, longitudinal_offset, lateral_offset, yaw_offset
         )
+        output[POSE_AUGMENTATION_APPLIED_KEY] = np.asarray(True)
         return output
+
+    def _select_case(self, input_data: FrameLike) -> PoseAugmentationCase:
+        current_state = input_data["ego_agent_past"][-1]
+        is_stopped = current_state[EGO_VELOCITY_INDEX] <= float(
+            self.stopped_in_intersection["stopped_speed_threshold"]
+        )
+        if is_stopped and is_point_in_intersection(input_data, current_state[:2]):
+            return PoseAugmentationCase.STOPPED_IN_INTERSECTION
+        return PoseAugmentationCase.NORMAL
+
+    @staticmethod
+    def _sample_offset(offset_range: tuple[float, float]) -> float:
+        if offset_range == (0.0, 0.0):
+            return 0.0
+        return float(np.random.uniform(*offset_range))
 
 
 def has_sufficient_future_speed(
     input_data: FrameLike,
     check_index: int,
     speed_threshold: float,
-    peak_speed_threshold: float | None = None,
 ) -> bool:
-    """Check minimum and optional peak speed through a future endpoint index."""
+    """Check speed at a future endpoint index."""
     future = input_data.get("ego_agent_future")
     if future is None or len(future) == 0 or check_index < 0:
         return False
     endpoint = min(check_index, len(future) - 1)
-    speeds = future[: endpoint + 1, EGO_VELOCITY_INDEX]
-    minimum_is_sufficient = bool(np.all(speeds >= speed_threshold))
-    peak_is_sufficient = peak_speed_threshold is None or bool(
-        np.max(speeds) > peak_speed_threshold
-    )
-    return minimum_is_sufficient and peak_is_sufficient
+    return bool(future[endpoint, EGO_VELOCITY_INDEX] > speed_threshold)
 
 
-def apply_rigid_pose_augmentation(
+def is_point_in_intersection(input_data: FrameLike, point: NDArray[Any]) -> bool:
+    """Return whether a point lies inside any valid intersection polygon."""
+    areas = input_data.get("intersection_area")
+    if areas is None:
+        return False
+    return bool(_is_point_in_any_polygon(areas, float(point[0]), float(point[1])))
+
+
+@njit(cache=True)
+def _is_point_in_any_polygon(areas: NDArray[Any], px: float, py: float) -> bool:
+    """Check fixed-size polygons with ray casting in compiled loops."""
+    for area_index in range(areas.shape[0]):
+        polygon = areas[area_index]
+        if len(polygon) < 3 or not np.any(polygon):
+            continue
+
+        inside = False
+        x1 = polygon[-1, 0]
+        y1 = polygon[-1, 1]
+        for vertex_index in range(len(polygon)):
+            x2 = polygon[vertex_index, 0]
+            y2 = polygon[vertex_index, 1]
+            if (y1 > py) != (y2 > py):
+                intersection_x = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+                if px < intersection_x:
+                    inside = not inside
+            x1 = x2
+            y1 = y2
+        if inside:
+            return True
+    return False
+
+
+def apply_pose_augmentation(
     input_data: FrameLike,
     longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
 ) -> tuple[Frame, NDArray[Any] | None]:
-    """Move the ego pose and rigidly recenter every spatial scene tensor."""
+    """Move the ego pose and recenter every spatial scene tensor."""
     ego_pose = input_data["ego_agent_past"][-1, :4]
     shifted_pose = get_shifted_pose(
         ego_pose, longitudinal_offset, lateral_offset, yaw_offset
