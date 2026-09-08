@@ -50,6 +50,20 @@ from diffusion_planner.utils.data_augmentation import (
 )
 
 # extra half-width the corridor keeps from borders and neighbors
+
+# Stream namespaces for the generators below. The MAIN stream stays exactly
+# ``seed + rank`` -- byte-for-byte what tier4-main uses -- so the default path is
+# unchanged at every rank. The two added streams sit in disjoint blocks a stride
+# apart, because the obvious ``seed + rank + 1`` / ``+ 2`` made the per-rank blocks
+# OVERLAP: at seed 3407, rank 0's history stream is seeded 3408 and so is rank 1's
+# main stream; rank 0's toward stream is 3409, and so are rank 1's history and rank
+# 2's main. The streams were then separated within a rank but correlated ACROSS
+# ranks in a multi-GPU job, which is the opposite of the point. The stride is far
+# above any plausible world size, so ``seed + rank`` cannot reach the next block.
+STREAM_STRIDE = 1_000_003
+HIST_STREAM = 1
+TOWARD_STREAM = 2
+
 CORRIDOR_MARGIN = 0.10
 # A neighbour counts as parked for the toward-parked nudge when its RECORDED velocity at
 # the last history step is below this. The recorded (vx, vy) is used rather than a
@@ -298,9 +312,13 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # rows vs 118 (scale) and 110 (jitter). That silently confounds any A/B on these
         # knobs with a different augmentation realisation, which is the opposite of what
         # applying them after the veto is for. Off this stream they cannot reach it.
-        self.hist_gen = torch.Generator(device="cpu").manual_seed(seed + rank + 1)
+        self.hist_gen = torch.Generator(device="cpu").manual_seed(
+            seed + rank + HIST_STREAM * STREAM_STRIDE
+        )
         # Same reasoning as hist_gen, for the toward-parked coin: see __call__.
-        self.toward_gen = torch.Generator(device="cpu").manual_seed(seed + rank + 2)
+        self.toward_gen = torch.Generator(device="cpu").manual_seed(
+            seed + rank + TOWARD_STREAM * STREAM_STRIDE
+        )
         self.ranked_temp_s = float(ranked_temp_s)
         # Rounds of draw-level re-selection allowed after an exact-OBB veto. 0 keeps
         # the original behaviour: a vetoed row falls back to plain GT.

@@ -862,3 +862,47 @@ def test_recovery_cannot_see_the_toward_set_at_all():
         "toward and hardened coincide on this scene, so the guard above is vacuous -- "
         "pick a tighter pass or the distinction has stopped being reachable"
     )
+
+
+# ──────────── generator streams must be disjoint across (rank, stream) ────────────
+
+
+def _augmenter_at_rank(monkeypatch, rank, seed=3407):
+    """Build the augmenter as DDP rank ``rank`` sees it, without a real process group."""
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: rank)
+    return FrenetStatePerturbationTensor(1.0, "cpu", seed=seed)
+
+
+def test_no_generator_state_collides_across_ranks_or_streams(monkeypatch):
+    """Every (rank, stream) pair must start from its own state.
+
+    `seed + rank`, `+ rank + 1`, `+ rank + 2` separated the streams within a rank but
+    made the per-rank blocks overlap, so rank 0's history generator started exactly
+    where rank 1's main generator did (and rank 0's toward matched both rank 1's
+    history and rank 2's main). Ranks in a multi-GPU job then drew correlated
+    perturbations -- the opposite of what splitting the streams is for.
+    """
+    states = {}
+    for rank in range(4):
+        aug = _augmenter_at_rank(monkeypatch, rank)
+        for name in ("gen", "hist_gen", "toward_gen"):
+            key = bytes(getattr(aug, name).get_state().numpy().tobytes())
+            assert key not in states, (
+                f"rank {rank} {name} starts in the same state as {states[key]}"
+            )
+            states[key] = f"rank {rank} {name}"
+    assert len(states) == 12
+
+
+def test_the_main_stream_still_matches_the_unpatched_seeding(monkeypatch):
+    """The main generator must stay `seed + rank`.
+
+    That is what tier4-main uses, so changing it would alter the default path at every
+    rank above 0 even with every new flag off. Only the ADDED streams are namespaced.
+    """
+    for rank in (0, 1, 5):
+        aug = _augmenter_at_rank(monkeypatch, rank, seed=11)
+        expected = torch.Generator(device="cpu").manual_seed(11 + rank)
+        assert torch.equal(aug.gen.get_state(), expected.get_state())
