@@ -12,6 +12,7 @@ visualization dashboard, ONNX export tools, and the ROS 2 inference node.
 | `packages/diffusion_planner_dashboard/` | Streamlit dataset and inference viewer |
 | `scripts/dataset/` | Rosbag-to-H5 dataset generation and checks |
 | `scripts/train/` | Hydra-based training |
+| `scripts/checkpoint/` | Checkpoint migration between model input formats |
 | `scripts/export/` | ONNX export and validation |
 | `configs/` | Dataset and training configuration |
 | `ros2_ws/src/ml_planner_data/` | Rosbag preprocessing and label generation |
@@ -97,3 +98,19 @@ uv run --package diffusion-planner python scripts/export/export_onnx.py \
 The exporter validates the generated ONNX models with ONNX Runtime. For ROS 2 node
 parameters, topics, model compatibility, and launch instructions, see
 `ros2_ws/src/deps/autoware_universe/planning/autoware_ml_planner/README.md`.
+
+## Migrating older checkpoints
+
+Checkpoints written before `agent_label` gained its fourth column (index 3, unknown) have a
+three-column label projection and fail the strict `load_state_dict` in both loaders. Widen one
+with:
+
+```bash
+uv run --package diffusion-planner python scripts/checkpoint/migrate_agent_label_dim.py \
+  checkpoints/<run>/latest.pth
+```
+
+The original file is never modified. The new column is zero, so the three known classes keep
+producing identical embeddings and the model behaves exactly as before until unknown-labelled
+agents appear in the input. Load the result with `training.warm_start=true`: a full-state
+resume would also restore optimizer momentum of the old width and fail.
