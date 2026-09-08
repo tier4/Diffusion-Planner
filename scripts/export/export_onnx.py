@@ -11,6 +11,7 @@ import onnxruntime as ort
 import torch
 
 from diffusion_planner.data.dimensions import (
+    AGENT_LABEL_DIM,
     MAX_NUM_NEIGHBORS,
     PLANNER_INPUT_SHAPES,
     TRAJECTORY_DIM,
@@ -35,6 +36,27 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _pad_agent_label(array: np.ndarray) -> np.ndarray:
+    """Right-pad the fixture's agent label with zero columns, as the data path does.
+
+    The fixture predates the unknown class and stores three columns, exactly like
+    every H5 shard. `PlannerUnknownLabelAugmentation` appends the missing column at
+    load time during training; this mirrors it so an old fixture still validates.
+    """
+    columns = array.shape[-1]
+    if columns > AGENT_LABEL_DIM:
+        raise ValueError(
+            f"Validation fixture stores {columns} agent label columns, more than "
+            f"AGENT_LABEL_DIM={AGENT_LABEL_DIM}"
+        )
+    if columns == AGENT_LABEL_DIM:
+        return array
+    padding = np.zeros(
+        (*array.shape[:-1], AGENT_LABEL_DIM - columns), dtype=array.dtype
+    )
+    return np.concatenate([array, padding], axis=-1)
+
+
 def _load_validation_inputs(batch_size: int = 2) -> tuple[torch.Tensor, ...]:
     """Load the repository fixture and replicate its frame along the batch axis."""
     with np.load(VALIDATION_FRAME_PATH) as fixture:
@@ -46,6 +68,8 @@ def _load_validation_inputs(batch_size: int = 2) -> tuple[torch.Tensor, ...]:
         inputs: list[torch.Tensor] = []
         for name in PLANNER_INPUT_NAMES:
             array = np.asarray(fixture[name], dtype=np.float32)
+            if name == "agent_label":
+                array = _pad_agent_label(array)
             expected_shape = PLANNER_INPUT_SHAPES[name]
             if array.shape != expected_shape:
                 raise ValueError(
