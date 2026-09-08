@@ -323,7 +323,10 @@ def model_training(args: TrainConfig):
             )
 
     if global_rank == 0:
-        print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        if mode == "npz":
+            print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        else:
+            print("Dataset Prepared: {} train data (shard mode)\n".format(len(train_shard_ds)))
         if args.enable_replan_consistency_eval:
             print(
                 "Replan consistency validation pairs: {}".format(
