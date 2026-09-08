@@ -1,4 +1,10 @@
-"""Kinematic-bicycle iLQR refinement after ego-pose augmentation."""
+"""Kinematic-bicycle iLQR refinement after ego-pose augmentation.
+
+The solver is the hot spot of the dataloader: it runs on every augmented frame,
+so its inner loops live in module-level ``numba`` kernels instead of scalar
+NumPy. The 5-state / 2-control matrices are tiny, so the products are written as
+explicit loops rather than BLAS calls.
+"""
 
 from __future__ import annotations
 
@@ -6,15 +12,391 @@ import math
 from typing import Any
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 from ..dimensions import EGO_VELOCITY_INDEX
 from .base import Frame, FrameLike
 from .pose_augmentation import POSE_AUGMENTATION_APPLIED_KEY
 
+STATE_DIM = 5
+CONTROL_DIM = 2
+LINE_SEARCH_ALPHAS = (1.0, 0.5, 0.25, 0.1, 0.05, 0.01)
+MIN_REGULARIZATION = 1e-8
+MAX_REGULARIZATION = 1e8
+INITIAL_REGULARIZATION = 1e-5
 
-def _wrap(angle: float | NDArray[Any]) -> Any:
-    return np.arctan2(np.sin(angle), np.cos(angle))
+
+@njit(inline="always")
+def _wrap(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+@njit(inline="always")
+def _clip(value: float, low: float, high: float) -> float:
+    """Clip while propagating NaN so a diverged candidate stays rejectable."""
+    if math.isnan(value):
+        return value
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value
+
+
+@njit(cache=True)
+def _mat_mat(x: NDArray[Any], y: NDArray[Any]) -> NDArray[Any]:
+    """Return ``x @ y`` for small dense matrices."""
+    rows, inner = x.shape
+    columns = y.shape[1]
+    out = np.zeros((rows, columns))
+    for i in range(rows):
+        for p in range(inner):
+            scale = x[i, p]
+            if scale != 0.0:
+                for j in range(columns):
+                    out[i, j] += scale * y[p, j]
+    return out
+
+
+@njit(cache=True)
+def _mat_t_mat(x: NDArray[Any], y: NDArray[Any]) -> NDArray[Any]:
+    """Return ``x.T @ y`` for small dense matrices."""
+    rows, columns = x.shape
+    inner = y.shape[1]
+    out = np.zeros((columns, inner))
+    for i in range(rows):
+        for p in range(columns):
+            scale = x[i, p]
+            if scale != 0.0:
+                for j in range(inner):
+                    out[p, j] += scale * y[i, j]
+    return out
+
+
+@njit(cache=True)
+def _mat_t_vec(x: NDArray[Any], v: NDArray[Any]) -> NDArray[Any]:
+    """Return ``x.T @ v`` for small dense matrices."""
+    rows, columns = x.shape
+    out = np.zeros(columns)
+    for i in range(rows):
+        scale = v[i]
+        if scale != 0.0:
+            for p in range(columns):
+                out[p] += x[i, p] * scale
+    return out
+
+
+@njit(cache=True, inline="always")
+def _dynamics(
+    state: NDArray[Any],
+    control: NDArray[Any],
+    dt: float,
+    wheelbase: float,
+    out: NDArray[Any],
+) -> None:
+    yaw = state[2]
+    velocity = control[0]
+    steering = control[1]
+    out[0] = state[0] + velocity * math.cos(yaw) * dt
+    out[1] = state[1] + velocity * math.sin(yaw) * dt
+    out[2] = yaw + velocity * math.tan(steering) * dt / wheelbase
+    out[3] = velocity
+    out[4] = steering
+
+
+@njit(cache=True)
+def _rollout(
+    initial_state: NDArray[Any],
+    controls: NDArray[Any],
+    dt: float,
+    wheelbase: float,
+) -> NDArray[Any]:
+    horizon = controls.shape[0]
+    states = np.empty((horizon + 1, STATE_DIM))
+    for j in range(STATE_DIM):
+        states[0, j] = initial_state[j]
+    for index in range(horizon):
+        _dynamics(states[index], controls[index], dt, wheelbase, states[index + 1])
+    return states
+
+
+@njit(cache=True)
+def _cost(
+    states: NDArray[Any],
+    controls: NDArray[Any],
+    reference: NDArray[Any],
+    velocity_reference: NDArray[Any],
+    q: NDArray[Any],
+    qf: NDArray[Any],
+    r: NDArray[Any],
+    rd: NDArray[Any],
+) -> float:
+    value = 0.0
+    for index in range(controls.shape[0]):
+        error_x = states[index, 0] - reference[index, 0]
+        error_y = states[index, 1] - reference[index, 1]
+        error_yaw = _wrap(states[index, 2] - reference[index, 2])
+        delta_velocity = controls[index, 0] - states[index, 3]
+        delta_steering = controls[index, 1] - states[index, 4]
+        value += 0.5 * (
+            q[0] * error_x * error_x
+            + q[1] * error_y * error_y
+            + q[2] * error_yaw * error_yaw
+        )
+        velocity_error = controls[index, 0] - velocity_reference[index]
+        value += 0.5 * r[0] * velocity_error * velocity_error
+        value += 0.5 * r[1] * controls[index, 1] * controls[index, 1]
+        value += 0.5 * (
+            rd[0] * delta_velocity * delta_velocity
+            + rd[1] * delta_steering * delta_steering
+        )
+    terminal_x = states[-1, 0] - reference[-1, 0]
+    terminal_y = states[-1, 1] - reference[-1, 1]
+    terminal_yaw = _wrap(states[-1, 2] - reference[-1, 2])
+    return value + 0.5 * (
+        qf[0] * terminal_x * terminal_x
+        + qf[1] * terminal_y * terminal_y
+        + qf[2] * terminal_yaw * terminal_yaw
+    )
+
+
+@njit(cache=True)
+def _backward(
+    states: NDArray[Any],
+    controls: NDArray[Any],
+    reference: NDArray[Any],
+    velocity_reference: NDArray[Any],
+    regularization: float,
+    q: NDArray[Any],
+    qf: NDArray[Any],
+    r: NDArray[Any],
+    rd: NDArray[Any],
+    dt: float,
+    wheelbase: float,
+    feedforward: NDArray[Any],
+    feedback: NDArray[Any],
+) -> bool:
+    """Fill the gains for one Riccati sweep and report whether it succeeded."""
+    horizon = controls.shape[0]
+    value_x = np.zeros(STATE_DIM)
+    value_xx = np.zeros((STATE_DIM, STATE_DIM))
+    value_x[0] = qf[0] * (states[-1, 0] - reference[-1, 0])
+    value_x[1] = qf[1] * (states[-1, 1] - reference[-1, 1])
+    value_x[2] = qf[2] * _wrap(states[-1, 2] - reference[-1, 2])
+    for j in range(3):
+        value_xx[j, j] = qf[j]
+
+    lxx = np.zeros((STATE_DIM, STATE_DIM))
+    lux = np.zeros((CONTROL_DIM, STATE_DIM))
+    luu = np.zeros((CONTROL_DIM, CONTROL_DIM))
+    for j in range(3):
+        lxx[j, j] = q[j]
+    for j in range(CONTROL_DIM):
+        lxx[3 + j, 3 + j] = rd[j]
+        lux[j, 3 + j] = -rd[j]
+        luu[j, j] = r[j] + rd[j]
+
+    a = np.zeros((STATE_DIM, STATE_DIM))
+    b = np.zeros((STATE_DIM, CONTROL_DIM))
+    a[0, 0] = 1.0
+    a[1, 1] = 1.0
+    a[2, 2] = 1.0
+    b[3, 0] = 1.0
+    b[4, 1] = 1.0
+    lx = np.zeros(STATE_DIM)
+    lu = np.zeros(CONTROL_DIM)
+
+    for index in range(horizon - 1, -1, -1):
+        yaw = states[index, 2]
+        velocity = controls[index, 0]
+        steering = controls[index, 1]
+        delta_velocity = velocity - states[index, 3]
+        delta_steering = steering - states[index, 4]
+
+        lx[0] = q[0] * (states[index, 0] - reference[index, 0])
+        lx[1] = q[1] * (states[index, 1] - reference[index, 1])
+        lx[2] = q[2] * _wrap(states[index, 2] - reference[index, 2])
+        lx[3] = -rd[0] * delta_velocity
+        lx[4] = -rd[1] * delta_steering
+        lu[0] = r[0] * (velocity - velocity_reference[index]) + rd[0] * delta_velocity
+        lu[1] = r[1] * steering + rd[1] * delta_steering
+
+        a[0, 2] = -velocity * math.sin(yaw) * dt
+        a[1, 2] = velocity * math.cos(yaw) * dt
+        b[0, 0] = math.cos(yaw) * dt
+        b[1, 0] = math.sin(yaw) * dt
+        b[2, 0] = math.tan(steering) * dt / wheelbase
+        cosine = math.cos(steering)
+        b[2, 1] = velocity * dt / (wheelbase * cosine * cosine)
+
+        a_value = _mat_t_mat(a, value_xx)
+        b_value = _mat_t_mat(b, value_xx)
+        qx = lx + _mat_t_vec(a, value_x)
+        qu = lu + _mat_t_vec(b, value_x)
+        qxx = lxx + _mat_mat(a_value, a)
+        quu = luu + _mat_mat(b_value, b)
+        qux = lux + _mat_mat(b_value, a)
+
+        m00 = quu[0, 0] + regularization
+        m01 = quu[0, 1]
+        m10 = quu[1, 0]
+        m11 = quu[1, 1] + regularization
+        determinant = m00 * m11 - m01 * m10
+        if determinant == 0.0 or not math.isfinite(determinant):
+            return False
+        feedforward[index, 0] = -(m11 * qu[0] - m01 * qu[1]) / determinant
+        feedforward[index, 1] = -(m00 * qu[1] - m10 * qu[0]) / determinant
+        for j in range(STATE_DIM):
+            feedback[index, 0, j] = -(m11 * qux[0, j] - m01 * qux[1, j]) / determinant
+            feedback[index, 1, j] = -(m00 * qux[1, j] - m10 * qux[0, j]) / determinant
+
+        k = feedforward[index]
+        gain = feedback[index]
+        quu_k = np.zeros(CONTROL_DIM)
+        for i in range(CONTROL_DIM):
+            for j in range(CONTROL_DIM):
+                quu_k[i] += quu[i, j] * k[j]
+        value_x = (
+            qx + _mat_t_vec(gain, quu_k) + _mat_t_vec(gain, qu) + _mat_t_vec(qux, k)
+        )
+        gain_quu = _mat_t_mat(gain, quu)
+        gain_qux = _mat_t_mat(gain, qux)
+        value_xx = qxx + _mat_mat(gain_quu, gain) + gain_qux + gain_qux.T
+        for i in range(STATE_DIM):
+            for j in range(i + 1, STATE_DIM):
+                symmetric = 0.5 * (value_xx[i, j] + value_xx[j, i])
+                value_xx[i, j] = symmetric
+                value_xx[j, i] = symmetric
+    return True
+
+
+@njit(cache=True)
+def _forward_with_gains(
+    initial_state: NDArray[Any],
+    nominal_states: NDArray[Any],
+    nominal_controls: NDArray[Any],
+    feedforward: NDArray[Any],
+    feedback: NDArray[Any],
+    alpha: float,
+    dt: float,
+    wheelbase: float,
+    velocity_low: float,
+    velocity_high: float,
+    steering_limit: float,
+) -> tuple[NDArray[Any], NDArray[Any]]:
+    horizon = nominal_controls.shape[0]
+    states = np.empty((horizon + 1, STATE_DIM))
+    controls = np.empty((horizon, CONTROL_DIM))
+    for j in range(STATE_DIM):
+        states[0, j] = initial_state[j]
+    for index in range(horizon):
+        velocity = nominal_controls[index, 0] + alpha * feedforward[index, 0]
+        steering = nominal_controls[index, 1] + alpha * feedforward[index, 1]
+        for j in range(STATE_DIM):
+            deviation = states[index, j] - nominal_states[index, j]
+            velocity += feedback[index, 0, j] * deviation
+            steering += feedback[index, 1, j] * deviation
+        controls[index, 0] = _clip(velocity, velocity_low, velocity_high)
+        controls[index, 1] = _clip(steering, -steering_limit, steering_limit)
+        _dynamics(states[index], controls[index], dt, wheelbase, states[index + 1])
+    return states, controls
+
+
+@njit(cache=True)
+def _solve(
+    initial_state: NDArray[Any],
+    reference: NDArray[Any],
+    velocity_reference: NDArray[Any],
+    initial_controls: NDArray[Any],
+    q: NDArray[Any],
+    qf: NDArray[Any],
+    r: NDArray[Any],
+    rd: NDArray[Any],
+    dt: float,
+    wheelbase: float,
+    velocity_low: float,
+    velocity_high: float,
+    steering_limit: float,
+    max_iterations: int,
+    convergence_tolerance: float,
+) -> tuple[NDArray[Any], NDArray[Any], bool]:
+    """Solve one finite-horizon tracking problem with regularized iLQR."""
+    horizon = initial_controls.shape[0]
+    controls = np.empty((horizon, CONTROL_DIM))
+    for index in range(horizon):
+        controls[index, 0] = _clip(
+            initial_controls[index, 0], velocity_low, velocity_high
+        )
+        controls[index, 1] = _clip(
+            initial_controls[index, 1], -steering_limit, steering_limit
+        )
+    states = _rollout(initial_state, controls, dt, wheelbase)
+    cost = _cost(states, controls, reference, velocity_reference, q, qf, r, rd)
+    regularization = INITIAL_REGULARIZATION
+    feedforward = np.empty((horizon, CONTROL_DIM))
+    feedback = np.empty((horizon, CONTROL_DIM, STATE_DIM))
+
+    for _ in range(max_iterations):
+        if not _backward(
+            states,
+            controls,
+            reference,
+            velocity_reference,
+            regularization,
+            q,
+            qf,
+            r,
+            rd,
+            dt,
+            wheelbase,
+            feedforward,
+            feedback,
+        ):
+            regularization *= 10.0
+            if regularization > MAX_REGULARIZATION:
+                return states, controls, False
+            continue
+        accepted = False
+        for alpha in LINE_SEARCH_ALPHAS:
+            candidate_states, candidate_controls = _forward_with_gains(
+                initial_state,
+                states,
+                controls,
+                feedforward,
+                feedback,
+                alpha,
+                dt,
+                wheelbase,
+                velocity_low,
+                velocity_high,
+                steering_limit,
+            )
+            candidate_cost = _cost(
+                candidate_states,
+                candidate_controls,
+                reference,
+                velocity_reference,
+                q,
+                qf,
+                r,
+                rd,
+            )
+            if math.isfinite(candidate_cost) and candidate_cost < cost:
+                improvement = cost - candidate_cost
+                states = candidate_states
+                controls = candidate_controls
+                cost = candidate_cost
+                regularization = max(regularization / 5.0, MIN_REGULARIZATION)
+                accepted = True
+                if improvement < convergence_tolerance:
+                    return states, controls, True
+                break
+        if not accepted:
+            regularization *= 10.0
+            if regularization > MAX_REGULARIZATION:
+                break
+    return states, controls, bool(np.all(np.isfinite(states)))
 
 
 class PlannerILQRRefinement:
@@ -85,7 +467,7 @@ class PlannerILQRRefinement:
         reference[0] = (0.0, 0.0, 0.0)
         reference[1:, :2] = future[:horizon, :2]
         reference[1:, 2] = np.arctan2(future[:horizon, 3], future[:horizon, 2])
-        velocity_reference = np.asarray(future[:horizon, 4], dtype=np.float64)
+        velocity_reference = np.ascontiguousarray(future[:horizon, 4], dtype=np.float64)
 
         current_speed = max(float(past[-1, 4]), 0.0)
         current_steering = self._steering_from_motion(current_speed, float(past[-1, 5]))
@@ -95,10 +477,7 @@ class PlannerILQRRefinement:
         controls = np.column_stack(
             (
                 velocity_reference,
-                [
-                    self._steering_from_motion(float(state[4]), float(state[5]))
-                    for state in future[:horizon]
-                ],
+                self._steering_from_future(future[:horizon]),
             )
         )
         solution = self.solve(initial_state, reference, velocity_reference, controls)
@@ -123,190 +502,34 @@ class PlannerILQRRefinement:
         initial_controls: NDArray[Any],
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
         """Solve one finite-horizon tracking problem."""
-        controls = self._clip_controls(np.asarray(initial_controls, dtype=np.float64))
-        states = self._rollout(initial_state, controls)
-        cost = self._cost(states, controls, reference, velocity_reference)
-        regularization = 1e-5
-
-        for _ in range(self.max_iterations):
-            gains = self._backward(
-                states, controls, reference, velocity_reference, regularization
-            )
-            if gains is None:
-                regularization *= 10.0
-                if regularization > 1e8:
-                    return None
-                continue
-            feedforward, feedback = gains
-            accepted = False
-            for alpha in (1.0, 0.5, 0.25, 0.1, 0.05, 0.01):
-                candidate_states, candidate_controls = self._forward_with_gains(
-                    initial_state, states, controls, feedforward, feedback, alpha
-                )
-                candidate_cost = self._cost(
-                    candidate_states,
-                    candidate_controls,
-                    reference,
-                    velocity_reference,
-                )
-                if np.isfinite(candidate_cost) and candidate_cost < cost:
-                    improvement = cost - candidate_cost
-                    states, controls, cost = (
-                        candidate_states,
-                        candidate_controls,
-                        candidate_cost,
-                    )
-                    regularization = max(regularization / 5.0, 1e-8)
-                    accepted = True
-                    if improvement < self.convergence_tolerance:
-                        return states, controls
-                    break
-            if not accepted:
-                regularization *= 10.0
-                if regularization > 1e8:
-                    break
-        return (states, controls) if np.all(np.isfinite(states)) else None
-
-    def _dynamics(self, state: NDArray[Any], control: NDArray[Any]) -> NDArray[Any]:
-        x, y, yaw = state[:3]
-        velocity, steering = control
-        return np.asarray(
-            (
-                x + velocity * math.cos(yaw) * self.dt,
-                y + velocity * math.sin(yaw) * self.dt,
-                yaw + velocity * math.tan(steering) * self.dt / self.wheelbase,
-                velocity,
-                steering,
-            )
+        states, controls, succeeded = _solve(
+            np.ascontiguousarray(initial_state, dtype=np.float64),
+            np.ascontiguousarray(reference, dtype=np.float64),
+            np.ascontiguousarray(velocity_reference, dtype=np.float64),
+            np.ascontiguousarray(initial_controls, dtype=np.float64),
+            self.q,
+            self.qf,
+            self.r,
+            self.rd,
+            self.dt,
+            self.wheelbase,
+            float(self.velocity_bounds[0]),
+            float(self.velocity_bounds[1]),
+            self.steering_limit,
+            int(self.max_iterations),
+            self.convergence_tolerance,
         )
+        return (states, controls) if succeeded else None
 
-    def _jacobians(
-        self, state: NDArray[Any], control: NDArray[Any]
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        yaw = float(state[2])
-        velocity, steering = map(float, control)
-        a = np.zeros((5, 5), dtype=np.float64)
-        a[:3, :3] = np.eye(3)
-        a[0, 2] = -velocity * math.sin(yaw) * self.dt
-        a[1, 2] = velocity * math.cos(yaw) * self.dt
-        b = np.zeros((5, 2), dtype=np.float64)
-        b[0, 0] = math.cos(yaw) * self.dt
-        b[1, 0] = math.sin(yaw) * self.dt
-        b[2, 0] = math.tan(steering) * self.dt / self.wheelbase
-        b[2, 1] = velocity * self.dt / (self.wheelbase * math.cos(steering) ** 2)
-        b[3:, :] = np.eye(2)
-        return a, b
-
-    def _rollout(
-        self, initial_state: NDArray[Any], controls: NDArray[Any]
-    ) -> NDArray[np.float64]:
-        states = np.empty((len(controls) + 1, 5), dtype=np.float64)
-        states[0] = initial_state
-        for index, control in enumerate(controls):
-            states[index + 1] = self._dynamics(states[index], control)
-        return states
-
-    def _cost(
-        self,
-        states: NDArray[Any],
-        controls: NDArray[Any],
-        reference: NDArray[Any],
-        velocity_reference: NDArray[Any],
-    ) -> float:
-        value = 0.0
-        for index, control in enumerate(controls):
-            error = states[index, :3] - reference[index]
-            error[2] = _wrap(error[2])
-            delta_control = control - states[index, 3:]
-            value += 0.5 * float(error @ (self.q * error))
-            value += 0.5 * self.r[0] * (control[0] - velocity_reference[index]) ** 2
-            value += 0.5 * self.r[1] * control[1] ** 2
-            value += 0.5 * float(delta_control @ (self.rd * delta_control))
-        terminal_error = states[-1, :3] - reference[-1]
-        terminal_error[2] = _wrap(terminal_error[2])
-        return value + 0.5 * float(terminal_error @ (self.qf * terminal_error))
-
-    def _backward(
-        self,
-        states: NDArray[Any],
-        controls: NDArray[Any],
-        reference: NDArray[Any],
-        velocity_reference: NDArray[Any],
-        regularization: float,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
-        horizon = len(controls)
-        feedforward = np.empty((horizon, 2), dtype=np.float64)
-        feedback = np.empty((horizon, 2, 5), dtype=np.float64)
-        terminal_error = states[-1, :3] - reference[-1]
-        terminal_error[2] = _wrap(terminal_error[2])
-        value_x = np.zeros(5)
-        value_x[:3] = self.qf * terminal_error
-        value_xx = np.zeros((5, 5))
-        value_xx[:3, :3] = np.diag(self.qf)
-
-        for index in range(horizon - 1, -1, -1):
-            state, control = states[index], controls[index]
-            error = state[:3] - reference[index]
-            error[2] = _wrap(error[2])
-            delta_control = control - state[3:]
-            lx = np.zeros(5)
-            lx[:3] = self.q * error
-            lx[3:] = -self.rd * delta_control
-            lu = (
-                self.r
-                * np.asarray((control[0] - velocity_reference[index], control[1]))
-                + self.rd * delta_control
-            )
-            lxx = np.zeros((5, 5))
-            lxx[:3, :3] = np.diag(self.q)
-            lxx[3:, 3:] = np.diag(self.rd)
-            luu = np.diag(self.r + self.rd)
-            lux = np.zeros((2, 5))
-            lux[:, 3:] = -np.diag(self.rd)
-            a, b = self._jacobians(state, control)
-            qx = lx + a.T @ value_x
-            qu = lu + b.T @ value_x
-            qxx = lxx + a.T @ value_xx @ a
-            quu = luu + b.T @ value_xx @ b
-            qux = lux + b.T @ value_xx @ a
-            quu_regularized = quu + regularization * np.eye(2)
-            try:
-                feedforward[index] = -np.linalg.solve(quu_regularized, qu)
-                feedback[index] = -np.linalg.solve(quu_regularized, qux)
-            except np.linalg.LinAlgError:
-                return None
-            k, gain = feedforward[index], feedback[index]
-            value_x = qx + gain.T @ quu @ k + gain.T @ qu + qux.T @ k
-            value_xx = qxx + gain.T @ quu @ gain + gain.T @ qux + qux.T @ gain
-            value_xx = 0.5 * (value_xx + value_xx.T)
-        return feedforward, feedback
-
-    def _forward_with_gains(
-        self,
-        initial_state: NDArray[Any],
-        nominal_states: NDArray[Any],
-        nominal_controls: NDArray[Any],
-        feedforward: NDArray[Any],
-        feedback: NDArray[Any],
-        alpha: float,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        states = np.empty_like(nominal_states)
-        controls = np.empty_like(nominal_controls)
-        states[0] = initial_state
-        for index in range(len(controls)):
-            controls[index] = nominal_controls[index] + alpha * feedforward[index]
-            controls[index] += feedback[index] @ (states[index] - nominal_states[index])
-            controls[index] = self._clip_controls(controls[index])
-            states[index + 1] = self._dynamics(states[index], controls[index])
-        return states, controls
-
-    def _clip_controls(self, controls: NDArray[Any]) -> NDArray[np.float64]:
-        result = np.array(controls, dtype=np.float64, copy=True)
-        result[..., 0] = np.clip(result[..., 0], *self.velocity_bounds)
-        result[..., 1] = np.clip(
-            result[..., 1], -self.steering_limit, self.steering_limit
-        )
-        return result
+    def _steering_from_future(self, future: NDArray[Any]) -> NDArray[np.float64]:
+        """Return the steering implied by each future speed and yaw rate."""
+        speeds = np.asarray(future[:, 4], dtype=np.float64)
+        yaw_rates = np.asarray(future[:, 5], dtype=np.float64)
+        steering = np.zeros(len(future), dtype=np.float64)
+        moving = np.abs(speeds) >= 1e-3
+        np.divide(self.wheelbase * yaw_rates, speeds, out=steering, where=moving)
+        np.arctan(steering, out=steering)
+        return np.clip(steering, -self.steering_limit, self.steering_limit)
 
     def _steering_from_motion(self, velocity: float, yaw_rate: float) -> float:
         if abs(velocity) < 1e-3:
