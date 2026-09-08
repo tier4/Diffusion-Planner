@@ -15,16 +15,17 @@ import pyarrow.parquet as pq
 from diffusion_planner.data import PlannerDataset
 
 
-def write_shard(path: Path) -> None:
+def write_shard(path: Path, offset: int = 0) -> None:
     """Write two minimal frames using the production H5 schema."""
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as file:
         file.attrs["format"] = "diffusion_planner_frame_dataset"
         file.attrs["format_version"] = 4
         file.attrs["num_frames"] = 2
         frames = file.create_group("frames")
         frames.create_dataset(
-            "ego_agent_past", data=np.arange(24, dtype=np.float32).reshape(2, 2, 6)
+            "ego_agent_past",
+            data=(offset + np.arange(24, dtype=np.float32)).reshape(2, 2, 6),
         )
         metadata = file.create_group("metadata")
         metadata.create_dataset(
@@ -87,6 +88,77 @@ class PlannerDatasetTest(unittest.TestCase):
         dataset = PlannerDataset(moved_root / "index.parquet")
         path, _ = dataset.source(0)
         self.assertEqual(Path(path), moved_root / "project/bag/frames.h5")
+
+
+class PlannerDatasetMultiShardTest(unittest.TestCase):
+    """Rows addressing several shards resolve to the right file and frame."""
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._directory.name)
+        self.index_path = self.root / "index.parquet"
+        self.offsets = (0, 100)
+        for shard, offset in enumerate(self.offsets):
+            write_shard(self.root / f"project/bag{shard}/frames.h5", offset=offset)
+        # Interleave the shards so consecutive rows alternate between files.
+        pq.write_table(
+            pa.table(
+                {
+                    "h5_path": [
+                        "project/bag1/frames.h5",
+                        "project/bag0/frames.h5",
+                        "project/bag1/frames.h5",
+                        "project/bag0/frames.h5",
+                    ],
+                    "frame_index": np.array([0, 1, 1, 0], dtype=np.int64),
+                    "frame_time_ns": np.array([10, 20, 30, 40], dtype=np.int64),
+                }
+            ),
+            self.index_path,
+        )
+
+    def tearDown(self) -> None:
+        self._directory.cleanup()
+
+    def _expected(self, offset: int, frame_index: int) -> np.ndarray:
+        return (offset + np.arange(24, dtype=np.float32)).reshape(2, 2, 6)[frame_index]
+
+    def test_addresses_each_shard_and_frame(self) -> None:
+        dataset = PlannerDataset(self.index_path)
+        self.assertEqual(len(dataset._shard_paths), 2)
+        for row, (shard, frame_index) in enumerate(((1, 0), (0, 1), (1, 1), (0, 0))):
+            np.testing.assert_array_equal(
+                dataset[row]["ego_agent_past"].numpy(),
+                self._expected(self.offsets[shard], frame_index),
+            )
+            self.assertEqual(
+                Path(dataset.source(row)[0]),
+                self.root / f"project/bag{shard}/frames.h5",
+            )
+
+    def test_reopens_shards_evicted_by_the_file_cache(self) -> None:
+        dataset = PlannerDataset(self.index_path, file_capacity=1)
+        for row in range(4):
+            dataset[row]
+            self.assertEqual(len(dataset._shards), 1)
+        np.testing.assert_array_equal(
+            dataset[0]["ego_agent_past"].numpy(), self._expected(self.offsets[1], 0)
+        )
+
+    def test_rejects_a_frame_index_beyond_the_shard(self) -> None:
+        pq.write_table(
+            pa.table(
+                {
+                    "h5_path": ["project/bag0/frames.h5"],
+                    "frame_index": np.array([7], dtype=np.int64),
+                    "frame_time_ns": np.array([10], dtype=np.int64),
+                }
+            ),
+            self.index_path,
+        )
+        dataset = PlannerDataset(self.index_path)
+        with self.assertRaises(IndexError):
+            dataset[0]
 
 
 if __name__ == "__main__":
