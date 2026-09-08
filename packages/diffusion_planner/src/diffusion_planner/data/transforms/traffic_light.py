@@ -9,21 +9,25 @@ from numpy.typing import NDArray
 
 from .base import Frame, FrameLike
 
+UNKNOWN_INDEX = 3
+
 
 def _forward_fill_unknown(past: NDArray[Any], future: NDArray[Any]) -> NDArray[Any]:
-    """Replace future Unknown states with the preceding traffic-light state."""
-    filled = np.array(future, copy=True)
-    flattened_past = past.reshape(-1, past.shape[-2], past.shape[-1])
-    flattened_future = filled.reshape(-1, filled.shape[-2], filled.shape[-1])
-    unknown_index = 3
-    for history, future_sequence in zip(flattened_past, flattened_future, strict=True):
-        previous = history[-1].copy()
-        for state in future_sequence:
-            if state[unknown_index] > 0.5:
-                state[:] = previous
-            else:
-                previous = state.copy()
-    return filled
+    """Replace future Unknown states with the preceding traffic-light state.
+
+    Every future step takes the most recent known state at or before it, falling
+    back to the last past state when no earlier future step is known. The gather
+    indices are built with a running maximum so the whole element grid is filled
+    in a few vectorized passes instead of one Python loop per step.
+    """
+    horizon = future.shape[-2]
+    known_source = np.arange(1, horizon + 1)
+    # Index 0 selects the last past state; index t + 1 selects future step t.
+    source = np.where(future[..., UNKNOWN_INDEX] > 0.5, 0, known_source)
+    np.maximum.accumulate(source, axis=-1, out=source)
+    candidates = np.concatenate((past[..., -1:, :], future), axis=-2)
+    filled = np.take_along_axis(candidates, source[..., None], axis=-2)
+    return filled.astype(future.dtype, copy=False)
 
 
 def fill_unknown_traffic_light_futures(
