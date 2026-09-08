@@ -27,8 +27,22 @@ def get_args(args_list=None):
     parser.add_argument("--save_dir", type=str, help="save path for model ckpt", required=True)
 
     # Data
-    parser.add_argument("--train_set_list", type=str, required=True)
-    parser.add_argument("--valid_set_list", type=str, required=True)
+    parser.add_argument("--train_set_list", type=str, default="")
+    parser.add_argument("--valid_set_list", type=str, default="")
+    # --- shard (WebDataset) loader; mutually exclusive with --train_set_list ---
+    parser.add_argument("--dataset_root", type=str, default="")
+    parser.add_argument("--dataset_version", type=str, default="")
+    parser.add_argument("--train_key_set", type=str, default="")
+    parser.add_argument("--valid_key_set", type=str, default="")
+    parser.add_argument("--train_shard_filter", type=str, default="")
+    parser.add_argument("--valid_shard_filter", type=str, default="")
+    parser.add_argument("--valid_num_workers", type=int, default=0)
+    parser.add_argument("--shards_in_flight", type=int, default=4)
+    parser.add_argument("--shuffle_buffer", type=int, default=2000)
+    parser.add_argument("--shuffle_buffer_bytes", type=int, default=536870912)
+    parser.add_argument("--shard_chunk_size", type=int, default=1024)
+    parser.add_argument("--shard_seek_threshold", type=float, default=0.2)
+    parser.add_argument("--shard_max_pad_fraction", type=float, default=0.01)
     parser.add_argument("--train_subsample_step", type=int, default=1)
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)

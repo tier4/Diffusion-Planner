@@ -63,6 +63,21 @@ class TrainConfig:
     use_smoothing_future_trajectory: bool = True
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
+
+    # --- shard (WebDataset) loader; back-ported for the pipeline reproduction ---
+    dataset_root: str = ""
+    dataset_version: str = ""
+    train_key_set: str = ""
+    valid_key_set: str = ""
+    train_shard_filter: str = ""
+    valid_shard_filter: str = ""
+    valid_num_workers: int = 0
+    shards_in_flight: int = 4
+    shuffle_buffer: int = 2000
+    shuffle_buffer_bytes: int = 536870912
+    shard_chunk_size: int = 1024
+    shard_seek_threshold: float = 0.2
+    shard_max_pad_fraction: float = 0.01
     pin_mem: bool = True
 
     # ---------------------------------------------------------
