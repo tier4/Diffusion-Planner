@@ -291,8 +291,15 @@ def model_training(args: TrainConfig):
             drop_last=False,
         )
     else:
+        # NB: at this commit ``save_path`` is None on every non-zero rank (it is assigned
+        # only inside the rank-0 branch above), while ``resolve_keysets`` needs a real path
+        # on all ranks. ``args.save_dir`` is parsed by every rank and names the same dir.
         train_loader, valid_loader, train_shard_ds, _ = shard_ddp.build_loaders(
-            args, global_rank, ddp.get_world_size(), batch_size // ddp.get_world_size(), save_path
+            args,
+            global_rank,
+            ddp.get_world_size(),
+            batch_size // ddp.get_world_size(),
+            args.save_dir,
         )
 
     valid_pair_loader = None
