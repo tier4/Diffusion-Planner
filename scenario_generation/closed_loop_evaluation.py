@@ -90,7 +90,10 @@ class RolloutParams:
     # A collision counts as "deviation collision" (reported alongside, not instead of,
     # object.collision_count) when the live ego was more than this far off the recorded
     # GT path at that same step. See ``reproducer_rollout.deviation_collision_block``.
-    deviation_collision_thresh_m: float = 2.0
+    deviation_collision_thresh_m: float
+    # Metrics for the optional post-rollout trajectory-colormap PNGs.  An empty tuple keeps
+    # the generic evaluator's historical behavior (the CLI caller opts in explicitly).
+    colormap_metrics: tuple[str, ...]
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -505,6 +508,19 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 draw_pool=draw_pool,
                 timers=timers,
             )
+
+            if params.colormap_metrics:
+                from scenario_generation.trajectory_colormap import render_trajectory_colormaps
+
+                render_trajectory_colormaps(
+                    png_dir,
+                    self.out_dir,
+                    f"{job.route_key}_{start}_{end}",
+                    metrics=params.colormap_metrics,
+                    near_miss_thresh=params.near_miss_thresh,
+                    strong_brake_mps2=params.strong_brake_mps2,
+                    title=f"{job.route_key} [{start},{end}]",
+                )
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
                 row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)

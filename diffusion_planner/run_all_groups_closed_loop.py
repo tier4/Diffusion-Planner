@@ -187,6 +187,7 @@ def run_one_group(
                 max_steps=cfg.closed_loop_max_steps,
                 timeline_progress_mode=cfg.closed_loop_timeline_progress_mode,  # replay mode
                 deviation_collision_thresh_m=cfg.closed_loop_deviation_collision_thresh_m,
+                colormap_metrics=tuple(cfg.closed_loop_colormap_metrics) if render_media else (),
             ),
             fps=float(cfg.closed_loop_fps),
             verbose=False,
