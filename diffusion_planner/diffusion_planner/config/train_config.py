@@ -182,9 +182,6 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     deterministic: bool = True
 
     def __post_init__(self) -> None:
-        # ``ClosedLoopConfig.__post_init__`` is what fills in ``pass_conditions``;
-        # without this call it stays None and closed-loop evaluation dies with
-        # ``AttributeError: 'NoneType' object has no attribute 'get_condition'``.
         super().__post_init__()
         if not self.save_dir:
             self.save_dir = self.build_save_dir(self.output_root, self.exp_name)

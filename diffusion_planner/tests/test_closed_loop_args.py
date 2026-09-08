@@ -103,15 +103,10 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path):
 
 
 def test_train_config_pass_conditions_is_populated():
-    """``TrainConfig`` must inherit ``ClosedLoopConfig``'s pass-condition loading.
+    """``pass_conditions`` must be non-None, as ``run_all_groups_closed_loop.py`` assumes.
 
-    ``ClosedLoopConfig.__post_init__`` is the only thing that fills in
-    ``_closed_loop_pass_conditions_loaded``, and its docstring promises callers
-    can always do ``cfg.pass_conditions.get_condition(...)`` without a None-check
-    (``run_all_groups_closed_loop.py`` relies on exactly that). A subclass that
-    defines its own ``__post_init__`` without calling ``super()`` silently breaks
-    the promise, and because closed-loop evaluation only runs on the final epoch
-    the crash lands after a full training run.
+    A subclass whose ``__post_init__`` skips ``super()`` leaves it None, and the
+    crash only surfaces on the final epoch of a full training run.
     """
     from diffusion_planner.config import GRPOConfig, TrainConfig
 
@@ -121,7 +116,6 @@ def test_train_config_pass_conditions_is_populated():
             f"{cls.__name__}.pass_conditions is None — "
             "__post_init__ must call super().__post_init__()"
         )
-        # The default is strict (all conditions enabled) when no YAML is given.
         assert cfg.pass_conditions.get_condition("any_group") is not None
 
 
