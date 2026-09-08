@@ -600,6 +600,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run_dir", required=True, type=Path, help="a finished suite run directory")
     p.add_argument("--out_root", required=True, type=Path, help="viewer tree to write")
+    # A case's video is published whenever the run left one, and the colormaps are drawn for
+    # every case, so there is nothing here for a flag to turn on. The drivers that deliver a run
+    # pass it because a revision where it did gate that is still in circulation; refusing it
+    # would cost them the export rather than the media.
+    p.add_argument(
+        "--include_legacy_media",
+        action="store_true",
+        help="accepted and ignored: a case's video and colormaps are published unconditionally",
+    )
     return p.parse_args(argv)
 
 

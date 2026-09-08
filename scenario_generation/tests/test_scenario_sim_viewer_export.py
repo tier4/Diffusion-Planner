@@ -17,6 +17,7 @@ from scenario_generation.scenario_sim_viewer_export import (
     export,
     key_aliases,
     load_submitted,
+    main,
 )
 
 # Shaped like a suite's map path, because the map id is read out of it. Nothing on disk.
@@ -236,3 +237,27 @@ def test_a_case_carries_what_its_expansion_set(tmp_path):
     assert cases[0]["parameters"] == {"speed": "8.3"}
     entry = json.loads((out / "scenarios.json").read_text())[_SC1]
     assert entry["description"] == _DESCRIPTION
+
+
+def test_the_flag_a_delivering_driver_passes_costs_nothing(tmp_path):
+    """A run must not be lost at argument parsing.
+
+    The drivers that deliver a run pass ``--include_legacy_media``, from a revision where it
+    gated whether a case's video was published. It no longer gates anything -- so it has to be
+    accepted, and accepting it has to leave the same tree behind.
+    """
+    run = _make_run(tmp_path / "run", [_rel(_SC1), _rel(_SC2)])
+    plain, with_flag = tmp_path / "plain", tmp_path / "with_flag"
+
+    assert main(["--run_dir", str(run), "--out_root", str(plain)]) == 0
+    assert (
+        main(["--run_dir", str(run), "--out_root", str(with_flag), "--include_legacy_media"]) == 0
+    )
+
+    assert sorted(p.relative_to(with_flag) for p in with_flag.rglob("*")) == sorted(
+        p.relative_to(plain) for p in plain.rglob("*")
+    )
+    for name in ("run.json", "scenarios.json", "cases.jsonl"):
+        assert (with_flag / name).read_text() == (plain / name).read_text().replace(
+            str(plain), str(with_flag)
+        )
