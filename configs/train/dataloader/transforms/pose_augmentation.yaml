@@ -1,8 +1,8 @@
 _target_: diffusion_planner.data.transforms.PlannerPoseAugmentation
 normal_case:
-  probability: 0.5
+  probability: 0.2
   longitudinal_offset_range: [0.0, 0.0]
-  lateral_offset_range: [-1.5, 1.5]
+  lateral_offset_range: [-0.7, 0.7]
   yaw_offset_range: [-0.0872665, 0.0872665]
   pose_augmentation_endpoint_speed_threshold: 1.5
   pose_augmentation_speed_check_endpoint_index: 40
