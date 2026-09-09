@@ -57,6 +57,60 @@ when unset. The original run passed it until epoch 50, when the shared list it
 pointed at was deleted and the job died with `FileNotFoundError`; it was dropped
 on resume. It contributes nothing to the trained weights.
 
+## The corridor pre-shrink: this code is NOT the current best version
+
+This snapshot carries a defect that `tier4-main` has already fixed, and anyone
+reproducing or extending this work needs to know which side of it they are on.
+
+`_corridor` here initialises the lateral bounds to a cap derived from the
+sampler's nominal offset, before any obstacle cuts them:
+
+```python
+cap = self.dy_max + 0.35 * half_l + 1e-3
+lo, hi = -cap, +cap
+```
+
+Substituted into the acceptance test `(L - rot >= lo) & (L + rot <= hi)` with
+`rot = 0.35 * half_l`, the margins cancel and the cap reduces to exactly
+`|L(t)| <= dy_max + 1e-3` — i.e. it asserts that the lateral profile never
+exceeds the drawn offset. That assumption is false: `dy` is a boundary condition
+at the merge time, not the profile's maximum, and a draw with a non-zero heading
+slope overshoots in between (upstream measured `|L| = 3.39 m` for a `1.98 m`
+offset). So the cap silently rejected feasible perturbations whose footprint the
+real road and neighbours had ample room for — obstacle-independent filtering
+that was never intended.
+
+`tier4-main` replaces it with unconstrained bounds (+/-20 m) that only real road
+borders and neighbour boxes tighten. **That version is the correct one.** Train
+new models against it, not against this branch.
+
+Measured difference between the two, 20,480 randomly sampled training scenes,
+identical seeds on both sides:
+
+| | |
+|---|---|
+| scenes selecting a different augmented future | 0.137% (95% CI 0.095–0.198%) |
+| same, as a fraction of augmented scenes | 0.390% |
+| scenes where augmentation stops happening at all | 0.01% |
+| unaugmented scenes affected | 0 |
+
+The rate is that low because an overshoot past `dy_max` needs a large heading
+offset paired with a large same-sign lateral offset, and the resulting polyline
+still has to clear the kinematic feasibility screen. It is far below the
+run-to-run noise floor, so it does not call the results into question — but it
+does mean **`tier4-main` will not reproduce this checkpoint bit-for-bit. Only
+this branch will.**
+
+## Rebuilding on top of newer augmenter work
+
+If you rebuild on a branch that adds `--ego_past_noise_std` support for frenet,
+pass `--ego_past_noise_std 0` explicitly. The per-augmenter default for frenet
+became `0.1` there, while the augmenter class default stayed `0.0`, so a stock
+`--augment_type frenet` command trains a different distribution than the one
+here — it perturbs the rewritten history on effectively every augmented scene.
+Beware also that constructing the augmenter directly in a test or probe picks up
+the class default and therefore does NOT exercise what the CLI does.
+
 ## Things that will bite you
 
 - **Evaluate the EMA weights, never `ckpt["model"]`.** Both are stored. The raw
