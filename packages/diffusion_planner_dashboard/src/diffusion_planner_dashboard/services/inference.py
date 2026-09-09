@@ -101,23 +101,28 @@ def run_onnx_inference(
 def run_turn_indicator_inference(
     model: DiffusionPlanner,
     frame_data: Mapping[str, Any],
+    trajectory: NDArray[np.float32],
     *,
     device: str,
 ) -> tuple[NDArray[np.float32], int, float]:
     """Predict the next turn indicator and return probabilities and elapsed seconds."""
     torch_device = torch.device(device)
-    normalized_frame = PlannerDataNormalizer()(
+    normalizer = PlannerDataNormalizer()
+    normalized_frame = normalizer(
         {key: np.asarray(value) for key, value in frame_data.items()}
     )
     input_data = {
         key: torch.as_tensor(value, device=torch_device).unsqueeze(0)
         for key, value in normalized_frame.items()
     }
+    normalized_trajectory = torch.as_tensor(
+        normalizer.normalize_trajectory(trajectory), device=torch_device
+    ).unsqueeze(0)
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)
     start = perf_counter()
     with torch.inference_mode():
-        logits = model.predict_turn_indicator(input_data)
+        logits = model.predict_turn_indicator(input_data, normalized_trajectory)
         probabilities = torch.softmax(logits, dim=-1)
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)

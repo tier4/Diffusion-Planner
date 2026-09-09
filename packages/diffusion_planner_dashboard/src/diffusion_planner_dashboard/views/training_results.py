@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import streamlit as st
 import torch
+from numpy.typing import NDArray
 
 from diffusion_planner.data import (
     PlannerRigidDataAugmentation,
@@ -153,6 +154,7 @@ def _cached_turn_indicator_prediction(
     remove_pedestrians: bool,
     remove_bikes: bool,
     infer_future_traffic_lights: bool,
+    ego_trajectory: NDArray[np.float32],
 ):
     loaded = _cached_planner(model_path, model_modification_time_ns, device)
     if isinstance(loaded, LoadedOnnxPlanner):
@@ -178,7 +180,9 @@ def _cached_turn_indicator_prediction(
             yaw_offset,
             ego_speed_scale,
         )
-    return run_turn_indicator_inference(loaded.model, frame_data, device=device)
+    return run_turn_indicator_inference(
+        loaded.model, frame_data, ego_trajectory, device=device
+    )
 
 
 def _augment_frame(
@@ -550,6 +554,7 @@ def render_training_results() -> None:
                 remove_pedestrians,
                 remove_bikes,
                 infer_future_traffic_lights,
+                prediction[0],
             )
     except Exception as error:
         st.exception(error)

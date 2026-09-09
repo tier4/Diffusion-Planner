@@ -110,6 +110,7 @@ def compute_diffusion_planner_loss(
     noise_scale: float,
     ego_loss_weight: float = 1.0,
     neighbor_loss_weight: float = 1.0,
+    turn_indicator_loss_weight: float = 1.0,
     turn_indicator_transition_loss_weight: float = 5.0,
 ) -> DiffusionPlannerLoss:
     """Compute the joint planner loss and turn-indicator metrics."""
@@ -149,7 +150,7 @@ def compute_diffusion_planner_loss(
         transition_weight=turn_indicator_transition_loss_weight,
     )
     return {
-        "total": trajectory_loss + turn_indicator_loss,
+        "total": trajectory_loss + turn_indicator_loss_weight * turn_indicator_loss,
         "trajectory": trajectory_loss,
         "turn_indicator": turn_indicator_loss,
         "turn_indicator_correct": correct,

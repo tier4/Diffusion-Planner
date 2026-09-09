@@ -84,6 +84,19 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.input_data = make_input_data()
 
     def test_compute_loss(self) -> None:
+        self.input_data["ego_agent_future"][:, :, 0] = torch.arange(TRAJECTORY_LENGTH)
+        turn_indicator_trajectories: list[torch.Tensor] = []
+
+        def capture_turn_indicator_trajectory(
+            _module: torch.nn.Module,
+            args: tuple[torch.Tensor, ...],
+            _output: torch.Tensor,
+        ) -> None:
+            turn_indicator_trajectories.append(args[3].detach().clone())
+
+        handle = self.model.turn_indicator_decoder.register_forward_hook(
+            capture_turn_indicator_trajectory
+        )
         losses = compute_diffusion_planner_loss(
             self.model,
             self.input_data,
@@ -92,9 +105,14 @@ class DiffusionPlannerTest(unittest.TestCase):
             time_epsilon=1e-5,
             noise_scale=1.0,
         )
+        handle.remove()
 
         self.assertEqual(losses["total"].ndim, 0)
         self.assertTrue(torch.isfinite(losses["total"]))
+        torch.testing.assert_close(
+            turn_indicator_trajectories[0],
+            self.input_data["ego_agent_future"][..., :TRAJECTORY_DIM],
+        )
         losses["total"].backward()
 
     def test_partial_future_padding_masks_complete_agent(self) -> None:
@@ -106,6 +124,42 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.assertTrue(missing_future[:, 0].all())
         self.assertFalse(missing_future[:, 1].any())
         self.assertTrue(missing_future[:, 2].all())
+
+    def test_turn_indicator_loss_backpropagates_into_scene_encoder(self) -> None:
+        agent_count = self.input_data["neighbor_agents_past"].shape[1] + 1
+        trajectory, logits = self.model(
+            torch.randn(1, agent_count, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+            torch.zeros(1, agent_count, dtype=torch.bool),
+            self.input_data,
+            torch.full((1,), 0.5),
+        )
+        del trajectory
+
+        logits.sum().backward()
+
+        self.assertTrue(
+            any(
+                parameter.grad is not None
+                and torch.count_nonzero(parameter.grad).item() > 0
+                for parameter in self.model.scene_encoder.parameters()
+            )
+        )
+        self.assertIsNotNone(
+            self.model.turn_indicator_decoder.trajectory_scene_attention.in_proj_weight.grad
+        )
+
+    def test_turn_indicator_loss_weight_controls_total_loss(self) -> None:
+        losses = compute_diffusion_planner_loss(
+            self.model,
+            self.input_data,
+            time_mean=-0.4,
+            time_std=1.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+            turn_indicator_loss_weight=0.0,
+        )
+
+        torch.testing.assert_close(losses["total"], losses["trajectory"])
 
     def test_position_error_uses_target_longitudinal_lateral_frame(self) -> None:
         error = torch.tensor([[[[1.0, 0.0, 0.25, -0.5]]]])
@@ -160,6 +214,7 @@ class DiffusionPlannerTest(unittest.TestCase):
     def test_sample_encodes_scene_once_and_masks_missing_agents(self) -> None:
         call_count = 0
         decoder_call_count = 0
+        turn_indicator_trajectories: list[torch.Tensor] = []
 
         def count_scene_calls(
             _module: torch.nn.Module,
@@ -177,9 +232,19 @@ class DiffusionPlannerTest(unittest.TestCase):
             nonlocal decoder_call_count
             decoder_call_count += 1
 
+        def capture_turn_indicator_trajectory(
+            _module: torch.nn.Module,
+            args: tuple[torch.Tensor, ...],
+            _output: torch.Tensor,
+        ) -> None:
+            turn_indicator_trajectories.append(args[3].detach().clone())
+
         handle = self.model.scene_encoder.register_forward_hook(count_scene_calls)
         decoder_handle = self.model.trajectory_decoder.register_forward_hook(
             count_decoder_calls
+        )
+        turn_indicator_handle = self.model.turn_indicator_decoder.register_forward_hook(
+            capture_turn_indicator_trajectory
         )
         trajectories, turn_indicator_logits = self.model.sample(
             self.input_data,
@@ -188,6 +253,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
         handle.remove()
         decoder_handle.remove()
+        turn_indicator_handle.remove()
 
         self.assertEqual(trajectories.shape, (1, 3, TRAJECTORY_LENGTH, 4))
         self.assertEqual(turn_indicator_logits.shape, (1, 3))
@@ -196,6 +262,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
         self.assertEqual(call_count, 1)
         self.assertEqual(decoder_call_count, 3)
+        torch.testing.assert_close(turn_indicator_trajectories[0], trajectories[:, 0])
 
 
 if __name__ == "__main__":

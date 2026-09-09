@@ -10,8 +10,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from diffusion_planner.data.transforms import (
+    PlannerEgoShapeAugmentation,
     PlannerGoalTransform,
-    PlannerQuinticHermiteAugmentation,
+    PlannerILQRAugmentation,
     PlannerRigidDataAugmentation,
     PlannerSpeedAugmentation,
 )
@@ -37,6 +38,7 @@ def _frame() -> dict[str, NDArray[np.float32]]:
         "stop_lines": np.zeros((2, 2, 2), dtype=np.float32),
         "road_borders": np.zeros((2, 3, 2), dtype=np.float32),
         "agent_shape": np.ones((2, 2), dtype=np.float32),
+        "ego_shape": np.asarray([3.5, 4.8, 1.8], dtype=np.float32),
     }
     frame["neighbor_agents_past"][0] = np.tile(_pose(3.0, 2.0), (2, 1))
     frame["neighbor_agents_future"][0] = np.tile(_pose(3.0, 2.0), (2, 1))
@@ -49,10 +51,10 @@ def _frame() -> dict[str, NDArray[np.float32]]:
     return frame
 
 
-class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
+class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
     def test_transforms_scene_into_augmented_ego_frame(self) -> None:
         frame = _frame()
-        augmentation = PlannerQuinticHermiteAugmentation(
+        augmentation = PlannerILQRAugmentation(
             lateral_offset_range=(2.0, 2.0),
             yaw_offset_range=(math.pi / 2, math.pi / 2),
             pose_probability=1.0,
@@ -68,10 +70,9 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
             _pose(0.0, -3.0, 0.0, -1.0),
             atol=1e-6,
         )
+        self.assertTrue(np.all(np.isfinite(result["ego_agent_future"])))
         np.testing.assert_allclose(
-            result["ego_agent_future"][0, :4],
-            _pose(-2.0, 0.0, 0.0, -1.0),
-            atol=1e-6,
+            np.linalg.norm(result["ego_agent_future"][:, 2:4], axis=-1), 1.0
         )
         np.testing.assert_allclose(
             result["goal_pose"],
@@ -81,7 +82,7 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
 
     def test_preserves_padding_and_non_coordinate_tensors(self) -> None:
         frame = _frame()
-        augmentation = PlannerQuinticHermiteAugmentation(
+        augmentation = PlannerILQRAugmentation(
             (1.0, 1.0), (0.1, 0.1), pose_probability=1.0
         )
 
@@ -134,17 +135,22 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
     def test_pose_augmentation_checks_future_speed_without_current_speed(self) -> None:
         for augmentation_type in (
             PlannerRigidDataAugmentation,
-            PlannerQuinticHermiteAugmentation,
+            PlannerILQRAugmentation,
         ):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_past"][-1, 4] = 0.0
+                check_index = (
+                    {"num_refine": 1}
+                    if augmentation_type is PlannerILQRAugmentation
+                    else {"pose_augmentation_speed_check_index": 1}
+                )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
                     pose_augmentation_speed_threshold=0.5,
-                    pose_augmentation_speed_check_index=1,
+                    **check_index,
                 )
 
                 result = augmentation(frame)
@@ -156,17 +162,22 @@ class PlannerQuinticHermiteAugmentationTest(unittest.TestCase):
     def test_pose_augmentation_skips_when_speed_before_index_is_too_low(self) -> None:
         for augmentation_type in (
             PlannerRigidDataAugmentation,
-            PlannerQuinticHermiteAugmentation,
+            PlannerILQRAugmentation,
         ):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_future"][1, 4] = 0.4
+                check_index = (
+                    {"num_refine": 1}
+                    if augmentation_type is PlannerILQRAugmentation
+                    else {"pose_augmentation_speed_check_index": 1}
+                )
                 augmentation = augmentation_type(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
                     pose_augmentation_speed_threshold=0.5,
-                    pose_augmentation_speed_check_index=1,
+                    **check_index,
                 )
 
                 result = augmentation(frame)
@@ -257,6 +268,32 @@ class PlannerGoalTransformTest(unittest.TestCase):
         result = transform(frame)
 
         self.assertIs(result["ego_agent_future"], frame["ego_agent_future"])
+
+
+class PlannerEgoShapeAugmentationTest(unittest.TestCase):
+    def test_reduces_ego_shape_without_mutating_input(self) -> None:
+        frame = _frame()
+        original_shape = frame["ego_shape"].copy()
+        augmentation = PlannerEgoShapeAugmentation(probability=1.0)
+
+        with patch(
+            "numpy.random.uniform",
+            return_value=np.asarray([0.9, 0.95, 0.85], dtype=np.float32),
+        ):
+            result = augmentation(frame)
+
+        np.testing.assert_allclose(
+            result["ego_shape"], frame["ego_shape"] * [0.9, 0.95, 0.85]
+        )
+        self.assertEqual(result["ego_shape"].dtype, frame["ego_shape"].dtype)
+        np.testing.assert_array_equal(frame["ego_shape"], original_shape)
+
+    def test_keeps_ego_shape_when_skipped(self) -> None:
+        frame = _frame()
+
+        result = PlannerEgoShapeAugmentation(probability=0.0)(frame)
+
+        self.assertIs(result["ego_shape"], frame["ego_shape"])
 
 
 if __name__ == "__main__":

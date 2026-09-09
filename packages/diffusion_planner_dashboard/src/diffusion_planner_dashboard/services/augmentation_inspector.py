@@ -48,7 +48,7 @@ def _valid_points(key: str, array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _rigid_distance_error(
     key: str, original: np.ndarray, augmented: np.ndarray
 ) -> float | None:
-    # Ego future is intentionally reshaped near the current pose by the quintic
+    # Ego future is intentionally reshaped near the current pose by trajectory
     # refinement, so it is not a rigid transform of the original trajectory.
     if key not in COORDINATE_KEYS or key == "ego_agent_future":
         return None
