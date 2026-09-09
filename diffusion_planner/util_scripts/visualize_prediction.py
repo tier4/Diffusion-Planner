@@ -269,7 +269,11 @@ def visualize_predictions(
     loss_ego_neighbor_margin_loss = defaultdict(list)
     loss_list = []
     for info_path, loss_path in zip(info_path_list, loss_path_list):
-        assert info_path.is_file()
+        assert info_path.is_file(), (
+            f"missing per-scene pose sidecar {info_path}. visualize_predictions needs a "
+            f"<stem>.json next to every validation NPZ; run with "
+            f"--enable_prediction_visualization False for a metrics-only evaluation."
+        )
         time_str = info_path.stem.split("_")[0]
 
         pose_data = json.load(open(info_path, "r"))

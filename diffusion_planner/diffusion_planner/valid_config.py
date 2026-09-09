@@ -11,6 +11,11 @@ class ValidConfig:
     # --- 上書き・推論用パラメータ ---
     valid_set_list: Optional[str] = None
     save_predictions_dir: Optional[str] = None
+    # Rendering the per-frame PNGs / per-clip MP4s is a SEPARATE product from the
+    # metrics, and it needs the per-scene pose sidecar JSONs next to each validation
+    # NPZ. A metrics-only run (large val set, predictions dumped to node-local scratch)
+    # should be able to opt out instead of failing after all metrics are already written.
+    enable_prediction_visualization: bool = True
 
     # --- 実行環境パラメータ ---
     batch_size: int = 32

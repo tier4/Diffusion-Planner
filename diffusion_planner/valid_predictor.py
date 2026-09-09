@@ -57,6 +57,11 @@ def get_args(args_list=None):
     parser.add_argument("--resume_model_path", type=str, required=True)
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
+    parser.add_argument(
+        "--enable_prediction_visualization",
+        default=_valid_config_default("enable_prediction_visualization"),
+        type=boolean,
+    )
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
@@ -324,7 +329,7 @@ def run_validation(valid_cfg: ValidConfig):
     if valid_cfg.ddp:
         torch.distributed.barrier()
 
-    if global_rank == 0:
+    if global_rank == 0 and valid_cfg.enable_prediction_visualization:
         from util_scripts.visualize_prediction import visualize_predictions
 
         visualize_predictions(
