@@ -40,16 +40,15 @@ def augmenter_from_args(args):
     """
     if not args.use_data_augment:
         return None
+    # Above the type dispatch, so the mode contract is enforced on EVERY path. It used to
+    # be called only in the bridge branch, which meant a caller that skipped the
+    # trainers' own call got `augment_type=quintic, ego_past_noise_mode=jitter` silently
+    # honoured as scale -- the record-it-and-ignore-it mismatch this module exists to
+    # stop. Idempotent, so the trainers calling it first costs nothing.
+    resolve_history_noise(args)
     if args.augment_type == "frenet":
         return frenet_augmenter_from_args(args)
     if args.augment_type == "bridge":
-        # Bridge takes neither the history noise nor the quintic refinement knobs. The
-        # rejection of an explicitly-passed --ego_past_noise_std lives in
-        # resolve_history_noise, which the trainers call before serializing the config:
-        # it needs to tell "passed" from "unset", and by the time the factory runs the
-        # value has been resolved to a number either way. Called here defensively for
-        # any caller that skipped the resolver.
-        resolve_history_noise(args)
         return BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
     if args.augment_type == "quintic":
         return StatePerturbation(

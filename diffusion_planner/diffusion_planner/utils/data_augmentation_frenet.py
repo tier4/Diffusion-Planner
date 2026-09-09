@@ -63,6 +63,7 @@ from diffusion_planner.utils.data_augmentation import (
 STREAM_STRIDE = 1_000_003
 HIST_STREAM = 1
 TOWARD_STREAM = 2
+RECOVERY_STREAM = 3
 
 CORRIDOR_MARGIN = 0.10
 # A neighbour counts as parked for the toward-parked nudge when its RECORDED velocity at
@@ -318,6 +319,15 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # Same reasoning as hist_gen, for the toward-parked coin: see __call__.
         self.toward_gen = torch.Generator(device="cpu").manual_seed(
             seed + rank + TOWARD_STREAM * STREAM_STRIDE
+        )
+        # And one for the retry. `_recover_vetoed` draws once per round, a
+        # data-dependent number of times, so off self.gen it shifted every later
+        # corridor draw: measured on 2,297 scenes, recovery_rounds=1 GAINED 340 rows
+        # (the feature working) but also LOST 360 (which pure recovery cannot do,
+        # since it only ever adds), across 46 of 72 batches. An A/B on the flag was
+        # therefore reading a reseed on top of the feature.
+        self.recovery_gen = torch.Generator(device="cpu").manual_seed(
+            seed + rank + RECOVERY_STREAM * STREAM_STRIDE
         )
         self.ranked_temp_s = float(ranked_temp_s)
         # Rounds of draw-level re-selection allowed after an exact-OBB veto. 0 keeps
@@ -980,7 +990,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         aug_xy = xy + Lw[..., None] * nrm
         return aug_xy
 
-    def _sample_merge_then_jerk(self, feas_k, jerk_k, merges):
+    def _sample_merge_then_jerk(self, feas_k, jerk_k, merges, gen=None):
         """The merge-then-jerk pick, shared by first selection and recovery.
 
         Merge horizon sampled with weight exp(-(M - Mmin) / temp) over the
@@ -992,7 +1002,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         w = w * feas_k
         alive = w.sum(-1) > 0
         w = torch.where(alive[:, None], w, torch.ones_like(w))  # avoid all-zero rows
-        pick_m = torch.multinomial(w.cpu().double(), 1, generator=self.gen).to(w.device)[:, 0]
+        pick_m = torch.multinomial(
+            w.cpu().double(), 1, generator=self.gen if gen is None else gen
+        ).to(w.device)[:, 0]
         same_m = feas_k & (merges[None, :] == merges[pick_m][:, None])
         return torch.where(same_m, jerk_k, BIG).argmin(-1), alive
 
@@ -1057,7 +1069,9 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 # vehicle.
                 cur = torch.where(hardened[rows], self._largest_offset_draw(draw_ok, dy[rows]), cur)
             feas_k = adm[rows, cur]
-            combo_idx, alive = self._sample_merge_then_jerk(feas_k, jerk[rows, cur], merges)
+            combo_idx, alive = self._sample_merge_then_jerk(
+                feas_k, jerk[rows, cur], merges, gen=self.recovery_gen
+            )
             cand = xy[rows] + L[rows, cur, combo_idx][..., None] * nrm[rows]
             g_r, hd_r = self._headings(cand, tan[rows])
             keep = self._veto_true_overlaps_rows(inputs, alive.clone(), cand, hd_r, rows, xy)

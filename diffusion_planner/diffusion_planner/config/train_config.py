@@ -54,9 +54,11 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     num_refine: int = 20
     ego_past_noise_std: Optional[float] = cli(
         "std of the single per-scene factor scaling an augmented row's ego history, "
-        "drawn from N(1, std) and clamped to +-2 std. Unset means each augmenter keeps "
-        "the value it has always used (quintic 0.1, frenet 0.0); passing a number "
-        "applies it to whichever augmenter is selected. WHAT IT SCALES DIFFERS BY "
+        "drawn from N(1, std) and clamped to +-2 std. Unset resolves per augmenter: "
+        "quintic 0.1 and frenet 0.1. The frenet value is a DELIBERATE DEFAULT CHANGE "
+        "-- tier4-main hard-passed 0.0 -- so reproducing a historical frenet run "
+        "requires --ego_past_noise_std 0 explicitly. Passing a number applies it to "
+        "whichever augmenter is selected. WHAT IT SCALES DIFFERS BY "
         "AUGMENTER: quintic scales the RECORDED history AND the current velocity and "
         "acceleration; frenet scales the history it rewrote from the perturbed polyline "
         "and leaves ego_current_state bit-identical -- so a quintic-vs-frenet A/B on "

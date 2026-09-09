@@ -219,11 +219,19 @@ def test_seed_and_past_noise_std_are_real_command_line_flags():
     # reaches a training, and that is what silently moved once already.
     from diffusion_planner.utils.augment_defaults import past_noise_std_for
 
-    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.1), ("bridge", 0.0)):
+    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.1)):
         resolved = past_noise_std_for(
             build_config(TrainConfig, parser.parse_args(["--augment_type", augment_type]))
         )
         assert resolved == expected, f"{augment_type} history noise moved to {resolved}"
+
+    # bridge has no entry on purpose: resolve_history_noise returns before resolving for
+    # it, so reaching this lookup means a caller bypassed the resolver, and that caller
+    # should get a KeyError rather than a silent 0.0 for a knob bridge cannot honour.
+    with pytest.raises(KeyError):
+        past_noise_std_for(
+            build_config(TrainConfig, parser.parse_args(["--augment_type", "bridge"]))
+        )
 
     over = build_config(
         TrainConfig, parser.parse_args(["--seed", "1234", "--ego_past_noise_std", "0.0"])

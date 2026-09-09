@@ -22,7 +22,10 @@ so a resolver in either of those would be a cycle.
 # replan 1; 1.0 on lost% at replan 3), so the evidence says the perturbation neither
 # helps nor hurts. It is on by default because the flag is uniform across augmenters
 # that support it, NOT because it was shown to improve anything.
-DEFAULT_PAST_NOISE_STD = {"quintic": 0.1, "bridge": 0.0, "frenet": 0.1}
+# No bridge entry on purpose: resolve_history_noise returns before resolving for
+# bridge, so a lookup here can only come from a caller that bypassed it -- and that
+# caller should get the KeyError this dict advertises, not a silent 0.0.
+DEFAULT_PAST_NOISE_STD = {"quintic": 0.1, "frenet": 0.1}
 
 
 def past_noise_std_for(args) -> float:
