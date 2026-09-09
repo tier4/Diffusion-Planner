@@ -39,7 +39,10 @@ def ddp_setup_universal(verbose=False, args=None):
     dist_backend = "nccl"
     # I don't know why but this is needed for DDP to work instead of 'env://'
     dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
+    # A HARDCODED shared path makes every concurrent job on a node collide, and a
+    # crashed job leaves a stale store that poisons the next launch. Allow a
+    # per-job override; default unchanged.
+    file_path = os.environ.get("DP_DIST_INIT_FILE", "/tmp/tmp_dist_init")
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
         init_method=f"{dist_url}{file_path}",

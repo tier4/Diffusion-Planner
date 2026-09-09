@@ -57,7 +57,7 @@ def get_args(args_list=None):
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
     parser.add_argument(
-        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+        "--augment_type", type=str, choices=["quintic", "bridge", "frenet"], default="quintic"
     )
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
