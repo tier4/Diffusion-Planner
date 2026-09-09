@@ -1,6 +1,6 @@
 # H5 Dataset Schema
 
-This document describes H5 format version 3 produced by
+This document describes H5 format version 4 produced by
 `scripts/dataset/create_h5_dataset.py`.
 
 ## Dataset layout
@@ -177,6 +177,6 @@ Each Parquet row addresses exactly one H5 frame.
 
 ## Compatibility
 
-Format version 3 is incompatible with version 2 because lane geometry and boundary
-types are stored in separate tensors. Existing H5 shards must be regenerated with
-`overwrite=true`; `resume=true` rejects shards with an older format version.
+Format version 4 is incompatible with version 3 because it adds closed-loop pose
+metadata (`ego_x`, `ego_y`, and `ego_yaw`). Existing H5 shards must be regenerated
+with `overwrite=true`; `resume=true` rejects shards with an older format version.

@@ -130,7 +130,15 @@ def build_builder_param(config: WorkerConfig) -> Any:
 def discover_bags(root: Path, split: str) -> list[BagEntry]:
     """Discover bags and preserve their hierarchy relative to the requested root."""
     entries = []
-    for info_path in sorted(root.rglob("log_file_info.json")):
+    # Closed-loop selections are materialized as directory symlinks.  pathlib's
+    # rglob() deliberately does not recurse into those directories, so walk the
+    # tree with followlinks enabled to discover both regular and selected bags.
+    info_paths = sorted(
+        Path(directory) / "log_file_info.json"
+        for directory, _, filenames in os.walk(root, followlinks=True)
+        if "log_file_info.json" in filenames
+    )
+    for info_path in info_paths:
         bag_path = info_path.parent
         if (
             not (bag_path / "metadata.yaml").is_file()
