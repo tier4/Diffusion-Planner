@@ -14,12 +14,12 @@
 
 #include "label_builder.hpp"
 
-#include "autoware/diffusion_planner/dimensions.hpp"
-#include "autoware/diffusion_planner/preprocessing/items/agent.hpp"
-#include "autoware/diffusion_planner/preprocessing/items/ego_history.hpp"
-#include "autoware/diffusion_planner/preprocessing/items/traffic_signals.hpp"
-#include "autoware/diffusion_planner/preprocessing/items/turn_indicators.hpp"
-#include "autoware/diffusion_planner/utils/utils.hpp"
+#include "autoware/ml_planner/dimensions.hpp"
+#include "autoware/ml_planner/preprocessing/items/agent.hpp"
+#include "autoware/ml_planner/preprocessing/items/ego_history.hpp"
+#include "autoware/ml_planner/preprocessing/items/traffic_signals.hpp"
+#include "autoware/ml_planner/preprocessing/items/turn_indicators.hpp"
+#include "autoware/ml_planner/utils/utils.hpp"
 
 #include <Eigen/Dense>
 #include <xtensor/xarray.hpp>
@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-namespace autoware::diffusion_planner::data {
+namespace autoware::ml_planner::data {
 
 namespace {
 
@@ -41,7 +41,7 @@ double stamp_sec_of(const std_msgs::msg::Header &header) {
 
 } // namespace
 
-preprocess::InputDataResult create_label_data_map(
+preprocess::TensorMapResult create_label_data_map(
     const rclcpp::Time &frame_time,
     const preprocess::MessageView<Odometry> &ego_msgs,
     const preprocess::MessageView<TrackedObjects> &objects_msgs,
@@ -85,7 +85,7 @@ preprocess::InputDataResult create_label_data_map(
   const Eigen::Matrix4d map_to_ego_transform =
       utils::inverse(ego_to_map_transform);
 
-  preprocess::InputDataMap label_data_map;
+  preprocess::TensorMap label_data_map;
 
   // Ego future: reuse the ego history item with the grid anchored at the end
   // of the horizon, which yields frame_time + [1 .. num_future_steps] * dt.
@@ -144,4 +144,4 @@ preprocess::InputDataResult create_label_data_map(
   return label_data_map;
 }
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data

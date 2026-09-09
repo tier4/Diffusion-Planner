@@ -17,7 +17,7 @@
 
 #include <string>
 
-namespace autoware::diffusion_planner::data {
+namespace autoware::ml_planner::data {
 
 struct TopicConfig {
   std::string kinematic_state;
@@ -34,6 +34,6 @@ struct TopicConfig {
  */
 TopicConfig load_topic_config();
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__TOPIC_CONFIG_HPP_

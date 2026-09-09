@@ -18,7 +18,7 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
-namespace autoware::diffusion_planner::data {
+namespace autoware::ml_planner::data {
 
 TopicConfig load_topic_config() {
   const std::string path =
@@ -35,4 +35,4 @@ TopicConfig load_topic_config() {
   return config;
 }
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data

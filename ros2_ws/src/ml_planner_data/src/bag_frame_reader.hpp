@@ -18,10 +18,10 @@
 #include "label_builder.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/diffusion_planner/constants.hpp"
-#include "autoware/diffusion_planner/dimensions.hpp"
-#include "autoware/diffusion_planner/preprocessing/input_builder.hpp"
-#include "autoware/diffusion_planner/utils/timed_buffer.hpp"
+#include "autoware/ml_planner/constants.hpp"
+#include "autoware/ml_planner/dimensions.hpp"
+#include "autoware/ml_planner/preprocessing/input_builder.hpp"
+#include "autoware/ml_planner/utils/timed_buffer.hpp"
 
 #include <rclcpp/serialization.hpp>
 #include <rosbag2_cpp/reader.hpp>
@@ -40,14 +40,7 @@
 #include <utility>
 #include <vector>
 
-namespace autoware::diffusion_planner::data {
-
-struct InputFrameData {
-  preprocess::InputDataMap tensors;
-  std::vector<preprocess::SelectedAgent> selected_agents;
-};
-
-using InputFrameDataResult = tl::expected<InputFrameData, std::string>;
+namespace autoware::ml_planner::data {
 
 /**
  * @brief Sequential reader over one rosbag with time-windowed message buffers.
@@ -64,7 +57,7 @@ public:
    * @brief Build the FrameInputs message windows for the given frame time and
    * run the shared input builder.
    */
-  InputFrameDataResult
+  preprocess::InputBuilderResult
   create_input_data(const rclcpp::Time &frame_time,
                     const preprocess::LaneSegmentContext &map_context,
                     const VehicleSpec &vehicle_spec,
@@ -74,7 +67,7 @@ public:
    * @brief Build the label tensors (ego/neighbor futures, turn indicator
    * future) for the given frame time.
    */
-  preprocess::InputDataResult create_label_data(
+  preprocess::TensorMapResult create_label_data(
       const rclcpp::Time &frame_time,
       const preprocess::LaneSegmentContext &map_context,
       const LabelBuilderParams &params,
@@ -162,6 +155,6 @@ private:
   double last_target_sec_{-std::numeric_limits<double>::infinity()};
 };
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data
 
 #endif // ML_PLANNER_DATA__SRC__BAG_FRAME_READER_HPP_

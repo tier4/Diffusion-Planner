@@ -17,8 +17,8 @@
 #include "bag_dataset_builder.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/diffusion_planner/constants.hpp"
-#include "autoware/diffusion_planner/dimensions.hpp"
+#include "autoware/ml_planner/constants.hpp"
+#include "autoware/ml_planner/dimensions.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,7 +29,7 @@
 #include <sstream>
 #include <utility>
 
-namespace autoware::diffusion_planner::data {
+namespace autoware::ml_planner::data {
 
 namespace {
 
@@ -148,9 +148,8 @@ FrameRange calculate_frame_range(const TopicConfig &topics,
   const double route_first_t =
       route_stamps.empty() ? infinity : route_stamps.front() - 1e-6;
   const double usable_from = std::max(structural_first_t, route_first_t);
-  const double future_horizon_s =
-      static_cast<double>(param.num_future_steps) *
-      constants::PREDICTION_TIME_STEP_S;
+  const double future_horizon_s = static_cast<double>(param.num_future_steps) *
+                                  constants::PREDICTION_TIME_STEP_S;
   const double usable_until = ego_last_sec - future_horizon_s;
 
   double first_valid_t = usable_from;
@@ -221,4 +220,4 @@ std::optional<std::string> check_min_travel_distance(
   return message.str();
 }
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data

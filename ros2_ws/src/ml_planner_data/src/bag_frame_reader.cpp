@@ -21,7 +21,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace autoware::diffusion_planner::data {
+namespace autoware::ml_planner::data {
 
 BagFrameReader::BagFrameReader(const std::string &bag_path,
                                const TopicConfig &topics)
@@ -46,7 +46,7 @@ BagFrameReader::BagFrameReader(const std::string &bag_path,
   open_main_reader();
 }
 
-InputFrameDataResult BagFrameReader::create_input_data(
+preprocess::InputBuilderResult BagFrameReader::create_input_data(
     const rclcpp::Time &frame_time,
     const preprocess::LaneSegmentContext &map_context,
     const VehicleSpec &vehicle_spec,
@@ -73,16 +73,11 @@ InputFrameDataResult BagFrameReader::create_input_data(
       window_of(traffic_signals_buffer_, frame_sec),
       *route};
 
-  std::vector<preprocess::SelectedAgent> selected_agents;
-  auto result = preprocess::create_input_data_map(
-      frame_inputs, map_context, vehicle_spec, params, &selected_agents);
-  if (!result) {
-    return tl::unexpected(result.error());
-  }
-  return InputFrameData{std::move(result.value()), std::move(selected_agents)};
+  return preprocess::create_input_data_map(frame_inputs, map_context,
+                                           vehicle_spec, params);
 }
 
-preprocess::InputDataResult BagFrameReader::create_label_data(
+preprocess::TensorMapResult BagFrameReader::create_label_data(
     const rclcpp::Time &frame_time,
     const preprocess::LaneSegmentContext &map_context,
     const LabelBuilderParams &params,
@@ -177,4 +172,4 @@ BagFrameReader::route_at(const double frame_sec) const {
   return result;
 }
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data
