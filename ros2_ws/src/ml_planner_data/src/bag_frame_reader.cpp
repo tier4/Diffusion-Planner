@@ -15,9 +15,11 @@
 #include "bag_frame_reader.hpp"
 
 #include <rclcpp/serialized_message.hpp>
+#include <rcutils/error_handling.h>
 #include <rosbag2_storage/storage_filter.hpp>
 
 #include <algorithm>
+#include <exception>
 #include <stdexcept>
 #include <string>
 
@@ -143,19 +145,47 @@ void BagFrameReader::ensure_read_until(const double target_sec) {
 
     if (topic == topics_.kinematic_state) {
       Odometry msg;
-      odom_serializer_.deserialize_message(&raw, &msg);
+      try {
+        odom_serializer_.deserialize_message(&raw, &msg);
+      } catch (const std::exception &) {
+        if (rcutils_error_is_set()) {
+          rcutils_reset_error();
+        }
+        continue;
+      }
       ego_buffer_.push_back(msg);
     } else if (topic == topics_.tracked_objects) {
       TrackedObjects msg;
-      objects_serializer_.deserialize_message(&raw, &msg);
+      try {
+        objects_serializer_.deserialize_message(&raw, &msg);
+      } catch (const std::exception &) {
+        if (rcutils_error_is_set()) {
+          rcutils_reset_error();
+        }
+        continue;
+      }
       objects_buffer_.push_back(msg);
     } else if (topic == topics_.turn_indicators) {
       TurnIndicatorsReport msg;
-      turn_serializer_.deserialize_message(&raw, &msg);
+      try {
+        turn_serializer_.deserialize_message(&raw, &msg);
+      } catch (const std::exception &) {
+        if (rcutils_error_is_set()) {
+          rcutils_reset_error();
+        }
+        continue;
+      }
       turn_indicators_buffer_.push_back(msg);
     } else if (topic == topics_.traffic_signals) {
       TrafficLightGroupArray msg;
-      traffic_serializer_.deserialize_message(&raw, &msg);
+      try {
+        traffic_serializer_.deserialize_message(&raw, &msg);
+      } catch (const std::exception &) {
+        if (rcutils_error_is_set()) {
+          rcutils_reset_error();
+        }
+        continue;
+      }
       traffic_signals_buffer_.push_back(msg);
     }
   }

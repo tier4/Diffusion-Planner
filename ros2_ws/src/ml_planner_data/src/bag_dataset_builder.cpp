@@ -15,6 +15,7 @@
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
 #include <rclcpp/time.hpp>
+#include <rcutils/error_handling.h>
 #include <rosbag2_cpp/reader.hpp>
 #include <rosbag2_storage/storage_filter.hpp>
 
@@ -26,6 +27,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <map>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -78,6 +81,12 @@ struct CandidateResult {
   bool skipped{false};
 };
 
+struct DeserializationFailure {
+  size_t count{0};
+  std::string first_timestamp;
+  std::string first_error;
+};
+
 CandidateResult collect_candidates(const std::string &bag_path,
                                    const TopicConfig &topics,
                                    const DatasetBuilderParam &param) {
@@ -106,14 +115,33 @@ CandidateResult collect_candidates(const std::string &bag_path,
   rclcpp::Serialization<TurnIndicatorsReport> turn_serializer;
   rclcpp::Serialization<TrafficLightGroupArray> traffic_serializer;
   rclcpp::Serialization<LaneletRoute> route_serializer;
+  std::map<std::string, DeserializationFailure> deserialization_failures;
 
   while (reader.has_next()) {
     const auto bag_message = reader.read_next();
     rclcpp::SerializedMessage raw(*bag_message->serialized_data);
     const std::string &topic = bag_message->topic_name;
+    const auto record_deserialization_failure =
+        [&](const std::exception &error) {
+          if (rcutils_error_is_set()) {
+            rcutils_reset_error();
+          }
+          auto &[count, first_timestamp, first_error] =
+              deserialization_failures[topic];
+          ++count;
+          if (count == 1) {
+            first_timestamp = std::to_string(bag_message->time_stamp);
+            first_error = error.what();
+          }
+        };
     if (topic == topics.kinematic_state) {
       Odometry message;
-      odom_serializer.deserialize_message(&raw, &message);
+      try {
+        odom_serializer.deserialize_message(&raw, &message);
+      } catch (const std::exception &error) {
+        record_deserialization_failure(error);
+        continue;
+      }
       const auto &orientation = message.pose.pose.orientation;
       const double yaw = std::atan2(
           2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
@@ -127,21 +155,41 @@ CandidateResult collect_candidates(const std::string &bag_path,
                     yaw});
     } else if (topic == topics.tracked_objects) {
       TrackedObjects message;
-      objects_serializer.deserialize_message(&raw, &message);
+      try {
+        objects_serializer.deserialize_message(&raw, &message);
+      } catch (const std::exception &error) {
+        record_deserialization_failure(error);
+        continue;
+      }
       object_samples.emplace_back(rclcpp::Time(message.header.stamp).seconds(),
                                   static_cast<int32_t>(message.objects.size()));
     } else if (topic == topics.turn_indicators) {
       TurnIndicatorsReport message;
-      turn_serializer.deserialize_message(&raw, &message);
+      try {
+        turn_serializer.deserialize_message(&raw, &message);
+      } catch (const std::exception &error) {
+        record_deserialization_failure(error);
+        continue;
+      }
       turn_samples.emplace_back(rclcpp::Time(message.stamp).seconds(),
                                 message.report);
     } else if (topic == topics.traffic_signals) {
       TrafficLightGroupArray message;
-      traffic_serializer.deserialize_message(&raw, &message);
+      try {
+        traffic_serializer.deserialize_message(&raw, &message);
+      } catch (const std::exception &error) {
+        record_deserialization_failure(error);
+        continue;
+      }
       traffic_stamps.push_back(rclcpp::Time(message.stamp).seconds());
     } else if (topic == topics.route) {
       LaneletRoute message;
-      route_serializer.deserialize_message(&raw, &message);
+      try {
+        route_serializer.deserialize_message(&raw, &message);
+      } catch (const std::exception &error) {
+        record_deserialization_failure(error);
+        continue;
+      }
       if (!message.segments.empty()) {
         route_stamps.push_back(rclcpp::Time(message.header.stamp).seconds());
       }
@@ -149,6 +197,12 @@ CandidateResult collect_candidates(const std::string &bag_path,
   }
 
   CandidateResult result;
+  for (const auto &[topic, failure] : deserialization_failures) {
+    result.warnings.push_back(
+        "skipped " + std::to_string(failure.count) + " incompatible " + topic +
+        " message(s); first failure at bag timestamp " +
+        failure.first_timestamp + ": " + failure.first_error);
+  }
   if (ego_samples.empty()) {
     return result;
   }
@@ -185,11 +239,36 @@ CandidateResult collect_candidates(const std::string &bag_path,
   const std::vector<double> ego_stamps = stamps_of(ego_samples);
   const std::vector<double> turn_stamps = stamps_of(turn_samples);
   const std::vector<double> object_stamps = stamps_of(object_samples);
+  DatasetBuilderParam frame_range_param = param;
+  const auto disable_incompatible_topic = [&](const std::vector<double> &stamps,
+                                              const std::string &topic,
+                                              double &threshold) {
+    const auto failure = deserialization_failures.find(topic);
+    if (!stamps.empty() || failure == deserialization_failures.end()) {
+      return;
+    }
+    threshold = 0.0;
+    result.warnings.push_back(
+        "proceeding without " + topic + " because all " +
+        std::to_string(failure->second.count) +
+        " message(s) were skipped as incompatible; dropout validation is "
+        "disabled for this bag");
+  };
+  disable_incompatible_topic(
+      turn_stamps, topics.turn_indicators,
+      frame_range_param.topic_drop_thresholds.turn_indicators);
+  disable_incompatible_topic(
+      object_stamps, topics.tracked_objects,
+      frame_range_param.topic_drop_thresholds.tracked_objects);
+  disable_incompatible_topic(
+      traffic_stamps, topics.traffic_signals,
+      frame_range_param.topic_drop_thresholds.traffic_signals);
   const FrameRange frame_range = calculate_frame_range(
-      topics, param, ego_stamps, turn_stamps, object_stamps, traffic_stamps,
-      route_stamps, num_frames);
+      topics, frame_range_param, ego_stamps, turn_stamps, object_stamps,
+      traffic_stamps, route_stamps, num_frames);
   result.usable_frames = frame_range.usable_frames;
-  result.warnings = frame_range.warnings;
+  result.warnings.insert(result.warnings.end(), frame_range.warnings.begin(),
+                         frame_range.warnings.end());
 
   size_t ego_cursor = 0;
   size_t turn_cursor = 0;

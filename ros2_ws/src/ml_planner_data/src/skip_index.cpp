@@ -139,9 +139,13 @@ FrameRange calculate_frame_range(const TopicConfig &topics,
   };
 
   const double turn_first_sec =
-      turn_stamps.empty() ? ego_last_sec : turn_stamps.front();
+      !check_enabled(param.topic_drop_thresholds.turn_indicators)
+          ? ego_first_sec
+          : (turn_stamps.empty() ? ego_last_sec : turn_stamps.front());
   const double objects_first_sec =
-      objects_stamps.empty() ? ego_last_sec : objects_stamps.front();
+      !check_enabled(param.topic_drop_thresholds.tracked_objects)
+          ? ego_first_sec
+          : (objects_stamps.empty() ? ego_last_sec : objects_stamps.front());
   const double structural_first_t =
       std::max({ego_first_sec, turn_first_sec, objects_first_sec}) +
       history_window_s;
