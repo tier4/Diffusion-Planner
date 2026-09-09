@@ -32,7 +32,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from diffusion_planner.utils.augment_defaults import past_noise_std_for
+from diffusion_planner.utils.augment_defaults import (
+    past_noise_std_for,
+    resolve_history_noise,
+)
 from diffusion_planner.utils.augmentation_checks import (
     DT,
     border_lateral_bounds,
@@ -1160,6 +1163,13 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
 
     ``argparse`` hands list fields back as strings, so the numeric coercion lives here too.
     """
+    # Resolve here too: this is a public entrypoint, not only reached through
+    # augmenter_from_args, and `ego_past_noise_std_effective` is None on a freshly
+    # parsed config. Reading it unresolved raised TypeError even when the user had
+    # passed an explicit --ego_past_noise_std. Idempotent, so the factory or a trainer
+    # having already called it costs nothing.
+    resolve_history_noise(args)
+
     return FrenetStatePerturbationTensor(
         augment_prob=args.augment_prob,
         device=args.device,

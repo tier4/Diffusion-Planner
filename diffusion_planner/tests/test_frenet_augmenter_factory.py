@@ -46,11 +46,15 @@ def _args(**over):
         ego_past_noise_std=0.0,
         ego_past_noise_mode="scale",
         use_data_augment=True,
+        # the builder resolves the effective value itself, which needs these two
+        augment_type="frenet",
     )
     base.update(over)
-    # resolve_history_noise normally writes this before anything reads it; these
-    # namespace stand-ins bypass the trainers, so mirror the flag unless overridden.
-    base.setdefault("ego_past_noise_std_effective", base["ego_past_noise_std"])
+    # Deliberately NOT pre-populating ego_past_noise_std_effective. Doing so hid a
+    # regression where the builder read that field unresolved and raised TypeError on
+    # any freshly parsed config; the builder resolves for itself, so the stand-in must
+    # arrive unresolved exactly as a real parsed config does.
+    base.setdefault("use_data_augment", True)
     return SimpleNamespace(**base)
 
 
@@ -438,3 +442,38 @@ def test_bridge_still_rejects_the_flag_at_resolve_time():
     # an unset bridge value stays None: the knob does not apply to bridge, and writing a
     # number here is what made the resolver's second call reject every bridge run
     assert _resolved_config("--augment_type", "bridge").ego_past_noise_std_effective is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--augment_type", "frenet"],
+        ["--augment_type", "frenet", "--ego_past_noise_std", "0.3"],
+        [
+            "--augment_type",
+            "frenet",
+            "--ego_past_noise_std",
+            "0.3",
+            "--ego_past_noise_mode",
+            "jitter",
+        ],
+    ],
+)
+def test_the_direct_builder_works_on_a_freshly_parsed_config(argv):
+    """frenet_augmenter_from_args is a public entrypoint, not only reached via the factory.
+
+    It briefly read `ego_past_noise_std_effective` -- which is None until something
+    resolves it -- and so raised TypeError on any parsed config, even one carrying an
+    explicit --ego_past_noise_std. Nothing caught it because the namespace fixture in
+    this file pre-populated that field; it no longer does.
+    """
+    from diffusion_planner.config.config_cli import build_config, build_parser
+    from diffusion_planner.config.train_config import TrainConfig
+    from diffusion_planner.utils.data_augmentation_frenet import frenet_augmenter_from_args
+
+    args = build_config(TrainConfig, build_parser(TrainConfig).parse_args(argv))
+    args.device = "cpu"
+    aug = frenet_augmenter_from_args(args)  # no separate resolve step
+    assert aug.past_noise_std is not None
+    if "--ego_past_noise_std" in argv:
+        assert aug.past_noise_std == float(argv[argv.index("--ego_past_noise_std") + 1])
