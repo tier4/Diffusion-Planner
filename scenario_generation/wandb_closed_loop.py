@@ -51,6 +51,7 @@ _ABS_COLUMNS = [
     ("Segs diverged", "n_segments_diverged"),
     ("Collisions", "total_collision_events"),
     ("Rear collisions", "total_rear_collision_events"),
+    ("Turn indicator accuracy (%)", "turn_indicator_accuracy"),
 ]
 
 _PER_1000STEPS_COLUMNS = [
@@ -67,6 +68,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Segs diverged / 1k steps", "n_segments_diverged"),
     ("Collisions / 1k steps", "total_collision_events"),
     ("Rear collisions / 1k steps", "total_rear_collision_events"),
+    ("Turn indicator accuracy (%)", "turn_indicator_accuracy"),
 ]
 
 
@@ -102,7 +104,12 @@ def _abs_value(source_key: str, summary: dict):
     ``summary.json`` still logs instead of blowing up the upload.
     """
     # Float fields: direct lookup or extract_score fallback.
-    if source_key in ("mean_route_completion", "pass_rate"):
+    if source_key in (
+        "mean_route_completion",
+        "pass_rate",
+        "turn_indicator_accuracy",
+        "turn_indicator_change_accuracy",
+    ):
         if source_key in summary:
             val = summary[source_key]
             return float(val if isinstance(val, (int, float)) else 0.0)
@@ -129,6 +136,8 @@ def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
         "mean_route_completion",
         "pass_rate",
         "mean_gt_deviation_m",  # already a per-step mean
+        "turn_indicator_accuracy",  # already a ratio
+        "turn_indicator_change_accuracy",
     ):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
@@ -189,6 +198,21 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     )
     agg["total_rear_collision_events"] = sum(
         int(extract_score(s, "total_rear_collision_events") or 0) for s in objects_only_values
+    )
+
+    # Weighted by scored steps (turn_indicator.total), not by segment count -- segments vary
+    # widely in how many real-inference steps they ran (see reproducer_rollout._score_turn_indicator).
+    ti_correct = sum(int(s.get("turn_indicator", {}).get("correct", 0) or 0) for s in values)
+    ti_total = sum(int(s.get("turn_indicator", {}).get("total", 0) or 0) for s in values)
+    ti_change_correct = sum(
+        int(s.get("turn_indicator", {}).get("change_correct", 0) or 0) for s in values
+    )
+    ti_change_total = sum(
+        int(s.get("turn_indicator", {}).get("change_total", 0) or 0) for s in values
+    )
+    agg["turn_indicator_accuracy"] = (ti_correct / ti_total) if ti_total else 0.0
+    agg["turn_indicator_change_accuracy"] = (
+        (ti_change_correct / ti_change_total) if ti_change_total else 0.0
     )
     return agg
 

@@ -330,6 +330,7 @@ def format_summary_lines(summary: dict) -> list[str]:
     rb = summary["road_border"]
     red = summary["red_light_violation"]
     brake = summary["strong_brake"]
+    ti = summary["turn_indicator"]
     repro = summary["reproducer"]
     lines = [
         f"object collision: {obj['collision_segments']}/{n_seg} segments "
@@ -363,6 +364,9 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"reproducer snap_count={repro['snap_count']} expand_count={repro['expand_count']} "
         f"repeat_step_rate={repro['repeat_step_rate']:.4f}  "
         f"terminated={summary['terminated_counts']}",
+        f"turn_indicator accuracy: {ti['correct']}/{ti['total']} ({ti['accuracy']:.4f}), "
+        f"on-change accuracy: {ti['change_correct']}/{ti['change_total']} "
+        f"({ti['change_accuracy']:.4f})",
     ]
     return lines
 
@@ -462,6 +466,13 @@ def aggregate(
     strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
     brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
 
+    turn_correct = sum(int(_require_block(r, "turn_indicator")["correct"]) for r in rows)
+    turn_total = sum(int(_require_block(r, "turn_indicator")["total"]) for r in rows)
+    turn_change_correct = sum(
+        int(_require_block(r, "turn_indicator")["change_correct"]) for r in rows
+    )
+    turn_change_total = sum(int(_require_block(r, "turn_indicator")["change_total"]) for r in rows)
+
     expand = sum(int(_require_block(r, "reproducer")["expand_count"]) for r in rows)
     snap = sum(int(_require_block(r, "reproducer")["snap_count"]) for r in rows)
     normal = sum(int(_require_block(r, "reproducer")["normal_steps"]) for r in rows)
@@ -481,6 +492,16 @@ def aggregate(
         "road_border": rb,
         "red_light_violation": red,
         "strong_brake": brake,
+        "turn_indicator": {
+            "correct": turn_correct,
+            "total": turn_total,
+            "accuracy": (turn_correct / turn_total) if turn_total > 0 else 0.0,
+            "change_correct": turn_change_correct,
+            "change_total": turn_change_total,
+            "change_accuracy": (
+                turn_change_correct / turn_change_total if turn_change_total > 0 else 0.0
+            ),
+        },
         "terminated_counts": term_counts,
         "reproducer": {
             "expand_count": expand,

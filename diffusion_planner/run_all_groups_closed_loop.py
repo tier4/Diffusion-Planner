@@ -327,6 +327,24 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             ),
         }
 
+        _ti_correct = sum(
+            int(s.get("turn_indicator", {}).get("correct", 0) or 0) for s in summaries.values()
+        )
+        _ti_total = sum(
+            int(s.get("turn_indicator", {}).get("total", 0) or 0) for s in summaries.values()
+        )
+        _ti_change_correct = sum(
+            int(s.get("turn_indicator", {}).get("change_correct", 0) or 0)
+            for s in summaries.values()
+        )
+        _ti_change_total = sum(
+            int(s.get("turn_indicator", {}).get("change_total", 0) or 0) for s in summaries.values()
+        )
+        agg["turn_indicator_accuracy"] = (_ti_correct / _ti_total) if _ti_total else 0.0
+        agg["turn_indicator_change_accuracy"] = (
+            (_ti_change_correct / _ti_change_total) if _ti_change_total else 0.0
+        )
+
         total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())
         total_fail = sum(int(s.get("fail_count", 0) or 0) for s in summaries.values())
         agg["n_pass_segments"] = total_pass

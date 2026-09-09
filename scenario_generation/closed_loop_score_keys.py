@@ -14,6 +14,8 @@ SCORE_EXTRACTORS = {
     "total_snaps": lambda d: d.get("reproducer", {}).get("snap_count"),
     "total_red_light_violations": lambda d: d.get("red_light_violation", {}).get("count"),
     "total_strong_brakes": lambda d: d.get("strong_brake", {}).get("count"),
+    "turn_indicator_accuracy": lambda d: d.get("turn_indicator", {}).get("accuracy"),
+    "turn_indicator_change_accuracy": lambda d: d.get("turn_indicator", {}).get("change_accuracy"),
 }
 
 

@@ -480,6 +480,13 @@ class _SegState:
     # A collision counts as "deviation collision" when the live ego was more than this far
     # off the recorded GT path at the same step (see ``deviation_collision_block``).
     deviation_collision_thresh_m: float = 2.0
+    # Closed-loop turn-indicator accuracy accumulators (see ``_score_turn_indicator``).
+    # Cumulative over the whole segment (never reset on unstick teleport), like
+    # ``expand_count``/``snap_count``.
+    turn_indicator_correct: int = 0
+    turn_indicator_total: int = 0
+    turn_indicator_change_correct: int = 0
+    turn_indicator_change_total: int = 0
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -688,6 +695,35 @@ def _hold_turn_indicator(s: _SegState) -> None:
     history scrolling by re-appending the LAST decoded turn indicator, so the next replan
     sees the held signal as if the model had re-confirmed it every step."""
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
+
+
+def _score_turn_indicator(s: _SegState, idx: int) -> None:
+    """Closed-loop turn-indicator accuracy for one REAL inference step.
+
+    Called only right after ``_feed_turn_indicator`` (both in ``render_segment`` and
+    ``run_segments_batched``) -- never after ``_hold_turn_indicator``, since a held/
+    cached-plan step made no fresh prediction and scoring it would conflate "no chance
+    to re-predict" with "was wrong".
+
+    Compares the RESOLVED prediction (``s.last_turn_indicator``, already in {0,1,2,3}
+    via ``resolve_keep_turn_indicator``) against the recorded GT at the same frame
+    ``idx`` the model conditioned on. This is a 4-class comparison, unlike
+    ``validate_model.py``'s training-time metric (raw 5-class argmax vs a KEEP-folded
+    GT) -- intentional, since KEEP never reaches storage/comparison in closed loop.
+
+    "Changed" is read off this frame's OWN GT window (``[-2]`` vs ``[-1]``) rather than
+    tracked across scored steps, so it stays correct even when the cursor skips/repeats
+    frames between scored steps.
+    """
+    gt_window = np.asarray(s.tl.npz(idx)["turn_indicators"]).reshape(-1)
+    gt = int(gt_window[-1])
+    pred = int(s.last_turn_indicator)
+    correct = pred == gt
+    s.turn_indicator_total += 1
+    s.turn_indicator_correct += int(correct)
+    if int(gt_window[-2]) != gt:
+        s.turn_indicator_change_total += 1
+        s.turn_indicator_change_correct += int(correct)
 
 
 # GT-deviation lookup window: ±15 s of recorded trajectory around the cursor. Wide enough to
@@ -1106,6 +1142,20 @@ def deviation_collision_block(collisions: np.ndarray, gt_devs: np.ndarray, thres
     }
 
 
+def turn_indicator_block(correct: int, total: int, change_correct: int, change_total: int) -> dict:
+    """The ``turn_indicator`` segment-row block: closed-loop turn-indicator prediction
+    accuracy, scored only on real inference steps (see ``_score_turn_indicator``). A plain
+    accumulator, like ``reproducer`` -- accuracy ratios are computed at aggregate time, not
+    here, so this stays summable across segments without re-deriving a rate.
+    """
+    return {
+        "correct": int(correct),
+        "total": int(total),
+        "change_correct": int(change_correct),
+        "change_total": int(change_total),
+    }
+
+
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
     rb = s.rb_dists[: s.k]
@@ -1162,6 +1212,12 @@ def _finalize(s: _SegState) -> dict:
             "count": _event_count(red_mask),
         },
         "strong_brake": strong_brake_block(accels, s.strong_brake_mps2),
+        "turn_indicator": turn_indicator_block(
+            s.turn_indicator_correct,
+            s.turn_indicator_total,
+            s.turn_indicator_change_correct,
+            s.turn_indicator_change_total,
+        ),
         "reproducer": {
             "expand_count": int(s.expand_count),
             "snap_count": int(s.snap_count),
@@ -1914,6 +1970,7 @@ def render_segment(
                 )
                 pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
                 _feed_turn_indicator(s, outputs)
+                _score_turn_indicator(s, idx)
             else:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
@@ -2657,6 +2714,7 @@ def run_segments_batched(
                             int(ti_pred[i]), s.last_turn_indicator
                         )
                         s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
+                        _score_turn_indicator(s, idx)
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
                         if s.save_buf is not None and s.snap_count > prev_snaps:
