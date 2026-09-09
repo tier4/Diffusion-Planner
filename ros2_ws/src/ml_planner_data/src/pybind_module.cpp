@@ -14,13 +14,13 @@
 
 // Python bindings to build ML planner model inputs directly from
 // rosbags, sharing the exact preprocessing code used at inference time
-// (autoware::diffusion_planner::preprocess::create_input_data_map).
+// (autoware::ml_planner::preprocess::create_input_data_map).
 
 #include "bag_dataset_builder.hpp"
 #include "frame_data_cache.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/diffusion_planner/dimensions.hpp"
+#include "autoware/ml_planner/dimensions.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -38,11 +38,11 @@ namespace py = pybind11;
 
 namespace {
 
-namespace mpd = autoware::diffusion_planner::data;
-using autoware::diffusion_planner::VehicleSpec;
-namespace preprocess = autoware::diffusion_planner::preprocess;
+namespace mpd = autoware::ml_planner::data;
+using autoware::ml_planner::VehicleSpec;
+namespace preprocess = autoware::ml_planner::preprocess;
 
-py::dict to_numpy_dict(const preprocess::InputDataMap &input_data_map) {
+py::dict to_numpy_dict(const preprocess::TensorMap &input_data_map) {
   py::dict result;
   for (const auto &[key, value] : input_data_map) {
     std::vector<py::ssize_t> shape;
@@ -172,8 +172,8 @@ py::dict create_bag_frame_data(const std::string &bag_path,
 } // namespace
 
 PYBIND11_MODULE(_ml_planner_data, m) {
-  using autoware::diffusion_planner::HISTORY_WINDOW_S;
-  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::ml_planner::HISTORY_WINDOW_S;
+  using autoware::ml_planner::OUTPUT_T;
 
   m.doc() = "Build ML planner model inputs directly from rosbags";
 

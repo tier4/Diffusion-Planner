@@ -116,6 +116,7 @@ def build_builder_param(config: WorkerConfig) -> Any:
         if not hasattr(thresholds, topic):
             raise ValueError(f"unknown topic in topic_drop_thresholds: {topic}")
         setattr(thresholds, topic, float(limit))
+
     param = mpd.DatasetBuilderParam()
     param.frame_interval_s = config.frame_interval_s
     param.num_future_steps = config.future_steps
@@ -124,17 +125,6 @@ def build_builder_param(config: WorkerConfig) -> Any:
     param.traffic_light_timeout_s = config.traffic_light_timeout_s
     param.neighbor_observation_timeout_s = config.neighbor_observation_timeout_s
     return param
-
-
-def build_topics() -> Any:
-    """Build the fixed source-topic mapping."""
-    topics = mpd.TopicConfig()
-    topics.kinematic_state = "/localization/kinematic_state"
-    topics.tracked_objects = "/perception/object_recognition/tracking/objects"
-    topics.turn_indicators = "/vehicle/status/turn_indicators_status"
-    topics.traffic_signals = "/perception/traffic_light_recognition/traffic_signals"
-    topics.route = "/planning/mission_planning/route"
-    return topics
 
 
 def discover_bags(root: Path, split: str) -> list[BagEntry]:
@@ -201,23 +191,6 @@ def validate_arrays(result: Mapping[str, Any]) -> int:
             if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
                 raise ValueError(f"{group_name}/{key} contains NaN or infinity")
     return num_frames
-
-
-def pad_future_labels(result: Mapping[str, Any], future_steps: int) -> None:
-    """Keep evaluation H5 schema-compatible when a short recorded future is used."""
-    if future_steps == 80:
-        return
-    for key, axis in {
-        "ego_agent_future": 1,
-        "neighbor_agents_future": 2,
-        "turn_indicators_future": 1,
-        "lane_traffic_light_future": 2,
-        "route_traffic_light_future": 2,
-    }.items():
-        values = np.asarray(result["frames"][key])
-        padding = [(0, 0)] * values.ndim
-        padding[axis] = (0, 80 - values.shape[axis])
-        result["frames"][key] = np.pad(values, padding, mode="edge")
 
 
 def write_h5(
@@ -390,9 +363,7 @@ def process_bag(
         map_path=entry.map_path,
         vehicle_spec=spec,
         param=build_builder_param(config),
-        topics=build_topics(),
     )
-    pad_future_labels(result, config.future_steps)
     stats = result["stats"]
     num_frames = validate_arrays(result)
     if num_frames == 0:
@@ -431,8 +402,6 @@ def main(config: DictConfig) -> None:
         raise ValueError(f"split must be one of {', '.join(SPLITS)}: {config.split}")
     if config.jobs < 1:
         raise ValueError(f"jobs must be at least 1: {config.jobs}")
-    if not 1 <= int(config.future_steps) <= 80:
-        raise ValueError(f"future_steps must be in [1, 80]: {config.future_steps}")
 
     root = Path(config.root).expanduser().resolve()
     output_root = Path(config.output_root).expanduser().resolve()

@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace autoware::diffusion_planner::data {
+namespace autoware::ml_planner::data {
 namespace {
 
 template <typename SampleT>
@@ -111,48 +111,40 @@ CandidateResult collect_candidates(const std::string &bag_path,
     const auto bag_message = reader.read_next();
     rclcpp::SerializedMessage raw(*bag_message->serialized_data);
     const std::string &topic = bag_message->topic_name;
-    try {
-      if (topic == topics.kinematic_state) {
-        Odometry message;
-        odom_serializer.deserialize_message(&raw, &message);
+    if (topic == topics.kinematic_state) {
+      Odometry message;
+      odom_serializer.deserialize_message(&raw, &message);
       const auto &orientation = message.pose.pose.orientation;
       const double yaw = std::atan2(
-          2.0 * (orientation.w * orientation.z +
-                 orientation.x * orientation.y),
+          2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
           1.0 - 2.0 * (orientation.y * orientation.y +
                        orientation.z * orientation.z));
       ego_samples.emplace_back(
           rclcpp::Time(message.header.stamp).seconds(),
           EgoSample{static_cast<float>(message.twist.twist.linear.x),
                     static_cast<float>(message.twist.twist.angular.z),
-                    message.pose.pose.position.x,
-                    message.pose.pose.position.y, yaw});
-      } else if (topic == topics.tracked_objects) {
+                    message.pose.pose.position.x, message.pose.pose.position.y,
+                    yaw});
+    } else if (topic == topics.tracked_objects) {
       TrackedObjects message;
       objects_serializer.deserialize_message(&raw, &message);
       object_samples.emplace_back(rclcpp::Time(message.header.stamp).seconds(),
                                   static_cast<int32_t>(message.objects.size()));
-      } else if (topic == topics.turn_indicators) {
+    } else if (topic == topics.turn_indicators) {
       TurnIndicatorsReport message;
       turn_serializer.deserialize_message(&raw, &message);
       turn_samples.emplace_back(rclcpp::Time(message.stamp).seconds(),
                                 message.report);
-      } else if (topic == topics.traffic_signals) {
+    } else if (topic == topics.traffic_signals) {
       TrafficLightGroupArray message;
       traffic_serializer.deserialize_message(&raw, &message);
       traffic_stamps.push_back(rclcpp::Time(message.stamp).seconds());
-      } else if (topic == topics.route) {
+    } else if (topic == topics.route) {
       LaneletRoute message;
       route_serializer.deserialize_message(&raw, &message);
       if (!message.segments.empty()) {
         route_stamps.push_back(rclcpp::Time(message.header.stamp).seconds());
       }
-      }
-    } catch (const std::exception &error) {
-      throw std::runtime_error(
-          "Failed to deserialize " + topic + " at " +
-          std::to_string(bag_message->time_stamp) + " in " + bag_path +
-          ": " + error.what());
     }
   }
 
@@ -220,15 +212,13 @@ CandidateResult collect_candidates(const std::string &bag_path,
                          invalid_range_cursor)) {
       continue;
     }
-    result.frames.push_back(
-        {BagFrameMetadata{static_cast<int64_t>(std::llround(time * 1e9)),
-                          ego != nullptr ? ego->x : 0.0,
-                          ego != nullptr ? ego->y : 0.0,
-                          ego != nullptr ? ego->yaw : 0.0,
-                          ego != nullptr ? ego->speed_mps : 0.0F,
-                          ego != nullptr ? ego->yaw_rate_rps : 0.0F,
-                          turn != nullptr ? *turn : uint8_t{0},
-                          objects != nullptr ? *objects : int32_t{0}}});
+    result.frames.push_back({BagFrameMetadata{
+        static_cast<int64_t>(std::llround(time * 1e9)),
+        ego != nullptr ? ego->x : 0.0, ego != nullptr ? ego->y : 0.0,
+        ego != nullptr ? ego->yaw : 0.0, ego != nullptr ? ego->speed_mps : 0.0F,
+        ego != nullptr ? ego->yaw_rate_rps : 0.0F,
+        turn != nullptr ? *turn : uint8_t{0},
+        objects != nullptr ? *objects : int32_t{0}}});
   }
   return result;
 }
@@ -242,9 +232,6 @@ void validate_param(const DatasetBuilderParam &param) {
       param.min_travel_distance < 0.0) {
     throw std::invalid_argument(
         "min_travel_distance must be finite and non-negative");
-  }
-  if (param.num_future_steps <= 0) {
-    throw std::invalid_argument("num_future_steps must be positive");
   }
 }
 
@@ -288,4 +275,4 @@ BagDataResult create_bag_frame_data(const std::string &bag_path,
   return result;
 }
 
-} // namespace autoware::diffusion_planner::data
+} // namespace autoware::ml_planner::data

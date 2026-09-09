@@ -2,7 +2,7 @@
 
 Python bindings that build ML planner model inputs and training labels directly
 from rosbags. Input preprocessing is shared with the ROS 2 inference node through
-`autoware::diffusion_planner::preprocess::create_input_data_map`.
+`autoware::ml_planner::preprocess::create_input_data_map`.
 
 ## Whole-bag dataset generation
 
