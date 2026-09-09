@@ -186,14 +186,14 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         loss by 1/s rather than perturb its history, which is a second mechanism the
         jitter does not have and would make the arms incomparable.
         """
-        if not (self.past_noise_std > 0.0 or self._hist_jitter_on):
+        if self.past_noise_std <= 0.0:
             return  # nothing drawn, nothing written: the default path is bit-identical
         past = inputs["ego_agent_past"]
         xy, tan = past[rows, :, :2], past[rows, :, 2:4]
-        if self.past_noise_std > 0.0:
+        # Exactly one mechanism, never both: see past_noise_mode in __init__.
+        if self.past_noise_mode == "scale":
             xy = self._scale_history(xy)
-        if self._hist_jitter_on:
-            # jitter the SCALED track, so its flagged amplitude is not itself rescaled
+        else:
             nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
             xy = xy + self._hist_jitter(xy, tan, nrm, xy.shape[1])
         # Same heading convention as the polyline rewrite, including its fallback to the
@@ -264,7 +264,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         toward_parked_prob: float = 0.0,
         min_clearance: float = 0.0,
         ego_past_noise_std: float = 0.0,
-        hist_jitter_lat: float = 0.0,
+        ego_past_noise_mode: str = "scale",
     ):
         super().__init__(
             augment_prob=augment_prob,
@@ -346,14 +346,20 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         self.past_noise_std = float(ego_past_noise_std)
         if self.past_noise_std < 0.0:
             raise ValueError(f"ego_past_noise_std must be >= 0, got {ego_past_noise_std}")
-        # Std (m) of the smooth history jitter AT THE OLDEST history sample, per axis of
-        # the path frame. A different perturbation from past_noise_std above: that one
-        # scales a correctly-shaped track so it is traversed at the wrong speed, this one
-        # bends the track itself. Applied after the veto, like the scale, so neither can
-        # move acceptance. 0 draws nothing and is bit-identical. See _hist_jitter.
-        self.hist_jitter_lat = float(hist_jitter_lat)
-        if self.hist_jitter_lat < 0.0:
-            raise ValueError(f"hist_jitter_lat must be >= 0, got {hist_jitter_lat}")
+        # Which mechanism the std above drives. Exactly one runs: `scale` multiplies the
+        # whole rewritten history by one factor (shape kept, traversal speed wrong, std
+        # dimensionless and clamped to +-2 std); `jitter` bends the track laterally
+        # (shape wrong, std in METRES at the oldest sample, unclamped).
+        #
+        # A mode rather than two magnitudes, because two magnitudes could both be set and
+        # the combination is reachable by accident -- the scale default is non-zero, so
+        # asking for jitter alone used to silently apply both. That combination has never
+        # been evaluated: every jitter arm of the A/B pinned the scale to 0.
+        self.past_noise_mode = str(ego_past_noise_mode)
+        if self.past_noise_mode not in ("scale", "jitter"):
+            raise ValueError(
+                f"ego_past_noise_mode must be 'scale' or 'jitter', got {ego_past_noise_mode!r}"
+            )
         self._basis_cache = {}
         self._jitter_basis_cache = {}
 
@@ -396,10 +402,6 @@ class FrenetStatePerturbationTensor(StatePerturbation):
 
     # ---------- corridor, fully batched ----------
     # ---------- smooth ego-history jitter (opt-in, depends only on P) ----------
-    @property
-    def _hist_jitter_on(self) -> bool:
-        return self.hist_jitter_lat > 0.0
-
     def _hist_jitter_axes(self, tan, nrm):
         """(std, unit direction) of every axis the jitter is drawn along.
 
@@ -415,7 +417,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         means the measured lateral configuration reproduces bit-for-bit. ``0.0 * d`` is
         exactly zero, so nothing is added along the path.
         """
-        return ((self.hist_jitter_lat, nrm), (0.0, tan))
+        return ((self.past_noise_std, nrm), (0.0, tan))
 
     def _hist_jitter_basis(self, P, device, dtype):
         """Cached (K, P) low-frequency displacement basis, normalised in amplitude.
@@ -1132,5 +1134,5 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         toward_parked_prob=float(args.frenet_toward_parked_prob),
         min_clearance=float(args.frenet_min_clearance),
         ego_past_noise_std=past_noise_std_for(args),
-        hist_jitter_lat=float(args.frenet_hist_jitter_lat),
+        ego_past_noise_mode=str(args.ego_past_noise_mode),
     )

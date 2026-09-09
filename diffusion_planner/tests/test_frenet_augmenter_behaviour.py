@@ -488,7 +488,7 @@ def _jitter_offset(batch: int, seed: int = 5, **kw):
 
 def test_hist_jitter_is_exactly_zero_at_t0():
     """The current pose is what the model plans from; the history must not move it."""
-    off, aug = _jitter_offset(64, hist_jitter_lat=0.4)
+    off, aug = _jitter_offset(64, ego_past_noise_std=0.4, ego_past_noise_mode="jitter")
     # the basis itself, before any amplitude: every mode vanishes at u = 0
     phi = aug._hist_jitter_basis(P_STEPS, torch.device("cpu"), torch.float32)
     assert torch.equal(phi[:, -1], torch.zeros(phi.shape[0]))
@@ -502,7 +502,7 @@ def test_hist_jitter_std_at_the_oldest_sample_is_the_requested_one():
     """The flag is defined as the std at the oldest sample: A = sigma / ||phi[:, 0]||."""
     sigma = 0.35
     n = 40000
-    off, _ = _jitter_offset(n, hist_jitter_lat=sigma)
+    off, _ = _jitter_offset(n, ego_past_noise_std=sigma, ego_past_noise_mode="jitter")
     emp = float(off[:, 0, 1].std())
     # Monte-Carlo error on a std from n samples is ~ sigma / sqrt(2n) = 1.2e-3 here;
     # 5% is many times that and still catches a wrong normalisation constant
@@ -514,7 +514,7 @@ def test_hist_jitter_std_at_the_oldest_sample_is_the_requested_one():
 def test_hist_jitter_is_smooth_not_white():
     """Independent per-sample noise is a jagged track a model learns to ignore."""
     sigma = 0.3
-    off, _ = _jitter_offset(4000, hist_jitter_lat=sigma)
+    off, _ = _jitter_offset(4000, ego_past_noise_std=sigma, ego_past_noise_mode="jitter")
     lat = off[:, :P_STEPS, 1]
     d2 = lat[:, 2:] - 2 * lat[:, 1:-1] + lat[:, :-2]
     # white noise of the same per-sample std has second-difference std sigma*sqrt(6)
@@ -534,7 +534,7 @@ def _spacing_ratio(**kw):
 def test_lateral_jitter_leaves_the_along_path_spacing_alone():
     """Bending the track sideways must not smuggle in a speed perturbation."""
     xy, _, _ = _straight_frame(4000)
-    off, _ = _jitter_offset(4000, hist_jitter_lat=0.3)
+    off, _ = _jitter_offset(4000, ego_past_noise_std=0.3, ego_past_noise_mode="jitter")
     step0 = (xy[:, 1:P_STEPS] - xy[:, : P_STEPS - 1]).norm(dim=-1)
     step1 = ((xy + off)[:, 1:P_STEPS] - (xy + off)[:, : P_STEPS - 1]).norm(dim=-1)
     # a purely lateral bend only lengthens the step at second order in the bend angle
@@ -547,8 +547,11 @@ def test_there_is_no_longitudinal_axis():
     It made the arm the worst of the campaign in all four eval cells on both metrics,
     where lateral alone was the best on recovery.
     """
-    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=5, hist_jitter_lat=0.3)
+    aug = FrenetStatePerturbationTensor(
+        1.0, "cpu", seed=5, ego_past_noise_std=0.3, ego_past_noise_mode="jitter"
+    )
     assert not hasattr(aug, "hist_jitter_lon"), "the longitudinal knob came back"
+    assert not hasattr(aug, "hist_jitter_lat"), "the separate jitter magnitude came back"
     with pytest.raises(TypeError):
         FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lon=0.3)
 
@@ -561,13 +564,15 @@ def test_there_is_no_longitudinal_axis():
     assert axes[1][0] == 0.0, "the along-path axis has a non-zero std again"
 
     # and it really contributes nothing along the path
-    off, _ = _jitter_offset(4000, hist_jitter_lat=0.3)
+    off, _ = _jitter_offset(4000, ego_past_noise_std=0.3, ego_past_noise_mode="jitter")
     assert float(off[:, 0, 0].abs().max()) == 0.0, "the zero axis moved the path tangent"
 
 
 def test_hist_jitter_headings_match_the_perturbed_polyline():
     """The jitter runs after the veto, so the stored cos/sin are re-derived from it."""
-    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=13, hist_jitter_lat=0.3)
+    aug = FrenetStatePerturbationTensor(
+        1.0, "cpu", seed=13, ego_past_noise_std=0.3, ego_past_noise_mode="jitter"
+    )
     inputs, _ = _run(aug, batch=8)
     rows = aug._aug_rows
     assert bool(rows.any()), "nothing was augmented; the test proves nothing"
@@ -600,7 +605,7 @@ def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
     in_off, fut_off = _run(off, batch=8, pad_steps=3)
     shapes_off, _ = list(shapes), shapes.clear()
 
-    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, hist_jitter_lat=0.0)
+    explicit = FrenetStatePerturbationTensor(1.0, "cpu", seed=7, ego_past_noise_std=0.0)
     in_on, fut_on = _run(explicit, batch=8, pad_steps=3)
 
     assert shapes_off == list(shapes), "the off value changed how much randomness is drawn"
@@ -611,8 +616,8 @@ def test_hist_jitter_at_zero_changes_nothing(monkeypatch):
 
 
 def test_hist_jitter_refuses_a_negative_std():
-    with pytest.raises(ValueError, match="hist_jitter_lat"):
-        FrenetStatePerturbationTensor(1.0, "cpu", hist_jitter_lat=-0.1)
+    with pytest.raises(ValueError, match="ego_past_noise_std"):
+        FrenetStatePerturbationTensor(1.0, "cpu", ego_past_noise_std=-0.1)
 
 
 # ───────────────────── layout robustness (3-col / 4-col) ─────────────────────
@@ -659,7 +664,7 @@ def test_a_3col_history_and_4col_future_are_accepted():
 
 _PERTURBATIONS = [
     pytest.param({"ego_past_noise_std": 0.2}, id="multiplicative"),
-    pytest.param({"hist_jitter_lat": 0.3}, id="jitter_lat"),
+    pytest.param({"ego_past_noise_std": 0.3, "ego_past_noise_mode": "jitter"}, id="jitter"),
 ]
 
 

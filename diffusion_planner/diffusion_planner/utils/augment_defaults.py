@@ -63,6 +63,11 @@ def resolve_history_noise(args) -> None:
         ValueError: if ``--ego_past_noise_std`` was passed with an ``augment_type``
             that cannot honour it.
     """
+    if args.ego_past_noise_mode == "jitter" and args.augment_type != "frenet":
+        raise ValueError(
+            f"--ego_past_noise_mode jitter is only implemented for augment_type=frenet, "
+            f"got {args.augment_type}; drop the flag or pick augment_type=frenet"
+        )
     if args.augment_type == "bridge":
         if args.ego_past_noise_std is not None:
             raise ValueError(

@@ -64,6 +64,16 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "support it and rejects the flag rather than ignoring it.",
         default=None,
     )
+    ego_past_noise_mode: Literal["scale", "jitter"] = cli(
+        "which history perturbation --ego_past_noise_std drives, for augment_type=frenet. "
+        "scale (default) = one multiplicative factor on the whole rewritten history, so "
+        "the track keeps its shape and is traversed at the wrong speed; the std is "
+        "dimensionless and clamped to +-2 std. jitter = a smooth lateral bend of the "
+        "track, so its SHAPE is wrong; the std is in METRES at the oldest history sample "
+        "and is not clamped. The two are mutually exclusive -- exactly one runs. "
+        "augment_type=quintic supports scale only.",
+        default="scale",
+    )
     use_smoothing_future_trajectory: bool = True
 
     # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---
@@ -102,14 +112,6 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "its merge window and a global floor would reject scenes for the recording's own "
         "clearance. True overlap is rejected everywhere regardless. Applies to the "
         "neighbour cut only, never the road edge. 0 (default) keeps the overlap-only veto.",
-        default=0.0,
-    )
-    frenet_hist_jitter_lat: float = cli(
-        "frenet: std (m) of a smooth per-scene LATERAL wobble of the rewritten ego "
-        "history, measured at the oldest history sample and tapering to exactly 0 at "
-        "t=0. Three low-frequency modes, so the track bends rather than looking noisy. "
-        "0 (default) draws nothing. There is no longitudinal counterpart: it was "
-        "measured and removed.",
         default=0.0,
     )
     frenet_recovery_rounds: int = cli(

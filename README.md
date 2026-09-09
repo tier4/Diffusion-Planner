@@ -140,6 +140,25 @@ Left unset it resolves per augmenter, because they do not perturb the same thing
 > both trackers, replan intervals 1 and 3) it moved recovery 28.3% → 30.2% at replan 1
 > and 52.7% → 52.2% at replan 3, every difference inside the seed spread.
 
+`--ego_past_noise_mode` selects **which** mechanism that std drives, for
+`augment_type=frenet`. Exactly one runs — they are mutually exclusive:
+
+| mode | what it does | units of the std | bounded? |
+|---|---|---|---|
+| `scale` (default) | one factor multiplies the whole rewritten history: the track keeps its shape and is traversed at the wrong speed | dimensionless (`N(1, std)`) | yes, ±2σ |
+| `jitter` | a smooth lateral bend of the track, so its *shape* is wrong; three low-frequency modes, exactly zero at t=0 | **metres** at the oldest sample | **no** |
+
+A mode rather than two magnitude flags, because two flags could both be set and the
+combination is reachable by accident — the scale default is non-zero, so asking for
+jitter alone used to silently apply both, and that combination has never been
+evaluated (every jitter arm of the A/B pinned the scale to 0). `jitter` is
+implemented for frenet only; asking for it with another `augment_type` is an error.
+
+Note the std means different things per mode. `0.1` is ±10% of a traversal speed in
+`scale`, and 0.1 m of lateral displacement in `jitter`. The A/B tested **0.3 m** for
+jitter, so that is the value to pass; and because the jitter is unclamped, 31.7% of
+draws exceed the std and 4.5% exceed twice it (measured over 200k draws).
+
 Passing a number applies it to whichever augmenter is selected, so the flag stays
 sweepable. Note that a `quintic`-vs-`frenet` A/B on it is not measuring the same
 perturbation — quintic also rescales the current velocity and acceleration.
@@ -154,7 +173,8 @@ augmenter reproduces the previous behaviour exactly.
   --frenet_recovery_rounds 1 \      # retry after a footprint veto
   --frenet_min_clearance 0.2 \      # metres of clearance to keep from recorded vehicles
   --frenet_toward_parked_prob 0.3 \ # fraction of eligible scenes nudged toward a parked vehicle
-  --frenet_hist_jitter_lat 0.3      # smooth lateral jitter of the history, metres at the oldest sample
+  --ego_past_noise_mode jitter \   # bend the history instead of stretching it (frenet only)
+  --ego_past_noise_std 0.3          # metres at the oldest sample, in jitter mode
 ```
 
 - **`--frenet_recovery_rounds N`** (default 0). A candidate whose footprint overlaps a
@@ -209,29 +229,6 @@ augmenter reproduces the previous behaviour exactly.
   accepted with the flag off, 8 with it on. The fallback above is what keeps that from
   being 0; it does not recover the rest, and no selection rule can, because a 2.0 m ego
   does not fit a 1.8 m gap. Use `P` as a small fraction, not a global setting.
-
-- **`--frenet_hist_jitter_lat L`** (default 0.0). Smooth per-sample jitter of the ego
-  history, in metres of standard deviation at the oldest sample, perpendicular to the
-  direction of travel. Unlike `--ego_past_noise_std`, which can only make a
-  correctly-shaped history be traversed at the wrong speed, this bends the history
-  itself. Applied after the footprint check and with t=0 pinned, so the target and the
-  state the model plans from are unchanged.
-
-  **There is no longitudinal counterpart.** One existed and was removed on measurement:
-  jittering along the path varies the sample spacing, and that arm was the worst of the
-  campaign in all four eval cells on both metrics (8 arms × 2 seeds, ~1,113 perturbed
-  closed-loop rollouts per arm, scored under both trackers at replan intervals 1 and 3).
-  Lateral alone was the best arm on recovery in both cells that had the resolution to
-  tell — and had the smallest seed spread of any arm — which is why it survived.
-
-  That ordering is deliberate — it keeps acceptance independent of the noise, which is
-  what makes an A/B between the two history perturbations valid — but it has a
-  consequence worth stating: **the jittered history is not re-checked against the
-  footprint constraint.** The corridor bounds certify the clean polyline, so at
-  `L = 0.3` the oldest sample can move ~0.6–0.9 m at 2–3σ, and on a drive that passed a
-  parked vehicle closely the resulting history can put the ego footprint inside that
-  vehicle in the past. The future, the target and t=0 are unaffected; what the encoder
-  reads is. Keep `L` small relative to the clearances in the data.
 
 Frenet also exposes the sampling grid itself — `--frenet_n_draws`, `--frenet_dy_max`,
 `--frenet_dth_max`, `--frenet_merge_times`, `--frenet_anchors`, `--frenet_acc0_fracs`,
