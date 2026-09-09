@@ -369,7 +369,11 @@ def test_min_clearance_does_not_move_the_border_bounds():
         half_w = shape[:, 2] / 2 + 0.10
         bounds.append(
             aug._corridor(
-                {"line_strings": inputs["line_strings"]},
+                # the full input dict: _corridor now REQUIRES the neighbour tensors, and
+                # passing a stripped dict is what used to silently give an unvetoed,
+                # neighbour-free corridor. The scene here has no neighbours anyway, so
+                # the border claim is unaffected.
+                inputs,
                 xy,
                 tan,
                 nrm,
@@ -911,3 +915,25 @@ def test_the_main_stream_still_matches_the_unpatched_seeding(monkeypatch):
         aug = _augmenter_at_rank(monkeypatch, rank, seed=11)
         expected = torch.Generator(device="cpu").manual_seed(11 + rank)
         assert torch.equal(aug.gen.get_state(), expected.get_state())
+
+
+def test_a_missing_neighbour_tensor_raises_instead_of_silently_disabling_the_veto():
+    """Dropping a mandatory key used to be a silent no-op with severe consequences.
+
+    Without the neighbour tensors the corridor gets no neighbour cuts, `_nbr_st` stays
+    None so the exact footprint veto returns early, and `_nbr_lo` stays None so no scene
+    is toward-parked eligible. A harness that popped `neighbor_agents_future` out of the
+    dict -- which the positional argument invites -- therefore measured an empty world
+    and reported 0 vetoes and 0 eligible scenes with no error.
+    """
+    aug = FrenetStatePerturbationTensor(1.0, "cpu", seed=3)
+    inputs, fut, nbf = _scene(batch=2)
+    stripped = {k: v for k, v in inputs.items() if k != "neighbor_agents_future"}
+    with pytest.raises(KeyError, match="neighbor_agents_future"):
+        aug(stripped, fut, nbf)
+
+    for key in ("line_strings", "neighbor_agents_past"):
+        aug2 = FrenetStatePerturbationTensor(1.0, "cpu", seed=3)
+        inp, f2, n2 = _scene(batch=2)
+        with pytest.raises(KeyError, match=key):
+            aug2({k: v for k, v in inp.items() if k != key}, f2, n2)

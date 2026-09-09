@@ -494,20 +494,60 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         B, T, _ = xy.shape
         lo, hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
 
-        ls = inputs.get("line_strings")
-        if ls is not None:
-            lo, hi = border_lateral_bounds(ls, xy, nrm, half_w, lo, hi)
+        # Indexed, not .get(): these are mandatory in the training format, and a missing
+        # key used to degrade SILENTLY to an unconstrained corridor with no neighbours --
+        # which also short-circuits the exact-OBB veto (`_nbr_st is None`) and the
+        # parked-vehicle detector (`_nbr_lo is None`). A caller that dropped a key
+        # therefore got an augmenter that vetoed nothing and reported zero eligible
+        # scenes, with no error. That is not a hypothetical: `neighbor_agents_future` is
+        # also passed as a positional argument, which invites a caller to pop it out of
+        # the dict, and doing so silently disabled every neighbour rule here.
+        missing = [
+            k
+            for k in ("line_strings", "neighbor_agents_past", "neighbor_agents_future")
+            if inputs.get(k) is None
+        ]
+        if missing:
+            raise KeyError(
+                f"frenet augmentation requires {missing} in inputs: without them the "
+                "corridor has no road-border or neighbour cuts, the exact footprint veto "
+                "never runs and no scene is toward-parked eligible. Note that "
+                "neighbor_agents_future must stay IN inputs even though it is also a "
+                "positional argument."
+            )
 
-        past = inputs.get("neighbor_agents_past")
-        fut = inputs.get("neighbor_agents_future")
-        if past is not None and fut is not None:
-            st, valid = time_aligned_neighbor_tracks(past, fut)
-            self._nbr_st, self._nbr_valid = st, valid  # reused by the exact-OBB veto
-            shapes_wl = past[:, :, -1][..., [6, 7]]  # width, length
-            n_lo, n_hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
-            n_lo, n_hi, self._nbr_near = neighbor_lateral_bounds(
+        lo, hi = border_lateral_bounds(inputs["line_strings"], xy, nrm, half_w, lo, hi)
+
+        past = inputs["neighbor_agents_past"]
+        fut = inputs["neighbor_agents_future"]
+        st, valid = time_aligned_neighbor_tracks(past, fut)
+        self._nbr_st, self._nbr_valid = st, valid  # reused by the exact-OBB veto
+        shapes_wl = past[:, :, -1][..., [6, 7]]  # width, length
+        n_lo, n_hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
+        n_lo, n_hi, self._nbr_near = neighbor_lateral_bounds(
+            st,
+            valid,
+            shapes_wl,
+            xy,
+            tan,
+            nrm,
+            half_l,
+            half_w_nbr,
+            wb,
+            n_lo,
+            n_hi,
+            min_clearance=self.min_clearance,
+        )
+        lo, hi = torch.maximum(lo, n_lo), torch.minimum(hi, n_hi)
+        if self.toward_parked_prob > 0.0:
+            # bounds from PARKED neighbours alone: the toward-parked nudge points at
+            # these and nothing else
+            P = inputs["ego_agent_past"].shape[1]
+            parked = self._parked_mask(past, st, valid, P)
+            p_lo, p_hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
+            p_lo, p_hi, _ = neighbor_lateral_bounds(
                 st,
-                valid,
+                valid & parked[:, :, None],
                 shapes_wl,
                 xy,
                 tan,
@@ -515,31 +555,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 half_l,
                 half_w_nbr,
                 wb,
-                n_lo,
-                n_hi,
-                min_clearance=self.min_clearance,
+                p_lo,
+                p_hi,
             )
-            lo, hi = torch.maximum(lo, n_lo), torch.minimum(hi, n_hi)
-            if self.toward_parked_prob > 0.0:
-                # bounds from PARKED neighbours alone: the toward-parked nudge points at
-                # these and nothing else
-                P = inputs["ego_agent_past"].shape[1]
-                parked = self._parked_mask(past, st, valid, P)
-                p_lo, p_hi = unconstrained_bounds(B, T, xy.device, xy.dtype)
-                p_lo, p_hi, _ = neighbor_lateral_bounds(
-                    st,
-                    valid & parked[:, :, None],
-                    shapes_wl,
-                    xy,
-                    tan,
-                    nrm,
-                    half_l,
-                    half_w_nbr,
-                    wb,
-                    p_lo,
-                    p_hi,
-                )
-                self._nbr_lo, self._nbr_hi = p_lo, p_hi
+            self._nbr_lo, self._nbr_hi = p_lo, p_hi
         return lo, hi
 
     @staticmethod
