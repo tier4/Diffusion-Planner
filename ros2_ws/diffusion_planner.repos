@@ -3,7 +3,9 @@ repositories:
   deps/autoware_msgs:
     type: git
     url: https://github.com/autowarefoundation/autoware_msgs.git
-    version: 1.7.0
+    # autoware_core requires autoware_localization_msgs/InitializeLocalization.
+    # That service was added after 1.7.0; 1.9.0 is the minimum compatible tag.
+    version: 1.9.0
   deps/autoware_adapi_msgs:
     type: git
     url: https://github.com/autowarefoundation/autoware_adapi_msgs.git
