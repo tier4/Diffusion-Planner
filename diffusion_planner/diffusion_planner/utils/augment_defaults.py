@@ -5,27 +5,28 @@ Lives in its own module because both :mod:`augmenter_factory` and
 so a resolver in either of those would be a cycle.
 """
 
-# `--ego_past_noise_std` unset means "the default for this augmenter". Quintic has
-# perturbed the recorded history at 0.1 since it was written. Frenet now matches it.
-# Bridge has no history perturbation at all, so it has no default to speak of and
-# rejects the flag rather than accepting and ignoring it.
+# `--ego_past_noise_std` unset means "the default for this augmenter", and the two
+# supported augmenters disagree on purpose. Quintic has perturbed the RECORDED ego
+# history at 0.1 since it was written. Frenet stays at 0.0, matching `tier4-main`,
+# which hard-passes 0.0 with the reason in-line: frenet already rewrites the past
+# kinematically from the perturbed polyline, so a multiplicative scale on top would
+# perturb a history this augmenter synthesised rather than one it observed.
 #
-# The frenet 0.1 is a DELIBERATE DEFAULT CHANGE, not an inherited value. `tier4-main`
-# hard-passed 0.0 to the frenet augmenter, so a stock `--augment_type frenet` run on
-# this branch trains a different distribution than the same command on main, and
-# reproducing an existing frenet checkpoint needs `--ego_past_noise_std 0` explicitly.
+# The knob is still available to frenet -- `--ego_past_noise_std 0.1`, or the lateral
+# `--ego_past_noise_mode jitter` -- it is simply off unless asked for.
 #
-# Measured before choosing it: on a 2-seed, 8-arm A/B (~1,113 perturbed closed-loop
-# rollouts per arm, both trackers, replan intervals 1 and 3), 0.1 vs 0.0 moved recovery
-# 28.3% -> 30.2% at replan 1 and 52.7% -> 52.2% at replan 3, with lost% 20.3 -> 19.8 and
-# 7.7 -> 8.0. Every one of those is inside the seed spread (17.2 points on recovered% at
-# replan 1; 1.0 on lost% at replan 3), so the evidence says the perturbation neither
-# helps nor hurts. It is on by default because the flag is uniform across augmenters
-# that support it, NOT because it was shown to improve anything.
+# Measured before choosing it, so the 0.0 is a decision rather than an omission: on a
+# 2-seed, 8-arm A/B (~1,113 perturbed closed-loop rollouts per arm, both trackers,
+# replan intervals 1 and 3), 0.1 vs 0.0 moved recovery 28.3% -> 30.2% at replan 1 and
+# 52.7% -> 52.2% at replan 3, with lost% 20.3 -> 19.8 and 7.7 -> 8.0. Every one of
+# those is inside the seed spread (17.2 points on recovered% at replan 1; 1.0 on lost%
+# at replan 3), so the evidence neither justifies nor forbids the perturbation. With
+# nothing measured to gain, the default is the one that leaves a stock
+# `--augment_type frenet` run byte-identical to main.
 # No bridge entry on purpose: resolve_history_noise returns before resolving for
 # bridge, so a lookup here can only come from a caller that bypassed it -- and that
 # caller should get the KeyError this dict advertises, not a silent 0.0.
-DEFAULT_PAST_NOISE_STD = {"quintic": 0.1, "frenet": 0.1}
+DEFAULT_PAST_NOISE_STD = {"quintic": 0.1, "frenet": 0.0}
 
 
 def past_noise_std_for(args) -> float:
@@ -56,7 +57,7 @@ def resolve_history_noise(args) -> None:
     The resolved value goes to ``ego_past_noise_std_effective`` and the raw flag is left
     exactly as the user gave it. Overwriting the flag in place looked simpler but broke
     round-tripping: ``run_lifelong_r2lpl_rounds`` reads a base run's ``args.json`` and
-    re-feeds the recorded fields as explicit flags, so a frenet run recording 0.1 and a
+    re-feeds the recorded fields as explicit flags, so a quintic run recording 0.1 and a
     later round overriding ``augment_type`` to bridge died at startup on a flag the user
     never passed.
 

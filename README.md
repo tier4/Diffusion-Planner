@@ -129,16 +129,22 @@ Left unset it resolves per augmenter, because they do not perturb the same thing
 | augmenter | default | what the factor scales |
 |---|---|---|
 | `quintic` | 0.1 | the RECORDED history, and the current velocity and acceleration with it |
-| `frenet` | 0.1 | the history it rewrote from the perturbed polyline; `ego_current_state` is left bit-identical |
+| `frenet` | **0.0** (off) | the history it rewrote from the perturbed polyline; `ego_current_state` is left bit-identical |
 | `bridge` | n/a | no history perturbation; passing the flag is an error, not a silent no-op |
 
-> **⚠ The frenet default is a change.** `tier4-main` hard-passed `0.0` to the frenet
-> augmenter, so a stock `--augment_type frenet` run here trains a different distribution
-> than the same command on main. **Reproducing an existing frenet checkpoint requires
-> `--ego_past_noise_std 0` explicitly.** It is on for flag uniformity, not because it was
-> shown to help: on a 2-seed, 8-arm A/B (~1,113 perturbed closed-loop rollouts per arm,
-> both trackers, replan intervals 1 and 3) it moved recovery 28.3% → 30.2% at replan 1
-> and 52.7% → 52.2% at replan 3, every difference inside the seed spread.
+**Why frenet defaults to off while quintic does not.** Quintic scales a history the
+recorder actually observed; frenet has already rewritten the past kinematically from the
+perturbed polyline, so the same factor would perturb a history it synthesised. That is
+the reason `tier4-main` hard-passes `0.0` there, and this branch keeps it — a stock
+`--augment_type frenet` run trains exactly what it trains on main.
+
+Measured either way, so the `0.0` is a decision and not an omission: on a 2-seed, 8-arm
+A/B (~1,113 perturbed closed-loop rollouts per arm, both trackers, replan intervals 1
+and 3) enabling it moved recovery 28.3% → 30.2% at replan 1 and 52.7% → 52.2% at replan
+3, with `lost%` 20.3 → 19.8 and 7.7 → 8.0 — every difference inside the seed spread
+(17.2 points on recovered% at replan 1, 1.0 on `lost%` at replan 3). Nothing is given up
+by leaving it off, and `--ego_past_noise_std 0.1` turns it on for anyone revisiting it at
+full dataset scale.
 
 `--ego_past_noise_mode` selects **which** mechanism that std drives, for
 `augment_type=frenet`. Exactly one runs — they are mutually exclusive:
@@ -149,8 +155,8 @@ Left unset it resolves per augmenter, because they do not perturb the same thing
 | `jitter` | a smooth lateral bend of the track, so its *shape* is wrong; three low-frequency modes, exactly zero at t=0 | **metres** at the oldest sample | **no** |
 
 A mode rather than two magnitude flags, because two flags could both be set and the
-combination is reachable by accident — the scale default is non-zero, so asking for
-jitter alone used to silently apply both, and that combination has never been
+combination is reachable by accident — quintic's scale default is non-zero, so asking
+for jitter alone used to silently apply both, and that combination has never been
 evaluated (every jitter arm of the A/B pinned the scale to 0). `jitter` is
 implemented for frenet only; asking for it with another `augment_type` is an error.
 
@@ -173,8 +179,11 @@ perturbation — quintic also rescales the current velocity and acceleration.
 
 #### Frenet-only options
 
-Every **frenet corridor** flag below is off by default; with those three at their defaults the
-augmenter reproduces the previous behaviour exactly.
+Every flag below is off at its default, and so is `--ego_past_noise_std` for frenet, so a
+stock run reproduces the previous behaviour exactly — measured through the path a training
+takes (`build_parser` → `build_config` → `augmenter_from_args`): 432 arrays over
+`ego_agent_past`, `ego_current_state` and `goal_pose`, three `augment_type` values, two
+seeds, worst `|base − head|` of **0.000e+00** for all three.
 
 ```bash
 --augment_type frenet \

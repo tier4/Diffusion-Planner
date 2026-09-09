@@ -227,7 +227,7 @@ def test_seed_and_past_noise_std_are_real_command_line_flags():
     # reaches a training, and that is what silently moved once already.
     from diffusion_planner.utils.augment_defaults import past_noise_std_for
 
-    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.1)):
+    for augment_type, expected in (("quintic", 0.1), ("frenet", 0.0)):
         resolved = past_noise_std_for(
             build_config(TrainConfig, parser.parse_args(["--augment_type", augment_type]))
         )
@@ -313,20 +313,22 @@ def _past_noise(aug):
     return getattr(aug, "past_noise_std", getattr(aug, "_ego_past_noise_std", None))
 
 
-def test_frenet_defaults_to_the_same_history_noise_as_quintic():
-    """A DELIBERATE default change: tier4-main hard-passed 0.0 to the frenet augmenter.
+def test_frenet_does_not_inherit_quintics_history_noise():
+    """Frenet is 0.0, as on tier4-main, so a stock frenet run is unchanged by this branch.
 
-    Pinned here because it is the one thing on this branch that alters a stock run --
-    reproducing a pre-branch frenet checkpoint needs `--ego_past_noise_std 0`. Measured
-    as neither helping nor hurting (inside the seed spread on an 8-arm A/B); it is on
-    for flag uniformity, not for a measured gain.
+    The two defaults diverge deliberately: quintic scales a RECORDED history, frenet one
+    it rewrote kinematically from the perturbed polyline. This is the assertion that
+    keeps a shared flag name from quietly merging the two recipes -- it did exactly that
+    once, which left existing frenet checkpoints unreproducible at their own seed.
+    Measured either way: 0.1 sat inside the seed spread on an 8-arm A/B, so nothing is
+    given up by defaulting it off.
     """
-    assert _past_noise(_from_cli("--augment_type", "frenet")) == 0.1
+    assert _past_noise(_from_cli("--augment_type", "frenet")) == 0.0
 
 
-def test_frenet_history_noise_can_still_be_turned_off():
-    """The escape hatch the reproducibility note points at."""
-    assert _past_noise(_from_cli("--augment_type", "frenet", "--ego_past_noise_std", "0")) == 0.0
+def test_frenet_history_noise_is_still_reachable():
+    """Off by default is not gone: the knob still applies to frenet when asked for."""
+    assert _past_noise(_from_cli("--augment_type", "frenet", "--ego_past_noise_std", "0.1")) == 0.1
 
 
 def test_quintic_keeps_the_history_noise_it_has_always_had():
@@ -394,18 +396,18 @@ def test_the_resolved_value_survives_a_json_round_trip():
     """A reader of args.json must get the effective number, not a sentinel."""
     import json
 
-    args = _resolved_config("--augment_type", "frenet")
+    args = _resolved_config("--augment_type", "quintic")
     assert json.loads(json.dumps(args.ego_past_noise_std_effective)) == 0.1
 
 
 def test_an_explicit_zero_is_recorded_as_zero_not_as_unset():
-    """The reproducibility escape hatch has to be visible in the saved config."""
-    args = _resolved_config("--augment_type", "frenet", "--ego_past_noise_std", "0")
+    """A deliberate 0 must be distinguishable in the saved config from an unset flag."""
+    args = _resolved_config("--augment_type", "quintic", "--ego_past_noise_std", "0")
     assert args.ego_past_noise_std_effective == 0.0
 
 
 @pytest.mark.parametrize(
-    "augment_type,expected", [("quintic", 0.1), ("frenet", 0.1), ("bridge", None)]
+    "augment_type,expected", [("quintic", 0.1), ("frenet", 0.0), ("bridge", None)]
 )
 def test_resolving_twice_changes_nothing(augment_type, expected):
     """The factory calls the resolver defensively, so it runs twice in a real run.
