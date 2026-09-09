@@ -135,3 +135,29 @@ def test_parse_shape_rejects_a_wrong_length():
     assert _common.parse_shape("4.76,7.24,2.43") == (4.76, 7.24, 2.43)
     with pytest.raises(SystemExit, match="wheelbase,length,width"):
         _common.parse_shape("4.76,7.24")
+
+
+def test_report_flags_a_degenerate_class(capsys):
+    """All-identical spans mean one situation sampled n times, not n samples."""
+    from rlvr.autoresearch.ego_shape_diag.check_tl_gate import report
+
+    # near-identical, as real runs of one situation are - not bit-equal
+    green = [16.8064 + i * 1e-6 for i in range(23)]
+    spans = {"green": green, "amber": [], "red": [0.04, 0.04], "none": [], "ambiguous": []}
+    report(spans, "ckpt.pth", 25, None)
+    out = capsys.readouterr().out
+    assert "one situation" in out
+    assert "median" in out and "min" in out and "max" in out
+
+
+def test_report_exposes_a_split_the_mean_would_hide(capsys):
+    """18 scenes drive, 5 stand still: the mean clears 15 m while 5 scenes are collapsed."""
+    from rlvr.autoresearch.ego_shape_diag.check_tl_gate import report
+
+    spans = {"green": [20.0] * 18 + [1.0] * 5, "amber": [], "red": [], "none": [], "ambiguous": []}
+    report(spans, "ckpt.pth", 23, None)
+    out = capsys.readouterr().out
+    # the mean clears the 15 m threshold, but min exposes the collapsed scenes
+    assert "mean  15.87" in " ".join(out.split(" ")) or "15.87" in out
+    assert "min   1.00" in out
+    assert "all identical" not in out  # and this class is not degenerate

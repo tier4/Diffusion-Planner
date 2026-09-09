@@ -51,6 +51,8 @@ _CLASSES = {
     TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT_GREEN: "red",
 }
 _ORDER = ("green", "amber", "red", "ambiguous", "none")
+# Two spans closer than this are the same plan, not two measurements worth averaging.
+_SAME_PLAN_M = 0.01
 
 
 def route_tl_class(d: dict) -> str:
@@ -141,12 +143,34 @@ def verdict(
 
 
 def report(spans: dict[str, list[float]], model_path: str, n_scenes: int, shape) -> None:
+    """Per class: the mean the gate grades on, and the spread behind it.
+
+    The mean alone is not enough to read a result. A class whose scenes all return the
+    same span is one situation sampled many times, not many independent samples, and its
+    n overstates the evidence; a class that splits into "drives" and "stands still" can
+    average out above the threshold while half its scenes fail. Both are visible in
+    min/median/max and invisible in the mean, so print all four.
+    """
     print(f"model  : {model_path}")
     print(f"scenes : {n_scenes}   " + "  ".join(f"{k} {len(spans[k])}" for k in _ORDER))
     print(f"shape  : {shape if shape else 'as recorded'}")
     for k in _ORDER:
-        if spans[k]:
-            print(f"   {k:<9} n={len(spans[k]):<3} mean span {float(np.mean(spans[k])):6.2f} m")
+        v = sorted(spans[k])
+        if not v:
+            continue
+        # Compare with a tolerance, not for equality: scenes that are the same situation
+        # still differ in the last few decimals, and a spread under a centimetre is not a
+        # difference in behaviour at these thresholds.
+        degenerate = len(v) > 1 and (v[-1] - v[0]) < _SAME_PLAN_M
+        note = (
+            f"  (spread < {_SAME_PLAN_M * 100:.0f} cm - one situation, not {len(v)} samples)"
+            if degenerate
+            else ""
+        )
+        print(
+            f"   {k:<9} n={len(v):<3} mean {float(np.mean(v)):6.2f} m"
+            f"   median {float(np.median(v)):6.2f}   min {v[0]:6.2f}   max {v[-1]:6.2f}{note}"
+        )
     excluded = len(spans["ambiguous"]) + len(spans["none"])
     if excluded:
         print(
