@@ -37,8 +37,8 @@ repositories:
   # universe
   deps/autoware_universe:
     type: git
-    url: https://github.com/yhisaki/autoware_universe.git
-    version: feat/diffusion-planner-v2
+    url: https://github.com/tier4/autoware_universe.git
+    version: feat/v0.64/e2e
   deps/tier4_autoware_msgs:
     type: git
     url: https://github.com/tier4/tier4_autoware_msgs.git
