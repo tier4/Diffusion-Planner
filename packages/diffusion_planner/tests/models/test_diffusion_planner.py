@@ -7,6 +7,7 @@ import unittest
 import torch
 
 from diffusion_planner.data.dimensions import (
+    CONTROL_DIM,
     EGO_HISTORY_LENGTH,
     INTERSECTION_AREA_LENGTH,
     LANE_LENGTH,
@@ -22,9 +23,8 @@ from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.flow_matching import sample_time
 from diffusion_planner.models.loss import (
     compute_diffusion_planner_loss,
-    create_target_trajectory,
-    trajectory_error_in_target_frame,
-    trajectory_huber_loss,
+    control_huber_loss,
+    create_ego_padding_mask,
 )
 
 
@@ -104,6 +104,8 @@ class DiffusionPlannerTest(unittest.TestCase):
             time_std=1.0,
             time_epsilon=1e-5,
             noise_scale=1.0,
+            control_normalizer=self.model.control_normalizer,
+            position_scale=self.model.position_scale,
         )
         handle.remove()
 
@@ -115,25 +117,63 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
         losses["total"].backward()
 
-    def test_partial_future_padding_masks_complete_agent(self) -> None:
-        target = create_target_trajectory(self.input_data)
-        target[:, 0, TRAJECTORY_LENGTH // 2 :] = 0.0
+    def test_loss_only_calls_the_model(self) -> None:
+        """The loss must not read attributes off the planner.
 
-        missing_future = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
+        `accelerator.prepare` hands training a DDP-wrapped, `torch.compile`-wrapped
+        planner, and neither wrapper forwards attribute lookups to the module it
+        holds. Anything the loss reads instead of calls breaks only under
+        distributed training, where it is expensive to find.
+        """
 
-        self.assertTrue(missing_future[:, 0].all())
-        self.assertFalse(missing_future[:, 1].any())
-        self.assertTrue(missing_future[:, 2].all())
+        class OpaqueWrapper(torch.nn.Module):
+            """Forward calls, refuse attribute lookups, like the real wrappers."""
+
+            def __init__(self, planner: DiffusionPlanner) -> None:
+                super().__init__()
+                self.wrapped = planner
+
+            def forward(self, *args: object, **kwargs: object) -> object:
+                return self.wrapped(*args, **kwargs)
+
+        wrapper = OpaqueWrapper(self.model)
+        with self.assertRaises(AttributeError):
+            wrapper.control_normalizer  # noqa: B018
+
+        losses = compute_diffusion_planner_loss(
+            wrapper,
+            self.input_data,
+            time_mean=-0.4,
+            time_std=1.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+            control_normalizer=self.model.control_normalizer,
+            position_scale=self.model.position_scale,
+        )
+
+        self.assertTrue(torch.isfinite(losses["total"]))
+
+    def test_partial_future_padding_masks_the_sample(self) -> None:
+        self.assertFalse(create_ego_padding_mask(self.input_data).any())
+
+        self.input_data["ego_agent_future"][:, TRAJECTORY_LENGTH // 2 :] = 0.0
+
+        self.assertTrue(create_ego_padding_mask(self.input_data).all())
+
+    def test_stationary_ego_is_not_masked(self) -> None:
+        """A stationary ego has all-zero control; the mask must read poses instead."""
+        self.input_data["ego_agent_past"][..., 4] = 0.0
+        self.input_data["ego_agent_future"][..., 4] = 0.0
+
+        self.assertFalse(create_ego_padding_mask(self.input_data).any())
 
     def test_turn_indicator_loss_backpropagates_into_scene_encoder(self) -> None:
-        agent_count = self.input_data["neighbor_agents_past"].shape[1] + 1
-        trajectory, logits = self.model(
-            torch.randn(1, agent_count, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
-            torch.zeros(1, agent_count, dtype=torch.bool),
+        control, logits = self.model(
+            torch.randn(1, TRAJECTORY_LENGTH, CONTROL_DIM),
             self.input_data,
             torch.full((1,), 0.5),
         )
-        del trajectory
+        del control
 
         logits.sum().backward()
 
@@ -156,48 +196,24 @@ class DiffusionPlannerTest(unittest.TestCase):
             time_std=1.0,
             time_epsilon=1e-5,
             noise_scale=1.0,
+            control_normalizer=self.model.control_normalizer,
+            position_scale=self.model.position_scale,
             turn_indicator_loss_weight=0.0,
+            control_trajectory_loss_weight=0.4,
         )
-
-        torch.testing.assert_close(losses["total"], losses["trajectory"])
-
-    def test_position_error_uses_target_longitudinal_lateral_frame(self) -> None:
-        error = torch.tensor([[[[1.0, 0.0, 0.25, -0.5]]]])
-        target = torch.tensor([[[[0.0, 0.0, 0.0, 1.0]]]])
-
-        transformed = trajectory_error_in_target_frame(error, target)
 
         torch.testing.assert_close(
-            transformed, torch.tensor([[[[0.0, -1.0, 0.25, -0.5]]]])
+            losses["total"],
+            losses["control"] + 0.4 * losses["control_trajectory"],
         )
 
-    def test_trajectory_loss_uses_elementwise_huber(self) -> None:
-        error = torch.tensor([[[[0.0, -2.0, 0.5, -0.5]]]])
-        target = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]]]])
-        prediction = target + error
+    def test_control_loss_uses_elementwise_huber(self) -> None:
+        target = torch.tensor([[[0.0, 0.0]]])
+        prediction = torch.tensor([[[-2.0, 0.5]]])
 
-        loss = trajectory_huber_loss(
-            prediction, target, torch.zeros(1), time_epsilon=1e-5
-        )
+        loss = control_huber_loss(prediction, target, torch.zeros(1), time_epsilon=1e-5)
 
-        torch.testing.assert_close(loss, torch.tensor([[[[0.0, 1.5, 0.125, 0.125]]]]))
-
-    def test_trajectory_loss_applies_ego_and_neighbor_weights(self) -> None:
-        target = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]], [[0.0, 0.0, 1.0, 0.0]]]])
-        prediction = target.clone()
-        prediction[..., 0] += 0.5
-
-        loss = trajectory_huber_loss(
-            prediction,
-            target,
-            torch.zeros(1),
-            time_epsilon=1e-5,
-            ego_loss_weight=2.0,
-            neighbor_loss_weight=0.5,
-        )
-
-        torch.testing.assert_close(loss[0, 0, 0, 0], torch.tensor(0.25))
-        torch.testing.assert_close(loss[0, 1, 0, 0], torch.tensor(0.0625))
+        torch.testing.assert_close(loss, torch.tensor([[[1.5, 0.125]]]))
 
     def test_logistic_normal_time_is_inside_unit_interval(self) -> None:
         time = sample_time(
@@ -211,7 +227,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.assertTrue(torch.all(time > 0))
         self.assertTrue(torch.all(time < 1))
 
-    def test_sample_encodes_scene_once_and_masks_missing_agents(self) -> None:
+    def test_sample_encodes_scene_once_and_returns_ego_poses(self) -> None:
         call_count = 0
         decoder_call_count = 0
         turn_indicator_trajectories: list[torch.Tensor] = []
@@ -248,21 +264,20 @@ class DiffusionPlannerTest(unittest.TestCase):
         )
         trajectories, turn_indicator_logits = self.model.sample(
             self.input_data,
-            torch.randn(1, 3, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+            torch.randn(1, TRAJECTORY_LENGTH, CONTROL_DIM),
             num_steps=2,
         )
         handle.remove()
         decoder_handle.remove()
         turn_indicator_handle.remove()
 
-        self.assertEqual(trajectories.shape, (1, 3, TRAJECTORY_LENGTH, 4))
+        self.assertEqual(trajectories.shape, (1, TRAJECTORY_LENGTH, 4))
         self.assertEqual(turn_indicator_logits.shape, (1, 3))
-        torch.testing.assert_close(
-            trajectories[:, 2], torch.zeros_like(trajectories[:, 2])
-        )
+        yaw_norm = torch.linalg.vector_norm(trajectories[..., 2:4], dim=-1)
+        torch.testing.assert_close(yaw_norm, torch.ones_like(yaw_norm))
         self.assertEqual(call_count, 1)
         self.assertEqual(decoder_call_count, 3)
-        torch.testing.assert_close(turn_indicator_trajectories[0], trajectories[:, 0])
+        torch.testing.assert_close(turn_indicator_trajectories[0], trajectories)
 
 
 if __name__ == "__main__":

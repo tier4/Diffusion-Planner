@@ -44,6 +44,8 @@ known-first-party = ["diffusion_planner", "diffusion_planner_dashboard"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+# Vendored from NVIDIA (Apache-2.0); kept close to upstream so it stays diffable.
+"packages/diffusion_planner/src/diffusion_planner/models/unicycle.py" = ["B008"]
 
 [tool.pyright]
 include = [
@@ -58,6 +60,9 @@ exclude = [
     "**/__pycache__",
     "**/.*",
     ".venv",
+    # Vendored from NVIDIA (Apache-2.0); kept close to upstream so it stays
+    # diffable, which means keeping its type-checking warts too.
+    "packages/diffusion_planner/src/diffusion_planner/models/unicycle.py",
 ]
 pythonVersion = "3.10"
 venvPath = "."

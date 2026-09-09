@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "accelerate>=1.14.0",
     "argcomplete>=3.7.0",
+    "einops>=0.8.0",
     "h5py>=3.16.0",
     "hdf5plugin>=7.0.0",
     "hydra-core>=1.3",

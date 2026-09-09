@@ -5,8 +5,12 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from diffusion_planner.data.dimensions import TRAJECTORY_DIM
+from diffusion_planner.data.dimensions import (
+    EGO_VELOCITY_INDEX,
+    TRAJECTORY_DIM,
+)
 
+from .control import ControlNormalizer, control_to_waypoints, denormalize_positions
 from .decoder import TrajectoryDecoder
 from .encoder import SceneEncoder
 from .flow_matching import sample
@@ -14,7 +18,12 @@ from .turn_indicator import TurnIndicatorDecoder
 
 
 class DiffusionPlanner(nn.Module):
-    """Predict joint ego and neighbor trajectories with conditional flow matching."""
+    """Predict the ego trajectory with conditional flow matching.
+
+    The model predicts ego control only. Neighbors are inputs, not outputs: they
+    reach the model as scene tokens through the encoder, and the decoder carries
+    no agent axis at all.
+    """
 
     def __init__(
         self,
@@ -31,8 +40,15 @@ class DiffusionPlanner(nn.Module):
         dropout: float = 0.0,
         velocity_threshold: float = 0.1,
         goal_max_distance: float = 2.0,
+        position_scale: float = 50.0,
+        control_mean: tuple[float, float] = (-0.030108, -0.001032),
+        control_std: tuple[float, float] = (2.177840, 0.033305),
     ) -> None:
         super().__init__()
+        self.position_scale = position_scale
+        self.control_normalizer = ControlNormalizer(
+            list(control_mean), list(control_std)
+        )
         self.scene_encoder = SceneEncoder(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
@@ -77,45 +93,58 @@ class DiffusionPlanner(nn.Module):
         )
 
     @staticmethod
-    def create_agent_pose(
-        input_data: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Create current `[x, y, cos_yaw, sin_yaw]` poses with shape `(B, A, 4)`."""
-        ego_pose = input_data["ego_agent_past"][:, -1, :TRAJECTORY_DIM].unsqueeze(1)
-        neighbor_pose = input_data["neighbor_agents_past"][:, :, -1, :TRAJECTORY_DIM]
-        return torch.cat((ego_pose, neighbor_pose), dim=1)
+    def create_ego_pose(input_data: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Return the current `[x, y, cos_yaw, sin_yaw]` ego pose `(B, 4)`."""
+        return input_data["ego_agent_past"][:, -1, :TRAJECTORY_DIM]
 
     def forward(
         self,
         x: torch.Tensor,
-        x_mask: torch.Tensor,
         input_data: dict[str, torch.Tensor],
         time: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Predict a clean trajectory and the next turn indicator.
+        """Predict the clean ego control and the next turn indicator.
 
         Args:
-            x: Normalized flow-state trajectories with shape `(B, A, T, 4)`.
-            x_mask: Invalid-agent mask with shape `(B, A)`.
+            x: Normalized flow-state control with shape `(B, T, CONTROL_DIM)`.
             input_data: Batched planner input tensors, including traffic-light future.
             time: Flow times with shape `(B,)` or `(B, 1)`.
 
         Returns:
-            Normalized clean trajectories `(B, A, T, 4)` and turn-indicator
-            logits `(B, 3)`.
+            Clean ego control `(B, T, CONTROL_DIM)` and turn-indicator logits `(B, 3)`.
         """
         scene, scene_mask = self.scene_encoder(input_data)
-        agent_pose = self.create_agent_pose(input_data)
-        trajectory = self.trajectory_decoder(
-            x, x_mask, scene, scene_mask, agent_pose, time
-        )
+        ego_pose = self.create_ego_pose(input_data)
+        control = self.trajectory_decoder(x, scene, scene_mask, ego_pose, time)
         turn_indicator_logits = self.turn_indicator_decoder(
             scene,
             scene_mask,
             input_data["turn_indicators"][:, -1],
             input_data["ego_agent_future"][..., :TRAJECTORY_DIM],
         )
-        return trajectory, turn_indicator_logits
+        return control, turn_indicator_logits
+
+    def ego_poses_from_control(
+        self, control: torch.Tensor, input_data: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """Roll normalized ego control out into normalized ego poses.
+
+        Args:
+            control: `(B, T, 2)` ego control in `ControlNormalizer` space.
+            input_data: Batched planner inputs, normalized as the model sees them.
+
+        Returns:
+            `(B, T, 4)` ego poses in the same normalized units as the pose head.
+        """
+        ego_past = input_data["ego_agent_past"]
+        history = denormalize_positions(
+            ego_past[..., :TRAJECTORY_DIM], self.position_scale
+        )
+        initial_speed = ego_past[:, -1, EGO_VELOCITY_INDEX]
+        poses = control_to_waypoints(
+            self.control_normalizer.inverse(control), history, initial_speed
+        )
+        return torch.cat((poses[..., :2] / self.position_scale, poses[..., 2:]), dim=-1)
 
     @torch.no_grad()
     def sample(
@@ -125,41 +154,35 @@ class DiffusionPlanner(nn.Module):
         num_steps: int = 20,
         time_epsilon: float = 1e-5,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Generate trajectories and predict the next turn indicator.
+        """Generate the ego trajectory and predict the next turn indicator.
 
         `input_data` must already contain training ground-truth or inference-time
         heuristic traffic-light future tensors. `initial_noise` has shape
-        `(B, A, T, 4)` and completely determines the initial flow state.
+        `(B, T, CONTROL_DIM)` and completely determines the initial flow state.
+        The returned trajectory is poses `(B, T, 4)`, reconstructed by integrating
+        the sampled control through the unicycle model.
         """
         scene, scene_mask = self.scene_encoder(input_data)
-        agent_pose = self.create_agent_pose(input_data)
-        neighbor_mask = input_data["neighbor_agents_past"].abs().sum(dim=(-2, -1)) == 0
-        ego_mask = torch.zeros(
-            neighbor_mask.shape[0],
-            1,
-            dtype=torch.bool,
-            device=neighbor_mask.device,
-        )
-        agent_mask = torch.cat((ego_mask, neighbor_mask), dim=1)
-        trajectory = sample(
+        ego_pose = self.create_ego_pose(input_data)
+        control = sample(
             x0_model=lambda state, time: self.trajectory_decoder(
-                state, agent_mask, scene, scene_mask, agent_pose, time
+                state, scene, scene_mask, ego_pose, time
             ),
             initial_state=initial_noise,
             num_steps=num_steps,
             epsilon=time_epsilon,
-            project_state=lambda state: state.masked_fill(
-                agent_mask[:, :, None, None], 0.0
-            ),
+            # Nothing to constrain: every channel of the ego control is free, and
+            # there is no agent axis whose padding would have to be held at zero.
+            project_state=lambda state: state,
         )
+        trajectory = self.ego_poses_from_control(control, input_data)
         yaw = trajectory[..., 2:4]
         yaw = yaw / torch.linalg.vector_norm(yaw, dim=-1, keepdim=True).clamp_min(1e-6)
         trajectory = torch.cat((trajectory[..., :2], yaw), dim=-1)
-        trajectory = trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)
         turn_indicator_logits = self.turn_indicator_decoder(
             scene,
             scene_mask,
             input_data["turn_indicators"][:, -1],
-            trajectory[:, 0],
+            trajectory,
         )
         return trajectory, turn_indicator_logits
