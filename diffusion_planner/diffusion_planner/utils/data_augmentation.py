@@ -227,7 +227,7 @@ class StatePerturbation:
 
         B = ego_current_state.shape[0]
         aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
-            abs(ego_current_state[:, EGOSTATE.VX]) < 2.0
+            abs(ego_current_state[:, EGOSTATE.VX]) < 1.0
         )
 
         random_tensor = torch.rand(B, len(self._low)).to(self._device)

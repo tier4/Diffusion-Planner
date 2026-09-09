@@ -15,7 +15,11 @@ import json
 
 from diffusion_planner.config import TrainConfig, build_config, build_parser
 from diffusion_planner.train import model_training
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 
 
 def apply_overrides_json(cfg: TrainConfig, overrides_path: str) -> TrainConfig:
@@ -64,6 +68,14 @@ def main() -> None:
     cfg = apply_overrides_json(cfg, cfg.train_overrides_json)
     cfg.state_normalizer = StateNormalizer.from_json(cfg)
     cfg.observation_normalizer = ObservationNormalizer.from_json(cfg)
+    cfg.control_normalizer = ControlNormalizer(
+        mean=[-0.030108, -0.001032],
+        std=[2.177840, 0.033305],
+    )
+    cfg.neighbor_control_normalizer = ControlNormalizer(
+        mean=[-3.346858, 0.000680],
+        std=[46.111027, 0.295797],
+    )
     model_training(cfg)
 
 

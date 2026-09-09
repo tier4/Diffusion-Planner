@@ -28,7 +28,11 @@ from diffusion_planner.utils.data_augmentation_frenet import (
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.validate_model import (
@@ -143,6 +147,14 @@ def closed_loop_validate(model, args: TrainConfig, epoch: int, out_dir: str) -> 
     was_training = net.training
     net.eval()
 
+    # Ego-prediction source for trajectory_and_control models: True => reconstruct the ego
+    # trajectory from the control (accel, curvature) head via the unicycle model (kinematically
+    # consistent, no lateral slip); False => use the pose head directly. No-op for pure-trajectory
+    # (flag never read) and pure-control (always control) models. Saved here and restored in the
+    # finally so the live training model is left untouched.
+    prev_ego_prediction_from_control = net.decoder._ego_prediction_from_control
+    net.decoder._ego_prediction_from_control = args.closed_loop_ego_prediction_from_control
+
     try:
         run_closed_loop_main(
             model=net,
@@ -166,6 +178,7 @@ def closed_loop_validate(model, args: TrainConfig, epoch: int, out_dir: str) -> 
                 )
 
     finally:
+        net.decoder._ego_prediction_from_control = prev_ego_prediction_from_control
         net.train(was_training)
 
 
@@ -236,7 +249,9 @@ def model_training(args: TrainConfig):
         # Save args
         args_dict = vars(args)
         args_dict = {
-            k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
+            k: v
+            if not isinstance(v, (StateNormalizer, ObservationNormalizer, ControlNormalizer))
+            else v.to_dict()
             for k, v in args_dict.items()
         }
         args_dict["major_version"] = 5

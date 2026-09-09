@@ -49,7 +49,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     )
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
-    use_smoothing_future_trajectory: bool = True
+    use_smoothing_future_trajectory: bool = False
 
     # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---
     # The defaults are the measured configuration: narrowing the offsets to the
@@ -135,6 +135,17 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     hybrid_loss_omega: float = 0.1
     hybrid_loss_window: int = 10
 
+    # Control Loss (used when output_mode includes control)
+    coeff_control_loss: float = cli(
+        "weight for the control loss when output_mode includes control", default=1.0
+    )
+    control_traj_loss_horizon: int = cli(
+        "sliding-window horizon for the control-to-trajectory loss (0 = disabled)", default=80
+    )
+    coeff_control_traj_loss: float = cli(
+        "weight for the control-to-trajectory sliding-window loss", default=0.4
+    )
+
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
@@ -175,6 +186,8 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     state_normalizer: Optional[Any] = field(default=None, repr=False)
     observation_normalizer: Optional[Any] = field(default=None, repr=False)
+    control_normalizer: Optional[Any] = field(default=None, repr=False)
+    neighbor_control_normalizer: Optional[Any] = field(default=None, repr=False)
 
     # ---------------------------------------------------------
     # Deterministic

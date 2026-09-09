@@ -14,6 +14,8 @@ from diffusion_planner.dimensions import (
     POINTS_PER_POLYGON,
 )
 
+from .config_cli import cli
+
 
 @dataclass
 class ModelConfig:
@@ -54,3 +56,11 @@ class ModelConfig:
     hidden_dim: int = 256
     diffusion_model_type: Literal["x_start", "flow_matching"] = "x_start"
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
+
+    # Output head layout: "trajectory" predicts poses only, "control" predicts
+    # (accel, curvature) only, "trajectory_and_control" predicts both.
+    output_mode: Literal["trajectory", "control", "trajectory_and_control"] = cli(
+        "decoder output representation: trajectory (x, y, cos, sin), "
+        "control (accel, curvature), or both",
+        default="trajectory_and_control",
+    )

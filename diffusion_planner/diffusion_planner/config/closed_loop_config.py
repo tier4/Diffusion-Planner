@@ -159,6 +159,15 @@ class ClosedLoopConfig:
     closed_loop_unstick_advance_m: float = 1.5
     closed_loop_unstick_radius_mult: float = 3.0
     closed_loop_unstick_teleport_after: int = 50
+    # trajectory_and_control models: reconstruct the ego trajectory from the control (accel,
+    # curvature) head via the unicycle model (kinematically consistent, no lateral slip) instead of
+    # the pose head. No-op for pure-trajectory / pure-control models.
+    closed_loop_ego_prediction_from_control: bool = cli(
+        "trajectory_and_control models: reconstruct the closed-loop ego trajectory from the "
+        "control (accel, curvature) head via the unicycle model (no lateral slip) instead of "
+        "the pose head. No-op for pure-trajectory / pure-control models.",
+        default=True,
+    )
     closed_loop_draw_every: int = 2
     closed_loop_draw_workers: int = cli("render on this many worker processes", default=4)
     closed_loop_replan_interval: int = 8
