@@ -1185,6 +1185,8 @@ _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
 _GT_PATH_COLOR = "#e69138"
 _GT_DEV_COLOR = "#cc0000"
+_TURN_LAMP_PRED_COLOR = "#e69138"  # amber, like a real turn-signal lamp
+_TURN_LAMP_GT_COLOR = "#ffa726"  # orange -- same family as the pred amber, a shade lighter
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
 _ROAD_BORDER_FLAG_THRESH = 0.5
 _ROAD_BORDER_COORD_EPS_M = 1e-3
@@ -1569,6 +1571,8 @@ def save_step_figure(
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
     gt_deviation_viz: tuple[np.ndarray, np.ndarray, float] | None = None,
+    turn_indicator_pred: int | None = None,
+    turn_indicator_gt: int | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -1583,6 +1587,10 @@ def save_step_figure(
     ``window_xy`` is the recorded-path window the GT-deviation distance was searched over
     (drawn as a thin line); ``nearest_xy`` is the closest point on it, connected to the ego
     with a dashed perpendicular labeled with ``dist_m``.
+
+    ``turn_indicator_pred``/``turn_indicator_gt``: when given, override the HUD's turn-signal
+    reading (``ego.turn_indicators[-1]``, which can lag one step behind a closed-loop
+    caller's freshly-decoded prediction) and add the recorded GT class alongside it.
     """
     from matplotlib.figure import Figure
 
@@ -1748,6 +1756,109 @@ def save_step_figure(
                 wheelbase=agent.wheelbase if is_ego else None,
             )
 
+    def _draw_turn_edge(
+        cx: float,
+        cy: float,
+        heading: float,
+        left_on: bool,
+        right_on: bool,
+        zorder: float,
+        color: str,
+    ) -> None:
+        """Thin colored line along the box's side edge(s) that have an active turn signal,
+        mimicking a real vehicle's blinker more directly than a separate marker would.
+        Left/right are in the box's own frame (heading), not screen left/right. Inactive sides
+        are left untouched -- the plain box outline already reads as "off".
+
+        ``(cx, cy)`` is the REAR-AXLE midpoint (ego convention, same as ``draw_agent_box``'s
+        ``wheelbase`` branch above) -- not the box centroid, so the front/rear extents along
+        the box's own x-axis are asymmetric whenever wheelbase < length.
+
+        Pred (amber) and GT (purple) are drawn with distinct colors, not offset apart, so both
+        stay legible when the live ego and reproducer boxes are close/overlapping without
+        drifting either line off its own box's true edge.
+        """
+        length, width, wheelbase = float(ego.length), float(ego.width), float(ego.wheelbase)
+        half_wid = width / 2.0
+        rear_overhang = (length - wheelbase) / 2.0
+        front_local, rear_local = length - rear_overhang, -rear_overhang
+        fwd = np.array([math.cos(heading), math.sin(heading)])
+        left_dir = np.array([-math.sin(heading), math.cos(heading)])
+        center = np.array([cx, cy])
+        for side_dir, active in ((left_dir, left_on), (-left_dir, right_on)):
+            if not active:
+                continue
+            front_corner = center + fwd * front_local + side_dir * half_wid
+            rear_corner = center + fwd * rear_local + side_dir * half_wid
+            ax.plot(
+                [front_corner[0], rear_corner[0]],
+                [front_corner[1], rear_corner[1]],
+                color=color,
+                lw=2.0,
+                solid_capstyle="round",
+                zorder=zorder,
+            )
+
+    def _draw_turn_fill(
+        cx: float,
+        cy: float,
+        heading: float,
+        left_on: bool,
+        right_on: bool,
+        zorder: float,
+        color: str,
+        alpha: float = 0.5,
+    ) -> None:
+        """Semi-transparent fill over the box's active side HALF (split along its own
+        longitudinal centerline), instead of a hard edge line -- used for the GT box so its
+        outline/label stay untouched and the tint reads as "this half is lit" rather than a
+        line that can visually compete with the amber pred line.
+        """
+        from matplotlib.patches import Polygon
+
+        length, width, wheelbase = float(ego.length), float(ego.width), float(ego.wheelbase)
+        half_wid = width / 2.0
+        rear_overhang = (length - wheelbase) / 2.0
+        front_local, rear_local = length - rear_overhang, -rear_overhang
+        fwd = np.array([math.cos(heading), math.sin(heading)])
+        left_dir = np.array([-math.sin(heading), math.cos(heading)])
+        center = np.array([cx, cy])
+        front_center = center + fwd * front_local
+        rear_center = center + fwd * rear_local
+        for side_dir, active in ((left_dir, left_on), (-left_dir, right_on)):
+            if not active:
+                continue
+            front_side = front_center + side_dir * half_wid
+            rear_side = rear_center + side_dir * half_wid
+            ax.add_patch(
+                Polygon(
+                    np.array([front_center, front_side, rear_side, rear_center]),
+                    closed=True,
+                    facecolor=color,
+                    edgecolor="none",
+                    alpha=alpha,
+                    zorder=zorder,
+                )
+            )
+
+    # 3a-turn) Turn-indicator edge highlight on the LIVE ego box, showing the closed-loop
+    # PREDICTION.
+    pred_cls = (
+        int(turn_indicator_pred)
+        if turn_indicator_pred is not None
+        else (int(ego.turn_indicators[-1]) if ego.turn_indicators is not None else None)
+    )
+    if pred_cls is not None:
+        _draw_turn_edge(
+            ex,
+            ey,
+            float(ego.current_heading),
+            pred_cls == 2,
+            pred_cls == 3,
+            zorder=26,
+            color=_TURN_LAMP_PRED_COLOR,
+        )
+
     # 3a) Hollow reproducer ego (recorded cursor pose in the live-ego frame).
     # Same color as live ego, outline-only, so divergence from the closed-loop ego is visible.
     if reproducer_ego is not None:
@@ -1777,6 +1888,20 @@ def save_step_figure(
             textcoords="offset points",
             zorder=24,
         )
+        # Turn-indicator fill on the reproducer (GT) box, showing the recorded GT class --
+        # kept on the GT box itself rather than overlaid on the live ego, so pred vs GT reads
+        # as two separate boxes each showing their own truth.
+        if turn_indicator_gt is not None:
+            gt_cls = int(turn_indicator_gt)
+            _draw_turn_fill(
+                rx,
+                ry,
+                rh,
+                gt_cls == 2,
+                gt_cls == 3,
+                zorder=25,
+                color=_TURN_LAMP_GT_COLOR,
+            )
 
     # 3a-2) GT-deviation visualization: the recorded-path window this step's deviation was
     # measured against, plus the perpendicular from the live ego to the nearest point on it.
@@ -1857,12 +1982,10 @@ def save_step_figure(
         else float("nan")
     )
 
-    # Ego state readout: speed, steering, current turn-signal class.
+    # Ego state readout: speed, steering. Turn-signal state is shown by the lamp markers
+    # drawn above (section 3a-turn), not as text here.
     ego_speed = float(np.hypot(ego.current_velocity[0], ego.current_velocity[1]))
     ego_speed_kph = ego_speed * 3.6
-    _TI_NAMES = {0: "NONE", 1: "DISABLE", 2: "LEFT", 3: "RIGHT", 4: "KEEP"}
-    ti_cls = int(ego.turn_indicators[-1]) if ego.turn_indicators is not None else 0
-    ti_label = _TI_NAMES.get(ti_cls, f"?{ti_cls}")
     # Display steering in degrees with 1-decimal precision. Under 0.5°
     # the old :+.0f° rounded to "+0°" and was mistakable for radians.
     steer_deg = math.degrees(ego.steering_angle)
@@ -1871,7 +1994,7 @@ def save_step_figure(
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
         f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
         f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
-        f"turn={ti_label}  goal_d={goal_d:.1f} m"
+        f"goal_d={goal_d:.1f} m"
     )
     if title_prefix:
         title = f"{title_prefix}\n{title}"

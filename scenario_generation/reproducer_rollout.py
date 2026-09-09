@@ -1581,6 +1581,8 @@ def _draw_step(
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
     gt_deviation_viz: tuple[np.ndarray, np.ndarray, float] | None = None,
+    turn_indicator_pred: int | None = None,
+    turn_indicator_gt: int | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1602,6 +1604,12 @@ def _draw_step(
     window and nearest point (both already in the live-ego frame, see ``_gt_deviation_m``)
     this step's GT deviation was measured against, drawn as a thin path line plus the
     perpendicular from the live ego to ``nearest_xy``.
+
+    ``turn_indicator_pred``/``turn_indicator_gt``: this step's resolved closed-loop
+    prediction (``s.last_turn_indicator``) and the recorded GT class, passed explicitly
+    because ``np_dict["turn_indicators"]`` is built at the top of the step (before this
+    step's fresh decode), so reading it back out of ``np_dict`` would show last step's
+    value in the HUD.
     """
     from pathlib import Path
 
@@ -1639,6 +1647,8 @@ def _draw_step(
         extra_ego_trajectories=extra_ego_trajectories,
         reproducer_ego=reproducer_ego,
         gt_deviation_viz=gt_deviation_viz,
+        turn_indicator_pred=turn_indicator_pred,
+        turn_indicator_gt=turn_indicator_gt,
     )
 
 
@@ -2044,6 +2054,10 @@ def render_segment(
                             view_half_m=view_half_m,
                             reproducer_ego=repro_xyh,
                             gt_deviation_viz=gt_dev_viz,
+                            turn_indicator_pred=int(s.last_turn_indicator),
+                            turn_indicator_gt=int(
+                                np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
+                            ),
                         )
                     )
             snaps_before = s.snap_count
