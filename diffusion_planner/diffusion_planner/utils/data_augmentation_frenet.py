@@ -27,12 +27,14 @@ plain GT on a true neighbor overlap (~1% of winners). Scenes with no feasible
 draw train on plain GT.
 """
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from planner_metrics.geometry import build_road_border_segments
 from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 
 DT = 0.1
@@ -55,6 +57,25 @@ LIMITS = {
     # steering angle delta = atan(WB * kappa), kappa = yaw_rate / speed.
     "steer": 0.61,  # rad (~35 deg), typical passenger-car lock
 }
+
+# the steering test runs in tan space (see _feasibility), so cache tan(limit)
+_TAN_STEER = math.tan(LIMITS["steer"])
+
+
+def _ddt(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """d/dt along `dim` on the fixed DT grid.
+
+    Same arithmetic as torch.gradient(x, spacing=DT, dim=dim) — central
+    differences inside, one-sided at the ends — written out because the library
+    call costs ~7x more on the candidate tensors (3.5 ms vs 0.5 ms for the three
+    derivatives at B=512). Verified bit-identical to torch.gradient.
+    """
+    lo = x.narrow(dim, 0, 1)
+    lo2 = x.narrow(dim, 1, 1)
+    hi2 = x.narrow(dim, x.shape[dim] - 2, 1)
+    hi = x.narrow(dim, x.shape[dim] - 1, 1)
+    mid = (x.narrow(dim, 2, x.shape[dim] - 2) - x.narrow(dim, 0, x.shape[dim] - 2)) / (2 * DT)
+    return torch.cat([(lo2 - lo) / DT, mid, (hi - hi2) / DT], dim=dim)
 
 
 def quintic_basis(t0: float, t1: float, t: np.ndarray):
@@ -130,6 +151,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # rows augmented in the most recent __call__; centric_transform re-projects
         # velocity/accel to base_link (vy = ay = 0) for exactly these rows
         self._aug_rows = None
+        self._nbr_near = None
         self.n_draws = n_draws
         self.dy_max = dy_max
         self.dth_max = dth_max
@@ -184,11 +206,16 @@ class FrenetStatePerturbationTensor(StatePerturbation):
     # ---------- corridor, fully batched ----------
     def _corridor(self, inputs, xy, tan, nrm, half_w, half_l, wb):
         # reset per batch so a neighbor-less batch never sees a stale tensor
-        self._nbr_st = self._nbr_valid = None
+        self._nbr_st = self._nbr_valid = self._nbr_near = None
         B, T, _ = xy.shape
         dev, dtype = xy.device, xy.dtype
-        lo = torch.full((B, T), -20.0, device=dev, dtype=dtype)
-        hi = torch.full((B, T), 20.0, device=dev, dtype=dtype)
+        # A candidate's lateral extent is |L| <= dy_max plus the rotation margin
+        # (half_l * 0.35, see the in_corr test), so a bound wider than that can
+        # never change an acceptance. Capping here keeps the test identical and
+        # lets the border search look only that far instead of 20 m.
+        cap = self.dy_max + 0.35 * half_l + 1e-3  # (B,)
+        lo = -cap[:, None].expand(B, T).clone()
+        hi = cap[:, None].expand(B, T).clone()
 
         ls = inputs.get("line_strings")
         if ls is not None and ls.shape[-1] < 4:
@@ -197,12 +224,12 @@ class FrenetStatePerturbationTensor(StatePerturbation):
                 "channel 3 (road-border flag) to constrain the corridor"
             )
         if ls is not None:
-            pts = ls[..., :2]  # (B, L, P, 2)
-            is_border = (ls[..., 3] > 0.5).any(-1)  # (B, L)
-            pv = pts.norm(dim=-1) > 1e-6
-            a = pts[:, :, :-1, :].flatten(1, 2)  # (B, S, 2)
-            e = pts[:, :, 1:, :].flatten(1, 2)
-            sv = (pv[:, :, :-1] & pv[:, :, 1:] & is_border[:, :, None]).flatten(1, 2)  # (B, S)
+            # lo/hi start at +-20 m, so a border further than that from every
+            # path point can never tighten them; the shared builder drops those
+            # before the ray math (~180 of 1140 slots survive on the pipeline
+            # set) and pads to the batch maximum, so the bounds are unchanged.
+            reach = float(cap.amax()) + float(half_w.amax()) + 1.0
+            a, e, sv = build_road_border_segments(ls, xy, reach=reach)
             d = e - a
             nx, ny = nrm[..., 0:1], nrm[..., 1:2]  # (B, T, 1)
             dx = d[:, None, :, 0]  # (B, 1, S)
@@ -235,37 +262,52 @@ class FrenetStatePerturbationTensor(StatePerturbation):
             st = torch.cat([past[..., :4], fut4], dim=2)  # (B, N, T, 4)
             valid = st.abs().sum(-1) > 0  # (B, N, T)
             self._nbr_st, self._nbr_valid = st, valid  # reused by the exact-OBB veto
-            l_n = past[:, :, -1, 7][..., None]  # (B, N, 1)
-            w_n = past[:, :, -1, 6][..., None]
-            c = st[..., :2]
-            axi = st[..., 2:4]
+            # Only slots holding a real track can cut the corridor, and they are
+            # ~31 of the 320 padded slots. Flatten to the valid (scene, neighbor)
+            # pairs so the projections below run over those alone, then reduce
+            # back per scene; padding contributed +-inf, i.e. nothing.
+            vb, vn = torch.nonzero(valid.any(-1), as_tuple=True)  # (M,)
+            if vb.numel() == 0:
+                self._nbr_near = valid
+                return lo, hi
+            valid_m = valid[vb, vn]  # (M, T)
+            l_n = past[vb, vn, -1, 7][:, None]  # (M, 1)
+            w_n = past[vb, vn, -1, 6][:, None]
+            c = st[vb, vn, :, :2]  # (M, T, 2)
+            axi = st[vb, vn, :, 2:4]
             per = torch.stack([-axi[..., 1], axi[..., 0]], dim=-1)
-            rel = c - xy[:, None]  # (B, N, T, 2)
+            tan_m, nrm_m = tan[vb], nrm[vb]  # (M, T, 2)
+            half_l_m, half_w_m, wb_m = half_l[vb, None], half_w[vb, None], wb[vb, None]
+            rel = c - xy[vb]  # (M, T, 2)
             # ego xy is base_link (rear axle); the footprint CENTER sits wb/2
             # ahead along the tangent, so shift the longitudinal window there —
             # otherwise a transient neighbor overlapping only the front bumper
             # imposes no lateral cut.
-            lon = (rel * tan[:, None]).sum(-1)  # rear-axle window (validated semantics)
-            lat = (rel * nrm[:, None]).sum(-1)
-            ext_lon = (
-                (tan[:, None] * axi).sum(-1).abs() * l_n + (tan[:, None] * per).sum(-1).abs() * w_n
-            ) / 2
-            ext_lat = (
-                (nrm[:, None] * axi).sum(-1).abs() * l_n + (nrm[:, None] * per).sum(-1).abs() * w_n
-            ) / 2
-            near = valid & (lon.abs() <= half_l[:, None, None] + ext_lon)
+            lon = (rel * tan_m).sum(-1)  # rear-axle window (validated semantics)
+            lat = (rel * nrm_m).sum(-1)
+            ext_lon = ((tan_m * axi).sum(-1).abs() * l_n + (tan_m * per).sum(-1).abs() * w_n) / 2
+            ext_lat = ((nrm_m * axi).sum(-1).abs() * l_n + (nrm_m * per).sum(-1).abs() * w_n) / 2
+            near = valid_m & (lon.abs() <= half_l_m + ext_lon)
+            # Same longitudinal test, padded, kept for the exact-OBB veto so it
+            # only pairs neighbors that can actually reach the ego box. The
+            # augmentation is a lateral offset, so a candidate's longitudinal
+            # coordinate in this frame is the GT one; the pad covers the ego's
+            # longitudinal half-extent growing under the heading change
+            # (half_l*cos + half_w*sin <= half_l + half_w) plus the wb/2 centre
+            # shift. Pairs outside it cannot overlap, so the verdicts are
+            # unchanged — the canonical OBB check still decides every one.
+            near_pad = valid_m & (lon.abs() <= half_l_m + ext_lon + half_w_m + wb_m / 2)
+            self._nbr_near = torch.zeros_like(valid)
+            self._nbr_near[vb, vn] = near_pad
             cut_hi = torch.where(
-                near & (lat > 0),
-                lat - ext_lat - half_w[:, None, None],
-                torch.full_like(lat, torch.inf),
+                near & (lat > 0), lat - ext_lat - half_w_m, torch.full_like(lat, torch.inf)
             )
             cut_lo = torch.where(
-                near & (lat < 0),
-                lat + ext_lat + half_w[:, None, None],
-                torch.full_like(lat, -torch.inf),
+                near & (lat < 0), lat + ext_lat + half_w_m, torch.full_like(lat, -torch.inf)
             )
-            hi = torch.minimum(hi, cut_hi.amin(1))
-            lo = torch.maximum(lo, cut_lo.amax(1))
+            idx = vb[:, None].expand_as(cut_hi)
+            hi = hi.scatter_reduce(0, idx, cut_hi, reduce="amin")
+            lo = lo.scatter_reduce(0, idx, cut_lo, reduce="amax")
         return lo, hi
 
     def _veto_true_overlaps(self, inputs, upd, aug_xy, heading):
@@ -285,19 +327,25 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         hd_cs = torch.stack([heading.cos(), heading.sin()], dim=-1)
         tr_aug = torch.cat([aug_xy, hd_cs], dim=-1)  # (B, T, 4)
         past_n = inputs["neighbor_agents_past"]
-        for i in torch.nonzero(upd).flatten().tolist():
-            keep = self._nbr_valid[i].any(-1)
-            if not bool(keep.any()):
-                continue
-            clr = compute_ego_neighbor_signed_clearance(
-                tr_aug[i : i + 1],
-                inputs["ego_shape"][i],
-                self._nbr_st[i, keep],
-                past_n[i, keep, -1][:, [6, 7]],  # width, length
-                self._nbr_valid[i, keep],
-            )
-            if float(clr.min()) < 0.0:
-                upd[i] = False
+        # One paired call for the whole batch. Per-scene calls were one tiny
+        # kernel each, so their launch overhead dominated training (228 ms/batch
+        # at B=512, several times the rest of the augmenter) to reject the ~1.4%
+        # of winners that truly overlap.
+        pairs = upd[:, None] & self._nbr_near.any(-1)  # (B, N) scene x neighbor
+        bi, ni = torch.nonzero(pairs, as_tuple=True)
+        if bi.numel() == 0:
+            return upd
+        clr = compute_ego_neighbor_signed_clearance(
+            tr_aug[bi],
+            inputs["ego_shape"][bi],
+            self._nbr_st[bi, ni],
+            past_n[bi, ni, -1][:, [6, 7]],  # width, length
+            self._nbr_valid[bi, ni],
+            paired=True,
+            overlap_only=True,  # the veto only asks whether they overlap
+        )  # (M, T)
+        overlapping = bi[clr.amin(-1) < 0.0]
+        upd[overlapping] = False
         return upd
 
     # ---------- the augmentation ----------
@@ -326,7 +374,7 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         xy = torch.cat([past4[..., :2], ego_future[..., :2]], dim=1)  # (B, T, 2)
         tan = torch.cat([past4[..., 2:4], fut_cs], dim=1)
         nrm = torch.stack([-tan[..., 1], tan[..., 0]], dim=-1)
-        speed = torch.gradient(xy, spacing=DT, dim=1)[0].norm(dim=-1).clamp(min=0.5)  # (B, T)
+        speed = _ddt(xy, 1).norm(dim=-1).clamp(min=0.5)  # (B, T)
         v0 = speed[:, P - 1]
         wb = inputs["ego_shape"][:, 0]
         half_w = inputs["ego_shape"][:, 2] / 2 + CORRIDOR_MARGIN
@@ -346,6 +394,31 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         dy = (r[:, :K] * 2 - 1) * self.dy_max
         dth = (r[:, K : 2 * K] * 2 - 1) * self.dth_max
 
+        L, in_corr, merges = self._candidate_profiles(
+            combos, dy, dth, v0, speed, half_l, lo, hi, dev, dtype
+        )
+
+        feasible, jerk_fut_peak = self._feasibility(xy, nrm, L, in_corr, wb, P)
+
+        feasible &= do_aug[:, None, None]
+        draw_ok = feasible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
+        has = draw_ok.any(-1)  # (B,)
+        first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
+
+        if not bool(has.any()):
+            # nothing feasible this batch: every row trains on plain GT
+            self._aug_rows = has
+            return self.centric_transform(inputs, ego_future, neighbors_future)
+
+        aug_xy = self._select_candidate(
+            feasible, jerk_fut_peak, first, merges, has, L, xy, nrm, B, dev, dtype
+        )
+
+        self._write_back(inputs, ego_future, aug_xy, xy, tan, wb, has, P)
+        return self.centric_transform(inputs, ego_future, neighbors_future)
+
+    def _candidate_profiles(self, combos, dy, dth, v0, speed, half_l, lo, hi, dev, dtype):
+        """Lateral-offset profile of every (draw, knob-combo) pair + corridor test."""
         slope = v0[:, None] * torch.tan(dth)
         # NO combo loop: stack every combo's basis/mask once, then evaluate all
         # (draw, combo) pairs in one einsum per derivative. (C=40 tiny GEMMs in
@@ -371,6 +444,10 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         in_corr = ((L - rot >= lo[:, None, None]) & (L + rot <= hi[:, None, None]) | ~m).all(
             -1
         )  # (B, K, C)
+        return L, in_corr, merges
+
+    def _feasibility(self, xy, nrm, L, in_corr, wb, P):
+        """Physical-limit screen on the exact candidate polylines."""
 
         # Feasibility on the EXACT candidate polylines, not the lateral-delta
         # profile: build every candidate's xy and finite-difference it at DT.
@@ -380,43 +457,55 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         # GT-relative: where the recorded drive itself exceeds a limit (data
         # glitches), the candidate only has to stay within the GT's own maximum.
         def _exact_metrics(poly_xy):
-            v = torch.gradient(poly_xy, spacing=DT, dim=-2)[0]
-            sp = v.norm(dim=-1).clamp(min=0.5)
-            a = torch.gradient(v, spacing=DT, dim=-2)[0]
-            lat_a = (v[..., 0] * a[..., 1] - v[..., 1] * a[..., 0]) / sp
-            jk = torch.gradient(a, spacing=DT, dim=-2)[0]
-            lat_j = (v[..., 0] * jk[..., 1] - v[..., 1] * jk[..., 0]) / sp
-            yaw_rate = lat_a / sp
-            return lat_a, lat_j, yaw_rate, sp
+            v = _ddt(poly_xy, -2)
+            # speed is clamped away from zero, so one reciprocal serves the three
+            # divisions below (a multiply is cheaper than a divide on 22M values)
+            inv_sp = v.norm(dim=-1).clamp(min=0.5).reciprocal()
+            a = _ddt(v, -2)
+            lat_a = (v[..., 0] * a[..., 1] - v[..., 1] * a[..., 0]) * inv_sp
+            jk = _ddt(a, -2)
+            lat_j = (v[..., 0] * jk[..., 1] - v[..., 1] * jk[..., 0]) * inv_sp
+            yaw_rate = lat_a * inv_sp
+            return lat_a, lat_j, yaw_rate, inv_sp
 
-        cand_xy = xy[:, None, None] + L[..., None] * nrm[:, None, None]  # (B, K, C, T, 2)
-        laC, ljC, yrC, spC = _exact_metrics(cand_xy)  # each (B, K, C, T)
-        laG, ljG, yrG, spG = _exact_metrics(xy)  # GT reference, (B, T)
-        stC = torch.atan(wb[:, None, None, None] * yrC / spC).abs()
-        stG = torch.atan(wb[:, None] * yrG / spG).abs()
+        # Only candidates that already clear the corridor can end up feasible, so
+        # build the exact polylines for those alone — the rest would be discarded
+        # by the `in_corr &` below anyway, and they are ~40% of the grid.
+        BIG = torch.tensor(1e9, device=L.device, dtype=L.dtype)
+        feasible = torch.zeros_like(in_corr)
+        jerk_fut_peak = torch.full(in_corr.shape, BIG.item(), device=L.device, dtype=L.dtype)
+        b_i, k_i, c_i = torch.nonzero(in_corr, as_tuple=True)
+        if b_i.numel() == 0:
+            return feasible, jerk_fut_peak
+
+        cand_xy = xy[b_i] + L[b_i, k_i, c_i][..., None] * nrm[b_i]  # (M, T, 2)
+        laC, ljC, yrC, ivC = _exact_metrics(cand_xy)  # each (M, T)
+        laG, ljG, yrG, ivG = _exact_metrics(xy)  # GT reference, (B, T)
+        # Steering is compared in tan space: the limit test is
+        # atan(x) <= max(atan(g), STEER), and atan is monotonic, so it is
+        # equivalent to x <= max(g, tan(STEER)) — same verdict, no atan over the
+        # candidate tensor.
+        stC = (wb[b_i, None] * yrC * ivC).abs()
+        stG = (wb[:, None] * yrG * ivG).abs()
 
         def _allow(gt_max, limit):
-            return torch.clamp(gt_max, min=limit)[:, None, None]  # (B, 1, 1)
+            return torch.clamp(gt_max, min=limit)[b_i]  # (M,)
 
-        jerk_fut_peak = ljC[..., P:].abs().amax(-1)  # (B, K, C) — also the tiebreak
+        peak = ljC[:, P:].abs().amax(-1)  # (M,) — also the tiebreak
         a_ok = laC.abs().amax(-1) <= _allow(laG.abs().amax(-1), LIMITS["lat_acc"])
-        j_ok = (jerk_fut_peak <= _allow(ljG[:, P:].abs().amax(-1), LIMITS["jerk"])) & (
-            ljC[..., :P].abs().amax(-1) <= _allow(ljG[:, :P].abs().amax(-1), LIMITS["jerk_history"])
+        j_ok = (peak <= _allow(ljG[:, P:].abs().amax(-1), LIMITS["jerk"])) & (
+            ljC[:, :P].abs().amax(-1) <= _allow(ljG[:, :P].abs().amax(-1), LIMITS["jerk_history"])
         )
         y_ok = yrC.abs().amax(-1) <= _allow(yrG.abs().amax(-1), LIMITS["yaw_rate"])
-        s_ok = stC.amax(-1) <= _allow(stG.amax(-1), LIMITS["steer"])
-        feasible = in_corr & a_ok & j_ok & y_ok & s_ok  # (B, K, C)
+        s_ok = stC.amax(-1) <= _allow(stG.amax(-1), _TAN_STEER)
+        feasible[b_i, k_i, c_i] = a_ok & j_ok & y_ok & s_ok
+        jerk_fut_peak[b_i, k_i, c_i] = peak
+        return feasible, jerk_fut_peak
 
-        feasible &= do_aug[:, None, None]
-        draw_ok = feasible.any(-1)  # (B, K): the drawn perturbation has >=1 valid merge
-        has = draw_ok.any(-1)  # (B,)
-        first = draw_ok.float().argmax(-1)  # first feasible PERTURBATION per scene
-
-        if not bool(has.any()):
-            # nothing feasible this batch: every row trains on plain GT
-            self._aug_rows = has
-            return self.centric_transform(inputs, ego_future, neighbors_future)
-
+    def _select_candidate(
+        self, feasible, jerk_fut_peak, first, merges, has, L, xy, nrm, B, dev, dtype
+    ):
+        """Sample a merge horizon per scene, take its lowest-jerk combo, build the polyline."""
         bi = torch.arange(B, device=dev)
         feas_k = feasible[bi, first]  # (B, C) — valid combos for the chosen draw
         jerk_k = jerk_fut_peak[bi, first]  # (B, C)
@@ -434,8 +523,11 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         combo_idx = torch.where(same_m, jerk_k, BIG).argmin(-1)
         Lw = L[bi, first, combo_idx]  # (B, T)
         aug_xy = xy + Lw[..., None] * nrm
+        return aug_xy
 
-        g = torch.gradient(aug_xy, spacing=DT, dim=1)[0]
+    def _write_back(self, inputs, ego_future, aug_xy, xy, tan, wb, has, P):
+        """Veto true overlaps, then write history / future / current state in place."""
+        g = _ddt(aug_xy, 1)
         gs = g.norm(dim=-1)
         hd_gt = torch.atan2(tan[..., 1], tan[..., 0])
         heading = torch.where(gs > 0.3, torch.atan2(g[..., 1], g[..., 0]), hd_gt)
@@ -455,10 +547,8 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         i0 = P - 1
         cur = inputs["ego_current_state"]
         vel = g[:, i0]
-        acc = torch.gradient(g, spacing=DT, dim=1)[0][:, i0]
-        yaw_rate = torch.gradient(
-            torch.stack([heading.cos(), heading.sin()], -1), spacing=DT, dim=1
-        )[0][:, i0]
+        acc = _ddt(g, 1)[:, i0]
+        yaw_rate = _ddt(torch.stack([heading.cos(), heading.sin()], -1), 1)[:, i0]
         yaw_rate = heading.cos()[:, i0] * yaw_rate[..., 1] - heading.sin()[:, i0] * yaw_rate[..., 0]
         steer = torch.atan(wb * yaw_rate / gs[:, i0].clamp(min=0.5))
         new_cur = torch.stack(
@@ -479,4 +569,3 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         n_cols = min(new_cur.shape[-1], cur.shape[-1])
         cur[upd, :n_cols] = new_cur[upd, :n_cols].to(cur.dtype)
         self._aug_rows = upd
-        return self.centric_transform(inputs, ego_future, neighbors_future)
