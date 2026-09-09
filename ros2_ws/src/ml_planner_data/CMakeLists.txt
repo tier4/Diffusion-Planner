@@ -10,6 +10,9 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake_auto REQUIRED)
+# Ubuntu's oneTBB package provides an official CMake config, while the legacy
+# module injected by mrt_cmake_modules expects the removed tbb_stddef.h header.
+find_package(TBB CONFIG REQUIRED)
 ament_auto_find_build_dependencies()
 
 # Non-ament dependencies
