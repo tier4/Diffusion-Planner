@@ -55,7 +55,7 @@ def augmenter_from_args(args):
             augment_prob=args.augment_prob,
             num_refine=args.num_refine,
             device=args.device,
-            ego_past_noise_std=past_noise_std_for(args),
+            ego_past_noise_std=args.ego_past_noise_std_effective,
             use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
         )
     raise ValueError(f"unknown augment_type {args.augment_type!r}; expected one of {AUGMENT_TYPES}")

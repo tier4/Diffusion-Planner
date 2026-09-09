@@ -76,6 +76,10 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "augment_type=quintic supports scale only.",
         default="scale",
     )
+    # Written by resolve_history_noise at startup, before args.json is serialized, so
+    # the saved config records the value the run actually applied. NOT a CLI flag --
+    # it is an output. None means no history perturbation was applied at all.
+    ego_past_noise_std_effective: Optional[float] = None
     use_smoothing_future_trajectory: bool = True
 
     # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---

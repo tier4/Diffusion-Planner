@@ -159,13 +159,21 @@ Note the std means different things per mode. `0.1` is ±10% of a traversal spee
 jitter, so that is the value to pass; and because the jitter is unclamped, 31.7% of
 draws exceed the std and 4.5% exceed twice it (measured over 200k draws).
 
+**In `jitter` mode the bent history is not re-checked against the footprint
+constraint.** The corridor bounds certify the clean polyline, and the jitter is applied
+afterwards on purpose, so that enabling it cannot change which scenes are accepted. The
+consequence: on a drive that passed a parked vehicle closely, the resulting history can
+place the ego footprint inside that vehicle **in the past**. The future, the training
+target and t=0 are unaffected; what the encoder reads is. Keep the magnitude small
+relative to the clearances in the data.
+
 Passing a number applies it to whichever augmenter is selected, so the flag stays
 sweepable. Note that a `quintic`-vs-`frenet` A/B on it is not measuring the same
 perturbation — quintic also rescales the current velocity and acceleration.
 
 #### Frenet-only options
 
-Every flag below is **off by default**; with all of them at their defaults the
+Every **frenet corridor** flag below is off by default; with those three at their defaults the
 augmenter reproduces the previous behaviour exactly.
 
 ```bash
@@ -185,15 +193,22 @@ augmenter reproduces the previous behaviour exactly.
   survives is blocked geometrically and re-rolling does not move geometry.
 
 - **`--frenet_min_clearance C`** (default 0.0). Metres of exact footprint clearance
-  required from every recorded vehicle, on top of the corridor margin, **at the
-  timesteps the perturbation actually moved the ego**. It is deliberately not a global
-  floor: a candidate coincides with the recorded drive outside its merge window, so a
-  floor applied over the whole horizon would reject scenes for the *recording's* own
-  clearance — which deletes exactly the tight-squeeze scenes the augmentation is most
-  valuable on. True overlap is still rejected everywhere, floor or no floor, so a
-  candidate can be accepted while passing closer than `C` at a timestep where it is
-  bit-identical to ground truth. Applies to the vehicle cut only; the road-edge margin
-  is unaffected. At `0.0` the check is overlap-only, which is the historical behaviour.
+  required from every recorded vehicle. It acts in **two** places, and they are not
+  windowed the same way — worth knowing before choosing a value:
+
+  | where | scope | effect |
+  |---|---|---|
+  | corridor half-width | **whole merge window** | the neighbour cut uses `max(0.10, C)`, so a `C` above the 0.10 corridor margin narrows the band a candidate may occupy at every masked timestep |
+  | exact footprint veto | **only the timesteps the perturbation moved the ego** | a candidate can be accepted while passing closer than `C` at a timestep where it is bit-identical to ground truth |
+
+  The veto's windowing exists because a candidate coincides with the recorded drive
+  outside its merge window, so vetoing there would reject scenes for the *recording's*
+  own clearance. The corridor cut is **not** windowed, so a large `C` can still drop a
+  tight-squeeze scene from augmentation via the corridor rather than the veto. Keep `C`
+  modest for that reason, and note `C ≤ 0.10` leaves the corridor untouched entirely and
+  only tightens the veto. True overlap is rejected everywhere regardless. Applies to the
+  vehicle cut only; the road-edge margin is unaffected. At `0.0` the check is
+  overlap-only, which is the historical behaviour.
 
 - **`--frenet_toward_parked_prob P`** (default 0.0). The corridor is symmetric, so a
   scene that passes a parked vehicle is as likely to be nudged away from it as toward

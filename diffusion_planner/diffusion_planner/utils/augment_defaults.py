@@ -47,41 +47,45 @@ def past_noise_std_for(args) -> float:
 
 
 def resolve_history_noise(args) -> None:
-    """Write the EFFECTIVE history-noise value onto ``args``, in place.
+    """Record the EFFECTIVE history-noise value on ``args``, without destroying the flag.
 
-    Call this once at startup, **before the config is serialized**. Both trainers write
-    ``args.json`` before they build the augmenter, so without this a stock frenet run
-    records ``ego_past_noise_std: null`` while training with 0.1 -- a saved experiment
-    configuration that is not the configuration used, and one whose meaning depends on
-    a future code default rather than on the file. That is the defect the augmenter
-    factory exists to prevent, one level up.
+    Call once at startup, before the config is serialized. Both trainers write
+    ``args.json`` before building the augmenter, so a sentinel that only resolved
+    inside the factory was recorded as null while the run trained with a number.
 
-    Also the only place the bridge rejection can live. The check needs to distinguish
-    "the user passed a value" from "unset", which is exactly the information this
-    function destroys, so it has to run first.
+    The resolved value goes to ``ego_past_noise_std_effective`` and the raw flag is left
+    exactly as the user gave it. Overwriting the flag in place looked simpler but broke
+    round-tripping: ``run_lifelong_r2lpl_rounds`` reads a base run's ``args.json`` and
+    re-feeds the recorded fields as explicit flags, so a frenet run recording 0.1 and a
+    later round overriding ``augment_type`` to bridge died at startup on a flag the user
+    never passed.
 
-    Idempotent: a second call is a no-op, since the value is then already a float.
+    ``None`` in the effective field means "no history perturbation is applied" -- either
+    augmentation is off entirely, or the augmenter does not support the knob.
+
+    Also the only place the mode and bridge rejections can live: both need to tell "the
+    user passed a value" from "unset", which is what resolution would destroy.
+
+    Idempotent.
 
     Raises:
-        ValueError: if ``--ego_past_noise_std`` was passed with an ``augment_type``
-            that cannot honour it.
+        ValueError: on ``jitter`` with a non-frenet augmenter, or on an explicit
+            ``--ego_past_noise_std`` with ``augment_type=bridge``.
     """
     if args.ego_past_noise_mode == "jitter" and args.augment_type != "frenet":
         raise ValueError(
             f"--ego_past_noise_mode jitter is only implemented for augment_type=frenet, "
             f"got {args.augment_type}; drop the flag or pick augment_type=frenet"
         )
-    if args.augment_type == "bridge":
-        if args.ego_past_noise_std is not None:
-            raise ValueError(
-                "--ego_past_noise_std is not supported by augment_type=bridge "
-                "(the bridge augmenter does not perturb the ego history); "
-                "drop the flag or pick another augment_type"
-            )
-        # Left as None deliberately, NOT resolved to a number. Bridge applies no history
-        # perturbation, so None is the honest record: the knob does not apply, rather
-        # than applying at 0. Writing 0.0 here also breaks the second call -- the factory
-        # calls this defensively, and a resolved 0.0 is indistinguishable from a user
-        # passing 0.0, so the rejection above would fire on every ordinary bridge run.
+    if args.augment_type == "bridge" and args.ego_past_noise_std is not None:
+        raise ValueError(
+            "--ego_past_noise_std is not supported by augment_type=bridge "
+            "(the bridge augmenter does not perturb the ego history); "
+            "drop the flag or pick another augment_type"
+        )
+    # Nothing is applied when augmentation is off or the augmenter has no such knob, so
+    # the effective value stays None rather than recording a number no run ever used.
+    if not args.use_data_augment or args.augment_type == "bridge":
+        args.ego_past_noise_std_effective = None
         return
-    args.ego_past_noise_std = past_noise_std_for(args)
+    args.ego_past_noise_std_effective = past_noise_std_for(args)

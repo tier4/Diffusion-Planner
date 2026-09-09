@@ -591,6 +591,16 @@ class FrenetStatePerturbationTensor(StatePerturbation):
         Returns:
             (B, N) bool.
         """
+        # P arrives as the EGO history length. Everything below indexes the NEIGHBOUR
+        # tensors with it, which is only correct while the two time dimensions agree --
+        # previously an implicit assumption. Assert it rather than silently reading the
+        # wrong column if a dataset ever carries a different neighbour history length.
+        if past.shape[2] != P:
+            raise ValueError(
+                f"neighbour history length {past.shape[2]} != ego history length {P}; "
+                "the parked-vehicle test indexes neighbour tensors with the ego length"
+            )
+
         stopped = valid[:, :, P - 1] & (past[:, :, P - 1, 4:6].norm(dim=-1) < PARKED_SPEED)
         # invalid future slots contribute 0 displacement: absence of a track is not
         # evidence of motion, and those slots cut no corridor anyway
@@ -1166,6 +1176,6 @@ def frenet_augmenter_from_args(args) -> "FrenetStatePerturbationTensor":
         recovery_rounds=int(args.frenet_recovery_rounds),
         toward_parked_prob=float(args.frenet_toward_parked_prob),
         min_clearance=float(args.frenet_min_clearance),
-        ego_past_noise_std=past_noise_std_for(args),
+        ego_past_noise_std=args.ego_past_noise_std_effective,
         ego_past_noise_mode=str(args.ego_past_noise_mode),
     )

@@ -45,8 +45,12 @@ def _args(**over):
         frenet_min_clearance=0.0,
         ego_past_noise_std=0.0,
         ego_past_noise_mode="scale",
+        use_data_augment=True,
     )
     base.update(over)
+    # resolve_history_noise normally writes this before anything reads it; these
+    # namespace stand-ins bypass the trainers, so mirror the flag unless overridden.
+    base.setdefault("ego_past_noise_std_effective", base["ego_past_noise_std"])
     return SimpleNamespace(**base)
 
 
@@ -370,12 +374,14 @@ def test_saved_config_equals_applied_config(augment_type):
     from diffusion_planner.utils.augmenter_factory import augmenter_from_args
 
     args = _resolved_config("--augment_type", augment_type)
-    saved = json.loads(json.dumps({"ego_past_noise_std": args.ego_past_noise_std}))
+    saved = json.loads(
+        json.dumps({"ego_past_noise_std_effective": args.ego_past_noise_std_effective})
+    )
     applied = _past_noise(augmenter_from_args(args))
 
-    assert saved["ego_past_noise_std"] is not None, "args.json would record null"
-    assert saved["ego_past_noise_std"] == applied, (
-        f"{augment_type}: args.json records {saved['ego_past_noise_std']} "
+    assert saved["ego_past_noise_std_effective"] is not None, "args.json would record null"
+    assert saved["ego_past_noise_std_effective"] == applied, (
+        f"{augment_type}: args.json records {saved['ego_past_noise_std_effective']} "
         f"but the augmenter trains with {applied}"
     )
 
@@ -385,13 +391,13 @@ def test_the_resolved_value_survives_a_json_round_trip():
     import json
 
     args = _resolved_config("--augment_type", "frenet")
-    assert json.loads(json.dumps(args.ego_past_noise_std)) == 0.1
+    assert json.loads(json.dumps(args.ego_past_noise_std_effective)) == 0.1
 
 
 def test_an_explicit_zero_is_recorded_as_zero_not_as_unset():
     """The reproducibility escape hatch has to be visible in the saved config."""
     args = _resolved_config("--augment_type", "frenet", "--ego_past_noise_std", "0")
-    assert args.ego_past_noise_std == 0.0
+    assert args.ego_past_noise_std_effective == 0.0
 
 
 @pytest.mark.parametrize(
@@ -409,7 +415,7 @@ def test_resolving_twice_changes_nothing(augment_type, expected):
     args = _resolved_config("--augment_type", augment_type)
     resolve_history_noise(args)
     resolve_history_noise(args)
-    assert args.ego_past_noise_std == expected
+    assert args.ego_past_noise_std_effective == expected
 
 
 @pytest.mark.parametrize("augment_type", ["quintic", "frenet", "bridge"])
@@ -431,4 +437,4 @@ def test_bridge_still_rejects_the_flag_at_resolve_time():
         _resolved_config("--augment_type", "bridge", "--ego_past_noise_std", "0.4")
     # an unset bridge value stays None: the knob does not apply to bridge, and writing a
     # number here is what made the resolver's second call reject every bridge run
-    assert _resolved_config("--augment_type", "bridge").ego_past_noise_std is None
+    assert _resolved_config("--augment_type", "bridge").ego_past_noise_std_effective is None

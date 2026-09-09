@@ -2405,6 +2405,7 @@ def _base_train_invocation(
         "augment_type",
         "num_refine",
         "ego_past_noise_std",
+        "ego_past_noise_mode",
         "use_smoothing_future_trajectory",
         "use_data_augment",
         "seed",
