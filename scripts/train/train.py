@@ -7,12 +7,12 @@ from pathlib import Path
 
 import hydra
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
-import wandb
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.loss import compute_diffusion_planner_loss
 from diffusion_planner.utils.checkpoint import load_checkpoint, save_checkpoint
@@ -138,7 +138,6 @@ def main(config: DictConfig) -> None:
                 time_epsilon=float(config.training.time_epsilon),
                 noise_scale=float(config.training.noise_scale),
                 ego_loss_weight=float(config.training.ego_loss_weight),
-                neighbor_loss_weight=float(config.training.neighbor_loss_weight),
                 turn_indicator_loss_weight=float(
                     config.training.turn_indicator_loss_weight
                 ),

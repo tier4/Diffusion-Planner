@@ -38,9 +38,8 @@ def run_inference(
         for key, value in normalized_frame.items()
     }
     generator = torch.Generator(device=torch_device).manual_seed(seed)
-    neighbor_count = normalized_frame["neighbor_agents_past"].shape[0]
     initial_noise = noise_scale * torch.randn(
-        (1, neighbor_count + 1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+        (1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
         device=torch_device,
         dtype=torch.float32,
         generator=generator,
@@ -58,7 +57,10 @@ def run_inference(
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)
     elapsed = perf_counter() - start
-    prediction_array = prediction[0].detach().float().cpu().numpy()
+    # The model predicts the ego only, but the visualizer still indexes a leading
+    # agent axis (`[0]` ego, `[1:]` neighbors), so keep a singleton axis: the
+    # neighbor slice comes out empty and its traces are skipped.
+    prediction_array = prediction[0:1].detach().float().cpu().numpy()
     prediction_array = normalizer.denormalize_trajectory(prediction_array)
     return prediction_array.astype(np.float32, copy=False), elapsed
 
@@ -77,6 +79,8 @@ def run_onnx_inference(
     )
     neighbor_count = normalized_frame["neighbor_agents_past"].shape[0]
     generator = torch.Generator().manual_seed(seed)
+    # The ONNX graph keeps the agent axis the deployed node expects, so the noise
+    # it takes is still shaped per agent even though only the ego is predicted.
     initial_noise = torch.randn(
         (1, neighbor_count + 1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
         generator=generator,

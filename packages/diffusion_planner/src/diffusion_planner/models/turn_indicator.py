@@ -67,7 +67,7 @@ class TurnIndicatorDecoder(nn.Module):
         current = turn_indicator.to(torch.long).clamp(0, 3)
         current_one_hot = F.one_hot(current, num_classes=4).to(scene.dtype)
         current_token = self.turn_indicator_encoder(current_one_hot).unsqueeze(1)
-        trajectory_token = self.trajectory_encoder(trajectory.unsqueeze(1))
+        trajectory_token = self.trajectory_encoder(trajectory).unsqueeze(1)
         trajectory_context, _ = self.trajectory_scene_attention(
             trajectory_token,
             scene,
