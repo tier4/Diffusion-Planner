@@ -60,14 +60,17 @@ def tdigest_dict_from_values(values: np.ndarray) -> dict | None:
 def merged_percentile(digest_dicts: list[dict], percentile: float) -> float:
     """Merge serialized digests and return an approximate percentile in ``[0, 100]``.
 
-    Order-dependent: t-digest merging is not associative, so a caller pooling shards must feed
-    them in a stable order.
+    Pools every centroid and inserts them in ascending mean, so the answer depends on the
+    set of digests and not the order they arrive in. Inserting whole digests one after
+    another does not: t-digest merging is not associative, so under DDP the metric would
+    shift with which rank produced which shard.
     """
-    if not digest_dicts:
+    centroids = sorted((c["m"], c["c"]) for d in digest_dicts for c in d["centroids"])
+    if not centroids:
         return float("inf")
     with _deterministic_rng():
         digest = TDigest()
-        for d in digest_dicts:
-            digest.update_from_dict(d)
+        for mean, count in centroids:
+            digest.update(mean, count)
         digest.compress()
         return float(digest.percentile(float(percentile)))
