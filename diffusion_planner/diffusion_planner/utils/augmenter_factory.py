@@ -12,10 +12,7 @@ falling through to quintic — the parser's ``Literal`` already constrains the f
 and a programmatic caller deserves the error rather than a silent substitution.
 """
 
-from diffusion_planner.utils.augment_defaults import (
-    past_noise_std_for,
-    resolve_history_noise,
-)
+from diffusion_planner.utils.augment_defaults import resolve_history_noise
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
