@@ -70,6 +70,7 @@ def model_training(args):
         args_dict = {
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
+            if not k.startswith("_")
         }
         args_dict["major_version"] = 4
 

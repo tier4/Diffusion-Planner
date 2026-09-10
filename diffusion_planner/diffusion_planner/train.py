@@ -237,7 +237,11 @@ def model_training(args: TrainConfig):
         args_dict = vars(args)
         args_dict = {
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
+            # Config objects may contain private runtime caches.  In particular,
+            # ClosedLoopConfig stores the parsed pass-condition YAML here; it is
+            # not part of the JSON config and is not JSON serializable.
             for k, v in args_dict.items()
+            if not k.startswith("_")
         }
         args_dict["major_version"] = 5
 
