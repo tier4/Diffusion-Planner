@@ -43,6 +43,7 @@ _ABS_COLUMNS = [
     ("Route completion (%)", "mean_route_completion"),
     ("Pass rate (%)", "pass_rate"),
     ("GT deviation (m)", "mean_gt_deviation_m"),
+    ("Centerline deviation (m)", "mean_centerline_dist_m"),
     ("Fails", "fail_count"),
     ("Curb hits", "total_curb_hits"),
     ("Snaps", "total_snaps"),
@@ -59,6 +60,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Route completion (%)", "mean_route_completion"),
     ("Pass rate (%)", "pass_rate"),
     ("GT deviation (m)", "mean_gt_deviation_m"),
+    ("Centerline deviation (m)", "mean_centerline_dist_m"),
     ("Curb hits / 1k steps", "total_curb_hits"),
     ("Snaps / 1k steps", "total_snaps"),
     ("Red light / 1k steps", "total_red_light_violations"),
@@ -109,6 +111,9 @@ def _abs_value(source_key: str, summary: dict):
         # ``inf`` (nothing measured) becomes a blank cell, not a number to be misread.
         dev = summary.get("mean_gt_deviation_m")
         return float(dev) if dev is not None and math.isfinite(float(dev)) else None
+    if source_key == "mean_centerline_dist_m":
+        dev = summary.get("mean_centerline_dist_m")
+        return float(dev) if dev is not None and math.isfinite(float(dev)) else None
 
     # Int fields.
     if source_key in ("n_segments", "total_steps"):
@@ -127,6 +132,7 @@ def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
         "mean_route_completion",
         "pass_rate",
         "mean_gt_deviation_m",  # already a per-step mean
+        "mean_centerline_dist_m",  # already a per-step mean
     ):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
@@ -165,12 +171,23 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
             dev_num += float(dev) * steps
             dev_steps += steps
 
+    # Step-weighted mean for mean_centerline_dist_m
+    cl_num = 0.0
+    cl_steps = 0
+    for v in values:
+        cl = v.get("mean_centerline_dist_m", None)
+        steps = int(v.get("total_steps", 0) or 0)
+        if cl is not None and math.isfinite(cl) and steps > 0:
+            cl_num += float(cl) * steps
+            cl_steps += steps
+
     agg: dict = {
         "n_groups": len(values),
         "n_segments": n_segments,
         "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
         "mean_route_completion": _segment_weighted_mean(values, "mean_route_completion"),
         "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
+        "mean_centerline_dist_m": (cl_num / cl_steps) if cl_steps else float("inf"),
         "pass_rate": _segment_weighted_mean(values, "pass_rate"),
         "fail_count": sum(int(s.get("fail_count", 0) or 0) for s in values),
     }

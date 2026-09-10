@@ -333,6 +333,8 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"reproducer snap_count={repro['snap_count']} expand_count={repro['expand_count']} "
         f"repeat_step_rate={repro['repeat_step_rate']:.4f}  "
         f"terminated={summary['terminated_counts']}",
+        f"mean gt_deviation={summary['mean_gt_deviation_m']:.3f} m  "
+        f"mean centerline_deviation={summary['mean_centerline_dist_m']:.3f} m",
     ]
     return lines
 
@@ -367,6 +369,17 @@ def aggregate(
     )
     dev_den = sum(
         r["n_steps_run"] for r in rows if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+    # centerline-deviation pooled the same way as gt-deviation: step-weighted mean.
+    cl_num = sum(
+        r["mean_centerline_dist_m"] * r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
+    )
+    cl_den = sum(
+        r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
     )
 
     term_counts: dict[str, int] = {}
@@ -432,6 +445,7 @@ def aggregate(
         "total_steps": total_steps,
         "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
         "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
+        "mean_centerline_dist_m": float(cl_num / cl_den) if cl_den else float("inf"),
         "n_segments_diverged": n_seg_diverged,
         "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "object": obj,
