@@ -36,6 +36,7 @@ from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.inference_compile import mark_inference_step
 from scenario_generation.metrics import (
+    score_centerline_step,
     score_object_step,
     score_object_step_batched,
     score_red_light_step,
@@ -494,6 +495,13 @@ class _SegState:
     # on an unstick teleport (see ``_advance_step``), so a teleport's environment jump is never
     # itself counted as a transition.
     turn_indicator_prev_scored_gt: int = 0
+    # Running sum/count of per-step route-centerline distance (m), for the
+    # mean_centerline_dist_m metric: mean nearest-segment distance from the live ego to
+    # the route_lanes/lanes centerline polyline (see ``score_centerline_step``). Same
+    # graded-signal treatment as gt_dev_sum/gt_dev_count, just measured against the map
+    # instead of the recorded ego trajectory.
+    centerline_dev_sum: float = 0.0
+    centerline_dev_count: int = 0
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -821,7 +829,8 @@ def _score_into(
     object_col: bool | None = None,
     object_rear_col: bool | None = None,
 ):
-    """Score this step's object / road-border / red-light metrics into the segment state.
+    """Score this step's object / road-border / centerline / red-light metrics into the
+    segment state.
 
     When ``object_cl`` / ``object_col`` / ``object_rear_col`` are provided (batched path
     already scored neighbors), reuse them instead of calling ``score_object_step`` again.
@@ -839,6 +848,10 @@ def _score_into(
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
+            cl_dev = score_centerline_step(np_dict, device=device)
+            if np.isfinite(cl_dev["centerline_dist_m"]):
+                s.centerline_dev_sum += cl_dev["centerline_dist_m"]
+                s.centerline_dev_count += 1
             red = score_red_light_step(
                 np_dict,
                 device=device,
@@ -1196,6 +1209,9 @@ def _finalize(s: _SegState) -> dict:
         "route_completion": route_completion,
         "mean_gt_deviation_m": float(s.gt_dev_sum / s.gt_dev_count)
         if s.gt_dev_count
+        else float("inf"),
+        "mean_centerline_dist_m": float(s.centerline_dev_sum / s.centerline_dev_count)
+        if s.centerline_dev_count
         else float("inf"),
         "progress_m": progress_m,
         "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),

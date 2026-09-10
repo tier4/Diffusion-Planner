@@ -28,7 +28,11 @@ from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 
 # ``aggregate`` reduces these from row keys this path never writes, and a mean over no samples
 # is 0.0 -- which reads as a measured total failure. Dropped, and named instead.
-_UNMEASURED_SUMMARY_KEYS = ("mean_route_completion", "mean_gt_deviation_m")
+_UNMEASURED_SUMMARY_KEYS = (
+    "mean_route_completion",
+    "mean_gt_deviation_m",
+    "mean_centerline_dist_m",
+)
 _UNMEASURED_MARKER_KEY = "unmeasured_keys"
 
 # The suite's own names for its scenarios. Copied rather than read, so what a name means stays
