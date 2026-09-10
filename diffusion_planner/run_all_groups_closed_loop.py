@@ -13,8 +13,10 @@ from __future__ import annotations
 import json
 import math
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from diffusion_planner.config.closed_loop_config import (
@@ -25,10 +27,14 @@ from diffusion_planner.config.config_cli import build_config, build_parser, reso
 from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
+from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
 )
 from tag_toolkit.store import TagStore
+
+if TYPE_CHECKING:
+    from scenario_generation.closed_loop_evaluation import FullRouteClosedLoopEvaluation
 
 
 def resolve_closed_loop_inputs(
@@ -103,7 +109,7 @@ def resolve_closed_loop_inputs(
     return entries
 
 
-def run_one_group(
+def build_group_evaluator(
     model,
     model_args,
     npz_root_list: list[str],
@@ -113,9 +119,10 @@ def run_one_group(
     render_media: bool = True,
     pass_condition: ClosedLoopPassCondition | None = None,
     tag_store=None,
-) -> None:
-    """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
-    under ``out_dir``. Wandb logging is left to the caller.
+) -> "FullRouteClosedLoopEvaluation":
+    """Build (but don't run) the evaluator for one group, so a coordinator can schedule
+    every group's jobs together (see ``assign_jobs``). Rank 0 writes the multi-root
+    ``_npz_roots.json`` sidecar here but does *not* barrier; the caller barriers once.
 
     ``mode`` is passed explicitly so it doesn't have to be inferred from ``out_dir``
     (a json_name containing ``__noobj`` would silently misfer).
@@ -144,13 +151,11 @@ def run_one_group(
         npz_root_arg = out_dir / "_npz_roots.json"
         if ddp_rank == 0:
             npz_root_arg.write_text(json.dumps([str(p) for p in npz_root_list]))
-        if ddp_world_size > 1:
-            torch.distributed.barrier()
         npz_root_arg = str(npz_root_arg)
     else:
         npz_root_arg = npz_root_list[0]
 
-    evaluator = FullRouteClosedLoopEvaluation(
+    return FullRouteClosedLoopEvaluation(
         model,
         model_args,
         ClosedLoopEvalConfig(
@@ -192,7 +197,6 @@ def run_one_group(
             fps=float(cfg.closed_loop_fps),
             verbose=False,
             profile=cfg.closed_loop_profile,
-            max_jobs=None,
             pass_condition=pass_condition,
         ),
         npz_root_arg,
@@ -202,7 +206,15 @@ def run_one_group(
         tag_store=tag_store,
     )
 
-    evaluator.run_distributed()
+
+def assign_jobs(evaluators: dict, rank: int, world_size: int) -> dict:
+    """Shard every group's jobs in one pass, avoiding the idle ranks and per-group barriers
+    that sharding each group separately causes. Returns ``{group key: jobs for this rank}``."""
+    jobs = [(key, job) for key, ev in evaluators.items() for job in ev.discover_jobs()]
+    mine: dict[str, list] = {key: [] for key in evaluators}
+    for key, job in shard_items(jobs, rank, world_size):
+        mine[key].append(job)
+    return mine
 
 
 def _make_summary_key(json_name: str, group_name: str) -> str:
@@ -228,7 +240,9 @@ def _load_group_results(
     """
     out_dir = Path(out_dir)
     summaries: dict[str, dict] = {}
-    for summary_file in out_dir.rglob("summary.json"):
+    # Sorted: the aggregates in ``_write_groups_manifest`` sum floats, so filesystem order
+    # would make ``groups.json`` differ in the last bits between identical runs.
+    for summary_file in sorted(out_dir.rglob("summary.json")):
         key = "/".join(summary_file.parent.relative_to(out_dir).parts)
         try:
             summary = json.loads(summary_file.read_text())
@@ -339,10 +353,9 @@ def run_closed_loop_main(
         <out_root>/<json_name>/<group_name>          (objects mode)
         <out_root>/<json_name>__noobj/<group_name>   (noobj mode)
 
-    Multi-GPU: launched via ``torch.distributed.run``. DDP rank is read from ``RANK``.
-    All ranks evaluate all groups; per-group ``run_distributed()`` does its own barrier
-    + rank-0 merge, so by the time we reach aggregation every rank's shards are flushed.
-    Rank 0 then writes the manifest and logs to wandb.
+    Multi-GPU: launched via ``torch.distributed.run``, DDP rank read from ``RANK``. Jobs
+    are packed across ranks in one pass and a single barrier precedes rank-0's merge, so
+    ``elapsed_sec`` is the whole evaluation's wall time (per-group is unmeasurable).
 
     Writes:
         - ``<out_root>/groups.json`` (root aggregate)
@@ -379,6 +392,7 @@ def run_closed_loop_main(
         render_media = cfg.render_media
 
     written_json_labels: set[str] = set()
+    evaluators: dict[str, "FullRouteClosedLoopEvaluation"] = {}
     for entry in entries:
         json_name, mode, groups = entry["name"], entry["mode"], entry["groups"]
         json_label = json_name if mode == "objects" else f"{json_name}__noobj"
@@ -392,7 +406,7 @@ def run_closed_loop_main(
             summary_key = _make_summary_key(json_label, group_name)
             # Per-group condition (falls back to the loaded default if not overridden in YAML).
             group_condition = pass_conditions.get_condition(group_name)
-            run_one_group(
+            evaluators[summary_key] = build_group_evaluator(
                 model,
                 model_args,
                 npz_paths,
@@ -406,7 +420,25 @@ def run_closed_loop_main(
 
         written_json_labels.add(json_label)
 
-    # rank-0 reads the per-group summaries; run_one_group already barriered + merged internally.
+    world_size = ddp.get_world_size()
+    t0 = time.perf_counter()
+    if world_size > 1:
+        torch.distributed.barrier()  # rank 0's ``_npz_roots.json`` sidecars are now visible
+
+    mine = assign_jobs(evaluators, ddp.get_rank(), world_size)
+
+    # An empty list still writes this rank's (empty) shard files, keeping
+    # ``collect_ddp_shards``' all-ranks-present check able to spot a crashed rank.
+    partials = {key: ev.run(mine[key]) for key, ev in evaluators.items()}
+
+    if world_size > 1:
+        torch.distributed.barrier()  # every rank has written its shard
+        if ddp.get_rank() == 0:
+            elapsed_sec = time.perf_counter() - t0  # per-group wall time is not measurable
+            for key, ev in evaluators.items():
+                if partials[key].get("ddp_shard"):
+                    ev.merge_ddp_shards(world_size, elapsed_sec=elapsed_sec)
+
     if ddp.get_rank() == 0:
         all_summaries = _load_group_results(out_root)
         all_group_names = sorted(all_summaries.keys())

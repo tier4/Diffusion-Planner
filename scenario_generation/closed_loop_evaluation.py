@@ -3,9 +3,8 @@
 ``ClosedLoopEvaluation`` defines the shared workflow:
 
   1. ``discover_jobs`` — what to evaluate (routes, bags, classification dates, …)
-  2. ``shard_jobs`` — DDP round-robin assignment (override for custom sharding)
-  3. ``run_job`` — rollout for one job unit (segments via ``render_segment``, etc.)
-  4. ``build_summary`` / ``write_artifacts`` / ``print_summary`` — serialize + terminal output
+  2. ``run_job`` — rollout for one job unit (segments via ``render_segment``, etc.)
+  3. ``build_summary`` / ``write_artifacts`` / ``print_summary`` — serialize + terminal output
 
 ``FullRouteClosedLoopEvaluation`` is the segment-wise evaluator (``segments.jsonl``) over every
 route under an npz_root.
@@ -20,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
@@ -140,7 +138,6 @@ class ClosedLoopEvalConfig:
     fps: float
     verbose: bool
     profile: bool
-    max_jobs: int | None
     # Pass-condition for per-segment pass/fail + aggregated pass stats in the summary.
     # ``None`` disables pass evaluation entirely — the segment row never gains a ``passed``
     # field and the summary never carries ``pass_count`` / ``pass_rate`` / ``pass_condition``.
@@ -200,13 +197,11 @@ class ClosedLoopEvaluation(ABC):
             return load_onnx_model(model_path, device)
         return load_model(model_path, device)
 
-    def run(self) -> dict:
-        """Discover jobs, optionally shard for DDP, execute, summarize, and persist."""
+    def run(self, jobs: list[ClosedLoopJob]) -> dict:
+        """Execute ``jobs`` (chosen by the caller), summarize, and persist. An empty list
+        is valid: it still writes this rank's empty shard files, which is what keeps
+        ``collect_ddp_shards``' all-ranks-present check useful."""
         t0 = time.perf_counter()
-        jobs = self.discover_jobs()
-        if self.config.max_jobs is not None:
-            jobs = jobs[: self.config.max_jobs]
-        jobs = self.shard_jobs(jobs)
         if self.config.verbose and jobs and self.ddp_world_size > 1:
             print(
                 f"DDP rank {self.ddp_rank}/{self.ddp_world_size}: "
@@ -228,36 +223,6 @@ class ClosedLoopEvaluation(ABC):
         if self.config.verbose:
             self.print_summary(summary)
         return summary
-
-    def run_distributed(self) -> dict:
-        """Run evaluation; under DDP, barrier then rank-0 ``merge_ddp_shards``.
-
-        Requires an initialized process group whenever ``ddp_world_size > 1``: skipping the
-        barrier (e.g. because torch.distributed was never initialized) would let rank-0 start
-        merging before every other rank has finished writing its ``segments_{rank}.jsonl``
-        shard, silently producing a summary built from a partial/incomplete set of ranks.
-        """
-        t0 = time.perf_counter()
-        partial = self.run()
-        if self.ddp_world_size <= 1:
-            return partial
-        import torch.distributed as dist
-
-        if not (dist.is_available() and dist.is_initialized()):
-            raise RuntimeError(
-                f"closed-loop run_distributed: ddp_world_size={self.ddp_world_size} > 1 but "
-                "torch.distributed is not initialized -- refusing to merge without a barrier "
-                "to guarantee every rank finished writing its shard first."
-            )
-        dist.barrier()
-        if self.ddp_rank != 0:
-            return {}
-        if partial.get("ddp_shard"):
-            return self.merge_ddp_shards(self.ddp_world_size, elapsed_sec=time.perf_counter() - t0)
-        return partial
-
-    def shard_jobs(self, jobs: list[ClosedLoopJob]) -> list[ClosedLoopJob]:
-        return shard_items(jobs, self.ddp_rank, self.ddp_world_size)
 
     def initial_job_extras(self) -> dict[str, Any]:
         return {}

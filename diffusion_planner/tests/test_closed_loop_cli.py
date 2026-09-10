@@ -185,15 +185,31 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
 
     captured = []
 
-    def fake_run_one_group(model, model_args, npz_paths, out_dir, cfg, **kwargs):
-        captured.append({"mode": kwargs.get("mode"), "out_dir": str(out_dir)})
+    class FakeEvaluator:
+        ddp_world_size = 1
 
-    monkeypatch.setattr(mod, "run_one_group", fake_run_one_group)
+        def discover_jobs(self):
+            return []
+
+        def run(self, jobs=None):
+            return {}
+
+    def fake_build_group_evaluator(model, model_args, npz_paths, out_dir, cfg, **kwargs):
+        captured.append({"mode": kwargs.get("mode"), "out_dir": str(out_dir)})
+        return FakeEvaluator()
+
+    monkeypatch.setattr(mod, "build_group_evaluator", fake_build_group_evaluator)
+    # The JSON lists placeholder npz paths; this test is about mode propagation, not tagging.
+    monkeypatch.setattr(mod, "TagStore", SimpleNamespace(from_source=lambda _source: None))
+    # ``cfg`` here is a SimpleNamespace, not the real dataclass ``save_config`` expects.
+    monkeypatch.setattr(mod, "save_config", lambda *a, **k: None)
     monkeypatch.setattr(mod, "log_closed_loop_to_wandb", lambda *a, **k: None)
 
     cfg = SimpleNamespace(
         closed_loop_npz_root=[str(json_path), str(json_path)],
         closed_loop_object_modes=["objects", "noobj"],
+        pass_conditions=SimpleNamespace(get_condition=lambda _name: None),
+        closed_loop_max_steps=None,
         closed_loop_near_miss_thresh=0.5,
         closed_loop_search_radius=1.5,
         closed_loop_warmup_steps=0,
@@ -232,3 +248,32 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         "objects": str(tmp_path / "sites" / "alpha"),
         "noobj": str(tmp_path / "sites__noobj" / "alpha"),
     }
+
+
+def _assign(spec, world_size):
+    """Per-rank assignment for a ``{group: [job_id]}`` spec: [{group: [job ids]}, ...]."""
+    from types import SimpleNamespace
+
+    mod = _load_run_all_groups()
+    evaluators = {
+        group: SimpleNamespace(
+            discover_jobs=lambda ids=ids: [SimpleNamespace(job_id=i) for i in ids]
+        )
+        for group, ids in spec.items()
+    }
+    return [
+        {g: [j.job_id for j in v] for g, v in mod.assign_jobs(evaluators, r, world_size).items()}
+        for r in range(world_size)
+    ]
+
+
+def test_jobs_are_scheduled_across_groups_exactly_once():
+    """Every job runs on exactly one rank, and the 1-route group no longer idles the
+    other three the way per-group sharding did."""
+    spec = {"wide": [f"w{i}" for i in range(9)], "sparse": ["s0"]}
+    shards = _assign(spec, 4)
+
+    for group, ids in spec.items():
+        assert sorted(i for s in shards for i in s[group]) == sorted(ids)
+    per_rank = [sum(len(v) for v in s.values()) for s in shards]
+    assert min(per_rank) >= 2, f"a rank was left nearly idle: {per_rank}"
