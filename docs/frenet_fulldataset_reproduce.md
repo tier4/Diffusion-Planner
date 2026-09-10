@@ -103,13 +103,19 @@ this branch will.**
 
 ## Rebuilding on top of newer augmenter work
 
-If you rebuild on a branch that adds `--ego_past_noise_std` support for frenet,
-pass `--ego_past_noise_std 0` explicitly. The per-augmenter default for frenet
-became `0.1` there, while the augmenter class default stayed `0.0`, so a stock
-`--augment_type frenet` command trains a different distribution than the one
-here — it perturbs the rewritten history on effectively every augmented scene.
-Beware also that constructing the augmenter directly in a test or probe picks up
-the class default and therefore does NOT exercise what the CLI does.
+Later augmenter work adds opt-in knobs (history-noise magnitude and mode, a
+clearance floor, veto-recovery rounds, a toward-parked draw). All of them are
+inert at their defaults: measured over 20,480 randomly sampled scenes with
+identical seeds, a stock run reproduces the unconstrained-bounds baseline with
+zero differing futures and zero augmentation-mask flips -- on the same harness
+that resolves the 0.137% pre-shrink difference described above. No extra flags
+are needed to rebuild against it.
+
+One caveat if you write your own harness: resolve the per-augmenter default the
+way the trainer does rather than reading the augmenter class's own default. The
+two are deliberately kept in agreement now, but a probe that constructs the
+augmenter directly is testing the constructor, not the configuration a run
+actually uses.
 
 ## Things that will bite you
 
