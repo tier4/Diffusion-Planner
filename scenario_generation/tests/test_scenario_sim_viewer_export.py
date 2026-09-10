@@ -56,6 +56,7 @@ def _row() -> dict:
         "object": dict(clearance),
         "road_border": dict(clearance),
         "red_light_violation": {"steps": 0, "count": 0, "measured": False},
+        "deviation_collision": {"thresh_m": 2.0, "steps": 0, "count": 0},
         # inf is the in-band "no braking event" value the rollout writes.
         "strong_brake": {
             "thresh_mps2": -2.5,

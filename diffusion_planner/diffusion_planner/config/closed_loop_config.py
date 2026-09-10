@@ -145,6 +145,12 @@ class ClosedLoopConfig:
     closed_loop_seg_len: int = 100000
     # ClosedLoopEvalConfig
     closed_loop_fps: int = 10
+    closed_loop_profile: bool = cli(
+        "print + persist a per-stage timing breakdown (route load, model inference, "
+        "render wait, score/advance, video encode) to <out_dir>/timing_report.txt "
+        "after each group",
+        default=True,
+    )
     # RolloutParams
     closed_loop_near_miss_thresh: float = 0.5
     closed_loop_search_radius: float = 1.5
@@ -155,14 +161,18 @@ class ClosedLoopConfig:
     closed_loop_unstick_teleport_after: int = 50
     closed_loop_draw_every: int = 2
     closed_loop_draw_workers: int = cli("render on this many worker processes", default=4)
-    closed_loop_replan_interval: int = 1
-    closed_loop_tracker_mode: str = "mpc"
+    closed_loop_replan_interval: int = 8
+    closed_loop_tracker_mode: str = "perfect"
     closed_loop_neighbor_history_mode: str = "recorded"
     closed_loop_yaw_gate: bool = True
     closed_loop_strong_brake_mps2: float = -2.5
     closed_loop_abort_deviation_m: float = 50.0
     closed_loop_abort_after: int = 30
     closed_loop_abort_max_snaps: int = 0
+    # Object collisions that happened while the live ego was more than this far off the
+    # recorded GT path at that same step are reported separately as "deviation_collision"
+    # (a breakdown of object.collision_count, not a replacement for it).
+    closed_loop_deviation_collision_thresh_m: float = 2.0
     closed_loop_goal_mode: str = "segment"
     closed_loop_title_prefix: str | None = None
     closed_loop_distance_label_offset_m: float = 1.2

@@ -39,7 +39,11 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     num_workers: int = 8
     pin_mem: bool = True
 
-    use_data_augment: bool = True
+    use_data_augment: bool = cli(
+        "apply the --augment_type augmenter during training. False trains on the "
+        "recorded states only.",
+        default=True,
+    )
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge", "frenet"] = cli(
         "data augmentation method: quintic (default) = fixed-offset quintic bridge; "
@@ -48,7 +52,34 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default="quintic",
     )
     num_refine: int = 20
-    ego_past_noise_std: float = 0.1
+    ego_past_noise_std: Optional[float] = cli(
+        "std of the single per-scene factor scaling an augmented row's ego history, "
+        "drawn from N(1, std) and clamped to +-2 std. Unset resolves per augmenter: "
+        "quintic 0.1 and frenet 0.0, matching tier4-main for both. Frenet is off by default because it already rewrites the past kinematically, so this would scale a "
+        "synthesised history rather than a recorded one; pass a number to enable it. "
+        "Passing a number applies it to "
+        "whichever augmenter is selected. WHAT IT SCALES DIFFERS BY "
+        "AUGMENTER: quintic scales the RECORDED history AND the current velocity and "
+        "acceleration; frenet scales the history it rewrote from the perturbed polyline "
+        "and leaves ego_current_state bit-identical -- so a quintic-vs-frenet A/B on "
+        "this flag is not measuring the same perturbation. augment_type=bridge does not "
+        "support it and rejects the flag rather than ignoring it.",
+        default=None,
+    )
+    ego_past_noise_mode: Literal["scale", "jitter"] = cli(
+        "which history perturbation --ego_past_noise_std drives, for augment_type=frenet. "
+        "scale (default) = one multiplicative factor on the whole rewritten history, so "
+        "the track keeps its shape and is traversed at the wrong speed; the std is "
+        "dimensionless and clamped to +-2 std. jitter = a smooth lateral bend of the "
+        "track, so its SHAPE is wrong; the std is in METRES at the oldest history sample "
+        "and is not clamped. The two are mutually exclusive -- exactly one runs. "
+        "augment_type=quintic supports scale only.",
+        default="scale",
+    )
+    # Written by resolve_history_noise at startup, before args.json is serialized, so
+    # the saved config records the value the run actually applied. NOT a CLI flag --
+    # it is an output. None means no history perturbation was applied at all.
+    ego_past_noise_std_effective: Optional[float] = None
     use_smoothing_future_trajectory: bool = True
 
     # --- frenet augmentation knobs (ignored unless augment_type=frenet) ---
@@ -71,6 +102,29 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         "frenet: initial lateral curvature, as a fraction of the value a quintic "
         "naturally takes for the drawn offset and horizon.",
         default_factory=lambda: [0.0, -0.5, 0.5, -1.0, 1.0],
+    )
+    frenet_toward_parked_prob: float = cli(
+        "frenet: fraction of scenes where a PARKED vehicle bounds the corridor far enough "
+        "ahead that the avoidance is still in front of the ego, whose nudges are mirrored "
+        "to point AT that vehicle and the largest feasible one is taken. Makes the t=0 "
+        "state a harder avoidance than the recording's. 0 (default) leaves the uniform "
+        "draw untouched.",
+        default=0.0,
+    )
+    frenet_min_clearance: float = cli(
+        "frenet: exact footprint clearance (m) required from every recorded neighbour, "
+        "on top of the corridor margin, AT THE TIMESTEPS THE PERTURBATION MOVED THE EGO "
+        "-- not a global floor, since a candidate coincides with the recording outside "
+        "its merge window and a global floor would reject scenes for the recording's own "
+        "clearance. True overlap is rejected everywhere regardless. Applies to the "
+        "neighbour cut only, never the road edge. 0 (default) keeps the overlap-only veto.",
+        default=0.0,
+    )
+    frenet_recovery_rounds: int = cli(
+        "frenet: rounds of re-selection allowed after a candidate is vetoed for truly "
+        "overlapping a recorded neighbour. Each round burns the losing draw and tries "
+        "the next one. 0 (default) leaves a vetoed scene on plain ground truth.",
+        default=0,
     )
     frenet_ranked_temp_s: float = cli(
         "frenet: time constant (s) of the merge-horizon sampling; smaller favours "
@@ -95,7 +149,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     # Training Parameters
     # ---------------------------------------------------------
-    seed: int = 3407
+    seed: int = cli(
+        "seed for model init, data order and augmentation draws. Vary it to measure the "
+        "run-to-run noise floor: training is otherwise deterministic, so two runs at the "
+        "same seed produce identical weights and cannot serve as a control.",
+        default=3407,
+    )
     train_epochs: int = cli("total training epochs", default=80)
     save_utd: int = cli("checkpoint save cadence in epochs", default=10)
     learning_rate: float = 1e-4

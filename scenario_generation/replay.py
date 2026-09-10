@@ -65,6 +65,9 @@ matplotlib.use("Agg")
 import numpy as np
 import torch
 
+from planner_metrics.geometry import (
+    point_inside_any_lane_polygon,
+)
 from planner_metrics.vehicle_collision import obb_corners
 
 # Live per-step lane / border / centerline scoring. Imports are module-
@@ -91,6 +94,10 @@ from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
     _obb_collides,
     _obb_corners,
+)
+from scenario_generation.metrics.road_border import (
+    _ego_inside_road_border_corridor,
+    _ego_intersects_border_segments,
 )
 from scenario_generation.render_pool import render_pool
 from scenario_generation.route import Route
@@ -1176,6 +1183,8 @@ _LANE_BORDER_COLOR = "#888888"
 _ROAD_BORDER_COLOR = "#dd2222"
 _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
+_GT_PATH_COLOR = "#e69138"
+_GT_DEV_COLOR = "#cc0000"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
 _ROAD_BORDER_FLAG_THRESH = 0.5
 _ROAD_BORDER_COORD_EPS_M = 1e-3
@@ -1461,7 +1470,13 @@ def _ego_nearest_moving_npc(
 
 
 def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """Road-border distance from the shared reward metric."""
+    """Road-border distance from the shared reward metric.
+
+    Signed by lane containment when ``map_data.lanes`` is non-empty: positive while
+    ``ego`` is inside some lane polygon, negative once it has crossed outside --
+    matches ``scenario_generation.metrics.road_border.score_road_border_step``'s
+    convention, so this render label agrees with the value logged to rollout.jsonl.
+    """
     if ego is None:
         return None
     if map_data is None or map_data.line_strings is None:
@@ -1508,6 +1523,32 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
     rb_dist = float(per_ts_min[0, 0].item())
     if not math.isfinite(rb_dist):
         return None
+    border_p1 = torch.from_numpy(border_xy[:, :-1].reshape(-1, 2)[valid_pair.reshape(-1)])
+    border_p2 = torch.from_numpy(border_xy[:, 1:].reshape(-1, 2)[valid_pair.reshape(-1)])
+    if _ego_intersects_border_segments(
+        border_p1,
+        border_p2,
+        ego_shape,
+        ego_pose=ego_traj[0, 0],
+    ):
+        rb_dist = 0.0
+    lanes = np.asarray(map_data.lanes, dtype=np.float32) if map_data.lanes is not None else None
+    if lanes is not None and lanes.size > 0:
+        pt = torch.tensor(
+            [float(ego.current_position[0]), float(ego.current_position[1])], dtype=torch.float32
+        )
+        lane_inside = point_inside_any_lane_polygon(pt, torch.from_numpy(lanes))
+        if rb_dist != 0.0 and not lane_inside:
+            # ``line_strings`` are in world coordinates here, while the
+            # corridor helper intentionally works in the ego-local frame.
+            dx = border_xy - np.asarray(ego.current_position, dtype=np.float32)
+            c, s = math.cos(h), math.sin(h)
+            local_border = line_strings.copy()
+            local_border[..., 0] = dx[..., 0] * c + dx[..., 1] * s
+            local_border[..., 1] = -dx[..., 0] * s + dx[..., 1] * c
+            border_inside = _ego_inside_road_border_corridor(torch.from_numpy(local_border))
+            if not border_inside:
+                rb_dist = -rb_dist
     return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
 
@@ -1527,6 +1568,7 @@ def save_step_figure(
     metrics: dict | None = None,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
+    gt_deviation_viz: tuple[np.ndarray, np.ndarray, float] | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -1535,6 +1577,12 @@ def save_step_figure(
 
     ``reproducer_ego``: optional ``(x, y, heading)`` in the live-ego frame for the
     recorded cursor ego, drawn as a hollow outline in ``_EGO_COLOR``.
+
+    ``gt_deviation_viz``: optional ``(window_xy, nearest_xy, dist_m)``, all already in the
+    live-ego frame (same convention as ``reproducer_ego`` -- no further transform here).
+    ``window_xy`` is the recorded-path window the GT-deviation distance was searched over
+    (drawn as a thin line); ``nearest_xy`` is the closest point on it, connected to the ego
+    with a dashed perpendicular labeled with ``dist_m``.
     """
     from matplotlib.figure import Figure
 
@@ -1729,6 +1777,31 @@ def save_step_figure(
             textcoords="offset points",
             zorder=24,
         )
+
+    # 3a-2) GT-deviation visualization: the recorded-path window this step's deviation was
+    # measured against, plus the perpendicular from the live ego to the nearest point on it.
+    if gt_deviation_viz is not None:
+        window_xy, nearest_xy, dist_m = gt_deviation_viz
+        if window_xy is not None and len(window_xy) >= 2:
+            ax.plot(
+                window_xy[:, 0],
+                window_xy[:, 1],
+                "-",
+                color=_GT_PATH_COLOR,
+                lw=1.3,
+                alpha=0.55,
+                zorder=6,
+            )
+        if nearest_xy is not None:
+            nx, ny = float(nearest_xy[0]), float(nearest_xy[1])
+            ax.plot([ex, nx], [ey, ny], "--", color=_GT_DEV_COLOR, lw=1.5, zorder=22)
+            ax.annotate(
+                f"{float(dist_m):.2f} m",
+                ((ex + nx) / 2, (ey + ny) / 2),
+                fontsize=7,
+                color=_GT_DEV_COLOR,
+                zorder=24,
+            )
 
     # 3b) Extra ego-frame trajectories (e.g. GT vs model output side by side).
     # Each entry: (traj[T, >=4] with x, y, cos, sin in the CURRENT ego frame,

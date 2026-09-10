@@ -8,6 +8,45 @@ from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_tr
 TIME_INTERVAL = 0.1
 
 
+def pose_to_cos_sin(x, pad=None):
+    """Widen ``(x, y, heading)`` to the canonical ``(x, y, cos, sin)``, padding kept.
+
+    Thin wrapper over the repo's canonical ``train_epoch.heading_to_cos_sin`` (also
+    idempotent on already-4-col input) that additionally re-zeroes padded rows: a
+    padded slot must not acquire the heading ``cos(0) = 1`` on the way through.
+
+    ``pad`` defaults to the usual all-zero-row test. Pass it explicitly where that
+    test is wrong — an ego history's t=0 sample is legitimately the origin with
+    heading 0 in its own frame, and is not padding.
+    """
+    if x.shape[-1] >= 4:
+        return x
+    # imported inside the function, not at module scope: train_epoch imports this
+    # module, so a top-level import would close the cycle.
+    from diffusion_planner.train_epoch import heading_to_cos_sin
+
+    if pad is None:
+        pad = torch.sum(torch.ne(x, 0), dim=-1) == 0
+    out = heading_to_cos_sin(x)
+    out[pad] = 0.0
+    return out
+
+
+def cos_sin_to_heading(x):
+    """Narrow a trajectory to the canonical 3-col ``(x, y, heading)`` layout.
+
+    The inverse of ``train_epoch.heading_to_cos_sin`` and, like it, idempotent: a
+    ``(..., 3)`` input that already carries a heading is returned unchanged. The
+    augmenters interpolate and transform a HEADING (they normalize angles and take
+    differences), so a 4-col ``(x, y, cos, sin)`` future — what scene-gen and the
+    offline tools emit — is narrowed on the way in rather than silently read as if
+    col 2 were an angle.
+    """
+    if x.shape[-1] < 4:
+        return x
+    return torch.cat([x[..., :2], torch.atan2(x[..., 3], x[..., 2])[..., None]], dim=-1)
+
+
 def vector_transform(vector, transform_mat, bias=None):
     """
     vector: (B, ..., 2)
@@ -187,6 +226,13 @@ class StatePerturbation:
         ).to(device=device)  # shape (B, N+1)
 
     def __call__(self, inputs, ego_future, neighbors_future):
+        # Both fields have two layouts in the wild and this augmenter reads a heading
+        # angle out of the future (quintic BCs) and a heading VECTOR out of the goal
+        # pose (cols 2:4 are rotated). Canonicalize both here; no-op at the canonical
+        # widths, so nothing changes for the training loop that already converts.
+        ego_future = cos_sin_to_heading(ego_future)
+        inputs["goal_pose"] = pose_to_cos_sin(inputs["goal_pose"])
+
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
         # Interpolate future trajectory

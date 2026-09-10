@@ -3,9 +3,8 @@
 ``ClosedLoopEvaluation`` defines the shared workflow:
 
   1. ``discover_jobs`` — what to evaluate (routes, bags, classification dates, …)
-  2. ``shard_jobs`` — DDP round-robin assignment (override for custom sharding)
-  3. ``run_job`` — rollout for one job unit (segments via ``render_segment``, etc.)
-  4. ``build_summary`` / ``write_artifacts`` / ``print_summary`` — serialize + terminal output
+  2. ``run_job`` — rollout for one job unit (segments via ``render_segment``, etc.)
+  3. ``build_summary`` / ``write_artifacts`` / ``print_summary`` — serialize + terminal output
 
 ``FullRouteClosedLoopEvaluation`` is the segment-wise evaluator (``segments.jsonl``) over every
 route under an npz_root.
@@ -20,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
@@ -87,6 +85,13 @@ class RolloutParams:
     window: tuple[int, int] | None
     max_steps: int | None
     timeline_progress_mode: str
+    # A collision counts as "deviation collision" (reported alongside, not instead of,
+    # object.collision_count) when the live ego was more than this far off the recorded
+    # GT path at that same step. See ``reproducer_rollout.deviation_collision_block``.
+    deviation_collision_thresh_m: float
+    # Metrics for the optional post-rollout trajectory-colormap PNGs.  An empty tuple keeps
+    # the generic evaluator's historical behavior (the CLI caller opts in explicitly).
+    colormap_metrics: tuple[str, ...]
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -120,6 +125,7 @@ class RolloutParams:
             "window": self.window,
             "max_steps": self.max_steps,
             "timeline_progress_mode": self.timeline_progress_mode,
+            "deviation_collision_thresh_m": self.deviation_collision_thresh_m,
         }
 
 
@@ -132,7 +138,6 @@ class ClosedLoopEvalConfig:
     fps: float
     verbose: bool
     profile: bool
-    max_jobs: int | None
     # Pass-condition for per-segment pass/fail + aggregated pass stats in the summary.
     # ``None`` disables pass evaluation entirely — the segment row never gains a ``passed``
     # field and the summary never carries ``pass_count`` / ``pass_rate`` / ``pass_condition``.
@@ -192,13 +197,11 @@ class ClosedLoopEvaluation(ABC):
             return load_onnx_model(model_path, device)
         return load_model(model_path, device)
 
-    def run(self) -> dict:
-        """Discover jobs, optionally shard for DDP, execute, summarize, and persist."""
+    def run(self, jobs: list[ClosedLoopJob]) -> dict:
+        """Execute ``jobs`` (chosen by the caller), summarize, and persist. An empty list
+        is valid: it still writes this rank's empty shard files, which is what keeps
+        ``collect_ddp_shards``' all-ranks-present check useful."""
         t0 = time.perf_counter()
-        jobs = self.discover_jobs()
-        if self.config.max_jobs is not None:
-            jobs = jobs[: self.config.max_jobs]
-        jobs = self.shard_jobs(jobs)
         if self.config.verbose and jobs and self.ddp_world_size > 1:
             print(
                 f"DDP rank {self.ddp_rank}/{self.ddp_world_size}: "
@@ -220,36 +223,6 @@ class ClosedLoopEvaluation(ABC):
         if self.config.verbose:
             self.print_summary(summary)
         return summary
-
-    def run_distributed(self) -> dict:
-        """Run evaluation; under DDP, barrier then rank-0 ``merge_ddp_shards``.
-
-        Requires an initialized process group whenever ``ddp_world_size > 1``: skipping the
-        barrier (e.g. because torch.distributed was never initialized) would let rank-0 start
-        merging before every other rank has finished writing its ``segments_{rank}.jsonl``
-        shard, silently producing a summary built from a partial/incomplete set of ranks.
-        """
-        t0 = time.perf_counter()
-        partial = self.run()
-        if self.ddp_world_size <= 1:
-            return partial
-        import torch.distributed as dist
-
-        if not (dist.is_available() and dist.is_initialized()):
-            raise RuntimeError(
-                f"closed-loop run_distributed: ddp_world_size={self.ddp_world_size} > 1 but "
-                "torch.distributed is not initialized -- refusing to merge without a barrier "
-                "to guarantee every rank finished writing its shard first."
-            )
-        dist.barrier()
-        if self.ddp_rank != 0:
-            return {}
-        if partial.get("ddp_shard"):
-            return self.merge_ddp_shards(self.ddp_world_size, elapsed_sec=time.perf_counter() - t0)
-        return partial
-
-    def shard_jobs(self, jobs: list[ClosedLoopJob]) -> list[ClosedLoopJob]:
-        return shard_items(jobs, self.ddp_rank, self.ddp_world_size)
 
     def initial_job_extras(self) -> dict[str, Any]:
         return {}
@@ -466,6 +439,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
                 merged.extras["route_keys"].append(job.route_key)
+                partial_timers = partial.extras.get("timers")
+                if partial_timers is not None:
+                    merged.extras.setdefault("timers", Timers()).merge(partial_timers)
                 self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
@@ -479,7 +455,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
-        timers = Timers() if self.config.profile else None
+        timers = Timers()
         tl = RouteTimeline(job.route_paths, sidecar_dir=job.npz_root, timers=timers)
         rows: list[dict] = []
         video_mp4s: list[Path] = []
@@ -495,7 +471,21 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 png_dir,
                 **params.render_kwargs(),
                 draw_pool=draw_pool,
+                timers=timers,
             )
+
+            if params.colormap_metrics:
+                from scenario_generation.trajectory_colormap import render_trajectory_colormaps
+
+                render_trajectory_colormaps(
+                    png_dir,
+                    self.out_dir,
+                    f"{job.route_key}_{start}_{end}",
+                    metrics=params.colormap_metrics,
+                    near_miss_thresh=params.near_miss_thresh,
+                    strong_brake_mps2=params.strong_brake_mps2,
+                    title=f"{job.route_key} [{start},{end}]",
+                )
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
                 row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
@@ -519,7 +509,8 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            build_mp4(png_dir, seg_mp4, self.config.fps)
+            with timers("build_mp4"):
+                build_mp4(png_dir, seg_mp4, self.config.fps)
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]
@@ -529,9 +520,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     f"min_clr={obj['clearance_min_m']:.3f}"
                 )
 
-        extras: dict[str, Any] = {}
-        if timers is not None:
-            extras["timers"] = timers
+        extras: dict[str, Any] = {"timers": timers}
         return JobRunResult(rows=rows, video_mp4s=video_mp4s, extras=extras)
 
     def on_job_complete(
@@ -552,6 +541,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             result.rows,
             self.config.params.near_miss_thresh,
             strong_brake_mps2=self.config.params.strong_brake_mps2,
+            deviation_collision_thresh_m=self.config.params.deviation_collision_thresh_m,
             pass_condition=self.config.pass_condition,
         )
         summary["npz_root"] = str(self.npz_root)
@@ -562,6 +552,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         summary["elapsed_sec"] = elapsed_sec
         summary["video_mp4s"] = result.video_mp4s
         summary["segments"] = result.rows
+        timers = result.extras.get("timers")
+        if timers is not None:
+            summary["timers_detail"] = timers.as_dict()
         return summary
 
     def write_artifacts(self, summary: dict, result: JobRunResult) -> None:
@@ -571,6 +564,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 f,
                 indent=4,
             )
+        timers = result.extras.get("timers")
+        if self.config.profile and timers is not None:
+            report = timers.report(summary.get("total_steps"))
+            (self.out_dir / "timing_report.txt").write_text(report + "\n")
+            print(f"\n=== timing breakdown: {self.out_dir} ===\n{report}")
 
     def print_summary(self, summary: dict) -> None:
         n_seg = summary["n_segments"]

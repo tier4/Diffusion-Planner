@@ -96,7 +96,8 @@ def test_ego_border_distance_keeps_large_real_clearance():
     line_strings[0, 0, :2] = [-10.0, far_border_y_m]
     line_strings[0, 1, :2] = [10.0, far_border_y_m]
     line_strings[0, :2, 3] = 1.0
-    map_data = SimpleNamespace(line_strings=line_strings)
+    lanes = None
+    map_data = SimpleNamespace(line_strings=line_strings, lanes=lanes)
 
     rb_info = _ego_border_distance(ego, map_data)
 

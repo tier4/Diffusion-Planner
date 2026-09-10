@@ -58,7 +58,13 @@ def get_args(args_list=None):
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--predicted_neighbor_num", type=int, default=32)
-    parser.add_argument("--resume_model_path", type=str, required=True)
+    parser.add_argument(
+        "--resume_model_path",
+        type=str,
+        required=True,
+        help="checkpoint to load: a .pth (resumed via resume_model, DDP-wrapped) or an "
+        "exported .onnx (loaded as an inference-only session, never DDP-wrapped)",
+    )
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
     parser.add_argument("--scenario_based_open_loop_list", type=str, default=None)
@@ -111,6 +117,10 @@ def run_validation(valid_cfg: ValidConfig):
     if valid_cfg.scenario_based_open_loop_only and not valid_cfg.scenario_based_open_loop_list:
         raise ValueError("--scenario_based_open_loop_only requires Scenario-based Open-loop list")
 
+    # An exported .onnx checkpoint carries its own weights (no state_dict/resume_model, no
+    # DDP-wrappable parameters); everything downstream keys off this instead of valid_cfg.ddp.
+    is_onnx = Path(valid_cfg.resume_model_path).suffix.lower() == ".onnx"
+
     # 1. Restore model configuration from training settings (args.json)
     config_obj = Config(valid_cfg.args_json_path)
 
@@ -138,38 +148,56 @@ def run_validation(valid_cfg: ValidConfig):
     set_seed(valid_cfg.seed + global_rank)
 
     # set up model (restore structure using training config_obj)
-    diffusion_planner = Diffusion_Planner(config_obj)
-    diffusion_planner = diffusion_planner.to(
-        rank if valid_cfg.device == "cuda" else valid_cfg.device
-    )
+    if is_onnx:
+        from scenario_generation.simulate import load_onnx_model
 
-    if valid_cfg.ddp:
-        diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
-
-    if global_rank == 0:
-        print(
-            "Model Params: {}".format(
-                sum(p.numel() for p in ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters())
-            )
+        onnx_device = f"cuda:{rank}" if valid_cfg.device == "cuda" else valid_cfg.device
+        # args.json is read again here (from next to the .onnx) but discarded: config_obj
+        # above (from --args_json_path) is the one actually used downstream.
+        diffusion_planner, _ = load_onnx_model(valid_cfg.resume_model_path, onnx_device)
+        model_is_ddp = False
+        print(f"ONNX model loaded from {valid_cfg.resume_model_path}")
+    else:
+        diffusion_planner = Diffusion_Planner(config_obj)
+        diffusion_planner = diffusion_planner.to(
+            rank if valid_cfg.device == "cuda" else valid_cfg.device
         )
 
-    # optimizer (dummy)
-    params = [{"params": ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters(), "lr": 0.0}]
-    optimizer = optim.AdamW(params)
+        if valid_cfg.ddp:
+            diffusion_planner = DDP(
+                diffusion_planner, device_ids=[rank], find_unused_parameters=True
+            )
+        model_is_ddp = valid_cfg.ddp
 
-    # load weights
-    print(f"Model loaded from {valid_cfg.resume_model_path}")
-    model_ema = ModelEma(diffusion_planner, decay=0.999, device=valid_cfg.device)
+        if global_rank == 0:
+            print(
+                "Model Params: {}".format(
+                    sum(
+                        p.numel()
+                        for p in ddp.get_model(diffusion_planner, model_is_ddp).parameters()
+                    )
+                )
+            )
 
-    diffusion_planner, _, _, _, _, _ = resume_model(
-        valid_cfg.resume_model_path,
-        diffusion_planner,
-        optimizer,
-        None,  # scheduler is not needed
-        model_ema,
-        valid_cfg.device,
-        use_ddp=valid_cfg.ddp,
-    )
+        # optimizer (dummy)
+        params = [
+            {"params": ddp.get_model(diffusion_planner, model_is_ddp).parameters(), "lr": 0.0}
+        ]
+        optimizer = optim.AdamW(params)
+
+        # load weights
+        print(f"Model loaded from {valid_cfg.resume_model_path}")
+        model_ema = ModelEma(diffusion_planner, decay=0.999, device=valid_cfg.device)
+
+        diffusion_planner, _, _, _, _, _ = resume_model(
+            valid_cfg.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            None,  # scheduler is not needed
+            model_ema,
+            valid_cfg.device,
+            use_ddp=valid_cfg.ddp,
+        )
 
     if valid_cfg.ddp:
         torch.distributed.barrier()
@@ -234,7 +262,7 @@ def run_validation(valid_cfg: ValidConfig):
                 ddp=False,
             )
             summary = run_scenario_based_open_loop_validation(
-                ddp.get_model(diffusion_planner, valid_cfg.ddp),
+                ddp.get_model(diffusion_planner, model_is_ddp),
                 scenario_open_loop_args,
                 visualization_dir=output_root / "scenario_based_open_loop" / "visualization",
                 details_dir=output_root / "scenario_based_open_loop" / "details",

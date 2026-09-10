@@ -19,13 +19,8 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.data_augmentation_bridge import (
-    StatePerturbation as BridgeStatePerturbation,
-)
-from diffusion_planner.utils.data_augmentation_frenet import (
-    frenet_augmenter_from_args,
-)
+from diffusion_planner.utils.augment_defaults import resolve_history_noise
+from diffusion_planner.utils.augmenter_factory import augmenter_from_args
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -225,6 +220,11 @@ def model_training(args: TrainConfig):
     global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
 
+    # Resolve the per-augmenter history-noise default BEFORE args.json is written, so the
+    # saved configuration is the configuration used. Every rank, because the value feeds
+    # the augmenter each rank builds; rank 0 alone serializes it.
+    resolve_history_noise(args)
+
     if global_rank == 0:
         # Logging
         print("------------- {} -------------".format(args.exp_name))
@@ -265,21 +265,7 @@ def model_training(args: TrainConfig):
     save_utd = args.save_utd
 
     # set up data loaders
-    if args.use_data_augment:
-        if args.augment_type == "bridge":
-            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
-        elif args.augment_type == "frenet":
-            aug = frenet_augmenter_from_args(args)
-        else:
-            aug = StatePerturbation(
-                augment_prob=args.augment_prob,
-                num_refine=args.num_refine,
-                device=args.device,
-                ego_past_noise_std=args.ego_past_noise_std,
-                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
-            )
-    else:
-        aug = None
+    aug = augmenter_from_args(args)
 
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
