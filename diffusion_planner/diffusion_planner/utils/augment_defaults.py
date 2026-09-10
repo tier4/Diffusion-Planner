@@ -44,7 +44,16 @@ def past_noise_std_for(args) -> float:
     """
     if args.ego_past_noise_std is not None:
         return float(args.ego_past_noise_std)
-    return DEFAULT_PAST_NOISE_STD[args.augment_type]
+    try:
+        return DEFAULT_PAST_NOISE_STD[args.augment_type]
+    except KeyError:
+        raise KeyError(
+            f"no history-noise default recorded for augment_type={args.augment_type!r}. "
+            f"Known: {sorted(DEFAULT_PAST_NOISE_STD)}. bridge is absent on purpose -- it "
+            "does not perturb the ego history, and resolve_history_noise returns before "
+            "reaching here, so this means the resolver was bypassed. A new augmenter "
+            "needs an entry (or an early return) rather than a default it never chose."
+        ) from None
 
 
 def resolve_history_noise(args) -> None:

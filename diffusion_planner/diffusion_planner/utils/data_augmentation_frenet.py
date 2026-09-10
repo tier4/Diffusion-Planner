@@ -32,10 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from diffusion_planner.utils.augment_defaults import (
-    past_noise_std_for,
-    resolve_history_noise,
-)
+from diffusion_planner.utils.augment_defaults import resolve_history_noise
 from diffusion_planner.utils.augmentation_checks import (
     DT,
     border_lateral_bounds,
