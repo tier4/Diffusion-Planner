@@ -505,7 +505,7 @@ def write_viewer_tree(
             "n_cases": len(clean_rows),
             "verdicts": _tally_verdicts(case_verdicts),
             "error": scenario_errors.get(scenario),
-            _UNMEASURED_MARKER_KEY: unmeasured + ["reproducer"],
+            _UNMEASURED_MARKER_KEY: unmeasured + ["reproducer", "turn_indicator"],
             "summary": sanitize(summary),
         }
         counts[scenario] = tally

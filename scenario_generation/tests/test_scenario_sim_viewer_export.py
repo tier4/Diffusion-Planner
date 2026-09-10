@@ -65,6 +65,7 @@ def _row() -> dict:
             "count": 0,
         },
         "reproducer": {"expand_count": 0, "snap_count": 0, "repeat_steps": 0, "normal_steps": 3},
+        "turn_indicator": {"transition_correct": 0, "transition_total": 0},
         "map_path": _MAP,
     }
 

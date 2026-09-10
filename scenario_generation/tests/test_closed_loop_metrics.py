@@ -334,10 +334,8 @@ def _segment_row(**overrides) -> dict:
             "repeat_steps": 1,
         },
         "turn_indicator": {
-            "correct": 3,
-            "total": 4,
-            "change_correct": 1,
-            "change_total": 1,
+            "transition_correct": 1,
+            "transition_total": 2,
         },
     }
     row.update(overrides)
@@ -361,10 +359,9 @@ def test_aggregate_nested_keeps_tdigest_in_json():
     assert summary["reproducer"]["expand_count"] == 1
     assert abs(summary["reproducer"]["repeat_step_rate"] - 0.25) < 1e-9
     assert summary["strong_brake"]["strongest_mps2"] == float("inf")
-    assert summary["turn_indicator"]["correct"] == 3
-    assert summary["turn_indicator"]["total"] == 4
-    assert abs(summary["turn_indicator"]["accuracy"] - 0.75) < 1e-9
-    assert summary["turn_indicator"]["change_accuracy"] == 1.0
+    assert summary["turn_indicator"]["transition_correct"] == 1
+    assert summary["turn_indicator"]["transition_total"] == 2
+    assert abs(summary["turn_indicator"]["transition_accuracy"] - 0.5) < 1e-9
     # Human-readable segments.jsonl strips digests; in-memory rows keep them.
     cleaned = metrics_for_json(rows[0])
     assert TDIGEST_KEY not in cleaned["object"]
@@ -410,17 +407,14 @@ def test_aggregate_missing_category_fails():
 
 
 def test_turn_indicator_block():
-    block = turn_indicator_block(3, 4, 1, 1)
-    assert block == {"correct": 3, "total": 4, "change_correct": 1, "change_total": 1}
+    block = turn_indicator_block(1, 2)
+    assert block == {"transition_correct": 1, "transition_total": 2}
 
 
-def test_aggregate_turn_indicator_zero_total_accuracy_is_zero():
-    row = _segment_row(
-        turn_indicator={"correct": 0, "total": 0, "change_correct": 0, "change_total": 0}
-    )
+def test_aggregate_turn_indicator_zero_total_accuracy_is_na():
+    row = _segment_row(turn_indicator={"transition_correct": 0, "transition_total": 0})
     summary = aggregate([row], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
-    assert summary["turn_indicator"]["accuracy"] == 0.0
-    assert summary["turn_indicator"]["change_accuracy"] == 0.0
+    assert summary["turn_indicator"]["transition_accuracy"] is None
 
 
 def test_aggregate_missing_turn_indicator_category_fails():

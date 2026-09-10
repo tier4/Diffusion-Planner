@@ -331,6 +331,9 @@ def format_summary_lines(summary: dict) -> list[str]:
     red = summary["red_light_violation"]
     brake = summary["strong_brake"]
     ti = summary["turn_indicator"]
+    ti_acc_str = (
+        f"{ti['transition_accuracy']:.4f}" if ti["transition_accuracy"] is not None else "N/A"
+    )
     repro = summary["reproducer"]
     lines = [
         f"object collision: {obj['collision_segments']}/{n_seg} segments "
@@ -364,9 +367,8 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"reproducer snap_count={repro['snap_count']} expand_count={repro['expand_count']} "
         f"repeat_step_rate={repro['repeat_step_rate']:.4f}  "
         f"terminated={summary['terminated_counts']}",
-        f"turn_indicator accuracy: {ti['correct']}/{ti['total']} ({ti['accuracy']:.4f}), "
-        f"on-change accuracy: {ti['change_correct']}/{ti['change_total']} "
-        f"({ti['change_accuracy']:.4f})",
+        f"turn_indicator transition accuracy: "
+        f"{ti['transition_correct']}/{ti['transition_total']} ({ti_acc_str})",
     ]
     return lines
 
@@ -466,12 +468,12 @@ def aggregate(
     strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
     brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
 
-    turn_correct = sum(int(_require_block(r, "turn_indicator")["correct"]) for r in rows)
-    turn_total = sum(int(_require_block(r, "turn_indicator")["total"]) for r in rows)
-    turn_change_correct = sum(
-        int(_require_block(r, "turn_indicator")["change_correct"]) for r in rows
+    turn_transition_correct = sum(
+        int(_require_block(r, "turn_indicator")["transition_correct"]) for r in rows
     )
-    turn_change_total = sum(int(_require_block(r, "turn_indicator")["change_total"]) for r in rows)
+    turn_transition_total = sum(
+        int(_require_block(r, "turn_indicator")["transition_total"]) for r in rows
+    )
 
     expand = sum(int(_require_block(r, "reproducer")["expand_count"]) for r in rows)
     snap = sum(int(_require_block(r, "reproducer")["snap_count"]) for r in rows)
@@ -493,13 +495,14 @@ def aggregate(
         "red_light_violation": red,
         "strong_brake": brake,
         "turn_indicator": {
-            "correct": turn_correct,
-            "total": turn_total,
-            "accuracy": (turn_correct / turn_total) if turn_total > 0 else 0.0,
-            "change_correct": turn_change_correct,
-            "change_total": turn_change_total,
-            "change_accuracy": (
-                turn_change_correct / turn_change_total if turn_change_total > 0 else 0.0
+            "transition_correct": turn_transition_correct,
+            "transition_total": turn_transition_total,
+            # None (not 0.0) when no transition was ever scored: a silent 0.0 would misread as
+            # "always wrong at transitions" rather than "no transitions to measure".
+            "transition_accuracy": (
+                (turn_transition_correct / turn_transition_total)
+                if turn_transition_total > 0
+                else None
             ),
         },
         "terminated_counts": term_counts,

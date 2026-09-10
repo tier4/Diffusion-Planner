@@ -327,22 +327,18 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             ),
         }
 
-        _ti_correct = sum(
-            int(s.get("turn_indicator", {}).get("correct", 0) or 0) for s in summaries.values()
-        )
-        _ti_total = sum(
-            int(s.get("turn_indicator", {}).get("total", 0) or 0) for s in summaries.values()
-        )
-        _ti_change_correct = sum(
-            int(s.get("turn_indicator", {}).get("change_correct", 0) or 0)
+        _ti_transition_correct = sum(
+            int(s.get("turn_indicator", {}).get("transition_correct", 0) or 0)
             for s in summaries.values()
         )
-        _ti_change_total = sum(
-            int(s.get("turn_indicator", {}).get("change_total", 0) or 0) for s in summaries.values()
+        _ti_transition_total = sum(
+            int(s.get("turn_indicator", {}).get("transition_total", 0) or 0)
+            for s in summaries.values()
         )
-        agg["turn_indicator_accuracy"] = (_ti_correct / _ti_total) if _ti_total else 0.0
-        agg["turn_indicator_change_accuracy"] = (
-            (_ti_change_correct / _ti_change_total) if _ti_change_total else 0.0
+        # None (not 0.0) when no transition was ever scored across any group -- a silent 0.0
+        # would misread as "always wrong at transitions" rather than "nothing to measure".
+        agg["turn_indicator_transition_accuracy"] = (
+            (_ti_transition_correct / _ti_transition_total) if _ti_transition_total else None
         )
 
         total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())

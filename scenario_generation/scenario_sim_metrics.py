@@ -1,8 +1,9 @@
 """Map scenario_sim rollout series onto the closed-loop segment-row schema.
 
 ``closed_loop_eval.aggregate`` consumes rows made of nested per-category blocks (``object`` /
-``road_border`` / ``red_light_violation`` / ``strong_brake`` / ``reproducer``) and fails fast
-on a missing block, so a missing metric can never read as a zero. The scenario_sim path
+``road_border`` / ``red_light_violation`` / ``strong_brake`` / ``reproducer`` /
+``turn_indicator``) and fails fast on a missing block, so a missing metric can never read as a
+zero. The scenario_sim path
 produces the same raw series as the reproducer path -- per-step clearance, collision,
 road-border distance and speed -- but through a simulator rather than recorded NPZ frames, so
 the mapping onto that schema lives here.
@@ -24,6 +25,7 @@ from scenario_generation.reproducer_rollout import (
     clearance_family_block,
     road_border_collision_mask,
     strong_brake_block,
+    turn_indicator_block,
 )
 
 # scenario_sim has no reproducer cursor: it never expands a window, snaps the ego back or
@@ -90,6 +92,10 @@ def build_segment_row(
         "red_light_violation": _red_light_block(),
         "strong_brake": strong_brake_block(ac, strong_brake_mps2),
         "reproducer": {**_NO_REPRODUCER_CURSOR, "normal_steps": int(n_steps_run)},
+        # No GT turn indicator to score against on this path -- zero counts are the true
+        # measurement (transition_accuracy then aggregates to None/"N/A"), same idea as
+        # ``_NO_REPRODUCER_CURSOR`` above.
+        "turn_indicator": turn_indicator_block(0, 0),
     }
 
 
