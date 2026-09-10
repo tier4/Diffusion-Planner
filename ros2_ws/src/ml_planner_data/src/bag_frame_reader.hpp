@@ -36,11 +36,24 @@
 #include <deque>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace autoware::ml_planner::data {
+
+/** Metadata associated with one requested rosbag frame. */
+struct FrameMetadata {
+  int64_t frame_time_ns;
+  double ego_x;
+  double ego_y;
+  double ego_yaw;
+  float ego_speed_mps;
+  float ego_yaw_rate_rps;
+  uint8_t turn_indicator;
+  int32_t num_objects;
+};
 
 /**
  * @brief Sequential reader over one rosbag with time-windowed message buffers.
@@ -72,6 +85,9 @@ public:
       const preprocess::LaneSegmentContext &map_context,
       const LabelBuilderParams &params,
       const std::vector<preprocess::SelectedAgent> &selected_agents);
+
+  /** Return the latest source metadata at or before one requested frame. */
+  std::optional<FrameMetadata> frame_metadata(const rclcpp::Time &frame_time);
 
 private:
   using Odometry = nav_msgs::msg::Odometry;

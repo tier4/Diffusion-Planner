@@ -144,6 +144,40 @@ py::object create_frame_data(mpd::FrameDataCache &cache,
   return to_numpy_dict(result.value());
 }
 
+py::object create_frame_record(mpd::FrameDataCache &cache,
+                               const std::string &bag_path,
+                               const std::string &map_path,
+                               const int64_t frame_time_ns,
+                               const VehicleSpec &vehicle_spec,
+                               const double traffic_light_timeout_s,
+                               const int64_t num_future_steps,
+                               const double neighbor_observation_timeout_s) {
+  py::object frames =
+      create_frame_data(cache, bag_path, map_path, frame_time_ns, vehicle_spec,
+                        traffic_light_timeout_s, num_future_steps,
+                        neighbor_observation_timeout_s);
+  if (frames.is_none()) {
+    return py::none();
+  }
+  const auto metadata = cache.frame_metadata(bag_path, frame_time_ns);
+  if (!metadata) {
+    return py::none();
+  }
+  py::dict values;
+  values["frame_time_ns"] = metadata->frame_time_ns;
+  values["ego_x"] = metadata->ego_x;
+  values["ego_y"] = metadata->ego_y;
+  values["ego_yaw"] = metadata->ego_yaw;
+  values["ego_speed_mps"] = metadata->ego_speed_mps;
+  values["ego_yaw_rate_rps"] = metadata->ego_yaw_rate_rps;
+  values["turn_indicator"] = metadata->turn_indicator;
+  values["num_objects"] = metadata->num_objects;
+  py::dict result;
+  result["frames"] = std::move(frames);
+  result["metadata"] = std::move(values);
+  return std::move(result);
+}
+
 py::dict create_bag_frame_data(const std::string &bag_path,
                                const std::string &map_path,
                                const VehicleSpec &vehicle_spec,
@@ -244,5 +278,11 @@ PYBIND11_MODULE(_ml_planner_data, m) {
            py::arg("neighbor_observation_timeout_s") = 0.3,
            "Build the single-batch model inputs and training labels for one "
            "frame as one dict (None "
-           "if the frame is not usable)");
+           "if the frame is not usable)")
+      .def("create_frame_record", &create_frame_record, py::arg("bag_path"),
+           py::arg("map_path"), py::arg("frame_time_ns"),
+           py::arg("vehicle_spec"), py::arg("traffic_light_timeout_s") = 0.2,
+           py::arg("num_future_steps") = OUTPUT_T,
+           py::arg("neighbor_observation_timeout_s") = 0.3,
+           "Build one frame and its source metadata (None if unusable)");
 }

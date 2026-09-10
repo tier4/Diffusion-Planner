@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import h5py
-import hdf5plugin
 import hydra
 import ml_planner_data as mpd
 import numpy as np
@@ -22,15 +21,14 @@ import pyarrow.parquet as pq
 from omegaconf import DictConfig
 from tqdm import tqdm
 
+from diffusion_planner.data.h5_writer import validate_h5_arrays, write_h5_shard
+
 # ``override`` is a complete-route source split used for closed-loop
 # evaluation.  The separately exported one-frame override H5 files remain
 # open-loop inputs only.
 SPLITS = ("train", "valid", "auto", "override")
 FORMAT_NAME = "diffusion_planner_frame_dataset"
 FORMAT_VERSION = 4
-
-hdf5plugin.register(filters="zstd")
-
 
 @dataclass(frozen=True)
 class VehicleParameters:
@@ -177,80 +175,30 @@ def h5_relative_path(entry: BagEntry) -> Path:
     return Path(entry.relative_bag_path) / "frames.h5"
 
 
-def validate_arrays(result: Mapping[str, Any]) -> int:
-    """Validate the whole-bag result before publishing it."""
-    frames = result["frames"]
-    metadata = result["metadata"]
-    frame_times = np.asarray(metadata["frame_time_ns"])
-    num_frames = len(frame_times)
-    if num_frames == 0:
-        return 0
-    if not frames:
-        raise ValueError("native result contains metadata but no frame tensors")
-    if num_frames > 1 and not np.all(frame_times[1:] > frame_times[:-1]):
-        raise ValueError("native result contains non-increasing frame times")
-    for group_name, arrays in (("frames", frames), ("metadata", metadata)):
-        for key, values in arrays.items():
-            array = np.asarray(values)
-            if array.ndim == 0 or len(array) != num_frames:
-                raise ValueError(
-                    f"{group_name}/{key} has first dimension {array.shape}, expected {num_frames}"
-                )
-            if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
-                raise ValueError(f"{group_name}/{key} contains NaN or infinity")
-    return num_frames
-
-
 def write_h5(
     path: Path,
     entry: BagEntry,
     result: Mapping[str, Any],
     config: WorkerConfig,
 ) -> None:
-    """Write and atomically publish one whole-bag H5 file."""
-    num_frames = validate_arrays(result)
-    temporary = path.with_suffix(path.suffix + ".incomplete")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary.unlink(missing_ok=True)
-    try:
-        with h5py.File(temporary, "w") as file:
-            file.attrs["format"] = FORMAT_NAME
-            file.attrs["format_version"] = FORMAT_VERSION
-            file.attrs["source_bag_path"] = entry.relative_bag_path
-            file.attrs["source_map_path"] = entry.map_path
-            file.attrs["project_id"] = entry.project_id
-            file.attrs["area_map_id"] = entry.area_map_id
-            file.attrs["area_map_version_id"] = entry.area_map_version_id
-            file.attrs["split"] = entry.split
-            file.attrs["num_frames"] = num_frames
-            file.attrs["frame_interval_s"] = config.frame_interval_s
-            file.attrs["traffic_light_timeout_s"] = config.traffic_light_timeout_s
-            file.attrs["neighbor_observation_timeout_s"] = (
-                config.neighbor_observation_timeout_s
-            )
-            frames_group = file.create_group("frames")
-            metadata_group = file.create_group("metadata")
-            for key, values in result["frames"].items():
-                array = np.asarray(values)
-                compression = (
-                    dict(hdf5plugin.Zstd())
-                    if config.compression == "zstd"
-                    else {"compression": config.compression}
-                )
-                frames_group.create_dataset(
-                    key,
-                    data=array,
-                    chunks=(1, *array.shape[1:]),
-                    shuffle=config.compression is not None,
-                    **compression,
-                )
-            for key, values in result["metadata"].items():
-                metadata_group.create_dataset(key, data=np.asarray(values))
-            file.flush()
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    """Write one complete whole-bag shard through the shared H5 pipeline."""
+    write_h5_shard(
+        path,
+        attributes={
+            "source_bag_path": entry.relative_bag_path,
+            "source_map_path": entry.map_path,
+            "project_id": entry.project_id,
+            "area_map_id": entry.area_map_id,
+            "area_map_version_id": entry.area_map_version_id,
+            "split": entry.split,
+            "frame_interval_s": config.frame_interval_s,
+            "traffic_light_timeout_s": config.traffic_light_timeout_s,
+            "neighbor_observation_timeout_s": config.neighbor_observation_timeout_s,
+        },
+        frames=result["frames"],
+        metadata=result["metadata"],
+        compression=config.compression,
+    )
 
 
 def read_existing_h5(path: Path) -> dict[str, dict[str, np.ndarray]]:
@@ -373,7 +321,7 @@ def process_bag(
         param=build_builder_param(config),
     )
     stats = result["stats"]
-    num_frames = validate_arrays(result)
+    num_frames = validate_h5_arrays(result["frames"], result["metadata"])
     if num_frames == 0:
         return BagResult(
             None,

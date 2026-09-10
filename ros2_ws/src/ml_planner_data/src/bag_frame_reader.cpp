@@ -19,6 +19,7 @@
 #include <rosbag2_storage/storage_filter.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -102,6 +103,34 @@ preprocess::TensorMapResult BagFrameReader::create_label_data(
                                window_of(turn_indicators_buffer_, cutoff_sec),
                                window_of(traffic_signals_buffer_, cutoff_sec),
                                *route, map_context, selected_agents, params);
+}
+
+std::optional<FrameMetadata>
+BagFrameReader::frame_metadata(const rclcpp::Time &frame_time) {
+  const double frame_sec = frame_time.seconds();
+  ensure_read_until(frame_sec);
+  const auto ego_history = window_of(ego_buffer_, frame_sec);
+  if (ego_history.empty()) {
+    return std::nullopt;
+  }
+  const auto &ego = ego_history.back();
+  const auto &orientation = ego.pose.pose.orientation;
+  const double yaw = std::atan2(
+      2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+      1.0 - 2.0 * (orientation.y * orientation.y +
+                   orientation.z * orientation.z));
+  const auto turns = window_of(turn_indicators_buffer_, frame_sec);
+  const auto objects = window_of(objects_buffer_, frame_sec);
+  return FrameMetadata{
+      frame_time.nanoseconds(),
+      ego.pose.pose.position.x,
+      ego.pose.pose.position.y,
+      yaw,
+      static_cast<float>(ego.twist.twist.linear.x),
+      static_cast<float>(ego.twist.twist.angular.z),
+      turns.empty() ? uint8_t{0} : turns.back().report,
+      objects.empty() ? int32_t{0}
+                      : static_cast<int32_t>(objects.back().objects.size())};
 }
 
 void BagFrameReader::open_main_reader() {

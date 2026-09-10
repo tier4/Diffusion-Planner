@@ -141,4 +141,11 @@ FrameDataResult FrameDataCache::create_frame_data(
   return std::move(input_output.tensors);
 }
 
+std::optional<FrameMetadata>
+FrameDataCache::frame_metadata(const std::string &bag_path,
+                               const int64_t frame_time_ns) {
+  return reader_for(bag_path).frame_metadata(
+      rclcpp::Time(frame_time_ns, RCL_ROS_TIME));
+}
+
 } // namespace autoware::ml_planner::data
