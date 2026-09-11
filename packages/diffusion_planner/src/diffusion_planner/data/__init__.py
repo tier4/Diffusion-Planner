@@ -4,6 +4,7 @@ from .planner_dataset import (
     PlannerDataset,
     build_dataloader,
 )
+from .shard_planner_dataset import ShardPlannerDataset, build_shard_dataloader
 from .transforms import (
     FillUnknownTrafficLightFutures,
     PlannerDataNormalizer,
@@ -34,8 +35,10 @@ __all__ = [
     "PlannerTurnIndicatorAugmentation",
     "PoseAugmentationCase",
     "PlannerDataset",
+    "ShardPlannerDataset",
     "Transform",
     "apply_pose_augmentation",
     "build_dataloader",
+    "build_shard_dataloader",
     "fill_unknown_traffic_light_futures",
 ]

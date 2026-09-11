@@ -1,0 +1,20 @@
+[project]
+name = "planner-shards"
+version = "0.1.0"
+description = "Versioned tar-shard datasets for planner training: packer, manifests, key-sets, DDP loader"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.1,<2",
+    "numpy>=1.26",
+    "pyarrow>=17",
+    "safetensors>=0.5",
+    "torch>=2.13.0",
+    "zstandard>=0.22",
+]
+
+[project.scripts]
+planner-shards = "planner_shards.data_pipeline.pack_shards:main"
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"

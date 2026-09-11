@@ -1,0 +1,51 @@
+# Shard-backed alternative to dataloader/default.yaml: the same transforms, frames read from a
+# versioned tar-shard dataset produced by scripts/dataset/convert_h5_to_shards.py.
+# Select with:  train/dataloader@dataloader=shards dataloader.dataset.root=... dataloader.dataset.keyset_path=...
+defaults:
+  - /train/dataloader/transforms@_global_.transform_configs.start_decision_augmentation: start_decision_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.fix_stop_point: fix_stop_point
+  - /train/dataloader/transforms@_global_.transform_configs.pose_augmentation: pose_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.ilqr_refinement: ilqr_refinement
+  - /train/dataloader/transforms@_global_.transform_configs.speed_augmentation: speed_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.goal: goal
+  - /train/dataloader/transforms@_global_.transform_configs.ego_shape_augmentation: ego_shape_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.turn_indicator_augmentation: turn_indicator_augmentation
+  - /train/dataloader/transforms@_global_.transform_configs.traffic_light: traffic_light
+  - /train/dataloader/transforms@_global_.transform_configs.normalization: normalization
+  - _self_
+
+_target_: diffusion_planner.data.build_shard_dataloader
+dataset:
+  _target_: diffusion_planner.data.ShardPlannerDataset
+  # Dataset root written by convert_h5_to_shards.py (contains versions/, manifests, shards).
+  root: ???
+  # Version tag, or "latest".
+  version: latest
+  # Key-set Parquet selecting the frames to train on (written next to the dataset by the converter).
+  keyset_path: ???
+  # The per-rank plan needs the loader's batch and worker settings.
+  batch_size: ${dataloader.batch_size}
+  num_workers: ${dataloader.num_workers}
+  seed: ${seed}
+  shuffle: true
+  chunk_size: 256
+  # Fraction of samples the plan may duplicate to give every worker whole batches.
+  max_pad_fraction: 0.01
+  transforms:
+    - ${transform_configs.start_decision_augmentation}
+    - ${transform_configs.fix_stop_point}
+    - ${transform_configs.pose_augmentation}
+    - ${transform_configs.ilqr_refinement}
+    - ${transform_configs.speed_augmentation}
+    - ${transform_configs.goal}
+    - ${transform_configs.ego_shape_augmentation}
+    - ${transform_configs.turn_indicator_augmentation}
+    - ${transform_configs.traffic_light}
+    - ${transform_configs.normalization}
+# This batch size applies to each process/GPU.
+batch_size: 256
+# Sequential shard reads need far fewer workers than per-frame H5 reads.
+num_workers: 8
+prefetch_factor: 4
+pin_memory: true
+drop_last: true
