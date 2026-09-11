@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from diffusion_planner_dashboard.views import (
+    render_attention,
     render_data_augmentation,
     render_frame_browser,
     render_home,
@@ -37,6 +38,11 @@ def main() -> None:
                     render_data_augmentation,
                     title="Data Augmentation",
                     icon=":material/compare:",
+                ),
+                st.Page(
+                    render_attention,
+                    title="Attention",
+                    icon=":material/visibility:",
                 ),
             ],
         }

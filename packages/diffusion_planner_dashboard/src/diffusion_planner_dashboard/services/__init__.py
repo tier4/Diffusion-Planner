@@ -1,5 +1,6 @@
 """Data-access services used by dashboard views."""
 
+from .attention import AttentionReading, run_attention
 from .augmentation_inspector import inspect_augmentation
 from .frame_index import FrameIndex, FrameIndexRow, load_frame_index
 from .frame_loader import FrameLoader
@@ -13,6 +14,7 @@ from .model_loader import (
 )
 
 __all__ = [
+    "AttentionReading",
     "FrameIndex",
     "FrameIndexRow",
     "FrameLoader",
@@ -24,6 +26,7 @@ __all__ = [
     "load_planner",
     "load_planner_checkpoint",
     "run_inference",
+    "run_attention",
     "run_onnx_inference",
     "run_turn_indicator_inference",
 ]
