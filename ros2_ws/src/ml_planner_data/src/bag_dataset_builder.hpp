@@ -41,6 +41,9 @@ struct DatasetBuilderParam {
 
 struct BagFrameMetadata {
   int64_t frame_time_ns;
+  double ego_x;
+  double ego_y;
+  double ego_yaw;
   float ego_speed_mps;
   float ego_yaw_rate_rps;
   uint8_t turn_indicator;

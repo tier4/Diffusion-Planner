@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace autoware::ml_planner::data {
@@ -48,6 +49,9 @@ public:
                     int64_t frame_time_ns, const VehicleSpec &vehicle_spec,
                     double traffic_light_timeout_s, int64_t num_future_steps,
                     double neighbor_observation_timeout_s);
+
+  std::optional<FrameMetadata> frame_metadata(const std::string &bag_path,
+                                              int64_t frame_time_ns);
 
 private:
   BagFrameReader &reader_for(const std::string &bag_path);

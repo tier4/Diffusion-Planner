@@ -93,12 +93,18 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   const std::vector<py::ssize_t> shape{
       static_cast<py::ssize_t>(metadata.size())};
   py::array_t<int64_t> frame_time_ns(shape);
+  py::array_t<double> ego_x(shape);
+  py::array_t<double> ego_y(shape);
+  py::array_t<double> ego_yaw(shape);
   py::array_t<float> ego_speed_mps(shape);
   py::array_t<float> ego_yaw_rate_rps(shape);
   py::array_t<uint8_t> turn_indicator(shape);
   py::array_t<int32_t> num_objects(shape);
   for (size_t index = 0; index < metadata.size(); ++index) {
     frame_time_ns.mutable_data()[index] = metadata[index].frame_time_ns;
+    ego_x.mutable_data()[index] = metadata[index].ego_x;
+    ego_y.mutable_data()[index] = metadata[index].ego_y;
+    ego_yaw.mutable_data()[index] = metadata[index].ego_yaw;
     ego_speed_mps.mutable_data()[index] = metadata[index].ego_speed_mps;
     ego_yaw_rate_rps.mutable_data()[index] = metadata[index].ego_yaw_rate_rps;
     turn_indicator.mutable_data()[index] = metadata[index].turn_indicator;
@@ -106,6 +112,9 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   }
   py::dict result;
   result["frame_time_ns"] = std::move(frame_time_ns);
+  result["ego_x"] = std::move(ego_x);
+  result["ego_y"] = std::move(ego_y);
+  result["ego_yaw"] = std::move(ego_yaw);
   result["ego_speed_mps"] = std::move(ego_speed_mps);
   result["ego_yaw_rate_rps"] = std::move(ego_yaw_rate_rps);
   result["turn_indicator"] = std::move(turn_indicator);
@@ -133,6 +142,40 @@ py::object create_frame_data(mpd::FrameDataCache &cache,
     return py::none();
   }
   return to_numpy_dict(result.value());
+}
+
+py::object create_frame_record(mpd::FrameDataCache &cache,
+                               const std::string &bag_path,
+                               const std::string &map_path,
+                               const int64_t frame_time_ns,
+                               const VehicleSpec &vehicle_spec,
+                               const double traffic_light_timeout_s,
+                               const int64_t num_future_steps,
+                               const double neighbor_observation_timeout_s) {
+  py::object frames =
+      create_frame_data(cache, bag_path, map_path, frame_time_ns, vehicle_spec,
+                        traffic_light_timeout_s, num_future_steps,
+                        neighbor_observation_timeout_s);
+  if (frames.is_none()) {
+    return py::none();
+  }
+  const auto metadata = cache.frame_metadata(bag_path, frame_time_ns);
+  if (!metadata) {
+    return py::none();
+  }
+  py::dict values;
+  values["frame_time_ns"] = metadata->frame_time_ns;
+  values["ego_x"] = metadata->ego_x;
+  values["ego_y"] = metadata->ego_y;
+  values["ego_yaw"] = metadata->ego_yaw;
+  values["ego_speed_mps"] = metadata->ego_speed_mps;
+  values["ego_yaw_rate_rps"] = metadata->ego_yaw_rate_rps;
+  values["turn_indicator"] = metadata->turn_indicator;
+  values["num_objects"] = metadata->num_objects;
+  py::dict result;
+  result["frames"] = std::move(frames);
+  result["metadata"] = std::move(values);
+  return std::move(result);
 }
 
 py::dict create_bag_frame_data(const std::string &bag_path,
@@ -235,5 +278,11 @@ PYBIND11_MODULE(_ml_planner_data, m) {
            py::arg("neighbor_observation_timeout_s") = 0.3,
            "Build the single-batch model inputs and training labels for one "
            "frame as one dict (None "
-           "if the frame is not usable)");
+           "if the frame is not usable)")
+      .def("create_frame_record", &create_frame_record, py::arg("bag_path"),
+           py::arg("map_path"), py::arg("frame_time_ns"),
+           py::arg("vehicle_spec"), py::arg("traffic_light_timeout_s") = 0.2,
+           py::arg("num_future_steps") = OUTPUT_T,
+           py::arg("neighbor_observation_timeout_s") = 0.3,
+           "Build one frame and its source metadata (None if unusable)");
 }

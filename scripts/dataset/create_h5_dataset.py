@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import h5py
-import hdf5plugin
 import hydra
 import ml_planner_data as mpd
 import numpy as np
@@ -22,12 +21,14 @@ import pyarrow.parquet as pq
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-SPLITS = ("train", "valid", "auto")
+from diffusion_planner.data.h5_writer import validate_h5_arrays, write_h5_shard
+
+# ``override`` is a complete-route source split used for closed-loop
+# evaluation.  The separately exported one-frame override H5 files remain
+# open-loop inputs only.
+SPLITS = ("train", "valid", "auto", "override")
 FORMAT_NAME = "diffusion_planner_frame_dataset"
 FORMAT_VERSION = 4
-
-hdf5plugin.register(filters="zstd")
-
 
 @dataclass(frozen=True)
 class VehicleParameters:
@@ -58,6 +59,7 @@ class WorkerConfig:
     output_root: str
     index_path: str
     frame_interval_s: float
+    future_steps: int
     min_travel_distance: float
     topic_drop_thresholds: dict[str, float]
     traffic_light_timeout_s: float
@@ -115,6 +117,7 @@ def build_builder_param(config: WorkerConfig) -> Any:
 
     param = mpd.DatasetBuilderParam()
     param.frame_interval_s = config.frame_interval_s
+    param.num_future_steps = config.future_steps
     param.min_travel_distance = config.min_travel_distance
     param.topic_drop_thresholds = thresholds
     param.traffic_light_timeout_s = config.traffic_light_timeout_s
@@ -125,7 +128,15 @@ def build_builder_param(config: WorkerConfig) -> Any:
 def discover_bags(root: Path, split: str) -> list[BagEntry]:
     """Discover bags and preserve their hierarchy relative to the requested root."""
     entries = []
-    for info_path in sorted(root.rglob("log_file_info.json")):
+    # Closed-loop selections are materialized as directory symlinks.  pathlib's
+    # rglob() deliberately does not recurse into those directories, so walk the
+    # tree with followlinks enabled to discover both regular and selected bags.
+    info_paths = sorted(
+        Path(directory) / "log_file_info.json"
+        for directory, _, filenames in os.walk(root, followlinks=True)
+        if "log_file_info.json" in filenames
+    )
+    for info_path in info_paths:
         bag_path = info_path.parent
         if (
             not (bag_path / "metadata.yaml").is_file()
@@ -134,7 +145,12 @@ def discover_bags(root: Path, split: str) -> list[BagEntry]:
             continue
         info = json.loads(info_path.read_text(encoding="utf-8"))
         map_version = str(info["area_map_version_id"])
-        map_path = bag_path.parents[2] / "map" / map_version / "lanelet2_map.osm"
+        # Standard data is ``<project>/<split>/<route>/<bag>`` whereas the
+        # override source has an extra ``override`` container:
+        # ``<site>/override/<route>/<bag>``.  Its map lives under that
+        # container, not directly below the site.
+        map_root = bag_path.parents[1] if split == "override" else bag_path.parents[2]
+        map_path = map_root / "map" / map_version / "lanelet2_map.osm"
         if not map_path.is_file():
             raise FileNotFoundError(f"map not found for {bag_path}: {map_path}")
         relative = bag_path.relative_to(root)
@@ -159,80 +175,30 @@ def h5_relative_path(entry: BagEntry) -> Path:
     return Path(entry.relative_bag_path) / "frames.h5"
 
 
-def validate_arrays(result: Mapping[str, Any]) -> int:
-    """Validate the whole-bag result before publishing it."""
-    frames = result["frames"]
-    metadata = result["metadata"]
-    frame_times = np.asarray(metadata["frame_time_ns"])
-    num_frames = len(frame_times)
-    if num_frames == 0:
-        return 0
-    if not frames:
-        raise ValueError("native result contains metadata but no frame tensors")
-    if num_frames > 1 and not np.all(frame_times[1:] > frame_times[:-1]):
-        raise ValueError("native result contains non-increasing frame times")
-    for group_name, arrays in (("frames", frames), ("metadata", metadata)):
-        for key, values in arrays.items():
-            array = np.asarray(values)
-            if array.ndim == 0 or len(array) != num_frames:
-                raise ValueError(
-                    f"{group_name}/{key} has first dimension {array.shape}, expected {num_frames}"
-                )
-            if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
-                raise ValueError(f"{group_name}/{key} contains NaN or infinity")
-    return num_frames
-
-
 def write_h5(
     path: Path,
     entry: BagEntry,
     result: Mapping[str, Any],
     config: WorkerConfig,
 ) -> None:
-    """Write and atomically publish one whole-bag H5 file."""
-    num_frames = validate_arrays(result)
-    temporary = path.with_suffix(path.suffix + ".incomplete")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary.unlink(missing_ok=True)
-    try:
-        with h5py.File(temporary, "w") as file:
-            file.attrs["format"] = FORMAT_NAME
-            file.attrs["format_version"] = FORMAT_VERSION
-            file.attrs["source_bag_path"] = entry.relative_bag_path
-            file.attrs["source_map_path"] = entry.map_path
-            file.attrs["project_id"] = entry.project_id
-            file.attrs["area_map_id"] = entry.area_map_id
-            file.attrs["area_map_version_id"] = entry.area_map_version_id
-            file.attrs["split"] = entry.split
-            file.attrs["num_frames"] = num_frames
-            file.attrs["frame_interval_s"] = config.frame_interval_s
-            file.attrs["traffic_light_timeout_s"] = config.traffic_light_timeout_s
-            file.attrs["neighbor_observation_timeout_s"] = (
-                config.neighbor_observation_timeout_s
-            )
-            frames_group = file.create_group("frames")
-            metadata_group = file.create_group("metadata")
-            for key, values in result["frames"].items():
-                array = np.asarray(values)
-                compression = (
-                    dict(hdf5plugin.Zstd())
-                    if config.compression == "zstd"
-                    else {"compression": config.compression}
-                )
-                frames_group.create_dataset(
-                    key,
-                    data=array,
-                    chunks=(1, *array.shape[1:]),
-                    shuffle=config.compression is not None,
-                    **compression,
-                )
-            for key, values in result["metadata"].items():
-                metadata_group.create_dataset(key, data=np.asarray(values))
-            file.flush()
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    """Write one complete whole-bag shard through the shared H5 pipeline."""
+    write_h5_shard(
+        path,
+        attributes={
+            "source_bag_path": entry.relative_bag_path,
+            "source_map_path": entry.map_path,
+            "project_id": entry.project_id,
+            "area_map_id": entry.area_map_id,
+            "area_map_version_id": entry.area_map_version_id,
+            "split": entry.split,
+            "frame_interval_s": config.frame_interval_s,
+            "traffic_light_timeout_s": config.traffic_light_timeout_s,
+            "neighbor_observation_timeout_s": config.neighbor_observation_timeout_s,
+        },
+        frames=result["frames"],
+        metadata=result["metadata"],
+        compression=config.compression,
+    )
 
 
 def read_existing_h5(path: Path) -> dict[str, dict[str, np.ndarray]]:
@@ -261,6 +227,13 @@ def read_existing_h5(path: Path) -> dict[str, dict[str, np.ndarray]]:
             raise ValueError(f"H5 frames must be a group: {path}")
         if not isinstance(metadata_object, h5py.Group):
             raise ValueError(f"H5 metadata must be a group: {path}")
+        required_metadata = {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
+        missing_metadata = required_metadata.difference(metadata_object.keys())
+        if missing_metadata:
+            raise ValueError(
+                f"H5 is missing required closed-loop pose metadata {sorted(missing_metadata)}: "
+                f"{path}; regenerate with overwrite=true"
+            )
 
         frame_lengths: set[int] = set()
         for key, values in frames_object.items():
@@ -299,6 +272,9 @@ def make_index_table(
             "h5_path": pa.array([stored_h5_path] * num_frames, pa.string()),
             "frame_index": pa.array(np.arange(num_frames, dtype=np.int64)),
             "frame_time_ns": pa.array(metadata["frame_time_ns"], pa.int64()),
+            "ego_x": pa.array(metadata["ego_x"], pa.float64()),
+            "ego_y": pa.array(metadata["ego_y"], pa.float64()),
+            "ego_yaw": pa.array(metadata["ego_yaw"], pa.float64()),
             "ego_speed_mps": pa.array(metadata["ego_speed_mps"], pa.float32()),
             "ego_yaw_rate_rps": pa.array(metadata["ego_yaw_rate_rps"], pa.float32()),
             "turn_indicator": pa.array(metadata["turn_indicator"], pa.uint8()),
@@ -345,7 +321,7 @@ def process_bag(
         param=build_builder_param(config),
     )
     stats = result["stats"]
-    num_frames = validate_arrays(result)
+    num_frames = validate_h5_arrays(result["frames"], result["metadata"])
     if num_frames == 0:
         return BagResult(
             None,
@@ -406,6 +382,7 @@ def main(config: DictConfig) -> None:
         output_root=str(output_root),
         index_path=str(index_output),
         frame_interval_s=float(config.frame_interval),
+        future_steps=int(config.future_steps),
         min_travel_distance=float(config.min_travel_distance),
         topic_drop_thresholds={
             str(topic): float(limit)

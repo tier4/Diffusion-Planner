@@ -13,6 +13,7 @@ wheels/
 build/
 install/
 log/
+/ros2_ws/src/deps/
 
 node_modules/
 

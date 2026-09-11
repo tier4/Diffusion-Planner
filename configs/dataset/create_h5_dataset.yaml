@@ -10,6 +10,8 @@ output_root: ???
 index_output: ${output_root}/indexes/${split}.parquet
 split: train
 frame_interval: 0.5
+# Number of future label steps emitted for each frame.
+future_steps: 80
 jobs: 200
 limit: null
 

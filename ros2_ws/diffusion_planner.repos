@@ -3,7 +3,9 @@ repositories:
   deps/autoware_msgs:
     type: git
     url: https://github.com/autowarefoundation/autoware_msgs.git
-    version: 1.7.0
+    # autoware_core requires autoware_localization_msgs/InitializeLocalization.
+    # That service was added after 1.7.0; 1.9.0 is the minimum compatible tag.
+    version: 1.9.0
   deps/autoware_adapi_msgs:
     type: git
     url: https://github.com/autowarefoundation/autoware_adapi_msgs.git
@@ -35,8 +37,8 @@ repositories:
   # universe
   deps/autoware_universe:
     type: git
-    url: https://github.com/yhisaki/autoware_universe.git
-    version: feat/diffusion-planner-v2
+    url: https://github.com/tier4/autoware_universe.git
+    version: feat/v0.64/e2e
   deps/tier4_autoware_msgs:
     type: git
     url: https://github.com/tier4/tier4_autoware_msgs.git

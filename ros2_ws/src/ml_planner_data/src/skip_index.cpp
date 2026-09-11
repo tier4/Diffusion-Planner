@@ -34,8 +34,6 @@ namespace autoware::ml_planner::data {
 namespace {
 
 constexpr double history_window_s = HISTORY_WINDOW_S;
-constexpr double future_horizon_s =
-    static_cast<double>(OUTPUT_T) * constants::PREDICTION_TIME_STEP_S;
 
 struct TopicTimeline {
   const char *topic;
@@ -61,6 +59,7 @@ std::string make_gap_warning(const TopicTimeline &timeline,
 }
 
 void add_topic_ranges(const TopicTimeline &timeline, const double ego_first_sec,
+                      const double future_horizon_s,
                       std::vector<InvalidFrameRange> &ranges,
                       std::vector<std::string> &warnings) {
   if (!check_enabled(timeline.threshold)) {
@@ -140,15 +139,21 @@ FrameRange calculate_frame_range(const TopicConfig &topics,
   };
 
   const double turn_first_sec =
-      turn_stamps.empty() ? ego_last_sec : turn_stamps.front();
+      !check_enabled(param.topic_drop_thresholds.turn_indicators)
+          ? ego_first_sec
+          : (turn_stamps.empty() ? ego_last_sec : turn_stamps.front());
   const double objects_first_sec =
-      objects_stamps.empty() ? ego_last_sec : objects_stamps.front();
+      !check_enabled(param.topic_drop_thresholds.tracked_objects)
+          ? ego_first_sec
+          : (objects_stamps.empty() ? ego_last_sec : objects_stamps.front());
   const double structural_first_t =
       std::max({ego_first_sec, turn_first_sec, objects_first_sec}) +
       history_window_s;
   const double route_first_t =
       route_stamps.empty() ? infinity : route_stamps.front() - 1e-6;
   const double usable_from = std::max(structural_first_t, route_first_t);
+  const double future_horizon_s = static_cast<double>(param.num_future_steps) *
+                                  constants::PREDICTION_TIME_STEP_S;
   const double usable_until = ego_last_sec - future_horizon_s;
 
   double first_valid_t = usable_from;
@@ -169,7 +174,8 @@ FrameRange calculate_frame_range(const TopicConfig &topics,
           std::min(last_valid_t, timeline.stamps->back() + timeline.threshold -
                                      future_horizon_s);
     }
-    add_topic_ranges(timeline, ego_first_sec, invalid_ranges, warnings);
+    add_topic_ranges(timeline, ego_first_sec, future_horizon_s, invalid_ranges,
+                     warnings);
   }
 
   return {
