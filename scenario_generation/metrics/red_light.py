@@ -32,7 +32,9 @@ def score_red_light_step(
     if "route_lanes" not in np_dict:
         return {"red_light_violation": False}
 
-    rl = np_dict["route_lanes"]
+    # New-H5 stores traffic-light state separately; its adapter supplies this
+    # exact legacy scoring view without changing the native model input.
+    rl = np_dict.get("metric_route_lanes", np_dict["route_lanes"])
     if torch.is_tensor(rl):  # GPU-resident batch slice from the rollout: no re-upload
         if rl.dim() not in (3, 4):
             return {"red_light_violation": False}

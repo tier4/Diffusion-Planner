@@ -26,7 +26,9 @@ def _ego_inside_lane(np_dict: dict, device: str) -> bool | None:
     (sign cannot be determined, e.g. older callers/tests that only pass line_strings)."""
     if "lanes" not in np_dict:
         return None
-    lanes_t = _as_float_tensor(np_dict["lanes"], device)
+    # Native-H5 adapters retain six-column lanes for ONNX, but supply an
+    # eight-column legacy polygon view for this scorer only.
+    lanes_t = _as_float_tensor(np_dict.get("metric_lanes", np_dict["lanes"]), device)
     if lanes_t.dim() == 4:
         lanes_t = lanes_t[0]
     origin = torch.zeros(2, dtype=torch.float32, device=device)
