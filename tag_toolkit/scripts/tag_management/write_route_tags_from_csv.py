@@ -13,8 +13,11 @@ Usage::
         /path/to/dataset \\
         /path/to/mapping.csv \\
         --match-col t4_dataset_id \\
-        --tag-dimensions devops_site devops_override_label \\
-        [--output-index /path/to/output.tags.db]
+        --tag-dimensions devops_site devops_override_label
+
+The TagStore index is rewritten afterwards, to ``<source stem>.tags.db`` beside the
+source unless ``--output-index`` says otherwise, because readers open that file on
+sight: leaving the old one in place would serve the tags as they were before this run.
 
 All file writes are batched (per-file fsync deferred) and synced once at
 the end for maximum performance.
@@ -370,9 +373,27 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         dest="output_index",
-        help="Output path for the .tags.db index file (optional)",
+        help="Where to write the .tags.db index. Defaults to <source stem>.tags.db next "
+        "to the source, which is where readers look for it. Pass --no-index to write none.",
+    )
+    parser.add_argument(
+        "--no-index",
+        action="store_true",
+        dest="no_index",
+        help="Write no index. The sidecars are still tagged, so any index beside the "
+        "source is left describing the tags as they were before this run.",
     )
     return parser.parse_args()
+
+
+def default_index_output(source: Path) -> Path | None:
+    """``<source stem>.tags.db`` beside ``source`` -- the path ``from_source`` reads.
+
+    A source that is already a database indexes itself; a directory has no stem to key on.
+    """
+    if source.name.endswith(".tags.db") or source.is_dir():
+        return None
+    return source.parent / f"{source.stem}.tags.db"
 
 
 def main() -> int:
@@ -413,13 +434,19 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
-    # Save index if requested
-    if args.output_index and not args.dry_run:
-        print(f"[3/3] Saving index to {args.output_index}...")
-        store.export_index(args.output_index)
-        print(f"  Index saved to {args.output_index}")
+    index_output = args.output_index or default_index_output(args.source)
+    if args.dry_run:
+        print("[3/3] Skipping index save (dry run)")
+    elif args.no_index:
+        print("[3/3] Skipping index save (--no-index)")
+        if index_output and index_output.exists():
+            print(f"  WARNING: {index_output} now predates these tags", file=sys.stderr)
+    elif index_output is None:
+        print("[3/3] Skipping index save (the source is not a path list)")
     else:
-        print("[3/3] Skipping index save (use --output-index to save)")
+        print(f"[3/3] Saving index to {index_output}...")
+        store.export_index(index_output)
+        print(f"  Index saved to {index_output}")
 
     # Summary
     print()
