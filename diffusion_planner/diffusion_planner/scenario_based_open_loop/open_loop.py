@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -128,6 +129,7 @@ def run_scenario_based_open_loop_validation(
 
     was_training = model.training
     model.eval()
+    render_executor = None
     try:
         summaries: dict[str, dict[str, float]] = {}
         metric_parameters = _metric_parameters_from_args(args)
@@ -138,6 +140,10 @@ def run_scenario_based_open_loop_validation(
             from diffusion_planner.scenario_based_open_loop.visualize import (
                 visualize_scenario_prediction,
             )
+            from scenario_generation.render_pool import render_pool
+
+            # Past 32 the main thread, not the renderers, sets the pace.
+            render_executor = render_pool(int(os.environ.get("OPEN_LOOP_RENDER_WORKERS", "32")))
         for root in (details_root,):
             if root is not None:
                 root.mkdir(parents=True, exist_ok=True)
@@ -155,6 +161,7 @@ def run_scenario_based_open_loop_validation(
             scorer = METRICS[metric_name]
             parameters = metric_parameters.get(metric_name, {})
             details: list[dict] = []
+            renders = []
             for inputs in loader:
                 raw_inputs = {
                     key: value.detach().clone() if torch.is_tensor(value) else value
@@ -201,8 +208,9 @@ def run_scenario_based_open_loop_validation(
                             key: value[batch_index].item() for key, value in fields.items()
                         }
                     if visualization_root is not None:
+                        # Cloned, not sliced: pickling a view sends the whole batch's storage.
                         sample_inputs = {
-                            key: value[batch_index : batch_index + 1]
+                            key: value[batch_index : batch_index + 1].clone()
                             if torch.is_tensor(value)
                             else value
                             for key, value in raw_inputs.items()
@@ -211,17 +219,27 @@ def run_scenario_based_open_loop_validation(
                         # index) so the PNG is identifiable without cross-
                         # referencing details.jsonl; the title matches.
                         npz_stem = Path(source_npz).stem
-                        png_path = visualization_root / metric_name / f"{sample_index:06d}_{npz_stem}.png"
-                        visualize_scenario_prediction(
-                            sample_inputs,
-                            ego_prediction[batch_index],
-                            png_path,
-                            npz_stem,
-                            show_neighbors=True,
-                            view_range=60.0,
+                        png_path = (
+                            visualization_root / metric_name / f"{sample_index:06d}_{npz_stem}.png"
+                        )
+                        renders.append(
+                            render_executor.submit(
+                                visualize_scenario_prediction,
+                                sample_inputs,
+                                ego_prediction[batch_index].cpu(),
+                                png_path,
+                                npz_stem,
+                                show_neighbors=True,
+                                view_range=60.0,
+                            )
                         )
                         detail["visualization_png"] = str(png_path)
                     details.append(detail)
+
+            # A failed render only surfaces when its future is read, and the details file
+            # names every PNG, so it must not be written before they exist.
+            for render in renders:
+                render.result()
 
             if details_root is not None:
                 details_path = details_root / metric_name / "details.jsonl"
@@ -235,5 +253,9 @@ def run_scenario_based_open_loop_validation(
                 {key: total / count for key, total in totals.items()} if count else {}
             )
     finally:
+        if render_executor is not None:
+            # Anything still queued here is queued because something above raised; waiting
+            # on it would turn a failure into a several-minute hang.
+            render_executor.shutdown(wait=False, cancel_futures=True)
         model.train(was_training)
     return summaries
