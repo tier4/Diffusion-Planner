@@ -1,0 +1,11 @@
+"""Experimental numeric defaults (spec §3/§5/§8) — to be fixed by §7 measurements."""
+
+SHARD_SIZE_BYTES = 1 << 30
+CHUNK_SIZE = 1024
+SHARDS_IN_FLIGHT = 4
+SHUFFLE_BUFFER_ITEMS = 2000
+SHUFFLE_BUFFER_BYTES = 512 << 20
+SEEK_THRESHOLD = 0.2
+MAX_PAD_FRACTION = 0.01
+ZSTD_LEVEL = 3
+READ_RETRIES = 3

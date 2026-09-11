@@ -7,12 +7,13 @@ from pathlib import Path
 
 import hydra
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
-import wandb
+from diffusion_planner.data import ShardPlannerDataset
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.loss import compute_diffusion_planner_loss
 from diffusion_planner.utils.checkpoint import load_checkpoint, save_checkpoint
@@ -46,6 +47,8 @@ def main(config: DictConfig) -> None:
         raise RuntimeError(
             "dataloader has no batches; reduce batch_size or disable drop_last"
         )
+    # A shard-backed loader is already split per rank; Accelerate must not shard it again.
+    shard_mode = isinstance(loader.dataset, ShardPlannerDataset)
 
     planner: DiffusionPlanner = hydra.utils.instantiate(config.model)
     checkpoint_model = planner
@@ -72,7 +75,10 @@ def main(config: DictConfig) -> None:
         ),
         verbose=accelerator.is_main_process,
     )
-    planner, optimizer, loader = accelerator.prepare(planner, optimizer, loader)
+    if shard_mode:
+        planner, optimizer = accelerator.prepare(planner, optimizer)
+    else:
+        planner, optimizer, loader = accelerator.prepare(planner, optimizer, loader)
     total_epochs = int(config.training.total_epochs)
     steps_per_epoch = len(loader)
     total_steps = total_epochs * steps_per_epoch
@@ -104,7 +110,7 @@ def main(config: DictConfig) -> None:
         )
         print(
             f"epochs={total_epochs} steps_per_epoch={steps_per_epoch} "
-            f"total_steps={total_steps}"
+            f"total_steps={total_steps} shard_mode={shard_mode}"
         )
         print(
             f"torch_compile={compile_enabled} "
@@ -121,7 +127,9 @@ def main(config: DictConfig) -> None:
     log_interval = int(config.training.log_interval)
     checkpoint_interval = int(config.training.checkpoint_interval)
     for epoch in range(start_epoch, total_epochs):
-        if hasattr(loader, "set_epoch"):
+        if shard_mode:
+            loader.dataset.set_epoch(epoch)
+        elif hasattr(loader, "set_epoch"):
             loader.set_epoch(epoch)
         progress = tqdm(
             loader,
@@ -130,6 +138,11 @@ def main(config: DictConfig) -> None:
             dynamic_ncols=True,
         )
         for step_in_epoch, batch in enumerate(progress, start=1):
+            if shard_mode:
+                batch = {
+                    key: value.to(accelerator.device, non_blocking=True)
+                    for key, value in batch.items()
+                }
             losses = compute_diffusion_planner_loss(
                 planner,
                 batch,

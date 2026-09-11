@@ -16,6 +16,7 @@ dependencies = [
     "onnxruntime-gpu<1.24",
     "onnxscript>=0.7.1",
     "plotly>=6.9.0",
+    "planner-shards",
     "pyarrow>=25.0.0",
     "timm>=1.0.28",
     "torch>=2.13.0",
@@ -25,3 +26,6 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+planner-shards = { workspace = true }

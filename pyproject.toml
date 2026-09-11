@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "diffusion-planner",
     "diffusion-planner-dashboard",
+    "planner-shards",
     "wandb>=0.28.2",
     "zarr>=2.18.3,<3",
 ]
@@ -20,6 +21,7 @@ package = false
 [tool.uv.sources]
 diffusion-planner = { workspace = true }
 diffusion-planner-dashboard = { workspace = true }
+planner-shards = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -40,7 +42,7 @@ skip-magic-trailing-comma = false
 docstring-code-format = true
 
 [tool.ruff.lint.isort]
-known-first-party = ["diffusion_planner", "diffusion_planner_dashboard"]
+known-first-party = ["diffusion_planner", "diffusion_planner_dashboard", "planner_shards"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]

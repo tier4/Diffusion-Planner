@@ -97,3 +97,26 @@ uv run --package diffusion-planner python scripts/export/export_onnx.py \
 The exporter validates the generated ONNX models with ONNX Runtime. For ROS 2 node
 parameters, topics, model compatibility, and launch instructions, see
 `ros2_ws/src/deps/autoware_universe/planning/autoware_ml_planner/README.md`.
+
+## Shard datasets
+
+`scripts/dataset/convert_h5_to_shards.py` repacks the frames of a Parquet index into a versioned
+tar-shard dataset (one member per frame, one partition per rosbag) using the `planner-shards`
+workspace package. Frames are staged in chunks through a scratch directory, packed, key-set,
+scrubbed and spot-checked bit-exact against the H5 source:
+
+```bash
+uv run --package diffusion-planner python scripts/dataset/convert_h5_to_shards.py \
+  /data/diffusion_planner_h5/indexes/train.parquet /data/diffusion_planner_shards \
+  --tag train-v1 --staging-dir /dev/shm/shard-staging
+```
+
+Train from the shards with the `shards` dataloader config; the transforms are the same as the
+H5 loader's and the loader is sharded per rank by the dataset itself:
+
+```bash
+uv run --package diffusion-planner python scripts/train/train.py \
+  train/dataloader@dataloader=shards \
+  dataloader.dataset.root=/data/diffusion_planner_shards \
+  dataloader.dataset.keyset_path=/data/diffusion_planner_shards/keysets/train-v1.parquet
+```
