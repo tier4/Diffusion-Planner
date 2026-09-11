@@ -38,19 +38,20 @@ class GuidanceComposer:
         model = kwargs["model"]
         model_condition = kwargs["model_condition"]
 
-        # x_in may be 3D [B,P,T*4] (after prefix_constraint) or 4D [B,P,T,4].
-        # The DiT model requires 4D, so reshape for the x_start correction.
+        # The DiT model takes a flattened 3D trajectory [B, P, T*4] and a scalar
+        # diffusion time per batch element. x_in from the solver is 3D [B, P, T*4].
+        # Extract one scalar t per batch element (also used for time-gating below).
+        t_scalar = t_input.reshape(B, -1)[:, 0] if t_input.dim() > 1 else t_input
+
+        x_3d = x_in.reshape(B, P, -1)
+        model_out = model(x_3d, t_scalar, **model_condition)  # [B, P, T*4]
         x_4d = x_in.reshape(B, P, -1, 4)
-        t_4d = t_input if t_input.dim() == 4 else t_input
-        x_fix = model(x_4d, t_4d, **model_condition).detach() - x_4d.detach()
+        x_fix = model_out.reshape(B, P, -1, 4).detach() - x_4d.detach()
         x_fix[:, :, 0] = 0.0
         x_corrected = x_4d + x_fix
 
         x_phys = state_normalizer.inverse(x_corrected.detach())
         inputs = observation_normalizer.inverse(kwargs["inputs"])
-
-        # Extract one scalar t per batch element for time-gating in BaseGuidance.energy()
-        t_scalar = t_input.reshape(B, -1)[:, 0] if t_input.dim() > 1 else t_input
 
         # Compute guidance gradient on detached 4D trajectory, then use
         # surrogate energy = dot(grad, x_in) so autograd returns a gradient

@@ -46,7 +46,7 @@ class _PreparedValidationBatch:
     turn_indicator_seq: torch.Tensor
 
 
-def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValidationBatch:
+def _prepare_validation_inputs(inputs, args, device) -> _PreparedValidationBatch:
     inputs = {key: value.to(device) for key, value in inputs.items()}
     batch_size = inputs["ego_current_state"].shape[0]
     turn_indicator_seq = inputs["turn_indicators"]
@@ -58,7 +58,6 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
         dtype=torch.float32,
         device=device,
     )
-    inputs["delay"] = torch.full((batch_size,), delay, dtype=torch.float32, device=device)
     inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
     inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
     ego_future = heading_to_cos_sin(inputs["ego_agent_future"])
@@ -81,8 +80,8 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
     )
 
 
-def _predict_ego_for_temporal_metrics(model, inputs, args, device, delay=0):
-    batch = _prepare_validation_inputs(inputs, args, device, delay)
+def _predict_ego_for_temporal_metrics(model, inputs, args, device):
+    batch = _prepare_validation_inputs(inputs, args, device)
     _, outputs = model(batch.inputs)
     return outputs["prediction"][:, 0], batch.ego_future
 
@@ -314,8 +313,6 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     turn_indicator_change_correct = 0.0
     turn_indicator_change_total = 0
 
-    delay = 0
-
     # Progress is driven by the SLOWEST rank: every `progress_sync_every` batches all
     # ranks rendezvous on an all-reduce(MIN) of their completed-batch count and rank 0
     # displays that minimum, so the bar reaches 100% only when every rank is done. The
@@ -324,7 +321,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     total_batches = len(val_loader)
     pbar = tqdm(total=total_batches, desc="validate (slowest rank)", disable=ddp.get_rank() != 0)
     for step, inputs in enumerate(val_loader):
-        prepared = _prepare_validation_inputs(inputs, args, device, delay)
+        prepared = _prepare_validation_inputs(inputs, args, device)
         inputs = prepared.inputs
         ego_future = prepared.ego_future
         neighbors_future = prepared.neighbors_future
