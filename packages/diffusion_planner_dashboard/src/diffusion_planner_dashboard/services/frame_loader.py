@@ -10,9 +10,19 @@ import h5py
 import hdf5plugin
 import numpy as np
 
+from diffusion_planner.data.transforms import PlannerUnknownLabelAugmentation
+
 from .frame_index import FrameIndexRow, _validate_h5
 
 hdf5plugin.register(filters="zstd")
+
+_widen_agent_label = PlannerUnknownLabelAugmentation()
+"""Pad-only at its default probability, matching what training applies on load.
+
+Shards store a three-column ``agent_label``; the fourth unknown column is
+appended when the frame is read. Without this the dashboard hands a three-column
+label to a four-class model and every recorded frame fails to run.
+"""
 
 
 class FrameLoader:
@@ -39,9 +49,10 @@ class FrameLoader:
         frames = file["frames"]
         if not isinstance(frames, h5py.Group):
             raise ValueError(f"H5 frames must be a group: {path}")
-        return {
+        frame = {
             key: np.asarray(values[row.frame_index]) for key, values in frames.items()
         }
+        return dict(_widen_agent_label(frame))
 
     def _file_for(self, path: Path) -> h5py.File:
         if not path.is_file():
