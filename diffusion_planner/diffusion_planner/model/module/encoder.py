@@ -167,18 +167,9 @@ class Encoder(nn.Module):
         ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
-        ego = torch.cat(
-            # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
-            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
-            dim=1,
-        )  # Only keep the current + first 5 steps of ego history
 
         # agents
         neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
-        neighbors = torch.cat(
-            [torch.zeros_like(neighbors[:, :, :-6]), neighbors[:, :, -6:]],
-            dim=2,
-        )  # Only keep the current + first 5 steps of history
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)
@@ -305,6 +296,7 @@ class Encoder(nn.Module):
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
         encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
+        encoder_outputs = encoder_outputs.masked_fill(encoding_mask.view(B, self.token_num, 1), 0.0)
 
         return encoder_outputs
 
