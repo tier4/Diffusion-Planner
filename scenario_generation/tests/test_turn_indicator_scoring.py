@@ -9,6 +9,13 @@ Covers the two PR #403 review fixes:
   ``turn_indicator_prev_scored_gt`` from the teleport target's GT) never corrupts the score for
   the step that just ran -- matching ``render_segment``'s already-correct ordering.
 
+Also covers the spurious-transition ("false positive") counters added alongside the transition
+counters: they must fire only when GT holds steady across scored steps AND the model's own
+resolved prediction flips from its own previous scored prediction, must stay untouched by
+GT-transition steps and by held/cached-plan steps, and must reseed correctly on an unstick
+teleport -- exactly the same set of edge cases as the transition counters, since both live in
+the same scoring function and partition the same population of scored steps.
+
 Route-building helper mirrors ``test_reproducer_unstick.py``'s ``_make_route``, but lets each
 frame's own ``turn_indicators`` window be built from an explicit per-tick GT signal (rather than
 all zeros), so the frame-local ``[-2]``/``[-1]`` window can be distinguished from the
@@ -123,6 +130,93 @@ def test_transition_missed_by_frame_local_window_but_caught_across_scored_steps(
     assert s.turn_indicator_prev_scored_gt == 3
 
 
+def test_score_turn_indicator_counts_fp_on_gt_steady_pred_flip(tmp_path):
+    """When GT holds steady across scored steps, a resolved prediction that changes from the
+    model's OWN previous scored prediction is a spurious transition -- counted as a false
+    positive, independent of whether it happens to match GT.
+    """
+    raw = [0] * 10
+    tl = _make_route(tmp_path, raw)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        len(raw),
+        search_radius=1.5,
+        warmup_steps=1000,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+    )
+    s.last_turn_indicator = 0  # matches the seeded baseline: no flip
+    _score_turn_indicator(s, 3)
+    assert (s.turn_indicator_fp_total, s.turn_indicator_fp_count) == (1, 0)
+
+    s.last_turn_indicator = 1  # spurious flip: GT is still 0 at idx 6
+    _score_turn_indicator(s, 6)
+    assert (s.turn_indicator_fp_total, s.turn_indicator_fp_count) == (2, 1)
+    assert s.turn_indicator_transition_total == 0, "GT never changed, so no transition either"
+
+
+def test_score_turn_indicator_no_fp_when_pred_stable(tmp_path):
+    """When GT holds steady AND the model's own prediction also stays put, no false positive
+    is counted -- only the opportunity (``fp_total``) accumulates.
+    """
+    raw = [0] * 10
+    tl = _make_route(tmp_path, raw)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        len(raw),
+        search_radius=1.5,
+        warmup_steps=1000,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+    )
+    s.last_turn_indicator = 0
+    _score_turn_indicator(s, 3)
+    _score_turn_indicator(s, 6)
+    assert (s.turn_indicator_fp_total, s.turn_indicator_fp_count) == (2, 0)
+
+
+def test_score_turn_indicator_gt_change_steps_do_not_touch_fp_counters(tmp_path):
+    """A scored step where GT changes must accumulate only the transition counters, never the
+    spurious-transition FP counters -- the two counter pairs partition the same population of
+    scored steps and must stay disjoint (``transition_total + fp_total`` == scored-step count).
+    """
+    raw = [0, 0, 0, 0, 3, 3, 3, 3, 3, 3]
+    tl = _make_route(tmp_path, raw)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        len(raw),
+        search_radius=1.5,
+        warmup_steps=1000,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+    )
+    s.last_turn_indicator = 0
+    _score_turn_indicator(s, 3)  # GT unchanged (0 -> 0): a genuine FP opportunity
+    assert s.turn_indicator_fp_total == 1
+    fp_before = (s.turn_indicator_fp_count, s.turn_indicator_fp_total)
+
+    s.last_turn_indicator = 3  # a real GT transition (0 -> 3)
+    _score_turn_indicator(s, 6)
+    assert s.turn_indicator_transition_total == 1
+    assert (s.turn_indicator_fp_count, s.turn_indicator_fp_total) == fp_before
+    assert s.turn_indicator_transition_total + s.turn_indicator_fp_total == 2  # disjoint partition
+
+
 def test_hold_turn_indicator_does_not_touch_transition_counters(tmp_path):
     """A cached-plan step (``replan_interval > 1``, no fresh inference) must never be scored:
     ``_hold_turn_indicator`` only re-appends the held signal, it must not touch the transition
@@ -153,6 +247,40 @@ def test_hold_turn_indicator_does_not_touch_transition_counters(tmp_path):
         s.turn_indicator_transition_correct,
         s.turn_indicator_transition_total,
         s.turn_indicator_prev_scored_gt,
+    )
+    assert before == after
+
+
+def test_hold_turn_indicator_does_not_touch_fp_counters(tmp_path):
+    """A cached-plan step must never touch the spurious-transition FP counters or the model's
+    own-prediction baseline (``turn_indicator_prev_scored_pred``) either -- only ``turn_hist``
+    changes.
+    """
+    raw = [2] * 10
+    tl = _make_route(tmp_path, raw)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        len(raw),
+        search_radius=1.5,
+        warmup_steps=1000,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+    )
+    before = (
+        s.turn_indicator_fp_count,
+        s.turn_indicator_fp_total,
+        s.turn_indicator_prev_scored_pred,
+    )
+    _hold_turn_indicator(s)
+    after = (
+        s.turn_indicator_fp_count,
+        s.turn_indicator_fp_total,
+        s.turn_indicator_prev_scored_pred,
     )
     assert before == after
 
@@ -200,6 +328,49 @@ def test_teleport_reseeds_transition_tracking_from_target_gt(tmp_path):
 
     assert s.last_turn_indicator == tgt_gt
     assert s.turn_indicator_prev_scored_gt == tgt_gt
+
+
+def test_teleport_reseeds_fp_tracking_from_target_pred(tmp_path):
+    """An unstick teleport must re-seed ``turn_indicator_prev_scored_pred`` (like
+    ``turn_indicator_prev_scored_gt``) from the teleport target's recorded GT -- otherwise the
+    next scored step would compare the model's pre-teleport prediction baseline against the
+    target's context and count the environment jump itself as a spurious flip.
+    """
+    n = 20
+    raw = [0] * (n // 2) + [2] * (n - n // 2)  # a real transition partway through the route
+    tl = _make_route(tmp_path, raw)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        n,
+        search_radius=1.5,
+        warmup_steps=1000,  # recorded-pose branch (no tracker needed)
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        unstick_after=3,
+        unstick_advance_m=0.05,
+        unstick_radius_mult=1.0,  # disable gentle widen: exercise the teleport path directly
+    )
+    pred = np.zeros((80, 4), dtype=np.float32)
+
+    for i in range(n):
+        s.cursor.last_was_repeat = True  # stuck repeating
+        _advance_step(s, pred, idx=i, device="cpu", timers=timers)
+        if s.snap_count > 0:
+            break
+    else:
+        pytest.fail("unstick never fired on the synthetic stalled route")
+
+    matches = np.where(np.all(np.isclose(tl.poses, s.live_pose), axis=1))[0]
+    assert len(matches) == 1
+    tgt = int(matches[0])
+    tgt_gt = int(np.asarray(tl.npz(tgt)["turn_indicators"]).reshape(-1)[-1])
+
+    assert s.turn_indicator_prev_scored_pred == tgt_gt
 
 
 def test_resolve_append_score_before_advance_survives_same_tick_teleport(tmp_path):

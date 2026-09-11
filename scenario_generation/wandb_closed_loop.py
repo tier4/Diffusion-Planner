@@ -53,6 +53,7 @@ _ABS_COLUMNS = [
     ("Collisions", "total_collision_events"),
     ("Rear collisions", "total_rear_collision_events"),
     ("Turn indicator transition accuracy (%)", "turn_indicator_transition_accuracy"),
+    ("Turn indicator false positive rate (%)", "turn_indicator_false_positive_rate"),
 ]
 
 _PER_1000STEPS_COLUMNS = [
@@ -71,6 +72,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Collisions / 1k steps", "total_collision_events"),
     ("Rear collisions / 1k steps", "total_rear_collision_events"),
     ("Turn indicator transition accuracy (%)", "turn_indicator_transition_accuracy"),
+    ("Turn indicator false positive rate (%)", "turn_indicator_false_positive_rate"),
 ]
 
 
@@ -120,6 +122,11 @@ def _abs_value(source_key: str, summary: dict):
         # "always wrong at transitions".
         val = summary[source_key] if source_key in summary else extract_score(summary, source_key)
         return float(val) if isinstance(val, (int, float)) else None
+    if source_key == "turn_indicator_false_positive_rate":
+        # None (no GT-steady scored step was ever observed) becomes a blank cell, not a 0.0 to
+        # misread as "never flips spuriously".
+        val = summary[source_key] if source_key in summary else extract_score(summary, source_key)
+        return float(val) if isinstance(val, (int, float)) else None
     if source_key == "mean_centerline_dist_m":
         dev = summary.get("mean_centerline_dist_m")
         return float(dev) if dev is not None and math.isfinite(float(dev)) else None
@@ -142,6 +149,7 @@ def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
         "pass_rate",
         "mean_gt_deviation_m",  # already a per-step mean
         "turn_indicator_transition_accuracy",  # already a ratio
+        "turn_indicator_false_positive_rate",  # already a ratio
         "mean_centerline_dist_m",  # already a per-step mean
     ):
         return _abs_value(source_key, summary)
@@ -228,6 +236,16 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     # None (not 0.0) when no transition was ever scored across any group.
     agg["turn_indicator_transition_accuracy"] = (
         (ti_transition_correct / ti_transition_total) if ti_transition_total else None
+    )
+
+    # Weighted by scored GT-steady steps (turn_indicator.fp_total), not by segment count --
+    # segments vary widely in how many GT-steady scored steps they contained
+    # (see reproducer_rollout._score_turn_indicator).
+    ti_fp_count = sum(int(s.get("turn_indicator", {}).get("fp_count", 0) or 0) for s in values)
+    ti_fp_total = sum(int(s.get("turn_indicator", {}).get("fp_total", 0) or 0) for s in values)
+    # None (not 0.0) when no GT-steady scored step was ever observed across any group.
+    agg["turn_indicator_false_positive_rate"] = (
+        (ti_fp_count / ti_fp_total) if ti_fp_total else None
     )
     return agg
 

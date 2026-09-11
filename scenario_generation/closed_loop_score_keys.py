@@ -17,6 +17,9 @@ SCORE_EXTRACTORS = {
     "turn_indicator_transition_accuracy": lambda d: d.get("turn_indicator", {}).get(
         "transition_accuracy"
     ),
+    "turn_indicator_false_positive_rate": lambda d: d.get("turn_indicator", {}).get(
+        "false_positive_rate"
+    ),
 }
 
 

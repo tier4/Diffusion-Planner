@@ -334,6 +334,9 @@ def format_summary_lines(summary: dict) -> list[str]:
     ti_acc_str = (
         f"{ti['transition_accuracy']:.4f}" if ti["transition_accuracy"] is not None else "N/A"
     )
+    ti_fp_str = (
+        f"{ti['false_positive_rate']:.4f}" if ti["false_positive_rate"] is not None else "N/A"
+    )
     repro = summary["reproducer"]
     lines = [
         f"object collision: {obj['collision_segments']}/{n_seg} segments "
@@ -369,6 +372,8 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"terminated={summary['terminated_counts']}",
         f"turn_indicator transition accuracy: "
         f"{ti['transition_correct']}/{ti['transition_total']} ({ti_acc_str})",
+        f"turn_indicator false positive rate: "
+        f"{ti['fp_count']}/{ti['fp_total']} ({ti_fp_str})",
         f"mean gt_deviation={summary['mean_gt_deviation_m']:.3f} m  "
         f"mean centerline_deviation={summary['mean_centerline_dist_m']:.3f} m",
     ]
@@ -487,6 +492,8 @@ def aggregate(
     turn_transition_total = sum(
         int(_require_block(r, "turn_indicator")["transition_total"]) for r in rows
     )
+    turn_fp_count = sum(int(_require_block(r, "turn_indicator")["fp_count"]) for r in rows)
+    turn_fp_total = sum(int(_require_block(r, "turn_indicator")["fp_total"]) for r in rows)
 
     expand = sum(int(_require_block(r, "reproducer")["expand_count"]) for r in rows)
     snap = sum(int(_require_block(r, "reproducer")["snap_count"]) for r in rows)
@@ -517,6 +524,13 @@ def aggregate(
                 (turn_transition_correct / turn_transition_total)
                 if turn_transition_total > 0
                 else None
+            ),
+            "fp_count": turn_fp_count,
+            "fp_total": turn_fp_total,
+            # None (not 0.0) when no GT-steady scored step ever occurred: a silent 0.0 would
+            # misread as "never flips spuriously" rather than "nothing to measure".
+            "false_positive_rate": (
+                (turn_fp_count / turn_fp_total) if turn_fp_total > 0 else None
             ),
         },
         "terminated_counts": term_counts,

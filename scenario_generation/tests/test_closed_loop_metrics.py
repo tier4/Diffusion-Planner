@@ -336,6 +336,8 @@ def _segment_row(**overrides) -> dict:
         "turn_indicator": {
             "transition_correct": 1,
             "transition_total": 2,
+            "fp_count": 1,
+            "fp_total": 3,
         },
     }
     row.update(overrides)
@@ -362,6 +364,9 @@ def test_aggregate_nested_keeps_tdigest_in_json():
     assert summary["turn_indicator"]["transition_correct"] == 1
     assert summary["turn_indicator"]["transition_total"] == 2
     assert abs(summary["turn_indicator"]["transition_accuracy"] - 0.5) < 1e-9
+    assert summary["turn_indicator"]["fp_count"] == 1
+    assert summary["turn_indicator"]["fp_total"] == 3
+    assert abs(summary["turn_indicator"]["false_positive_rate"] - 1 / 3) < 1e-9
     # Human-readable segments.jsonl strips digests; in-memory rows keep them.
     cleaned = metrics_for_json(rows[0])
     assert TDIGEST_KEY not in cleaned["object"]
@@ -407,14 +412,39 @@ def test_aggregate_missing_category_fails():
 
 
 def test_turn_indicator_block():
-    block = turn_indicator_block(1, 2)
-    assert block == {"transition_correct": 1, "transition_total": 2}
+    block = turn_indicator_block(1, 2, 0, 3)
+    assert block == {
+        "transition_correct": 1,
+        "transition_total": 2,
+        "fp_count": 0,
+        "fp_total": 3,
+    }
 
 
 def test_aggregate_turn_indicator_zero_total_accuracy_is_na():
-    row = _segment_row(turn_indicator={"transition_correct": 0, "transition_total": 0})
+    row = _segment_row(
+        turn_indicator={
+            "transition_correct": 0,
+            "transition_total": 0,
+            "fp_count": 0,
+            "fp_total": 3,
+        }
+    )
     summary = aggregate([row], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
     assert summary["turn_indicator"]["transition_accuracy"] is None
+
+
+def test_aggregate_turn_indicator_fp_zero_total_rate_is_na():
+    row = _segment_row(
+        turn_indicator={
+            "transition_correct": 0,
+            "transition_total": 2,
+            "fp_count": 0,
+            "fp_total": 0,
+        }
+    )
+    summary = aggregate([row], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
+    assert summary["turn_indicator"]["false_positive_rate"] is None
 
 
 def test_aggregate_missing_turn_indicator_category_fails():

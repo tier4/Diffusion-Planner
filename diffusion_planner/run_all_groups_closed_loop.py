@@ -341,6 +341,18 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             (_ti_transition_correct / _ti_transition_total) if _ti_transition_total else None
         )
 
+        _ti_fp_count = sum(
+            int(s.get("turn_indicator", {}).get("fp_count", 0) or 0) for s in summaries.values()
+        )
+        _ti_fp_total = sum(
+            int(s.get("turn_indicator", {}).get("fp_total", 0) or 0) for s in summaries.values()
+        )
+        # None (not 0.0) when no GT-steady scored step was ever observed across any group -- a
+        # silent 0.0 would misread as "never flips spuriously" rather than "nothing to measure".
+        agg["turn_indicator_false_positive_rate"] = (
+            (_ti_fp_count / _ti_fp_total) if _ti_fp_total else None
+        )
+
         total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())
         total_fail = sum(int(s.get("fail_count", 0) or 0) for s in summaries.values())
         agg["n_pass_segments"] = total_pass
