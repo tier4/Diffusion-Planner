@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "diffusion-planner",
     "diffusion-planner-dashboard",
+    "matplotlib>=3.10.9",
     "wandb>=0.28.2",
     "zarr>=2.18.3,<3",
 ]
