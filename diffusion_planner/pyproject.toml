@@ -5,6 +5,8 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
     "einops",
     "gradio",
+    "h5py>=3.16.0",
+    "hdf5plugin>=7.0.0",
     "matplotlib",
     "natsort",
     "numpy>=1.26,<2",
@@ -16,6 +18,7 @@ dependencies = [
     "peft",
     "planner-metrics",
     "protobuf",
+    "pyarrow>=24.0.0",
     "pydantic",
     "pytorch-lightning",
     "scipy",

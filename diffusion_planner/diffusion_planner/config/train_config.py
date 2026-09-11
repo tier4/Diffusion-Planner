@@ -19,6 +19,35 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     valid_set_list: str = cli("JSON list of validation NPZ paths", path=True, default="")
 
     # ---------------------------------------------------------
+    # H5 dataset (new-architecture frame shards)
+    # ---------------------------------------------------------
+    # The H5 frames are re-assembled into the same canonical model inputs as the NPZ files, so
+    # nothing downstream of the dataset changes and each split can be chosen independently --
+    # an H5 training split validated against an NPZ split is a supported combination.
+    h5_train_index: str = cli(
+        "Parquet frame index of the H5 training split; replaces train_set_list when set",
+        path=True,
+        default="",
+    )
+    h5_valid_index: str = cli(
+        "Parquet frame index of the H5 validation split; replaces valid_set_list when set. "
+        "Leave empty to keep validating on the NPZ valid_set_list, which is what the "
+        "replan-consistency evaluation requires",
+        path=True,
+        default="",
+    )
+    h5_file_capacity: int = cli(
+        "open H5 shards cached per DataLoader worker",
+        default=8,
+    )
+    h5_converter_param_path: str = cli(
+        "data-converter parameter JSON supplying the true ego_wheel_base per project id; "
+        "without it the wheelbase is estimated from the H5 ego shape",
+        path=True,
+        default="",
+    )
+
+    # ---------------------------------------------------------
     # Run output
     # ---------------------------------------------------------
     output_root: str = cli(
