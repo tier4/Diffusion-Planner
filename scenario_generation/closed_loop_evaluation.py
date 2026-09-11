@@ -13,6 +13,7 @@ route under an npz_root.
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -430,11 +431,17 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             digests_path.open("w", encoding="utf-8") as fdigest,
             # One pool for every segment: a spawned worker re-imports torch and matplotlib.
             render_pool(self.config.params.draw_workers) as draw_pool,
+            # ffmpeg consumes and deletes these, so they must not land in the output tree.
+            tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
                 partial = self.run_job(
-                    job, segments_file=fout, digest_file=fdigest, draw_pool=draw_pool
+                    job,
+                    segments_file=fout,
+                    digest_file=fdigest,
+                    draw_pool=draw_pool,
+                    frames_root=Path(frames_root),
                 )
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
@@ -452,16 +459,18 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         segments_file=None,
         digest_file=None,
         draw_pool=None,
+        frames_root: Path | None = None,
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
+        frames_root = frames_root if frames_root is not None else self.out_dir
         timers = Timers()
         tl = RouteTimeline(job.route_paths, sidecar_dir=job.npz_root, timers=timers)
         rows: list[dict] = []
         video_mp4s: list[Path] = []
 
         for start, end in tl.iter_segments(job.seg_len):
-            png_dir = self.out_dir / f"{job.route_key}_{start}_{end}"
+            png_dir = frames_root / f"{job.route_key}_{start}_{end}"
             metrics = render_segment(
                 self.model,
                 self.model_args,
