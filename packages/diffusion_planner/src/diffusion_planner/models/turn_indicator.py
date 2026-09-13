@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..data.dimensions import TRAJECTORY_DIM
 from .decoder import TrajectoryEncoder
 from .encoder import OneHotEncoder
 
@@ -27,6 +28,8 @@ class TurnIndicatorDecoder(nn.Module):
             hidden_dim=hidden_dim,
             depth=trajectory_encoder_depth,
             mixer_hidden_dim=trajectory_mixer_hidden_dim,
+            # The turn indicator always reads a pose trajectory, never control.
+            state_dim=TRAJECTORY_DIM,
         )
         self.trajectory_scene_attention = nn.MultiheadAttention(
             hidden_dim, num_heads, dropout=dropout, batch_first=True
@@ -67,7 +70,7 @@ class TurnIndicatorDecoder(nn.Module):
         current = turn_indicator.to(torch.long).clamp(0, 3)
         current_one_hot = F.one_hot(current, num_classes=4).to(scene.dtype)
         current_token = self.turn_indicator_encoder(current_one_hot).unsqueeze(1)
-        trajectory_token = self.trajectory_encoder(trajectory.unsqueeze(1))
+        trajectory_token = self.trajectory_encoder(trajectory).unsqueeze(1)
         trajectory_context, _ = self.trajectory_scene_attention(
             trajectory_token,
             scene,

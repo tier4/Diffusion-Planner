@@ -18,6 +18,7 @@ NUM_STOP_LINES = 30
 NUM_ROAD_BORDERS = 30
 
 TRAJECTORY_DIM = 4
+CONTROL_DIM = 2  # accel, curvature; the decoder's output width
 LANE_GEOMETRY_DIM = 6
 LANE_TYPE_DIM = 20
 TRAFFIC_LIGHT_DIM = 6

@@ -21,7 +21,11 @@ training:
   time_epsilon: 1.0e-5
   noise_scale: 1.0
   ego_loss_weight: 100.0
-  neighbor_loss_weight: 1.0
+  # Trajectory-space loss on the rolled-out ego control. Matching control channel
+  # by channel says nothing about where the vehicle ends up, so this term scores
+  # the integrated trajectory over sliding windows of this many steps.
+  control_trajectory_loss_weight: 0.4
+  control_trajectory_loss_horizon: 80
   turn_indicator_loss_weight: 1e-3
   turn_indicator_transition_loss_weight: 1.0
   log_interval: 200

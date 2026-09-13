@@ -7,12 +7,12 @@ from pathlib import Path
 
 import hydra
 import torch
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
-import wandb
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.loss import compute_diffusion_planner_loss
 from diffusion_planner.utils.checkpoint import load_checkpoint, save_checkpoint
@@ -48,6 +48,9 @@ def main(config: DictConfig) -> None:
         )
 
     planner: DiffusionPlanner = hydra.utils.instantiate(config.model)
+    # Kept before `accelerator.prepare` wraps the planner: DDP and torch.compile
+    # do not forward attribute lookups, so anything that reads the model rather
+    # than calling it has to go through this handle.
     checkpoint_model = planner
     model_config = OmegaConf.to_container(
         config.model, resolve=True, throw_on_missing=True
@@ -137,13 +140,20 @@ def main(config: DictConfig) -> None:
                 time_std=float(config.training.time_std),
                 time_epsilon=float(config.training.time_epsilon),
                 noise_scale=float(config.training.noise_scale),
+                control_normalizer=checkpoint_model.control_normalizer,
+                position_scale=checkpoint_model.position_scale,
                 ego_loss_weight=float(config.training.ego_loss_weight),
-                neighbor_loss_weight=float(config.training.neighbor_loss_weight),
                 turn_indicator_loss_weight=float(
                     config.training.turn_indicator_loss_weight
                 ),
                 turn_indicator_transition_loss_weight=float(
                     config.training.turn_indicator_transition_loss_weight
+                ),
+                control_trajectory_loss_weight=float(
+                    config.training.control_trajectory_loss_weight
+                ),
+                control_trajectory_loss_horizon=int(
+                    config.training.control_trajectory_loss_horizon
                 ),
             )
             loss = losses["total"]
@@ -168,7 +178,8 @@ def main(config: DictConfig) -> None:
                     torch.stack(
                         (
                             losses["total"].detach().float(),
-                            losses["trajectory"].detach().float(),
+                            losses["control"].detach().float(),
+                            losses["control_trajectory"].detach().float(),
                             losses["turn_indicator"].detach().float(),
                             gradient_norm_value,
                         )
@@ -186,12 +197,13 @@ def main(config: DictConfig) -> None:
                 )
                 metric_values = {
                     "train/loss/total": metrics[0].item(),
-                    "train/loss/trajectory": metrics[1].item(),
-                    "train/loss/turn_indicator": metrics[2].item(),
+                    "train/loss/control": metrics[1].item(),
+                    "train/loss/control_trajectory": metrics[2].item(),
+                    "train/loss/turn_indicator": metrics[3].item(),
                     "train/turn_indicator_accuracy": (
                         turn_counts[0] / turn_counts[1].clamp_min(1)
                     ).item(),
-                    "train/grad_norm": metrics[3].item(),
+                    "train/grad_norm": metrics[4].item(),
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                 }
                 if accelerator.is_main_process:
