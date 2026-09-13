@@ -12,10 +12,12 @@ import torch
 from numpy.typing import NDArray
 
 from diffusion_planner.data import (
-    PlannerRigidDataAugmentation,
+    PlannerPoseAugmentation,
     PlannerSpeedAugmentation,
+    PlannerStartDecisionAugmentation,
     fill_unknown_traffic_light_futures,
 )
+from diffusion_planner.data.dimensions import MAX_NUM_NEIGHBORS
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
     FrameIndex,
@@ -87,11 +89,15 @@ def _cached_prediction(
     noise_scale: float,
     seed: int,
     apply_augmentation: bool,
+    apply_start_decision: bool,
+    start_stop_speed_threshold: float,
+    start_max_shift_steps: int,
     longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
     remove_neighbor_agents: bool,
+    removed_neighbor_indices: tuple[int, ...],
     remove_pedestrians: bool,
     remove_bikes: bool,
     infer_future_traffic_lights: bool,
@@ -105,7 +111,9 @@ def _cached_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
-    elif remove_pedestrians or remove_bikes:
+    elif removed_neighbor_indices:
+        frame_data = _remove_neighbors_by_index(frame_data, removed_neighbor_indices)
+    if not remove_neighbor_agents and (remove_pedestrians or remove_bikes):
         frame_data = _remove_agent_types(frame_data, remove_pedestrians, remove_bikes)
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
@@ -113,6 +121,9 @@ def _cached_prediction(
     if apply_augmentation:
         frame_data = _augment_frame(
             frame_data,
+            apply_start_decision,
+            start_stop_speed_threshold,
+            start_max_shift_steps,
             longitudinal_offset,
             lateral_offset,
             yaw_offset,
@@ -146,11 +157,15 @@ def _cached_turn_indicator_prediction(
     h5_modification_time_ns: int,
     device: str,
     apply_augmentation: bool,
+    apply_start_decision: bool,
+    start_stop_speed_threshold: float,
+    start_max_shift_steps: int,
     longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
     remove_neighbor_agents: bool,
+    removed_neighbor_indices: tuple[int, ...],
     remove_pedestrians: bool,
     remove_bikes: bool,
     infer_future_traffic_lights: bool,
@@ -167,7 +182,9 @@ def _cached_turn_indicator_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
-    elif remove_pedestrians or remove_bikes:
+    elif removed_neighbor_indices:
+        frame_data = _remove_neighbors_by_index(frame_data, removed_neighbor_indices)
+    if not remove_neighbor_agents and (remove_pedestrians or remove_bikes):
         frame_data = _remove_agent_types(frame_data, remove_pedestrians, remove_bikes)
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
@@ -175,6 +192,9 @@ def _cached_turn_indicator_prediction(
     if apply_augmentation:
         frame_data = _augment_frame(
             frame_data,
+            apply_start_decision,
+            start_stop_speed_threshold,
+            start_max_shift_steps,
             longitudinal_offset,
             lateral_offset,
             yaw_offset,
@@ -187,24 +207,44 @@ def _cached_turn_indicator_prediction(
 
 def _augment_frame(
     frame_data: dict[str, Any],
+    apply_start_decision: bool,
+    start_stop_speed_threshold: float,
+    start_max_shift_steps: int,
     longitudinal_offset: float,
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
 ) -> dict[str, Any]:
     """Apply a deterministic training augmentation to one frame."""
+    start_decision = PlannerStartDecisionAugmentation(
+        probability=1.0,
+        stop_speed_threshold=start_stop_speed_threshold,
+        max_shift_steps=start_max_shift_steps,
+    )
     speed_augmentation = PlannerSpeedAugmentation(
         speed_scale_range=(ego_speed_scale, ego_speed_scale),
         speed_noise_range=(0.0, 0.0),
         probability=1.0,
     )
-    pose_augmentation = PlannerRigidDataAugmentation(
-        longitudinal_offset_range=(longitudinal_offset, longitudinal_offset),
-        lateral_offset_range=(lateral_offset, lateral_offset),
-        yaw_offset_range=(yaw_offset, yaw_offset),
-        pose_probability=1.0,
+    pose_augmentation = PlannerPoseAugmentation(
+        normal_case={
+            "probability": 1.0,
+            "longitudinal_offset_range": (longitudinal_offset, longitudinal_offset),
+            "lateral_offset_range": (lateral_offset, lateral_offset),
+            "yaw_offset_range": (yaw_offset, yaw_offset),
+            "pose_augmentation_endpoint_speed_threshold": 0.1,
+            "pose_augmentation_speed_check_endpoint_index": 20,
+        },
+        stopped_in_intersection={
+            "probability": 1.0,
+            "stopped_speed_threshold": 0.1,
+            "longitudinal_offset_range": (longitudinal_offset, longitudinal_offset),
+            "lateral_offset_range": (lateral_offset, lateral_offset),
+            "yaw_offset_range": (yaw_offset, yaw_offset),
+        },
     )
-    return pose_augmentation(speed_augmentation(frame_data))
+    output = start_decision(frame_data) if apply_start_decision else frame_data
+    return speed_augmentation(pose_augmentation(output))
 
 
 def _remove_neighbor_agents(frame_data: dict[str, Any]) -> dict[str, Any]:
@@ -218,6 +258,28 @@ def _remove_neighbor_agents(frame_data: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in result:
             result[key] = np.zeros_like(np.asarray(result[key]))
+    return result
+
+
+def _remove_neighbors_by_index(
+    frame_data: dict[str, Any], neighbor_indices: tuple[int, ...]
+) -> dict[str, Any]:
+    """Return a frame with selected neighbor rows zeroed across all tensors."""
+    result = dict(frame_data)
+    for key in (
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "agent_shape",
+        "agent_label",
+    ):
+        if key not in result:
+            continue
+        values = np.asarray(result[key]).copy()
+        valid_indices = [
+            index for index in neighbor_indices if 0 <= index < len(values)
+        ]
+        values[valid_indices] = 0
+        result[key] = values
     return result
 
 
@@ -349,10 +411,35 @@ def _render_inference_settings(onnx_model: bool) -> tuple[str, int, float, float
     return device, num_steps, time_epsilon, noise_scale, seed
 
 
-def _render_augmentation_settings() -> tuple[bool, float, float, float, float]:
+def _render_augmentation_settings() -> tuple[
+    bool, bool, float, int, float, float, float, float
+]:
     """Render deterministic augmentation controls for checkpoint inference."""
     st.sidebar.subheader("Data augmentation")
     enabled = st.sidebar.checkbox("Apply augmentation", value=False)
+    apply_start_decision = st.sidebar.checkbox(
+        "Apply Start Decision", value=False, disabled=not enabled
+    )
+    with st.sidebar.expander("Start Decision parameters", expanded=False):
+        start_stop_speed_threshold = float(
+            st.number_input(
+                "Start stop-speed threshold [m/s]",
+                min_value=0.0,
+                value=0.1,
+                step=0.05,
+                disabled=not enabled or not apply_start_decision,
+            )
+        )
+        start_max_shift_steps = int(
+            st.number_input(
+                "Start maximum shift steps",
+                min_value=1,
+                max_value=30,
+                value=15,
+                step=1,
+                disabled=not enabled or not apply_start_decision,
+            )
+        )
     longitudinal_offset = float(
         st.sidebar.slider(
             "Longitudinal offset [m]",
@@ -395,6 +482,9 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float, float]:
     )
     return (
         enabled,
+        apply_start_decision,
+        start_stop_speed_threshold,
+        start_max_shift_steps,
         longitudinal_offset,
         lateral_offset,
         math.radians(yaw_offset_degrees),
@@ -402,12 +492,19 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float, float]:
     )
 
 
-def _render_input_options() -> tuple[bool, bool, bool, bool]:
+def _render_input_options() -> tuple[bool, tuple[int, ...], bool, bool, bool]:
     """Render optional input transformations."""
     st.sidebar.subheader("Input options")
     remove_neighbor_agents = st.sidebar.checkbox(
         "Remove all neighbor agents", value=False
     )
+    selected_neighbor_indices = st.sidebar.multiselect(
+        "Neighbor indices to remove",
+        options=range(MAX_NUM_NEIGHBORS),
+        default=[],
+        disabled=remove_neighbor_agents,
+    )
+    removed_neighbor_indices = tuple(int(index) for index in selected_neighbor_indices)
     remove_pedestrians = st.sidebar.checkbox("Remove pedestrians", value=False)
     remove_bikes = st.sidebar.checkbox("Remove bikes", value=False)
     infer_future_traffic_lights = st.sidebar.checkbox(
@@ -415,6 +512,7 @@ def _render_input_options() -> tuple[bool, bool, bool, bool]:
     )
     return (
         remove_neighbor_agents,
+        removed_neighbor_indices,
         remove_pedestrians,
         remove_bikes,
         infer_future_traffic_lights,
@@ -431,6 +529,9 @@ def render_training_results() -> None:
     )
     (
         apply_augmentation,
+        apply_start_decision,
+        start_stop_speed_threshold,
+        start_max_shift_steps,
         longitudinal_offset,
         lateral_offset,
         yaw_offset,
@@ -438,6 +539,7 @@ def render_training_results() -> None:
     ) = _render_augmentation_settings()
     (
         remove_neighbor_agents,
+        removed_neighbor_indices,
         remove_pedestrians,
         remove_bikes,
         infer_future_traffic_lights,
@@ -496,18 +598,25 @@ def render_training_results() -> None:
         )
         if remove_neighbor_agents:
             visualized_frame = _remove_neighbor_agents(frame_data)
-        elif remove_pedestrians or remove_bikes:
-            visualized_frame = _remove_agent_types(
-                frame_data, remove_pedestrians, remove_bikes
-            )
         else:
             visualized_frame = frame_data
+            if removed_neighbor_indices:
+                visualized_frame = _remove_neighbors_by_index(
+                    visualized_frame, removed_neighbor_indices
+                )
+        if not remove_neighbor_agents and (remove_pedestrians or remove_bikes):
+            visualized_frame = _remove_agent_types(
+                visualized_frame, remove_pedestrians, remove_bikes
+            )
         if infer_future_traffic_lights:
             visualized_frame = _infer_future_traffic_lights(visualized_frame)
         visualized_frame = _fill_unknown_traffic_lights(visualized_frame)
         if apply_augmentation:
             visualized_frame = _augment_frame(
                 visualized_frame,
+                apply_start_decision,
+                start_stop_speed_threshold,
+                start_max_shift_steps,
                 longitudinal_offset,
                 lateral_offset,
                 yaw_offset,
@@ -526,11 +635,15 @@ def render_training_results() -> None:
             noise_scale,
             seed,
             apply_augmentation,
+            apply_start_decision,
+            start_stop_speed_threshold,
+            start_max_shift_steps,
             longitudinal_offset,
             lateral_offset,
             yaw_offset,
             ego_speed_scale,
             remove_neighbor_agents,
+            removed_neighbor_indices,
             remove_pedestrians,
             remove_bikes,
             infer_future_traffic_lights,
@@ -546,11 +659,15 @@ def render_training_results() -> None:
                 h5_modification_time_ns,
                 device,
                 apply_augmentation,
+                apply_start_decision,
+                start_stop_speed_threshold,
+                start_max_shift_steps,
                 longitudinal_offset,
                 lateral_offset,
                 yaw_offset,
                 ego_speed_scale,
                 remove_neighbor_agents,
+                removed_neighbor_indices,
                 remove_pedestrians,
                 remove_bikes,
                 infer_future_traffic_lights,
@@ -571,9 +688,18 @@ def render_training_results() -> None:
             f"yaw offset {math.degrees(yaw_offset):.2f} deg · "
             f"ego history speed scale {ego_speed_scale:.2f}"
         )
+        if apply_start_decision:
+            st.caption(
+                "Start Decision: enabled · "
+                f"stop-speed threshold {start_stop_speed_threshold:.2f} m/s · "
+                f"maximum shift {start_max_shift_steps} steps"
+            )
     if remove_neighbor_agents:
         st.caption("Input option: all neighbor agents removed")
     else:
+        if removed_neighbor_indices:
+            removed_indices = ", ".join(map(str, removed_neighbor_indices))
+            st.caption(f"Input option: neighbor indices {removed_indices} removed")
         if remove_pedestrians:
             st.caption("Input option: pedestrians removed")
         if remove_bikes:
@@ -620,8 +746,11 @@ def render_training_results() -> None:
         f"training-result::{checkpoint_path}::{checkpoint_modification_time_ns}::"
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
         f"{noise_scale}::{seed}::{apply_augmentation}::{longitudinal_offset}::"
+        f"{apply_start_decision}::{start_stop_speed_threshold}::"
+        f"{start_max_shift_steps}::"
         f"{lateral_offset}::{yaw_offset}::{ego_speed_scale}::"
-        f"{remove_neighbor_agents}::{remove_pedestrians}::{remove_bikes}::"
+        f"{remove_neighbor_agents}::{removed_neighbor_indices}::"
+        f"{remove_pedestrians}::{remove_bikes}::"
         f"{infer_future_traffic_lights}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)

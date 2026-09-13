@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -12,9 +13,12 @@ from numpy.typing import NDArray
 from diffusion_planner.data.transforms import (
     PlannerEgoShapeAugmentation,
     PlannerGoalTransform,
-    PlannerILQRAugmentation,
-    PlannerRigidDataAugmentation,
+    PlannerPoseAugmentation,
     PlannerSpeedAugmentation,
+)
+from diffusion_planner.data.transforms.pose_augmentation import (
+    POSE_AUGMENTATION_APPLIED_KEY,
+    is_point_in_intersection,
 )
 
 
@@ -51,10 +55,100 @@ def _frame() -> dict[str, NDArray[np.float32]]:
     return frame
 
 
-class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
+def _pose_augmentation(**kwargs: Any) -> PlannerPoseAugmentation:
+    probability = float(kwargs.pop("pose_probability", 0.5))
+    normal_case = {
+        "probability": probability,
+        "longitudinal_offset_range": kwargs.pop(
+            "longitudinal_offset_range", (0.0, 0.0)
+        ),
+        "lateral_offset_range": kwargs.pop("lateral_offset_range", (-1.0, 1.0)),
+        "yaw_offset_range": kwargs.pop(
+            "yaw_offset_range", (-math.radians(5), math.radians(5))
+        ),
+        "pose_augmentation_endpoint_speed_threshold": kwargs.pop(
+            "pose_augmentation_endpoint_speed_threshold", 0.1
+        ),
+        "pose_augmentation_speed_check_endpoint_index": kwargs.pop(
+            "pose_augmentation_speed_check_endpoint_index", 20
+        ),
+    }
+    stopped_case = {
+        "probability": probability,
+        "stopped_speed_threshold": kwargs.pop("stopped_speed_threshold", 0.1),
+        "longitudinal_offset_range": kwargs.pop(
+            "stopped_in_intersection_longitudinal_offset_range", (-1.5, 1.5)
+        ),
+        "lateral_offset_range": kwargs.pop(
+            "stopped_in_intersection_lateral_offset_range", (-1.5, 1.5)
+        ),
+        "yaw_offset_range": kwargs.pop(
+            "stopped_in_intersection_yaw_offset_range",
+            (-math.radians(5), math.radians(5)),
+        ),
+    }
+    if kwargs:
+        raise ValueError(f"Unexpected test parameters: {sorted(kwargs)}")
+    return PlannerPoseAugmentation(
+        normal_case=normal_case, stopped_in_intersection=stopped_case
+    )
+
+
+class PlannerPoseAugmentationTest(unittest.TestCase):
+    def test_point_in_intersection_handles_inside_and_outside(self) -> None:
+        areas = np.zeros((2, 4, 2), dtype=np.float32)
+        areas[0] = np.asarray(
+            [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            dtype=np.float32,
+        )
+        frame = {"intersection_area": areas}
+
+        self.assertTrue(is_point_in_intersection(frame, np.asarray([0.0, 0.0])))
+        self.assertFalse(is_point_in_intersection(frame, np.asarray([2.0, 0.0])))
+
+    def test_uses_stopped_in_intersection_offset_ranges(self) -> None:
+        frame = _frame()
+        frame["ego_agent_past"][-1, 4] = 0.0
+        frame["intersection_area"][0] = np.asarray(
+            [[-1.0, -1.0], [1.0, -1.0], [0.0, 1.0]], dtype=np.float32
+        )
+        augmentation = _pose_augmentation(
+            longitudinal_offset_range=(2.0, 2.0),
+            lateral_offset_range=(0.0, 0.0),
+            yaw_offset_range=(0.0, 0.0),
+            pose_probability=1.0,
+            stopped_in_intersection_longitudinal_offset_range=(0.5, 0.5),
+            stopped_in_intersection_lateral_offset_range=(0.0, 0.0),
+            stopped_in_intersection_yaw_offset_range=(0.0, 0.0),
+        )
+
+        result = augmentation(frame)
+
+        self.assertTrue(bool(result[POSE_AUGMENTATION_APPLIED_KEY]))
+        self.assertEqual(result["goal_pose"][0], 3.5)
+
+    def test_uses_normal_ranges_when_current_state_is_moving(self) -> None:
+        frame = _frame()
+        frame["intersection_area"][0] = np.asarray(
+            [[-1.0, -1.0], [1.0, -1.0], [0.0, 1.0]], dtype=np.float32
+        )
+        augmentation = _pose_augmentation(
+            longitudinal_offset_range=(2.0, 2.0),
+            lateral_offset_range=(0.0, 0.0),
+            yaw_offset_range=(0.0, 0.0),
+            pose_probability=1.0,
+            stopped_in_intersection_longitudinal_offset_range=(0.5, 0.5),
+            stopped_in_intersection_lateral_offset_range=(0.0, 0.0),
+            stopped_in_intersection_yaw_offset_range=(0.0, 0.0),
+        )
+
+        result = augmentation(frame)
+
+        self.assertEqual(result["goal_pose"][0], 2.0)
+
     def test_transforms_scene_into_augmented_ego_frame(self) -> None:
         frame = _frame()
-        augmentation = PlannerILQRAugmentation(
+        augmentation = _pose_augmentation(
             lateral_offset_range=(2.0, 2.0),
             yaw_offset_range=(math.pi / 2, math.pi / 2),
             pose_probability=1.0,
@@ -62,6 +156,7 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
 
         result = augmentation(frame)
 
+        self.assertTrue(bool(result[POSE_AUGMENTATION_APPLIED_KEY]))
         np.testing.assert_allclose(
             result["ego_agent_past"][-1, :4], _pose(0.0, 0.0), atol=1e-6
         )
@@ -69,10 +164,6 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
             result["neighbor_agents_past"][0, -1],
             _pose(0.0, -3.0, 0.0, -1.0),
             atol=1e-6,
-        )
-        self.assertTrue(np.all(np.isfinite(result["ego_agent_future"])))
-        np.testing.assert_allclose(
-            np.linalg.norm(result["ego_agent_future"][:, 2:4], axis=-1), 1.0
         )
         np.testing.assert_allclose(
             result["goal_pose"],
@@ -82,8 +173,10 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
 
     def test_preserves_padding_and_non_coordinate_tensors(self) -> None:
         frame = _frame()
-        augmentation = PlannerILQRAugmentation(
-            (1.0, 1.0), (0.1, 0.1), pose_probability=1.0
+        augmentation = _pose_augmentation(
+            longitudinal_offset_range=(1.0, 1.0),
+            lateral_offset_range=(0.1, 0.1),
+            pose_probability=1.0,
         )
 
         result = augmentation(frame)
@@ -133,24 +226,16 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
         np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
 
     def test_pose_augmentation_checks_future_speed_without_current_speed(self) -> None:
-        for augmentation_type in (
-            PlannerRigidDataAugmentation,
-            PlannerILQRAugmentation,
-        ):
+        for augmentation_type in (PlannerPoseAugmentation,):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_past"][-1, 4] = 0.0
-                check_index = (
-                    {"num_refine": 1}
-                    if augmentation_type is PlannerILQRAugmentation
-                    else {"pose_augmentation_speed_check_index": 1}
-                )
-                augmentation = augmentation_type(
+                augmentation = _pose_augmentation(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
-                    pose_augmentation_speed_threshold=0.5,
-                    **check_index,
+                    pose_augmentation_endpoint_speed_threshold=0.5,
+                    pose_augmentation_speed_check_endpoint_index=1,
                 )
 
                 result = augmentation(frame)
@@ -160,28 +245,21 @@ class PlannerILQRAugmentationIntegrationTest(unittest.TestCase):
                 )
 
     def test_pose_augmentation_skips_when_speed_before_index_is_too_low(self) -> None:
-        for augmentation_type in (
-            PlannerRigidDataAugmentation,
-            PlannerILQRAugmentation,
-        ):
+        for augmentation_type in (PlannerPoseAugmentation,):
             with self.subTest(augmentation_type=augmentation_type.__name__):
                 frame = _frame()
                 frame["ego_agent_future"][1, 4] = 0.4
-                check_index = (
-                    {"num_refine": 1}
-                    if augmentation_type is PlannerILQRAugmentation
-                    else {"pose_augmentation_speed_check_index": 1}
-                )
-                augmentation = augmentation_type(
+                augmentation = _pose_augmentation(
                     lateral_offset_range=(1.0, 1.0),
                     yaw_offset_range=(0.0, 0.0),
                     pose_probability=1.0,
-                    pose_augmentation_speed_threshold=0.5,
-                    **check_index,
+                    pose_augmentation_endpoint_speed_threshold=0.5,
+                    pose_augmentation_speed_check_endpoint_index=1,
                 )
 
                 result = augmentation(frame)
 
+                self.assertFalse(bool(result[POSE_AUGMENTATION_APPLIED_KEY]))
                 self.assertIs(result["goal_pose"], frame["goal_pose"])
 
 
