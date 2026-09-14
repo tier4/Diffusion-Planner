@@ -195,7 +195,7 @@ The initial sidecar format is `diffusion_planner_h5_tags`, version `1`:
       "frame_stop": 873,
       "first_frame_time_ns": 1736598240000000000,
       "last_frame_time_ns": 1736598676000000000,
-      "tags": ["split:validation", "site:odaiba", "split:train", "project:x2_dev"]
+      "tags": ["project:x2_dev", "site:odaiba", "split:train", "vehicle:j6_gen2"]
     },
     {
       "frame_start": 120,
@@ -218,7 +218,8 @@ The initial sidecar format is `diffusion_planner_h5_tags`, version `1`:
 `h5` is an identity and compatibility check for the sibling shard, not a path to it.
 The sidecar must not contain an absolute path. `source_bag_path`, H5 format/version,
 frame count, and the first/last source timestamps must match the H5 file before a
-consumer uses its tags.
+consumer uses its tags. The source value is taken from the shard's
+`source_bag_path` root attribute.
 
 Each item in `spans` attaches one or more tags to a half-open H5 frame interval
 `[frame_start, frame_stop)`. The required constraints are:
@@ -240,26 +241,23 @@ components matching lowercase `[a-z0-9_]+`. The format does not impose a taxonom
 allow-list, so projects can introduce new dimensions and values without a schema
 release.
 
-`project_id`, `split`, and other values already represented by H5 root attributes
-should not be duplicated in the sidecar. Tag query tools may expose such values as
-derived tags (for example, `project:x2_dev` or `split:train`) together with the
-curated sidecar tags.
+Path-derived tags may intentionally duplicate values represented by H5 root
+attributes. In particular, the standard full-shard path span carries
+`site`, `split`, `project`, and `vehicle` so H5 and NPZ releases expose the same
+tag vocabulary through their authoritative sidecars. Consumers may use the H5
+attributes as an additional consistency check, but must not treat them as a
+replacement for those tags.
 
-### Derived tag indexes and evaluation output
+A path-tag refresh tool owns only these four dimensions on a full-shard span
+`[0, num_frames)`. It updates that span when present or creates it when absent,
+preserving all other tags on that span and preserving every narrower curated span.
 
-`frames.tags.json` is the source of truth. A dataset-level SQLite or Parquet index is
-optional and must be rebuildable from sidecars. A normalized index stores one row per
-`span` and tag, with at least:
+### Evaluation output
 
-```text
-h5_path, source_bag_path, frame_start, frame_stop,
-first_frame_time_ns, last_frame_time_ns, tag
-```
-
-`h5_path` in such an index is relative to the index file. Tags must not become
-authoritative columns in the normal training frame index; a tag query may instead
-materialize a separate filtered frame index for a particular training or evaluation
-selection.
+`frames.tags.json` is the complete H5 tag system: there is no dataset-level tag
+database or tag index. Consumers resolve tags from the selected shard's adjacent
+sidecar. Tags must not become authoritative columns in the normal training frame
+index.
 
 Open-loop result rows should include the effective tags at their referenced frame.
 Closed-loop result rows should include the H5 path, global `[frame_start, frame_stop)`
