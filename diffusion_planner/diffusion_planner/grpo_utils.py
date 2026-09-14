@@ -22,8 +22,6 @@ Only the ``x_start`` diffusion model type (the default) without velocity represe
 supported; the helpers raise a clear error otherwise.
 """
 
-import random
-
 import torch
 
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
@@ -34,7 +32,6 @@ from diffusion_planner.loss import (
     loss_func,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 
@@ -80,7 +77,6 @@ def sample_group(
     inference_inputs["sampled_trajectories"] = (
         torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
     )
-    inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
 
     _, outputs = model(inference_inputs)
     ego_world = outputs["prediction"][:, 0].detach()  # [B*N, T, 4]
@@ -269,7 +265,6 @@ def compute_grpo_loss(
     ego_target = ego_pseudo_gt.detach()
 
     B, Pn, T, _ = neighbors_future.shape
-    P = 1 + Pn
     device = ego_pseudo_gt.device
 
     ego_current = norm_inputs["ego_current_state"][:, :4]
@@ -287,30 +282,21 @@ def compute_grpo_loss(
 
     eps = 1e-3
     t = torch.rand(B, device=device) * (1 - eps) + eps
-    t = t.view(B, 1, 1, 1).expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future)
-
-    max_delay = 5
-    delay = torch.randint(0, max_delay + 1, (B,), device=device)
-    prefix_mask = generate_prefix_mask(delay, P, T + 1)  # [B, P, T+1, 1]
-    mask_coeff = random.uniform(0.0, 1.0)
-    curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=device))
-    t = torch.where(prefix_mask, curr_mask_time, t)
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)  # [B, P, T+1, 4]
     all_gt[:, 1:][neighbor_mask] = 0.0
 
-    mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+    mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
+    std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
     xT = mean + std * z
     xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-    xT = torch.where(prefix_mask, all_gt, xT)
 
     merged_inputs = {
         **norm_inputs,
         "gt_trajectories": all_gt,
         "sampled_trajectories": xT,
         "diffusion_time": t,
-        "prefix_mask": prefix_mask,
     }
     _, decoder_output = model(merged_inputs)
     model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
