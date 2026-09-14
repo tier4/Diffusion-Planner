@@ -291,12 +291,22 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
                 dev_num += float(dev) * steps
                 dev_steps += steps
 
+        cl_num = 0.0
+        cl_steps = 0
+        for v in summaries.values():
+            cl = v.get("mean_centerline_dist_m", None)
+            steps = int(v.get("total_steps", 0) or 0)
+            if cl is not None and math.isfinite(cl) and steps > 0:
+                cl_num += float(cl) * steps
+                cl_steps += steps
+
         agg = {
             "n_groups": len(summaries),
             "n_segments": n_segments,
             "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in summaries.values()),
             "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
             "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
+            "mean_centerline_dist_m": (cl_num / cl_steps) if cl_steps else float("inf"),
             "total_curb_hits": sum(
                 int(s.get("road_border", {}).get("collision_count", 0) or 0)
                 for s in summaries.values()
