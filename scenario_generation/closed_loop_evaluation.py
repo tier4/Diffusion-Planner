@@ -13,6 +13,7 @@ route under an npz_root.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -495,6 +496,16 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     strong_brake_mps2=params.strong_brake_mps2,
                     title=f"{job.route_key} [{start},{end}]",
                 )
+            # render_segment always writes this next to the PNGs; png_dir may be a scratch
+            # dir (see execute_jobs) that gets wiped once the run finishes, so pull the trace
+            # out into out_dir now, alongside the mp4s, or it's lost with the frames.
+            rollout_src = png_dir / "rollout.jsonl"
+            if rollout_src.exists():
+                shutil.move(
+                    str(rollout_src),
+                    self.out_dir / f"{job.route_key}_{start}_{end}.rollout.jsonl",
+                )
+
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
                 row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
