@@ -22,6 +22,10 @@ training:
   noise_scale: 1.0
   ego_loss_weight: 100.0
   neighbor_loss_weight: 1.0
+  # Multiplies neighbor_loss_weight for agents carrying the unknown label, in the trajectory
+  # loss only. They keep full weight in the scene encoder, so they still inform the plan.
+  # 1.0 keeps the previous behaviour exactly.
+  unknown_loss_scale: 1.0
   turn_indicator_loss_weight: 1e-3
   turn_indicator_transition_loss_weight: 1.0
   log_interval: 200

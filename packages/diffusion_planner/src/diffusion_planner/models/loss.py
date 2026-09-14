@@ -7,7 +7,7 @@ from typing import TypedDict
 import torch
 import torch.nn.functional as F
 
-from diffusion_planner.data.dimensions import TRAJECTORY_DIM
+from diffusion_planner.data.dimensions import AGENT_LABEL_DIM, TRAJECTORY_DIM
 
 from .diffusion_planner import DiffusionPlanner
 from .flow_matching import compute_x0_flow_matching_loss, x0_velocity_error
@@ -65,6 +65,44 @@ def trajectory_error_in_target_frame(
     )
 
 
+def build_agent_loss_weights(
+    agent_label: torch.Tensor | None,
+    num_agents: int,
+    *,
+    ego_loss_weight: float,
+    neighbor_loss_weight: float,
+    unknown_loss_scale: float,
+    like: torch.Tensor,
+) -> torch.Tensor:
+    """Per-agent trajectory-loss weights, shaped `(B, A)`: ego first, then neighbours.
+
+    ``unknown_loss_scale`` multiplies the weight of neighbours carrying the unknown label.
+    The asymmetry with the scene encoder is the point: an unknown agent should still inform
+    the plan at full strength, but its future is genuinely less predictable, and charging the
+    model full price for failing to predict it gives it a reason to rely on agents less
+    overall. Attention measurements show that is what the four-class model does - it shifts
+    away from agents and onto static map geometry.
+
+    Neighbour ordering matches ``agent_label`` row for row: ``neighbor_agents_future`` and
+    ``agent_label`` both carry MAX_NUM_NEIGHBORS rows in the same order, so trajectory agent
+    ``i`` is ``agent_label[i - 1]``.
+    """
+    batch = like.shape[0]
+    weights = like.new_full((batch, num_agents), neighbor_loss_weight)
+    weights[:, 0] = ego_loss_weight
+    if unknown_loss_scale == 1.0 or agent_label is None:
+        return weights
+    if agent_label.shape[-1] < AGENT_LABEL_DIM:
+        # Three-column shards: there is no unknown column to weight.
+        return weights
+    neighbours = num_agents - 1
+    unknown = agent_label[:, :neighbours, AGENT_LABEL_DIM - 1] > 0.0
+    scaled = weights[:, 1:].masked_fill(
+        unknown, neighbor_loss_weight * unknown_loss_scale
+    )
+    return torch.cat((weights[:, :1], scaled), dim=1)
+
+
 def trajectory_huber_loss(
     x_prediction: torch.Tensor,
     target: torch.Tensor,
@@ -72,8 +110,13 @@ def trajectory_huber_loss(
     time_epsilon: float,
     ego_loss_weight: float = 1.0,
     neighbor_loss_weight: float = 1.0,
+    agent_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Apply agent-weighted Huber loss after target-frame position rotation."""
+    """Apply agent-weighted Huber loss after target-frame position rotation.
+
+    ``agent_weights`` is an optional `(B, A)` override. Without it the two scalars are used
+    exactly as before, so existing callers are unaffected.
+    """
     target_frame_error = trajectory_error_in_target_frame(x_prediction - target, target)
     target_frame_error = x0_velocity_error(target_frame_error, time, time_epsilon)
     elementwise_loss = F.huber_loss(
@@ -81,15 +124,17 @@ def trajectory_huber_loss(
         torch.zeros_like(target_frame_error),
         reduction="none",
     )
-    agent_weights = torch.cat(
-        (
-            elementwise_loss.new_full((1,), ego_loss_weight),
-            elementwise_loss.new_full(
-                (elementwise_loss.shape[1] - 1,), neighbor_loss_weight
-            ),
+    if agent_weights is None:
+        scalar_weights = torch.cat(
+            (
+                elementwise_loss.new_full((1,), ego_loss_weight),
+                elementwise_loss.new_full(
+                    (elementwise_loss.shape[1] - 1,), neighbor_loss_weight
+                ),
+            )
         )
-    )
-    return elementwise_loss * agent_weights.view(1, -1, 1, 1)
+        return elementwise_loss * scalar_weights.view(1, -1, 1, 1)
+    return elementwise_loss * agent_weights.unsqueeze(-1).unsqueeze(-1)
 
 
 def create_target_trajectory(
@@ -110,12 +155,21 @@ def compute_diffusion_planner_loss(
     noise_scale: float,
     ego_loss_weight: float = 1.0,
     neighbor_loss_weight: float = 1.0,
+    unknown_loss_scale: float = 1.0,
     turn_indicator_loss_weight: float = 1.0,
     turn_indicator_transition_loss_weight: float = 5.0,
 ) -> DiffusionPlannerLoss:
     """Compute the joint planner loss and turn-indicator metrics."""
     target = create_target_trajectory(input_data)
     training_mask = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
+    agent_weights = build_agent_loss_weights(
+        input_data.get("agent_label"),
+        target.shape[1],
+        ego_loss_weight=ego_loss_weight,
+        neighbor_loss_weight=neighbor_loss_weight,
+        unknown_loss_scale=unknown_loss_scale,
+        like=target,
+    )
     turn_indicator_logits: list[torch.Tensor] = []
 
     def predict(state: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
@@ -137,6 +191,7 @@ def compute_diffusion_planner_loss(
             time_epsilon,
             ego_loss_weight,
             neighbor_loss_weight,
+            agent_weights,
         ),
         target=target,
         mask=training_mask,
