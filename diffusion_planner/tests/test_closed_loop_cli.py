@@ -250,6 +250,36 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
     }
 
 
+def test_write_groups_manifest_includes_step_weighted_centerline_mean(tmp_path: Path):
+    """``groups.json`` must carry ``mean_centerline_dist_m`` step-weighted across groups, the
+    same way it already does ``mean_gt_deviation_m`` -- ``wandb_closed_loop``'s ``_aggregate``
+    already computes this metric the same way, so the two aggregation paths must not drift
+    apart (see ``_write_groups_manifest``'s docstring)."""
+    import json
+
+    mod = _load_run_all_groups()
+
+    summaries = {
+        "siteA/routeA": {
+            "n_segments": 1,
+            "total_steps": 100,
+            "mean_centerline_dist_m": 0.2,
+            "mean_gt_deviation_m": 0.1,
+        },
+        "siteA/routeB": {
+            "n_segments": 1,
+            "total_steps": 300,
+            "mean_centerline_dist_m": 0.6,
+            "mean_gt_deviation_m": 0.3,
+        },
+    }
+    mod._write_groups_manifest(tmp_path, summaries)
+
+    groups = json.loads((tmp_path / "groups.json").read_text())
+    expected = (0.2 * 100 + 0.6 * 300) / 400
+    assert groups["mean_centerline_dist_m"] == pytest.approx(expected)
+
+
 def _assign(spec, world_size):
     """Per-rank assignment for a ``{group: [job_id]}`` spec: [{group: [job ids]}, ...]."""
     from types import SimpleNamespace
