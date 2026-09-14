@@ -11,15 +11,18 @@ import torch
 from torch.utils.data import DataLoader
 
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from planner_metrics.arrival import evaluate_arrival_with_details
 from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
 from planner_metrics.gt_lateral_deviation import evaluate_gt_lateral_deviation_with_details
+from planner_metrics.lane_change import evaluate_lane_change_with_details
 from planner_metrics.object_avoidance import evaluate_object_avoidance_with_details
 from planner_metrics.scene_data import extract_metric_scene_data
 from planner_metrics.stop_overshoot import evaluate_stop_overshoot_with_details
 from planner_metrics.yield_progress import evaluate_yield_progress_with_details
 
 METRICS = {
+    "arrival": evaluate_arrival_with_details,
     "centerline": evaluate_centerline_with_details,
     "departure": evaluate_departure_with_details,
     "traffic_light_go": evaluate_departure_with_details,
@@ -30,6 +33,7 @@ METRICS = {
     "temporal_stop": evaluate_yield_progress_with_details,
     "obstacle_stop": evaluate_stop_overshoot_with_details,
     "traffic_light_stop": evaluate_stop_overshoot_with_details,
+    "lane_change": evaluate_lane_change_with_details,
 }
 
 

@@ -13,8 +13,9 @@ The JSON maps each metric name to a list of NPZ files:
 }
 ```
 
-Supported metrics: `centerline`, `departure`, `traffic_light_go`, `simple_turn`, `object_avoidance`, `pedestrian_yield`, `vehicle_yield`, `temporal_stop`, `obstacle_stop`, `traffic_light_stop`. The NPZ files must use the standard planner input format.
+Supported metrics: `arrival`, `centerline`, `departure`, `traffic_light_go`, `simple_turn`, `object_avoidance`, `pedestrian_yield`, `vehicle_yield`, `temporal_stop`, `obstacle_stop`, `traffic_light_stop`, `lane_change`. The NPZ files must use the standard planner input format.
 
+- `arrival` requires `ego_agent_future`: reports final displacement error in meters and final heading error in degrees against the GT endpoint. GT may use either `[x, y, heading]` or `[x, y, cos(yaw), sin(yaw)]`.
 - `centerline`, `departure`, `traffic_light_go` require `route_lanes`/`lanes` or `ego_current_state` as documented in `planner_metrics/centerline.py` and `planner_metrics/departure.py`. `traffic_light_go` reuses the `departure` scorer (predicted forward progress must clear a minimum within a horizon) under its own list key/parameters, for scenes where the ego is released from a red light rather than departing from a stop.
 - `simple_turn` requires `ego_agent_future`: same lateral/longitudinal error decomposition as `centerline`, but measured against the GT trajectory instead of the route-lane centerline (route-lane geometry is coarser than the recorded turn shape).
 - `object_avoidance` requires `neighbor_agents_future`, `neighbor_agents_past`, and `ego_shape` in the OR-interval-start NPZ, with at least one valid neighbor of any type.
