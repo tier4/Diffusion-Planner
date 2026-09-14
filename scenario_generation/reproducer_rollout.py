@@ -518,6 +518,10 @@ class _SegState:
     # instead of the recorded ego trajectory.
     centerline_dev_sum: float = 0.0
     centerline_dev_count: int = 0
+    # Per-step route-centerline distance (m), parallel to ``clearances``/``gt_devs`` -- lets
+    # the per-step rollout.jsonl trace expose the same value ``mean_centerline_dist_m`` is
+    # averaged from, instead of only the segment-level mean.
+    centerline_devs: np.ndarray | None = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -643,6 +647,7 @@ def _seed_state(
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
+        centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
@@ -885,6 +890,8 @@ def _score_into(
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
             cl_dev = score_centerline_step(np_dict, device=device)
+            if s.centerline_devs is not None:
+                s.centerline_devs[s.k] = float(cl_dev["centerline_dist_m"])
             if np.isfinite(cl_dev["centerline_dist_m"]):
                 s.centerline_dev_sum += cl_dev["centerline_dist_m"]
                 s.centerline_dev_count += 1
@@ -2028,8 +2035,19 @@ def render_segment(
                         "rb_dist_m": round(float(s.rb_dists[k]), 4)
                         if np.isfinite(s.rb_dists[k])
                         else None,
+                        "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
+                        if np.isfinite(s.centerline_devs[k])
+                        else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        # Resolved closed-loop turn indicator going into this tick, and the
+                        # recorded GT at the same frame -- same values (and same read) the
+                        # segment-level turn_indicator block and the PNG renderer use, so a
+                        # transition/false-positive can be reconstructed post hoc from the trace.
+                        "turn_indicator_pred": int(s.last_turn_indicator),
+                        "turn_indicator_gt": int(
+                            np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
+                        ),
                         # collision AND off the recorded GT path by > deviation_collision_thresh_m
                         # (see ``deviation_collision_block``); same per-step definition the
                         # segment-level "deviation_collision" metric rolls up from.
