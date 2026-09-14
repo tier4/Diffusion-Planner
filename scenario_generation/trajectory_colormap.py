@@ -1,9 +1,11 @@
 """Render a top-down ego trajectory colored by a per-step risk metric.
 
 Reads the per-step trace ``reproducer_rollout.render_segment`` already writes to
-``rollout.jsonl`` next to a segment's PNGs (ego pose + ``clearance_m`` + ``collision``,
-one line per step) and draws a colored polyline (risk metric -> color) with a colorbar
-legend, similar in spirit to a routing app's "road risk" heatmap overlay.
+``rollout.jsonl`` next to a segment's PNGs (ego pose plus whatever risk fields that step
+recorded -- ``clearance_m``, ``collision``, ``centerline_dist_m``, ``turn_indicator_pred``/
+``turn_indicator_gt``, ``deviation_collision``, ``collision_rear``, etc., one line per step)
+and draws a colored polyline (risk metric -> color) with a colorbar legend, similar in spirit
+to a routing app's "road risk" heatmap overlay.
 
 Used by both the W&B representative-case image (one PNG per group, ``wandb.Image``,
 worst-case route) and the local video/colormap output — same renderer, same look,
@@ -26,6 +28,10 @@ METRIC_CHOICES = (
     "road_border",
     "red_light",
     "strong_brake",
+    "centerline",
+    "turn_indicator",
+    "deviation_collision",
+    "collision_rear",
 )
 
 # Fixed sim step (must match reproducer_rollout.DT) -- rollout.jsonl rows are one per sim step
@@ -37,7 +43,15 @@ _DT = 0.1
 # Binary metrics only ever take 2 colors (event happened / didn't) — a colorbar with 2 ticks
 # adds clutter without adding information the title ("metric: collision") doesn't already
 # give, so it's skipped for these.
-_BINARY_METRICS = ("collision", "near_miss", "red_light", "strong_brake")
+_BINARY_METRICS = (
+    "collision",
+    "near_miss",
+    "red_light",
+    "strong_brake",
+    "turn_indicator",
+    "deviation_collision",
+    "collision_rear",
+)
 
 # The trace key each metric is derived from. A producer that never observed a quantity omits its
 # key entirely, and every accessor below defaults to the safe value -- which would paint a
@@ -51,6 +65,10 @@ _METRIC_TRACE_KEYS = {
     "road_border": "rb_dist_m",
     "red_light": "red_light_violation",
     "strong_brake": "speed",
+    "centerline": "centerline_dist_m",
+    "turn_indicator": "turn_indicator_pred",
+    "deviation_collision": "deviation_collision",
+    "collision_rear": "collision_rear",
 }
 
 # Short colorbar axis label. The ticks themselves (see _risk_and_ticks) carry the actual
@@ -64,6 +82,10 @@ _METRIC_AXIS_LABELS = {
     "road_border": "distance to road border (m)",
     "red_light": "",
     "strong_brake": "",
+    "centerline": "distance to route centerline (m)",
+    "turn_indicator": "",
+    "deviation_collision": "",
+    "collision_rear": "",
 }
 
 
@@ -96,6 +118,7 @@ def _risk_and_ticks(
     metric: str,
     near_miss_thresh: float,
     strong_brake_mps2: float = -2.5,
+    centerline_thresh_m: float = 2.0,
 ) -> tuple[np.ndarray, list[float], list[str]]:
     """Map each step's raw metric to a [0, 1] risk scalar (0=safe, 1=very high risk) for
     coloring, plus (tick_positions, tick_labels) carrying the actual real-world value at
@@ -170,6 +193,35 @@ def _risk_and_ticks(
             [0.0, 1.0],
             ["no strong brake", f"accel <= {strong_brake_mps2:.2f} m/s²"],
         )
+    if metric == "centerline":
+        # Same clamp-at-2x-threshold shape as "clearance"/"road_border", but NOT inverted --
+        # larger centerline_dist_m is worse, not smaller. Missing/None (no lane geometry to
+        # measure against) reads as "no evidence of deviation" (0.0), not "worst case".
+        cap = max(centerline_thresh_m * 2.0, 1e-6)
+        vals = np.array(
+            [r.get("centerline_dist_m") if r.get("centerline_dist_m") is not None else 0.0 for r in rows],
+            dtype=np.float64,
+        )
+        risk = np.clip(vals / cap, 0.0, 1.0)
+        ticks = [0.0, 0.33, 0.66, 1.0]
+        labels = [f"{cap * t:.2f}m" for t in ticks]
+        return risk, ticks, labels
+    if metric == "turn_indicator":
+        risk = np.array(
+            [1.0 if r.get("turn_indicator_pred") != r.get("turn_indicator_gt") else 0.0 for r in rows],
+            dtype=np.float64,
+        )
+        return risk, [0.0, 1.0], ["indicator matches GT", "indicator mismatch"]
+    if metric == "deviation_collision":
+        risk = np.array(
+            [1.0 if r.get("deviation_collision") else 0.0 for r in rows], dtype=np.float64
+        )
+        return risk, [0.0, 1.0], ["no deviation collision", "deviation collision"]
+    if metric == "collision_rear":
+        risk = np.array(
+            [1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64
+        )
+        return risk, [0.0, 1.0], ["no rear collision", "rear collision"]
     raise ValueError(f"Unknown colormap metric: {metric!r} (choices: {METRIC_CHOICES})")
 
 
@@ -180,6 +232,7 @@ def render_trajectory_colormap(
     metric: str = "clearance",
     near_miss_thresh: float = 0.5,
     strong_brake_mps2: float = -2.5,
+    centerline_thresh_m: float = 2.0,
     title: str | None = None,
     dpi: int = 110,
 ) -> Path | None:
@@ -189,7 +242,11 @@ def render_trajectory_colormap(
     ``"collision"`` (binary), ``"near_miss"`` (binary, clearance <= near_miss_thresh),
     ``"speed"``, ``"road_border"`` (distance to the nearest road/lane border, same scale
     scheme as ``"clearance"``; ``None`` on frames with no lane geometry -> treated as safe),
-    ``"red_light"`` (binary), ``"strong_brake"`` (binary, accel <= ``strong_brake_mps2``).
+    ``"red_light"`` (binary), ``"strong_brake"`` (binary, accel <= ``strong_brake_mps2``),
+    ``"centerline"`` (distance to the route centerline, clamped at 2x ``centerline_thresh_m``;
+    unlike ``"clearance"``/``"road_border"`` this is NOT inverted -- larger is worse),
+    ``"turn_indicator"`` (binary, resolved prediction != recorded GT), ``"deviation_collision"``
+    (binary), ``"collision_rear"`` (binary).
     Returns ``out_png`` on success, or ``None`` if there was no per-step trace to draw
     (e.g. a 0-frame segment, or an old run predating the trace fields), or if the run never
     observed the quantity ``metric`` is derived from -- an unobserved metric has to be absent
@@ -209,7 +266,7 @@ def render_trajectory_colormap(
 
     xy = np.array([r["ego"] for r in rows], dtype=np.float64)
     risk, tick_positions, tick_labels = _risk_and_ticks(
-        rows, metric, near_miss_thresh, strong_brake_mps2
+        rows, metric, near_miss_thresh, strong_brake_mps2, centerline_thresh_m
     )
 
     segments = np.concatenate([xy[:-1, None, :], xy[1:, None, :]], axis=1)
@@ -304,6 +361,7 @@ def render_trajectory_colormaps(
     metrics: tuple[str, ...] = METRIC_CHOICES,
     near_miss_thresh: float = 0.5,
     strong_brake_mps2: float = -2.5,
+    centerline_thresh_m: float = 2.0,
     title: str | None = None,
     dpi: int = 110,
 ) -> dict[str, Path]:
@@ -323,6 +381,7 @@ def render_trajectory_colormaps(
             metric=metric,
             near_miss_thresh=near_miss_thresh,
             strong_brake_mps2=strong_brake_mps2,
+            centerline_thresh_m=centerline_thresh_m,
             title=title,
             dpi=dpi,
         )

@@ -442,6 +442,7 @@ def write_viewer_tree(
 
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
+        centerline_thresh = float(rows[0].get("deviation_collision", {}).get("thresh_m") or 2.0)
 
         # One read per case: the scenario's description, and what its expansion set.
         read = {
@@ -477,6 +478,7 @@ def write_viewer_tree(
                         case,
                         near_miss_thresh=near_miss,
                         strong_brake_mps2=strong_brake,
+                        centerline_thresh_m=centerline_thresh,
                         title=f"{scenario} {case}",
                     )
                     for metric, drawn in rendered.items():
