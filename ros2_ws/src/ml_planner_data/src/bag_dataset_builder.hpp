@@ -33,6 +33,7 @@ struct TopicDropThresholds {
 struct DatasetBuilderParam {
   double frame_interval_s{0.1};
   double min_travel_distance{0.0};
+  bool split_routes{false};
   TopicDropThresholds topic_drop_thresholds{};
   double traffic_light_timeout_s{0.2};
   double neighbor_observation_timeout_s{0.3};
@@ -48,6 +49,7 @@ struct BagFrameMetadata {
   float ego_yaw_rate_rps;
   uint8_t turn_indicator;
   int32_t num_objects;
+  int64_t route_group_id{0};
 };
 
 struct BagDataResult {

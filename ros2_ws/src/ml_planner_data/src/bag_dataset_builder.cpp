@@ -101,6 +101,7 @@ CandidateResult collect_candidates(const std::string &bag_path,
   std::vector<std::pair<double, int32_t>> object_samples;
   std::vector<double> traffic_stamps;
   std::vector<double> route_stamps;
+  std::vector<std::pair<double, LaneletRoute>> route_samples;
 
   rosbag2_cpp::Reader reader;
   reader.open(bag_path);
@@ -190,6 +191,8 @@ CandidateResult collect_candidates(const std::string &bag_path,
         record_deserialization_failure(error);
         continue;
       }
+      route_samples.emplace_back(
+          static_cast<double>(bag_message->time_stamp) * 1e-9, message);
       if (!message.segments.empty()) {
         route_stamps.push_back(rclcpp::Time(message.header.stamp).seconds());
       }
@@ -216,16 +219,68 @@ CandidateResult collect_candidates(const std::string &bag_path,
   std::sort(traffic_stamps.begin(), traffic_stamps.end());
   std::sort(route_stamps.begin(), route_stamps.end());
 
+  // Match the legacy NPZ converter's route identity: consecutive route
+  // messages with an identical start pose belong to one sequence.  Assignment
+  // uses rosbag receive time, as did sequence_builder.cpp.  H5 frame centers
+  // remain on the odometry-header-time grid, so the boundary can differ by a
+  // fraction of a second without changing its route semantics.
+  std::vector<std::pair<double, int64_t>> route_group_samples;
+  route_group_samples.reserve(route_samples.size());
+  int64_t route_group_id = -1;
+  for (size_t index = 0; index < route_samples.size(); ++index) {
+    if (index == 0 || !(route_samples[index].second.start_pose ==
+                        route_samples[index - 1].second.start_pose)) {
+      ++route_group_id;
+    }
+    route_group_samples.emplace_back(route_samples[index].first,
+                                     route_group_id);
+  }
+
+  std::vector<bool> keep_route_group(
+      static_cast<size_t>(std::max<int64_t>(route_group_id + 1, 0)), true);
+  if (param.split_routes && !route_group_samples.empty() &&
+      param.min_travel_distance > 0.0) {
+    std::vector<double> route_distances(keep_route_group.size(), 0.0);
+    std::vector<EgoSample> previous(keep_route_group.size());
+    std::vector<bool> has_previous(keep_route_group.size(), false);
+    size_t route_cursor = 0;
+    for (const auto &[stamp, ego] : ego_samples) {
+      const int64_t *group =
+          latest_at_or_before(route_group_samples, stamp, route_cursor);
+      if (group == nullptr) {
+        continue;
+      }
+      const size_t group_index = static_cast<size_t>(*group);
+      if (has_previous[group_index]) {
+        route_distances[group_index] += std::hypot(
+            ego.x - previous[group_index].x, ego.y - previous[group_index].y);
+      }
+      previous[group_index] = ego;
+      has_previous[group_index] = true;
+    }
+    for (size_t group = 0; group < route_distances.size(); ++group) {
+      if (route_distances[group] < param.min_travel_distance) {
+        keep_route_group[group] = false;
+        result.warnings.push_back(
+            "route group " + std::to_string(group) + " traveled " +
+            std::to_string(route_distances[group]) + " m, below " +
+            std::to_string(param.min_travel_distance) + " m; skipped");
+      }
+    }
+  }
+
   std::vector<std::pair<double, double>> ego_positions;
   ego_positions.reserve(ego_samples.size());
   for (const auto &sample : ego_samples) {
     ego_positions.emplace_back(sample.second.x, sample.second.y);
   }
-  if (const auto warning =
-          check_min_travel_distance(ego_positions, param.min_travel_distance)) {
-    result.warnings.push_back(*warning);
-    result.skipped = true;
-    return result;
+  if (!param.split_routes) {
+    if (const auto warning = check_min_travel_distance(
+            ego_positions, param.min_travel_distance)) {
+      result.warnings.push_back(*warning);
+      result.skipped = true;
+      return result;
+    }
   }
 
   const double first_sec = ego_samples.front().first;
@@ -274,6 +329,7 @@ CandidateResult collect_candidates(const std::string &bag_path,
   size_t turn_cursor = 0;
   size_t object_cursor = 0;
   size_t invalid_range_cursor = 0;
+  size_t route_group_cursor = 0;
   result.frames.reserve(num_frames);
   for (size_t index = 0; index < num_frames; ++index) {
     const double time =
@@ -282,6 +338,10 @@ CandidateResult collect_candidates(const std::string &bag_path,
     const uint8_t *turn = latest_at_or_before(turn_samples, time, turn_cursor);
     const int32_t *objects =
         latest_at_or_before(object_samples, time, object_cursor);
+    const int64_t *group =
+        param.split_routes
+            ? latest_at_or_before(route_group_samples, time, route_group_cursor)
+            : nullptr;
 
     if (time > frame_range.last_valid_t) {
       break;
@@ -291,13 +351,18 @@ CandidateResult collect_candidates(const std::string &bag_path,
                          invalid_range_cursor)) {
       continue;
     }
+    if (param.split_routes &&
+        (group == nullptr || !keep_route_group[static_cast<size_t>(*group)])) {
+      continue;
+    }
     result.frames.push_back({BagFrameMetadata{
         static_cast<int64_t>(std::llround(time * 1e9)),
         ego != nullptr ? ego->x : 0.0, ego != nullptr ? ego->y : 0.0,
         ego != nullptr ? ego->yaw : 0.0, ego != nullptr ? ego->speed_mps : 0.0F,
         ego != nullptr ? ego->yaw_rate_rps : 0.0F,
         turn != nullptr ? *turn : uint8_t{0},
-        objects != nullptr ? *objects : int32_t{0}}});
+        objects != nullptr ? *objects : int32_t{0},
+        group != nullptr ? *group : int64_t{0}}});
   }
   return result;
 }

@@ -34,12 +34,19 @@ listed in `ros2_ws/diffusion_planner.repos`, build the workspace with `colcon`, 
 source it before running ROS-dependent commands:
 
 ```bash
+vcs import ros2_ws/src < ros2_ws/diffusion_planner.repos
+cd ros2_ws
+colcon build --symlink-install
+cd ..
 source ros2_ws/install/setup.bash
 ```
 
 ## Dataset
 
-Generate one `frames.h5` shard per rosbag and a Parquet frame index:
+Generate one `frames.h5` shard per rosbag and a Parquet frame index. Source bags
+are first normalized to the current Autoware message schemas with
+`autoware_msg_bag_converter`; converted bags are cached under
+`converted_bag_root`:
 
 ```bash
 source ros2_ws/install/setup.bash

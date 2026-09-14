@@ -7,6 +7,9 @@ defaults:
 root: ???
 # Root under which the source bag directory hierarchy and frames.h5 files are written.
 output_root: ???
+# Cache of bags normalized to the current Autoware message schemas. Every bag
+# processed below passes through autoware_msg_bag_converter first.
+converted_bag_root: ${output_root}/converted_rosbags
 index_output: ${output_root}/indexes/${split}.parquet
 split: train
 frame_interval: 0.5
@@ -31,3 +34,6 @@ topic_drop_thresholds:
   traffic_signals: 1.0
 
 min_travel_distance: 1000.0
+# Emit one H5 shard per adjacent same-start-pose route group. Disabled for
+# ordinary train/valid generation; closed-loop dataset builds enable it.
+split_routes: false

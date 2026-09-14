@@ -89,7 +89,8 @@ py::dict stack_frames(const std::vector<mpd::FrameData> &frames) {
   return result;
 }
 
-py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
+py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata,
+                           const bool include_route_group_id) {
   const std::vector<py::ssize_t> shape{
       static_cast<py::ssize_t>(metadata.size())};
   py::array_t<int64_t> frame_time_ns(shape);
@@ -100,6 +101,7 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   py::array_t<float> ego_yaw_rate_rps(shape);
   py::array_t<uint8_t> turn_indicator(shape);
   py::array_t<int32_t> num_objects(shape);
+  py::array_t<int64_t> route_group_id(shape);
   for (size_t index = 0; index < metadata.size(); ++index) {
     frame_time_ns.mutable_data()[index] = metadata[index].frame_time_ns;
     ego_x.mutable_data()[index] = metadata[index].ego_x;
@@ -109,6 +111,7 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
     ego_yaw_rate_rps.mutable_data()[index] = metadata[index].ego_yaw_rate_rps;
     turn_indicator.mutable_data()[index] = metadata[index].turn_indicator;
     num_objects.mutable_data()[index] = metadata[index].num_objects;
+    route_group_id.mutable_data()[index] = metadata[index].route_group_id;
   }
   py::dict result;
   result["frame_time_ns"] = std::move(frame_time_ns);
@@ -119,6 +122,9 @@ py::dict metadata_to_numpy(const std::vector<mpd::BagFrameMetadata> &metadata) {
   result["ego_yaw_rate_rps"] = std::move(ego_yaw_rate_rps);
   result["turn_indicator"] = std::move(turn_indicator);
   result["num_objects"] = std::move(num_objects);
+  if (include_route_group_id) {
+    result["route_group_id"] = std::move(route_group_id);
+  }
   return result;
 }
 
@@ -197,7 +203,8 @@ py::dict create_bag_frame_data(const std::string &bag_path,
   stats["skipped"] = bag_result.skipped;
   py::dict result;
   result["frames"] = stack_frames(bag_result.frames);
-  result["metadata"] = metadata_to_numpy(bag_result.metadata);
+  result["metadata"] =
+      metadata_to_numpy(bag_result.metadata, param.split_routes);
   result["warnings"] = py::cast(bag_result.warnings);
   result["stats"] = std::move(stats);
   return result;
@@ -243,6 +250,7 @@ PYBIND11_MODULE(_ml_planner_data, m) {
                      &mpd::DatasetBuilderParam::frame_interval_s)
       .def_readwrite("min_travel_distance",
                      &mpd::DatasetBuilderParam::min_travel_distance)
+      .def_readwrite("split_routes", &mpd::DatasetBuilderParam::split_routes)
       .def_readwrite("topic_drop_thresholds",
                      &mpd::DatasetBuilderParam::topic_drop_thresholds)
       .def_readwrite("traffic_light_timeout_s",

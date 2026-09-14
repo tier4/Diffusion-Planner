@@ -1,10 +1,11 @@
-"""Build one preprocessed H5 file per rosbag and a split-level Parquet index."""
+"""Build preprocessed H5 shards and a split-level Parquet index."""
 
 from __future__ import annotations
 
 import json
 import math
 import os
+import shutil
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ import ml_planner_data as mpd
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from autoware_msg_bag_converter.converter import convert_bag
 from omegaconf import DictConfig
 from tqdm import tqdm
 
@@ -29,6 +31,7 @@ from diffusion_planner.data.h5_writer import validate_h5_arrays, write_h5_shard
 SPLITS = ("train", "valid", "auto", "override")
 FORMAT_NAME = "diffusion_planner_frame_dataset"
 FORMAT_VERSION = 4
+
 
 @dataclass(frozen=True)
 class VehicleParameters:
@@ -57,10 +60,12 @@ class WorkerConfig:
     """Primitive generation settings safe to send to worker processes."""
 
     output_root: str
+    converted_bag_root: str
     index_path: str
     frame_interval_s: float
     future_steps: int
     min_travel_distance: float
+    split_routes: bool
     topic_drop_thresholds: dict[str, float]
     traffic_light_timeout_s: float
     neighbor_observation_timeout_s: float
@@ -96,7 +101,7 @@ def build_vehicles(config: DictConfig) -> dict[str, VehicleParameters]:
 
 
 def build_builder_param(config: WorkerConfig) -> Any:
-    """Build the native whole-bag generation parameters."""
+    """Build the native generation parameters."""
     if not math.isfinite(config.frame_interval_s) or config.frame_interval_s <= 0.0:
         raise ValueError(
             f"frame_interval must be finite and positive: {config.frame_interval_s}"
@@ -119,6 +124,7 @@ def build_builder_param(config: WorkerConfig) -> Any:
     param.frame_interval_s = config.frame_interval_s
     param.num_future_steps = config.future_steps
     param.min_travel_distance = config.min_travel_distance
+    param.split_routes = config.split_routes
     param.topic_drop_thresholds = thresholds
     param.traffic_light_timeout_s = config.traffic_light_timeout_s
     param.neighbor_observation_timeout_s = config.neighbor_observation_timeout_s
@@ -170,9 +176,12 @@ def discover_bags(root: Path, split: str) -> list[BagEntry]:
     return entries
 
 
-def h5_relative_path(entry: BagEntry) -> Path:
+def h5_relative_path(entry: BagEntry, route_group_id: int | None = None) -> Path:
     """Return the portable H5 path stored in the Parquet index."""
-    return Path(entry.relative_bag_path) / "frames.h5"
+    relative = Path(entry.relative_bag_path)
+    if route_group_id is not None:
+        relative /= f"route_{route_group_id:08d}"
+    return relative / "frames.h5"
 
 
 def write_h5(
@@ -180,21 +189,25 @@ def write_h5(
     entry: BagEntry,
     result: Mapping[str, Any],
     config: WorkerConfig,
+    route_group_id: int | None = None,
 ) -> None:
-    """Write one complete whole-bag shard through the shared H5 pipeline."""
+    """Write one complete shard through the shared H5 pipeline."""
+    attributes: dict[str, Any] = {
+        "source_bag_path": entry.relative_bag_path,
+        "source_map_path": entry.map_path,
+        "project_id": entry.project_id,
+        "area_map_id": entry.area_map_id,
+        "area_map_version_id": entry.area_map_version_id,
+        "split": entry.split,
+        "frame_interval_s": config.frame_interval_s,
+        "traffic_light_timeout_s": config.traffic_light_timeout_s,
+        "neighbor_observation_timeout_s": config.neighbor_observation_timeout_s,
+    }
+    if route_group_id is not None:
+        attributes["route_group_id"] = route_group_id
     write_h5_shard(
         path,
-        attributes={
-            "source_bag_path": entry.relative_bag_path,
-            "source_map_path": entry.map_path,
-            "project_id": entry.project_id,
-            "area_map_id": entry.area_map_id,
-            "area_map_version_id": entry.area_map_version_id,
-            "split": entry.split,
-            "frame_interval_s": config.frame_interval_s,
-            "traffic_light_timeout_s": config.traffic_light_timeout_s,
-            "neighbor_observation_timeout_s": config.neighbor_observation_timeout_s,
-        },
+        attributes=attributes,
         frames=result["frames"],
         metadata=result["metadata"],
         compression=config.compression,
@@ -267,26 +280,57 @@ def make_index_table(
     """Build the Parquet rows corresponding exactly to one H5 shard."""
     stored_h5_path = Path(os.path.relpath(h5_path, start=index_path.parent)).as_posix()
     num_frames = len(metadata["frame_time_ns"])
-    return pa.table(
-        {
-            "h5_path": pa.array([stored_h5_path] * num_frames, pa.string()),
-            "frame_index": pa.array(np.arange(num_frames, dtype=np.int64)),
-            "frame_time_ns": pa.array(metadata["frame_time_ns"], pa.int64()),
-            "ego_x": pa.array(metadata["ego_x"], pa.float64()),
-            "ego_y": pa.array(metadata["ego_y"], pa.float64()),
-            "ego_yaw": pa.array(metadata["ego_yaw"], pa.float64()),
-            "ego_speed_mps": pa.array(metadata["ego_speed_mps"], pa.float32()),
-            "ego_yaw_rate_rps": pa.array(metadata["ego_yaw_rate_rps"], pa.float32()),
-            "turn_indicator": pa.array(metadata["turn_indicator"], pa.uint8()),
-            "num_objects": pa.array(metadata["num_objects"], pa.int32()),
-            "project_id": pa.array([entry.project_id] * num_frames, pa.string()),
-            "area_map_id": pa.array([entry.area_map_id] * num_frames, pa.string()),
-            "area_map_version_id": pa.array(
-                [entry.area_map_version_id] * num_frames, pa.string()
-            ),
-            "split": pa.array([entry.split] * num_frames, pa.string()),
+    columns = {
+        "h5_path": pa.array([stored_h5_path] * num_frames, pa.string()),
+        "frame_index": pa.array(np.arange(num_frames, dtype=np.int64)),
+        "frame_time_ns": pa.array(metadata["frame_time_ns"], pa.int64()),
+        "ego_x": pa.array(metadata["ego_x"], pa.float64()),
+        "ego_y": pa.array(metadata["ego_y"], pa.float64()),
+        "ego_yaw": pa.array(metadata["ego_yaw"], pa.float64()),
+        "ego_speed_mps": pa.array(metadata["ego_speed_mps"], pa.float32()),
+        "ego_yaw_rate_rps": pa.array(metadata["ego_yaw_rate_rps"], pa.float32()),
+        "turn_indicator": pa.array(metadata["turn_indicator"], pa.uint8()),
+        "num_objects": pa.array(metadata["num_objects"], pa.int32()),
+        "project_id": pa.array([entry.project_id] * num_frames, pa.string()),
+        "area_map_id": pa.array([entry.area_map_id] * num_frames, pa.string()),
+        "area_map_version_id": pa.array(
+            [entry.area_map_version_id] * num_frames, pa.string()
+        ),
+        "split": pa.array([entry.split] * num_frames, pa.string()),
+    }
+    if "route_group_id" in metadata:
+        columns["route_group_id"] = pa.array(metadata["route_group_id"], pa.int64())
+    return pa.table(columns)
+
+
+def select_frames(
+    result: Mapping[str, Any], selection: np.ndarray
+) -> dict[str, dict[str, np.ndarray]]:
+    """Select one route group while preserving every frame and metadata field."""
+    return {
+        group_name: {
+            key: np.asarray(values)[selection]
+            for key, values in result[group_name].items()
         }
-    )
+        for group_name in ("frames", "metadata")
+    }
+
+
+def normalized_bag_path(entry: BagEntry, config: WorkerConfig) -> Path:
+    """Convert one source bag to current message schemas and return its path."""
+    output = Path(config.converted_bag_root) / entry.relative_bag_path
+    if (output / "metadata.yaml").is_file():
+        return output
+
+    incomplete = output.with_name(output.name + ".incomplete")
+    if incomplete.exists():
+        shutil.rmtree(incomplete)
+    incomplete.parent.mkdir(parents=True, exist_ok=True)
+    convert_bag(entry.bag_path, str(incomplete))
+    if not (incomplete / "metadata.yaml").is_file():
+        raise RuntimeError(f"converted bag has no metadata.yaml: {incomplete}")
+    incomplete.replace(output)
+    return output
 
 
 def process_bag(
@@ -294,9 +338,30 @@ def process_bag(
 ) -> BagResult:
     """Generate or resume one H5 shard and return its index rows."""
     entry, vehicle, config = packed
-    relative_h5 = h5_relative_path(entry)
-    output_path = Path(config.output_root) / relative_h5
+    output_root = Path(config.output_root)
+    output_path = output_root / h5_relative_path(entry)
     index_path = Path(config.index_path)
+    if config.split_routes:
+        existing_route_shards = sorted(
+            (output_root / entry.relative_bag_path).glob("route_*/frames.h5")
+        )
+        if existing_route_shards:
+            if not config.resume:
+                raise FileExistsError(
+                    f"route H5 output already exists for {entry.bag_path}; "
+                    "use an empty output root"
+                )
+            tables = [
+                make_index_table(
+                    entry,
+                    shard,
+                    index_path,
+                    read_existing_h5(shard)["metadata"],
+                )
+                for shard in existing_route_shards
+            ]
+            table = pa.concat_tables(tables)
+            return BagResult(table, [], 0, 0, table.num_rows, 0, False, True)
     if output_path.exists():
         if config.overwrite:
             pass
@@ -314,8 +379,9 @@ def process_bag(
         vehicle_length=vehicle.vehicle_length,
         vehicle_width=vehicle.vehicle_width,
     )
+    bag_path = normalized_bag_path(entry, config)
     result = mpd.create_bag_frame_data(
-        bag_path=entry.bag_path,
+        bag_path=str(bag_path),
         map_path=entry.map_path,
         vehicle_spec=spec,
         param=build_builder_param(config),
@@ -333,8 +399,23 @@ def process_bag(
             bool(stats["skipped"]),
             False,
         )
-    write_h5(output_path, entry, result, config)
-    table = make_index_table(entry, output_path, index_path, result["metadata"])
+    if config.split_routes:
+        route_group_ids = np.asarray(result["metadata"]["route_group_id"])
+        tables = []
+        for route_group_id in np.unique(route_group_ids):
+            group_id = int(route_group_id)
+            route_result = select_frames(result, route_group_ids == route_group_id)
+            route_path = output_root / h5_relative_path(entry, group_id)
+            write_h5(route_path, entry, route_result, config, group_id)
+            tables.append(
+                make_index_table(
+                    entry, route_path, index_path, route_result["metadata"]
+                )
+            )
+        table = pa.concat_tables(tables)
+    else:
+        write_h5(output_path, entry, result, config)
+        table = make_index_table(entry, output_path, index_path, result["metadata"])
     return BagResult(
         table,
         list(result["warnings"]),
@@ -380,10 +461,12 @@ def main(config: DictConfig) -> None:
 
     worker_config = WorkerConfig(
         output_root=str(output_root),
+        converted_bag_root=str(Path(config.converted_bag_root).expanduser().resolve()),
         index_path=str(index_output),
         frame_interval_s=float(config.frame_interval),
         future_steps=int(config.future_steps),
         min_travel_distance=float(config.min_travel_distance),
+        split_routes=bool(config.split_routes),
         topic_drop_thresholds={
             str(topic): float(limit)
             for topic, limit in config.topic_drop_thresholds.items()

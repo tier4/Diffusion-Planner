@@ -1,4 +1,17 @@
 repositories:
+  # Rosbag message-schema migration used before closed-loop H5 generation.
+  deps/autoware_msg_bag_converter:
+    type: git
+    url: https://github.com/autowarefoundation/autoware_msg_bag_converter.git
+    version: 39fafce0fcf670b53349bc3541670058714d5055
+  deps/autoware_auto_msgs:
+    type: git
+    url: https://github.com/tier4/autoware_auto_msgs.git
+    version: 624aae9feb142eb2a4e16069ed06bf4050ccc3ea
+  deps/ros2_numpy:
+    type: git
+    url: https://github.com/Box-Robotics/ros2_numpy.git
+    version: d5ebf723e1d2457d36fa89bf021b212e340c3c11
   # core
   deps/autoware_msgs:
     type: git
