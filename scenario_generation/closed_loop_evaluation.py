@@ -494,6 +494,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     metrics=params.colormap_metrics,
                     near_miss_thresh=params.near_miss_thresh,
                     strong_brake_mps2=params.strong_brake_mps2,
+                    centerline_thresh_m=params.deviation_collision_thresh_m,
                     title=f"{job.route_key} [{start},{end}]",
                 )
             # render_segment always writes this next to the PNGs; png_dir may be a scratch

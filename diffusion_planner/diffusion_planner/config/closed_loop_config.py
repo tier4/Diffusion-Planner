@@ -199,6 +199,10 @@ class ClosedLoopConfig:
             "road_border",
             "red_light",
             "strong_brake",
+            "centerline",
+            "turn_indicator",
+            "deviation_collision",
+            "collision_rear",
         ]
     )
 
