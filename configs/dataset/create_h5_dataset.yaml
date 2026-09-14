@@ -12,6 +12,8 @@ output_root: ???
 converted_bag_root: ${output_root}/converted_rosbags
 index_output: ${output_root}/indexes/${split}.parquet
 split: train
+# Training and open-loop default. Closed-loop releases must override this to
+# 0.1 because their rollout clock and timeout budget operate at 10 Hz.
 frame_interval: 0.5
 # Number of future label steps emitted for each frame.
 future_steps: 80

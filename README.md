@@ -57,7 +57,9 @@ uv run python scripts/dataset/create_h5_dataset.py \
 ```
 
 Configuration is defined in `configs/dataset/create_h5_dataset.yaml`. Completed H5
-shards are reused when an interrupted index build is resumed.
+shards are reused when an interrupted index build is resumed. Training and open-loop
+generation defaults to a 0.5 s frame interval. Closed-loop releases must explicitly
+use `frame_interval=0.1` so their frame grid matches the 10 Hz rollout clock.
 
 Inspect loading performance with:
 

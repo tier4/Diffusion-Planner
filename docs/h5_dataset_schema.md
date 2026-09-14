@@ -36,7 +36,7 @@ the ego frame at `frame_time_ns`.
 | `area_map_version_id` | Map version identifier |
 | `split` | `train`, `valid`, or `auto` |
 | `num_frames` | Number of stored frames, `N` |
-| `frame_interval_s` | Interval used when selecting frames |
+| `frame_interval_s` | Interval used when selecting frames. Training/open-loop normally uses `0.5`; closed-loop evaluation requires `0.1`. |
 | `traffic_light_timeout_s` | Maximum accepted traffic-light observation age |
 | `neighbor_observation_timeout_s` | Maximum accepted tracked-object observation age |
 
