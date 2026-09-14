@@ -20,6 +20,7 @@ from diffusion_planner.utils.lr_scheduler import (
     build_lr_scheduler,
     describe_lr_scheduler,
 )
+from diffusion_planner.utils.provenance import collect_provenance
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="train/train")
@@ -52,6 +53,20 @@ def main(config: DictConfig) -> None:
     model_config = OmegaConf.to_container(
         config.model, resolve=True, throw_on_missing=True
     )
+    # Recorded with every checkpoint so a model can always say how it was trained. Without
+    # this only model_config is stored, which describes the architecture and nothing about
+    # the data, the augmentation or the code that produced it.
+    provenance = collect_provenance(
+        OmegaConf.to_container(config, resolve=True, throw_on_missing=True),
+        dataset_path=config.dataloader.dataset.parquet_path,
+        extra={"run_name": run_name, "world_size": accelerator.num_processes},
+    )
+    if accelerator.is_main_process:
+        git = provenance["git"]
+        print(
+            f"provenance: commit={git.get('commit')} branch={git.get('branch')} "
+            f"dirty={git.get('dirty')}"
+        )
     if accelerator.is_main_process:
         parameter_count = sum(parameter.numel() for parameter in planner.parameters())
         trainable_parameter_count = sum(
@@ -139,6 +154,7 @@ def main(config: DictConfig) -> None:
                 noise_scale=float(config.training.noise_scale),
                 ego_loss_weight=float(config.training.ego_loss_weight),
                 neighbor_loss_weight=float(config.training.neighbor_loss_weight),
+                unknown_loss_scale=float(config.training.unknown_loss_scale),
                 turn_indicator_loss_weight=float(
                     config.training.turn_indicator_loss_weight
                 ),
@@ -218,6 +234,7 @@ def main(config: DictConfig) -> None:
                     step_in_epoch=step_in_epoch,
                     global_step=global_step,
                     steps_per_epoch=steps_per_epoch,
+                    provenance=provenance,
                 )
         if accelerator.is_main_process:
             save_checkpoint(
@@ -231,6 +248,7 @@ def main(config: DictConfig) -> None:
                 step_in_epoch=0,
                 global_step=global_step,
                 steps_per_epoch=steps_per_epoch,
+                provenance=provenance,
             )
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:

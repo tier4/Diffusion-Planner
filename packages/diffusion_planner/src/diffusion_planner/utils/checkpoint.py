@@ -43,8 +43,14 @@ def save_checkpoint(
     step_in_epoch: int,
     global_step: int,
     steps_per_epoch: int,
+    provenance: Mapping[str, Any] | None = None,
 ) -> None:
-    """Atomically save model and training state from the main process."""
+    """Atomically save model and training state from the main process.
+
+    ``provenance`` carries the resolved run config, the git state and the dataset
+    fingerprint (see ``utils.provenance``). It is optional so that older callers and tests
+    keep working, and it is omitted from the file entirely when not supplied.
+    """
     checkpoint_path = Path(path)
     temporary_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
     model_state = model.state_dict()
@@ -59,6 +65,8 @@ def save_checkpoint(
         "steps_per_epoch": steps_per_epoch,
         "world_size": accelerator.num_processes,
     }
+    if provenance is not None:
+        state["provenance"] = dict(provenance)
 
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(state, temporary_path)
