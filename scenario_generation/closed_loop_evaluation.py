@@ -31,7 +31,7 @@ from scenario_generation.closed_loop_eval import (
     tdigest_sidecar_row,
 )
 from scenario_generation.inference_compile import compiled_for_inference
-from scenario_generation.perf_timer import Timers
+from scenario_generation.perf_timer import Timers, format_multi_rank_report
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
@@ -214,6 +214,7 @@ class ClosedLoopEvaluation(ABC):
         elapsed_sec = time.perf_counter() - t0
 
         if self.ddp_world_size > 1:
+            self._persist_rank_timers(result, elapsed_sec=elapsed_sec, n_jobs=len(jobs))
             return self.finalize_ddp(result, elapsed_sec=elapsed_sec)
 
         summary = self.build_summary(result, elapsed_sec=elapsed_sec)
@@ -274,6 +275,52 @@ class ClosedLoopEvaluation(ABC):
             "elapsed_sec": elapsed_sec,
         }
 
+    def _persist_rank_timers(
+        self, result: JobRunResult, *, elapsed_sec: float, n_jobs: int
+    ) -> None:
+        """Best-effort: dump this rank's merged ``Timers`` (+ this rank's own ``execute_jobs``
+        wall time) to ``timers_{rank}.json`` so rank-0's DDP merge can pick it up.
+
+        Ranks run concurrently, so a rank's own ``elapsed_sec`` here is NOT the same thing as
+        the run's overall wall-clock time -- see ``format_multi_rank_report``. Always writes
+        (even with empty ``stages``, e.g. a zero-job rank) when profiling is on, mirroring
+        ``segments_{rank}.jsonl``'s convention that a MISSING file (not an empty one) is what
+        signals a crashed rank. Never raises: timing is diagnostic, not correctness-critical.
+        """
+        if not self.config.profile:
+            return
+        timers = result.extras.get("timers")
+        payload = {
+            "rank": self.ddp_rank,
+            "world_size": self.ddp_world_size,
+            "elapsed_sec": elapsed_sec,
+            "n_jobs": n_jobs,
+            "stages": timers.as_dict() if timers is not None else {},
+        }
+        try:
+            (self.out_dir / f"timers_{self.ddp_rank}.json").write_text(json.dumps(payload))
+        except OSError as e:
+            print(f"warning: failed to persist timers_{self.ddp_rank}.json: {e}")
+
+    def collect_ddp_timers(self, world_size: int) -> list[dict]:
+        """Best-effort load of every rank's ``timers_{rank}.json``.
+
+        Unlike ``collect_ddp_shards``' hard failure on a missing ``segments_{rank}.jsonl``,
+        a missing or corrupt timers file here is skipped with a warning, not fatal: timing is
+        diagnostic, so a crashed/non-profiled rank must never abort the real result merge.
+        """
+        per_rank: list[dict] = []
+        for r in range(world_size):
+            f = self.out_dir / f"timers_{r}.json"
+            if not f.is_file():
+                print(f"warning: closed-loop DDP timers merge: missing {f.name}, skipping")
+                continue
+            try:
+                per_rank.append(json.loads(f.read_text()))
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"warning: closed-loop DDP timers merge: failed to read {f.name}: {e}")
+        return per_rank
+
     def collect_ddp_shards(self, world_size: int) -> JobRunResult:
         """Load every rank's ``segments_{rank}.jsonl`` (+ tdigest sidecar), the same convention
         ``closed_loop_eval.run_closed_loop_eval`` uses for its own multi-GPU shards.
@@ -300,6 +347,8 @@ class ClosedLoopEvaluation(ABC):
     def merge_ddp_shards(self, world_size: int, *, elapsed_sec: float = 0.0) -> dict:
         """Rank-0: merge shard files, persist artifacts, and return the final summary."""
         result = self.collect_ddp_shards(world_size)
+        if self.config.profile:
+            result.extras["ddp_timers_per_rank"] = self.collect_ddp_timers(world_size)
         self.prepare_ddp_merge_artifacts(result)
         summary = self.build_summary(result, elapsed_sec=elapsed_sec)
         summary["mode"] = self.mode
@@ -564,6 +613,16 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         timers = result.extras.get("timers")
         if timers is not None:
             summary["timers_detail"] = timers.as_dict()
+        per_rank_timers = result.extras.get("ddp_timers_per_rank")
+        if per_rank_timers:
+            # DDP merge: timers_detail becomes the cross-rank SUM (compute-seconds, not
+            # wall-clock, since ranks run concurrently) -- timers_per_rank being present
+            # alongside it is what signals this distinction to any reader of summary.json.
+            summary["timers_per_rank"] = per_rank_timers
+            agg = Timers()
+            for pr in per_rank_timers:
+                agg.merge(Timers.from_dict(pr.get("stages", {})))
+            summary["timers_detail"] = agg.as_dict()
         return summary
 
     def write_artifacts(self, summary: dict, result: JobRunResult) -> None:
@@ -573,8 +632,19 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 f,
                 indent=4,
             )
+        per_rank_timers = result.extras.get("ddp_timers_per_rank")
         timers = result.extras.get("timers")
-        if self.config.profile and timers is not None:
+        if self.config.profile and per_rank_timers:
+            mr_report = format_multi_rank_report(per_rank_timers, summary.get("total_steps"))
+            (self.out_dir / "timing_report.txt").write_text(mr_report.full + "\n")
+            # Console stays short (aggregate + imbalance flag only) -- the per-rank detail in
+            # mr_report.full can be long with many ranks; it's always in the file.
+            print(
+                f"\n=== timing breakdown (DDP, {len(per_rank_timers)} ranks) -- aggregate only, "
+                f"see {self.out_dir / 'timing_report.txt'} for per-rank detail ===\n"
+                f"{mr_report.aggregate}"
+            )
+        elif self.config.profile and timers is not None:
             report = timers.report(summary.get("total_steps"))
             (self.out_dir / "timing_report.txt").write_text(report + "\n")
             print(f"\n=== timing breakdown: {self.out_dir} ===\n{report}")
