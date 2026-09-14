@@ -12,3 +12,12 @@ distance_scale_range_m: 50.0
 probability_cap: 1.0
 # Largest share of one frame's labelled agents that may become unknown.
 max_renamed_fraction: 1.0
+# Keep one agent of each class labelled in every frame. max_renamed_fraction bounds the
+# frame as a whole, which does not stop a single class from vanishing: on 400 real frames at
+# probability=0.1 / pedestrian=0.25 / bicycle=0.25 / distance_scale_max=2.0, 41 frames lost
+# every pedestrian and 45 lost every bicycle. Off by default so existing runs are unchanged.
+preserve_last_of_class: false
+# Keep the class that was hidden, as `agent_label_true`, so a head can be asked to recover
+# it (Phase 2.3) and so analysis can tell renamed agents from genuinely unknown ones.
+# Off by default: it adds a tensor to every batch.
+record_true_label: false

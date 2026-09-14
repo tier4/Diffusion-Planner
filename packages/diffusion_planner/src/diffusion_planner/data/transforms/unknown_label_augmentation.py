@@ -23,8 +23,14 @@ class PlannerUnknownLabelAugmentation:
     unknown with a probability that starts from the per-class rate, grows
     linearly with distance from the ego up to ``distance_scale_max`` at
     ``distance_scale_range_m``, and is clipped by ``probability_cap``. At most
-    ``max_renamed_fraction`` of the labelled agents in a frame are relabelled,
-    so no frame loses every known class.
+    ``max_renamed_fraction`` of the labelled agents in a frame are relabelled.
+
+    ``max_renamed_fraction`` bounds the frame as a whole, which does not stop a
+    single class from disappearing. Measured on 400 real frames at the settings
+    used for the 2026-09-08 runs, 41 frames lost every pedestrian and 45 lost
+    every bicycle, because renaming is drawn per agent and bicycles are rare.
+    ``preserve_last_of_class`` keeps one agent of each class present in the
+    frame, so the scene never silently stops containing pedestrians.
     """
 
     def __init__(
@@ -37,6 +43,8 @@ class PlannerUnknownLabelAugmentation:
         distance_scale_range_m: float = 50.0,
         probability_cap: float = 1.0,
         max_renamed_fraction: float = 1.0,
+        preserve_last_of_class: bool = False,
+        record_true_label: bool = False,
     ) -> None:
         self.probability = probability
         self.probability_vehicle = probability_vehicle
@@ -46,6 +54,8 @@ class PlannerUnknownLabelAugmentation:
         self.distance_scale_range_m = distance_scale_range_m
         self.probability_cap = probability_cap
         self.max_renamed_fraction = max_renamed_fraction
+        self.preserve_last_of_class = preserve_last_of_class
+        self.record_true_label = record_true_label
 
     @property
     def class_probabilities(self) -> NDArray[np.float32]:
@@ -64,6 +74,11 @@ class PlannerUnknownLabelAugmentation:
         output = dict(input_data)
         labels = _widen_labels(input_data["agent_label"])
         output["agent_label"] = labels
+        if self.record_true_label:
+            # The class that was hidden, kept so it can be used as a target. Renaming throws
+            # it away otherwise, which makes it impossible to ask the model to recover it or
+            # to check afterwards which agents were renamed.
+            output["agent_label_true"] = labels.copy()
 
         class_probabilities = self.class_probabilities
         if not np.any(class_probabilities > 0.0):
@@ -80,6 +95,8 @@ class PlannerUnknownLabelAugmentation:
         )
         probabilities = self._rename_probabilities(classes, distances)
         selected = candidates[np.random.random(candidates.size) < probabilities]
+        if self.preserve_last_of_class:
+            selected = self._keep_one_per_class(selected, candidates, classes)
         selected = self._apply_frame_cap(selected, candidates.size)
         if selected.size == 0:
             return output
@@ -99,6 +116,34 @@ class PlannerUnknownLabelAugmentation:
             reach = np.ones_like(distances)
         scale = 1.0 + (self.distance_scale_max - 1.0) * reach
         return np.clip(base * scale, 0.0, self.probability_cap).astype(np.float32)
+
+    def _keep_one_per_class(
+        self,
+        selected: NDArray[np.intp],
+        candidates: NDArray[np.intp],
+        classes: NDArray[np.intp],
+    ) -> NDArray[np.intp]:
+        """Drop one rename per class that would otherwise be emptied from the frame.
+
+        A frame that contained pedestrians should still contain a pedestrian afterwards.
+        Without this the label is removed from every example of a class in the frame, which
+        is the one case where the augmentation stops being label noise and becomes a
+        different scene.
+        """
+        if selected.size == 0:
+            return selected
+        keep = np.ones(selected.size, dtype=bool)
+        selected_set = set(selected.tolist())
+        for class_index in np.unique(classes):
+            in_class = candidates[classes == class_index]
+            if not in_class.size:
+                continue
+            if any(agent not in selected_set for agent in in_class.tolist()):
+                continue  # at least one survivor already
+            # Every agent of this class was picked: spare one at random.
+            spared = int(np.random.permutation(in_class)[0])
+            keep &= selected != spared
+        return selected[keep]
 
     def _apply_frame_cap(
         self, selected: NDArray[np.intp], num_candidates: int

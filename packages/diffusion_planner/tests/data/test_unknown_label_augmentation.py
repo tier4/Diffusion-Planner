@@ -174,3 +174,85 @@ class RenameTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreserveLastOfClassTest(unittest.TestCase):
+    """``max_renamed_fraction`` bounds the frame; it does not protect a single class.
+
+    Measured on 400 real frames at the settings used for the 2026-09-08 runs, 41 frames lost
+    every pedestrian and 45 lost every bicycle, because renaming is drawn per agent and
+    bicycles are rare. That is the one case where the augmentation stops being label noise
+    and becomes a different scene.
+    """
+
+    def test_keeps_one_agent_of_every_class_present(self) -> None:
+        augmentation = PlannerUnknownLabelAugmentation(
+            probability=1.0, preserve_last_of_class=True
+        )
+
+        for seed in range(20):
+            np.random.seed(seed)
+            result = augmentation(_frame([0, 1, 2], [60.0, 60.0, 60.0]))
+
+            for class_index in range(KNOWN_LABEL_DIM):
+                self.assertGreaterEqual(
+                    result["agent_label"][:, class_index].sum(),
+                    1.0,
+                    f"class {class_index} was wiped from the frame with seed {seed}",
+                )
+
+    def test_spares_one_agent_not_the_whole_class(self) -> None:
+        augmentation = PlannerUnknownLabelAugmentation(
+            probability=1.0, preserve_last_of_class=True
+        )
+        np.random.seed(0)
+
+        result = augmentation(_frame([1] * 10, [60.0] * 10))
+
+        self.assertEqual(result["agent_label"][:, UNKNOWN_LABEL_INDEX].sum(), 9.0)
+        self.assertEqual(result["agent_label"][:, 1].sum(), 1.0)
+
+    def test_is_off_by_default_so_existing_configs_are_unchanged(self) -> None:
+        augmentation = PlannerUnknownLabelAugmentation(probability=1.0)
+        np.random.seed(0)
+
+        result = augmentation(_frame([1], [60.0]))
+
+        self.assertEqual(result["agent_label"][0, UNKNOWN_LABEL_INDEX], 1.0)
+
+
+class RecordTrueLabelTest(unittest.TestCase):
+    """The hidden class has to be kept if anything is ever to predict it back."""
+
+    def test_records_the_pre_rename_label(self) -> None:
+        augmentation = PlannerUnknownLabelAugmentation(
+            probability=1.0, record_true_label=True
+        )
+        np.random.seed(0)
+
+        result = augmentation(_frame([0, 1, 2], [60.0, 60.0, 60.0]))
+
+        self.assertIn("agent_label_true", result)
+        np.testing.assert_array_equal(
+            result["agent_label_true"][:, :KNOWN_LABEL_DIM], np.eye(3, dtype=np.float32)
+        )
+        self.assertEqual(result["agent_label"][:, UNKNOWN_LABEL_INDEX].sum(), 3.0)
+
+    def test_renamed_agents_are_recoverable_by_comparison(self) -> None:
+        augmentation = PlannerUnknownLabelAugmentation(
+            probability=0.5, record_true_label=True
+        )
+        np.random.seed(3)
+
+        result = augmentation(_frame([1] * 40, [60.0] * 40))
+
+        renamed = result["agent_label"][:, UNKNOWN_LABEL_INDEX] > 0
+        self.assertTrue(renamed.any())
+        np.testing.assert_array_equal(
+            result["agent_label_true"][renamed, 1], np.ones(int(renamed.sum()))
+        )
+
+    def test_is_off_by_default(self) -> None:
+        result = PlannerUnknownLabelAugmentation()(_frame([0], [5.0]))
+
+        self.assertNotIn("agent_label_true", result)
