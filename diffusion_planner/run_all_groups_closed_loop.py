@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
 from scenario_generation.closed_loop_ddp import shard_items
+from scenario_generation.render_pool import render_pool
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
 )
@@ -459,7 +461,23 @@ def run_closed_loop_main(
 
     # An empty list still writes this rank's (empty) shard files, keeping
     # ``collect_ddp_shards``' all-ranks-present check able to spot a crashed rank.
-    partials = {key: ev.run(mine[key]) for key, ev in evaluators.items()}
+    #
+    # One render pool and one frames directory for the rank rather than one per group: a
+    # spawned worker re-imports torch and matplotlib, and that cost was paid again for every
+    # group. Sharing them also lets a group's encodes run during the next group's rollout,
+    # which is why the join below is here instead of inside ``execute_jobs``.
+    with (
+        render_pool(cfg.closed_loop_draw_workers) as draw_pool,
+        tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
+    ):
+        for ev in evaluators.values():
+            ev.shared_render = (draw_pool, frames_root)
+        partials = {key: ev.run(mine[key]) for key, ev in evaluators.items()}
+        # Inside the ``with``: the encoders read frames_root, and an ffmpeg failure surfaces
+        # nowhere else. Every MP4 must exist before rank 0 globs the output directory below.
+        for ev in evaluators.values():
+            for future in getattr(ev, "_mp4_futures", []) or []:
+                future.result()
 
     if world_size > 1:
         torch.distributed.barrier()  # every rank has written its shard

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+from contextlib import nullcontext
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -424,16 +425,33 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         sidecar under DDP sharding -- the same convention ``run_closed_loop_eval`` uses), while
         jobs run."""
         merged = JobRunResult(extras={"route_keys": []})
+        self._mp4_futures: list = []
         suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
         segments_path = self.out_dir / f"segments{suffix}.jsonl"
         digests_path = self.out_dir / f"tdigests{suffix}.jsonl"
+        # ``shared_render`` is the caller's ``(pool, frames_root)``, alive for the whole rank.
+        # Building them per group respawns every worker, and each one re-imports torch and
+        # matplotlib; that latency lands inside the first ``render_drain``, and at high rank
+        # counts a group often holds a single segment, so the pool was rebuilt for one rollout.
+        # They are taken as a pair because an encode reads both: owning one and borrowing the
+        # other would tear the frames down under a running encoder.
+        shared = getattr(self, "shared_render", None)
+        pool_ctx = (
+            nullcontext(shared[0])
+            if shared is not None
+            else render_pool(self.config.params.draw_workers)
+        )
+        # ffmpeg consumes and deletes these, so they must not land in the output tree.
+        frames_ctx = (
+            nullcontext(str(shared[1]))
+            if shared is not None
+            else tempfile.TemporaryDirectory(prefix="closed_loop_frames_")
+        )
         with (
             segments_path.open("w", encoding="utf-8") as fout,
             digests_path.open("w", encoding="utf-8") as fdigest,
-            # One pool for every segment: a spawned worker re-imports torch and matplotlib.
-            render_pool(self.config.params.draw_workers) as draw_pool,
-            # ffmpeg consumes and deletes these, so they must not land in the output tree.
-            tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
+            pool_ctx as draw_pool,
+            frames_ctx as frames_root,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
@@ -451,6 +469,16 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 if partial_timers is not None:
                     merged.extras.setdefault("timers", Timers()).merge(partial_timers)
                 self.on_job_complete(job, partial, ri, len(jobs))
+            # Ours die at the end of this block, so the encoders reading them have to be
+            # waited on here. The caller's are joined after the last group instead, which is
+            # what lets an encode overlap the next group's rollout. Either way the wait must
+            # happen: an ffmpeg failure surfaces nowhere else.
+            join = Timers()
+            with join("mp4_join"):
+                if shared is None:
+                    for future in self._mp4_futures:
+                        future.result()
+            merged.extras.setdefault("timers", Timers()).merge(join)
         return merged
 
     def run_job(
@@ -529,8 +557,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            with timers("build_mp4"):
-                build_mp4(png_dir, seg_mp4, self.config.fps)
+            if draw_pool is None:
+                with timers("build_mp4"):
+                    build_mp4(png_dir, seg_mp4, self.config.fps)
+            else:
+                with timers("mp4_submit"):
+                    self._mp4_futures.append(
+                        draw_pool.submit(build_mp4, png_dir, seg_mp4, self.config.fps)
+                    )
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]
