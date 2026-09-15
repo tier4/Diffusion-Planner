@@ -5,11 +5,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from planner_metrics.config import RewardConfig
 from planner_metrics.geometry import (
     point_inside_any_lane_polygon,
 )
-from planner_metrics.subscores import compute_road_border_penalty
+from planner_metrics.subscores import road_border_distances
 
 
 def _as_float_tensor(value, device: str) -> torch.Tensor:
@@ -202,37 +201,33 @@ def score_road_border_step(np_dict: dict, *, device: str) -> dict:
     rb_dist_m = float("inf")
     if "line_strings" in np_dict and "ego_shape" in np_dict:
         ego_shape_t = _as_float_tensor(np_dict["ego_shape"], device).reshape(-1)[:3]
+        # float32 to match what _as_float_tensor put on the device: the perimeter is built
+        # from these numbers, and a float64 1.85 is not the 1.850000023841858 the tensor holds.
+        _shape_host = np.asarray(np_dict["ego_shape"], dtype=np.float32).reshape(-1)[:3]
+        ego_shape_host = (float(_shape_host[0]), float(_shape_host[1]), float(_shape_host[2]))
         traj = torch.zeros(1, 1, 4, dtype=torch.float32, device=device)
         traj[..., 2] = 1.0  # origin, heading +x
         ls = _as_float_tensor(np_dict["line_strings"], device)
         if ls.dim() == 4:
             ls = ls[0]
         data = {"line_strings": ls}
-        _gate, _near, _wide, _steps, _cont, per_ts_min = compute_road_border_penalty(
-            traj, ego_shape_t, data, config=RewardConfig()
+        per_ts_min, seg_p1, seg_p2 = road_border_distances(
+            traj, ego_shape_t, data, ego_shape_host=ego_shape_host
         )
         rb_dist_m = float(per_ts_min[0, 0].item())
         if np.isfinite(rb_dist_m):
             inside = _ego_inside_lane(np_dict, device)
             # A border crossing/contact takes precedence over the signed
             # clearance: the requested value at intersection is exactly 0.
-            if "line_strings" in np_dict:
-                ls_for_intersection = ls
-                border_xy = ls_for_intersection[..., :2]
-                valid = (ls_for_intersection[..., 3] > 0.5) & (border_xy.norm(dim=-1) > 1e-3)
-                valid_pair = valid[:, :-1] & valid[:, 1:]
-                idx = torch.where(valid_pair.reshape(-1))[0]
-                seg_p1 = border_xy[:, :-1].reshape(-1, 2)[idx]
-                seg_p2 = border_xy[:, 1:].reshape(-1, 2)[idx]
-                if _ego_intersects_border_segments(seg_p1, seg_p2, ego_shape_t):
-                    rb_dist_m = 0.0
+            if _ego_intersects_border_segments(seg_p1, seg_p2, ego_shape_t):
+                rb_dist_m = 0.0
             border_inside = False
             if rb_dist_m != 0.0 and inside is False:
                 # Lane polygons are the primary containment test.  At turns
                 # the lane representation can be incomplete, so only use the
                 # road-border corridor as a fallback when no lane contains
                 # the ego origin.
-                border_inside = _ego_inside_road_border_corridor(ls_for_intersection)
+                border_inside = _ego_inside_road_border_corridor(ls)
                 if not border_inside:
                     rb_dist_m = -rb_dist_m
     return {"rb_dist_m": rb_dist_m}
