@@ -424,6 +424,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         sidecar under DDP sharding -- the same convention ``run_closed_loop_eval`` uses), while
         jobs run."""
         merged = JobRunResult(extras={"route_keys": []})
+        self._mp4_futures: list = []
         suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
         segments_path = self.out_dir / f"segments{suffix}.jsonl"
         digests_path = self.out_dir / f"tdigests{suffix}.jsonl"
@@ -451,6 +452,13 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 if partial_timers is not None:
                     merged.extras.setdefault("timers", Timers()).merge(partial_timers)
                 self.on_job_complete(job, partial, ri, len(jobs))
+            # Must stay inside the ``with``: the encoders read frames_root, which is torn
+            # down on exit, and an ffmpeg failure surfaces nowhere else.
+            join = Timers()
+            with join("mp4_join"):
+                for future in self._mp4_futures:
+                    future.result()
+            merged.extras.setdefault("timers", Timers()).merge(join)
         return merged
 
     def run_job(
@@ -529,8 +537,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            with timers("build_mp4"):
-                build_mp4(png_dir, seg_mp4, self.config.fps)
+            if draw_pool is None:
+                with timers("build_mp4"):
+                    build_mp4(png_dir, seg_mp4, self.config.fps)
+            else:
+                with timers("mp4_submit"):
+                    self._mp4_futures.append(
+                        draw_pool.submit(build_mp4, png_dir, seg_mp4, self.config.fps)
+                    )
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]
