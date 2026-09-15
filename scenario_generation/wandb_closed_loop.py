@@ -726,12 +726,15 @@ def log_closed_loop_to_wandb(
 ) -> None:
     """Push per-group closed-loop scalar metrics + Custom Charts to W&B.
 
-    Reuses ``run`` if given, else starts its own.
+    Reuses ``run`` if given.  Otherwise, starts its own run only when
+    ``cfg.wandb_project_name`` is non-empty; an empty project disables W&B for
+    standalone closed-loop evaluation.
     Sets up W&B Custom Chart presets for cross-run comparison.
 
     Args:
         cfg: Closed-loop config exposing ``wandb_project_name`` and ``exp_name``.
-             If None, wandb.init falls back to its own defaults.
+             An empty ``wandb_project_name`` disables creating a run.  If cfg is
+             None, wandb.init falls back to its own defaults.
         group_names: List of group keys.
         group_summaries: Dict mapping group key -> summary dict.
         run: W&B run instance. If None, starts a new one.
@@ -741,6 +744,9 @@ def log_closed_loop_to_wandb(
 
     if run is None:
         project = getattr(cfg, "wandb_project_name", None) or None
+        if cfg is not None and project is None:
+            print("wandb: disabled (wandb_project_name is empty)")
+            return
         name = getattr(cfg, "exp_name", None) or None
         run = wandb.init(project=project, name=name)
         own_run = True
