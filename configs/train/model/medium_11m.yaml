@@ -12,3 +12,9 @@ drop_path_rate: 0.0
 dropout: 0.0
 velocity_threshold: 0.1
 goal_max_distance: 2.0
+
+# "one_hot" gives unknown its own orthogonal column, as if it were a fourth kind of object.
+# "class_prior" encodes it as a learned prior over the known classes plus one uncertainty
+# vector, which is what an unknown agent actually is and how the augmentation builds it.
+# Costs 3 parameters. Default keeps existing runs unchanged.
+agent_label_encoder: one_hot

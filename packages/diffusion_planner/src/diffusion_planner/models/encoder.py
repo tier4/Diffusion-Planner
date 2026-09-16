@@ -32,6 +32,40 @@ def _element_embedding(hidden_dim: int) -> nn.Parameter:
     return embedding
 
 
+class ClassPriorEncoder(nn.Module):
+    """Encode agent class where "unknown" means "one of the known classes, undetermined".
+
+    ``OneHotEncoder`` gives the unknown class its own column, so it becomes a fourth
+    direction orthogonal to vehicle, pedestrian and bicycle - the geometry of a fourth kind
+    of object. That is not what an unknown agent is. It is a vehicle, a pedestrian or a
+    bicycle whose class was not determined, and the training augmentation builds it exactly
+    that way, by hiding the label of an agent that had one.
+
+    So an unknown agent is encoded as a learned prior *over the known classes*, which places
+    it inside the simplex the known classes span rather than orthogonal to it, plus one
+    learned vector marking that the class is uncertain.
+
+    Empty neighbour slots carry an all-zero label and still encode to zero, matching
+    ``OneHotEncoder`` with ``bias=False``.
+    """
+
+    def __init__(self, num_classes: int, output_dim: int) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_known_classes = num_classes - 1
+        self.projection = nn.Linear(self.num_known_classes, output_dim, bias=False)
+        self.prior_logits = nn.Parameter(torch.zeros(self.num_known_classes))
+        self.uncertainty = nn.Parameter(torch.zeros(output_dim))
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        """Encode class vectors with shape `(..., C)` into `(..., output_dim)`."""
+        known = values[..., : self.num_known_classes]
+        unknown = values[..., self.num_known_classes :].sum(dim=-1, keepdim=True)
+        prior = torch.softmax(self.prior_logits, dim=-1)
+        mixed = known + unknown * prior
+        return self.projection(mixed) + unknown * self.uncertainty
+
+
 class OneHotEncoder(nn.Module):
     """Encode one-hot vectors."""
 
@@ -276,6 +310,7 @@ class NeighborAgentEncoder(nn.Module):
         hidden_dim: int,
         depth: int,
         mixer_hidden_dim: int,
+        agent_label_encoder: str = "one_hot",
     ) -> None:
         super().__init__()
         self.history_encoder = FloatVectorSequenceEncoder(
@@ -287,7 +322,15 @@ class NeighborAgentEncoder(nn.Module):
             drop_path_rate,
         )
         self.shape_encoder = FloatVectorEncoder(AGENT_SHAPE_DIM, hidden_dim)
-        self.label_encoder = OneHotEncoder(AGENT_LABEL_DIM, hidden_dim)
+        if agent_label_encoder == "class_prior":
+            self.label_encoder: nn.Module = ClassPriorEncoder(AGENT_LABEL_DIM, hidden_dim)
+        elif agent_label_encoder == "one_hot":
+            self.label_encoder = OneHotEncoder(AGENT_LABEL_DIM, hidden_dim)
+        else:
+            raise ValueError(
+                f"agent_label_encoder must be 'one_hot' or 'class_prior': "
+                f"{agent_label_encoder}"
+            )
         self.element_embedding = _element_embedding(hidden_dim)
 
     def forward(
@@ -540,6 +583,7 @@ class SceneEncoder(nn.Module):
         mixer_hidden_dim: int = 128,
         velocity_threshold: float = 0.1,
         goal_max_distance: float = 2.0,
+        agent_label_encoder: str = "one_hot",
     ) -> None:
         super().__init__()
         self.neighbor_agent_encoder = NeighborAgentEncoder(
@@ -547,6 +591,7 @@ class SceneEncoder(nn.Module):
             hidden_dim,
             encoder_depth,
             mixer_hidden_dim,
+            agent_label_encoder,
         )
         self.lane_encoder = LaneEncoder(
             drop_path_rate,

@@ -31,6 +31,7 @@ class DiffusionPlanner(nn.Module):
         dropout: float = 0.0,
         velocity_threshold: float = 0.1,
         goal_max_distance: float = 2.0,
+        agent_label_encoder: str = "one_hot",
     ) -> None:
         super().__init__()
         self.scene_encoder = SceneEncoder(
@@ -43,6 +44,7 @@ class DiffusionPlanner(nn.Module):
             mixer_hidden_dim=element_mixer_hidden_dim,
             velocity_threshold=velocity_threshold,
             goal_max_distance=goal_max_distance,
+            agent_label_encoder=agent_label_encoder,
         )
         self.trajectory_decoder = TrajectoryDecoder(
             hidden_dim=hidden_dim,

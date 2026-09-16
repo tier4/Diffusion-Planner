@@ -17,6 +17,7 @@ from diffusion_planner.data.dimensions import (
 )
 from diffusion_planner.models.encoder import (
     EGO_VELOCITY_INDEX,
+    ClassPriorEncoder,
     EgoHistoryEncoder,
     EgoShapeEncoder,
     FloatVectorEncoder,
@@ -363,3 +364,56 @@ class LaneEncoderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassPriorEncoderTest(unittest.TestCase):
+    """Unknown is a known class left undetermined, not a fourth kind of object."""
+
+    def test_known_classes_match_a_plain_projection(self) -> None:
+        encoder = ClassPriorEncoder(AGENT_LABEL_DIM, 8)
+        one_hot = torch.eye(AGENT_LABEL_DIM - 1)
+
+        encoded = encoder(torch.cat([one_hot, torch.zeros(3, 1)], dim=-1))
+
+        torch.testing.assert_close(encoded, encoder.projection(one_hot))
+
+    def test_empty_slots_still_encode_to_zero(self) -> None:
+        """All-zero labels mark empty neighbour slots and must contribute nothing."""
+        encoder = ClassPriorEncoder(AGENT_LABEL_DIM, 8)
+
+        encoded = encoder(torch.zeros(4, AGENT_LABEL_DIM))
+
+        torch.testing.assert_close(encoded, torch.zeros(4, 8))
+
+    def test_unknown_lands_inside_the_known_class_simplex(self) -> None:
+        """With the uncertainty vector at zero, unknown is a mixture of the known classes.
+
+        A fourth one-hot column would instead place it on an axis orthogonal to all three.
+        """
+        encoder = ClassPriorEncoder(AGENT_LABEL_DIM, 8)
+        with torch.no_grad():
+            encoder.uncertainty.zero_()
+        unknown = torch.zeros(1, AGENT_LABEL_DIM)
+        unknown[0, AGENT_LABEL_DIM - 1] = 1.0
+
+        encoded = encoder(unknown)
+        prior = torch.softmax(encoder.prior_logits, dim=-1).unsqueeze(0)
+
+        torch.testing.assert_close(encoded, encoder.projection(prior))
+
+    def test_uncertainty_vector_shifts_unknown_agents_only(self) -> None:
+        encoder = ClassPriorEncoder(AGENT_LABEL_DIM, 8)
+        with torch.no_grad():
+            encoder.uncertainty.fill_(1.0)
+        vehicle = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        unknown = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+
+        with torch.no_grad():
+            before_vehicle = encoder(vehicle).clone()
+            before_unknown = encoder(unknown).clone()
+            encoder.uncertainty.fill_(5.0)
+            after_vehicle = encoder(vehicle)
+            after_unknown = encoder(unknown)
+
+        torch.testing.assert_close(after_vehicle, before_vehicle)
+        self.assertGreater(float(after_unknown.mean()), float(before_unknown.mean()))
