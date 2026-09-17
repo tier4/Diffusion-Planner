@@ -205,8 +205,26 @@ def _extract_neighbors(data: dict[str, np.ndarray]) -> list[Agent]:
     if nb_past is None:
         return []
 
-    # (N_nb, T, 11) [x, y, cos_h, sin_h, vx, vy, width, length, is_veh, is_ped, is_bike]
-    N_nb, T, _ = nb_past.shape
+    # Legacy NPZ stores 11 columns: [x, y, cos_h, sin_h, vx, vy, width,
+    # length, is_veh, is_ped, is_bike].  Native new-DP H5 deliberately keeps
+    # model inputs compact at [x, y, cos_h, sin_h], with shape/type in their
+    # own tensors.  Expand only for this legacy renderer; inference continues
+    # to receive the native 4-column tensor.
+    N_nb, T, width = nb_past.shape
+    if width == 4:
+        native_shape = np.asarray(data.get("agent_shape", np.zeros((N_nb, 2))))
+        native_label = np.asarray(data.get("agent_label", np.zeros((N_nb, 3))))
+        if native_shape.shape != (N_nb, 2) or native_label.shape != (N_nb, 3):
+            raise ValueError(
+                "native neighbor rendering requires agent_shape (N,2) and agent_label (N,3)"
+            )
+        expanded = np.zeros((N_nb, T, 11), dtype=nb_past.dtype)
+        expanded[:, :, :4] = nb_past
+        expanded[:, :, 6:8] = native_shape[:, None, :]
+        expanded[:, :, 8:11] = native_label[:, None, :]
+        nb_past = expanded
+    elif width != 11:
+        raise ValueError(f"unsupported neighbor_agents_past width: {width}")
 
     nb_future = data.get("neighbor_agents_future")
 
