@@ -1,4 +1,4 @@
-"""Load diffusion planner checkpoints and sampler ONNX models."""
+"""Load planner checkpoints and sampler ONNX models."""
 
 from __future__ import annotations
 
@@ -10,13 +10,16 @@ import onnxruntime as ort
 import torch
 
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
+from diffusion_planner.utils.checkpoint import resolve_target
+
+from .inference import Planner
 
 
 @dataclass(frozen=True)
 class LoadedPlanner:
     """A restored planner and checkpoint metadata for dashboard inference."""
 
-    model: DiffusionPlanner
+    model: Planner
     epoch: int
     global_step: int
 
@@ -31,14 +34,19 @@ class LoadedOnnxPlanner:
 
 
 def load_planner_checkpoint(path: str | Path, device: str) -> LoadedPlanner:
-    """Restore a planner on ``device`` from a single-file training checkpoint."""
+    """Restore a planner on ``device`` from a single-file training checkpoint.
+
+    The planner class comes from the checkpoint's ``_target_`` (flow-matching or
+    PLUTO); checkpoints without one are treated as ``DiffusionPlanner``.
+    """
     checkpoint_path = Path(path).expanduser()
     checkpoint: dict[str, Any] = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False
     )
     model_config = dict(checkpoint["model_config"])
-    model_config.pop("_target_", None)
-    model = DiffusionPlanner(**model_config)
+    target = model_config.pop("_target_", None)
+    factory = resolve_target(str(target)) if target else DiffusionPlanner
+    model = factory(**model_config)
     model.load_state_dict(checkpoint["model"])
     model.to(torch.device(device))
     model.eval()

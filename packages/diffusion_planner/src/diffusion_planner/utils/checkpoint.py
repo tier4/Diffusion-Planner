@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
@@ -15,17 +16,35 @@ from torch.optim import Optimizer
 ModelT = TypeVar("ModelT", bound=nn.Module)
 
 
+def resolve_target(target: str) -> Callable[..., Any]:
+    """Import the class or function named by a Hydra ``_target_`` string."""
+    module_name, _, attribute = target.rpartition(".")
+    if not module_name or not attribute:
+        raise ValueError(f"Invalid _target_: {target!r}")
+    return getattr(importlib.import_module(module_name), attribute)
+
+
 def load_model(
     path: str | Path,
-    model_factory: Callable[..., ModelT],
+    model_factory: Callable[..., ModelT] | None = None,
 ) -> ModelT:
-    """Construct a model from its saved config and load its weights on CPU."""
+    """Construct a model from its saved config and load its weights on CPU.
+
+    Without ``model_factory`` the class is resolved from the checkpoint's
+    ``_target_``, so flow-matching and PLUTO checkpoints load the same way.
+    """
     checkpoint_path = Path(path).expanduser()
     checkpoint: dict[str, Any] = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False
     )
     model_config = dict(checkpoint["model_config"])
-    model_config.pop("_target_", None)
+    target = model_config.pop("_target_", None)
+    if model_factory is None:
+        if target is None:
+            raise ValueError(
+                f"{checkpoint_path} has no model _target_; pass model_factory"
+            )
+        model_factory = resolve_target(str(target))
     model = model_factory(**model_config)
     model.load_state_dict(checkpoint["model"])
     return model

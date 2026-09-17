@@ -1,0 +1,17 @@
+# PLUTO planning loss for model=pluto_*. All PLUTO weights are 1 (plain sum).
+_target_: diffusion_planner.models.pluto_loss.compute_pluto_loss
+_partial_: true
+position_scale: ${transform_configs.normalization.position_scale}
+num_modes: ${model.num_modes}
+# Progress bins along the preferred route at 8 s. PLUTO: radius 120 m / 12 modes.
+mode_interval_m: 10.0
+# Optional non-uniform bin edges in meters (num_modes - 1 values); null = uniform.
+bin_edges_m: null
+# Optional smoothing of the one-hot mode target onto the two neighbor bins.
+label_smoothing: 0.0
+regression_weight: 1.0
+classification_weight: 1.0
+neighbor_weight: 1.0
+yaw_regularization_weight: 1.0
+turn_indicator_loss_weight: ${training.turn_indicator_loss_weight}
+turn_indicator_transition_loss_weight: ${training.turn_indicator_transition_loss_weight}

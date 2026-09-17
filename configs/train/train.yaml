@@ -6,6 +6,7 @@ defaults:
   - /train/accelerator@accelerator: default
   - /train/dataloader@dataloader: default
   - /train/model@model: large_33m
+  - /train/loss@loss: flow_matching
   - /train/optimizer@optimizer: default
   - /train/scheduler@scheduler: default
   - _self_

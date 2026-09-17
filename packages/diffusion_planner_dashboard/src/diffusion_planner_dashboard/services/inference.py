@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from time import perf_counter
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import onnxruntime as ort
@@ -13,12 +13,29 @@ from numpy.typing import NDArray
 
 from diffusion_planner.data import PlannerDataNormalizer
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
-from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.onnx import PLANNER_INPUT_NAMES
 
 
+class Planner(Protocol):
+    """What the dashboard needs from a planner (DiffusionPlanner or PlutoPlanner)."""
+
+    def sample(
+        self,
+        input_data: dict[str, torch.Tensor],
+        initial_noise: torch.Tensor,
+        num_steps: int = ...,
+        time_epsilon: float = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    def predict_turn_indicator(
+        self,
+        input_data: dict[str, torch.Tensor],
+        trajectory: torch.Tensor,
+    ) -> torch.Tensor: ...
+
+
 def run_inference(
-    model: DiffusionPlanner,
+    model: Planner,
     frame_data: Mapping[str, Any],
     *,
     device: str,
@@ -99,7 +116,7 @@ def run_onnx_inference(
 
 
 def run_turn_indicator_inference(
-    model: DiffusionPlanner,
+    model: Planner,
     frame_data: Mapping[str, Any],
     trajectory: NDArray[np.float32],
     *,

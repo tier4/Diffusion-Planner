@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Export a training checkpoint as a complete planner sampler ONNX model."""
+"""Export a training checkpoint as a complete planner sampler ONNX model.
+
+Works for every planner class saved with a ``_target_`` in the checkpoint
+(flow-matching ``DiffusionPlanner`` and one-shot ``PlutoPlanner``); the ONNX
+inputs and outputs are identical for both.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,6 @@ from diffusion_planner.data.dimensions import (
     TRAJECTORY_DIM,
     TRAJECTORY_LENGTH,
 )
-from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.onnx import (
     PLANNER_INPUT_NAMES,
     DiffusionPlannerOnnxWrapper,
@@ -160,7 +164,8 @@ def main() -> None:
     args = _parse_args()
     torch.backends.mha.set_fastpath_enabled(False)
     checkpoint_path = args.checkpoint.expanduser().resolve()
-    model = load_model(checkpoint_path, DiffusionPlanner).eval()
+    model = load_model(checkpoint_path).eval()
+    print(f"model={type(model).__module__}.{type(model).__name__}")
     export_inputs = _make_onnx_inputs()
     sampler_wrapper = DiffusionPlannerOnnxWrapper(model).eval()
 

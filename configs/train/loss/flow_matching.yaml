@@ -1,0 +1,12 @@
+# Default loss: the flow-matching objective, unchanged. The weights stay under
+# `training.*` and are read from there.
+_target_: diffusion_planner.models.loss.compute_diffusion_planner_loss
+_partial_: true
+time_mean: ${training.time_mean}
+time_std: ${training.time_std}
+time_epsilon: ${training.time_epsilon}
+noise_scale: ${training.noise_scale}
+ego_loss_weight: ${training.ego_loss_weight}
+neighbor_loss_weight: ${training.neighbor_loss_weight}
+turn_indicator_loss_weight: ${training.turn_indicator_loss_weight}
+turn_indicator_transition_loss_weight: ${training.turn_indicator_transition_loss_weight}

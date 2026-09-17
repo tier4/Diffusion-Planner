@@ -1,4 +1,4 @@
-"""Accelerate-based diffusion planner training entry point."""
+"""Accelerate-based planner training entry point."""
 
 from __future__ import annotations
 
@@ -13,13 +13,37 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
 import wandb
-from diffusion_planner.models.diffusion_planner import DiffusionPlanner
-from diffusion_planner.models.loss import compute_diffusion_planner_loss
 from diffusion_planner.utils.checkpoint import load_checkpoint, save_checkpoint
 from diffusion_planner.utils.lr_scheduler import (
     build_lr_scheduler,
     describe_lr_scheduler,
 )
+
+# Loss-dict entries logged under train/loss/; other scalars go under train/.
+LOSS_KEYS = (
+    "total",
+    "trajectory",
+    "turn_indicator",
+    "regression",
+    "classification",
+    "neighbor",
+    "yaw_regularization",
+)
+
+
+def _is_count(name: str) -> bool:
+    """Count-like entries are summed across processes instead of averaged."""
+    return name.endswith(("_count", "_counts", "_correct"))
+
+
+def _output_layers(planner: torch.nn.Module) -> tuple[torch.nn.Module, ...]:
+    """Head layers kept in AdamW; models may declare them, the flow model does not."""
+    if hasattr(planner, "output_layers"):
+        return tuple(planner.output_layers())
+    return (
+        planner.trajectory_decoder.output_projection.fc2,
+        planner.turn_indicator_decoder.classifier,
+    )
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="train/train")
@@ -47,7 +71,8 @@ def main(config: DictConfig) -> None:
             "dataloader has no batches; reduce batch_size or disable drop_last"
         )
 
-    planner: DiffusionPlanner = hydra.utils.instantiate(config.model)
+    planner: torch.nn.Module = hydra.utils.instantiate(config.model)
+    loss_function = hydra.utils.instantiate(config.loss)
     checkpoint_model = planner
     model_config = OmegaConf.to_container(
         config.model, resolve=True, throw_on_missing=True
@@ -66,10 +91,7 @@ def main(config: DictConfig) -> None:
     optimizer = hydra.utils.instantiate(
         config.optimizer,
         model=planner,
-        output_layers=(
-            planner.trajectory_decoder.output_projection.fc2,
-            planner.turn_indicator_decoder.classifier,
-        ),
+        output_layers=_output_layers(planner),
         verbose=accelerator.is_main_process,
     )
     planner, optimizer, loader = accelerator.prepare(planner, optimizer, loader)
@@ -115,6 +137,7 @@ def main(config: DictConfig) -> None:
         )
         print(describe_lr_scheduler(config.scheduler, total_steps))
         print(f"run_name={run_name} checkpoint_dir={checkpoint_dir}")
+        print(f"loss={config.loss._target_}")
 
     planner.train()
     optimizer.zero_grad(set_to_none=True)
@@ -130,22 +153,7 @@ def main(config: DictConfig) -> None:
             dynamic_ncols=True,
         )
         for step_in_epoch, batch in enumerate(progress, start=1):
-            losses = compute_diffusion_planner_loss(
-                planner,
-                batch,
-                time_mean=float(config.training.time_mean),
-                time_std=float(config.training.time_std),
-                time_epsilon=float(config.training.time_epsilon),
-                noise_scale=float(config.training.noise_scale),
-                ego_loss_weight=float(config.training.ego_loss_weight),
-                neighbor_loss_weight=float(config.training.neighbor_loss_weight),
-                turn_indicator_loss_weight=float(
-                    config.training.turn_indicator_loss_weight
-                ),
-                turn_indicator_transition_loss_weight=float(
-                    config.training.turn_indicator_transition_loss_weight
-                ),
-            )
+            losses = loss_function(planner, batch)
             loss = losses["total"]
             accelerator.backward(loss)
             gradient_norm = accelerator.clip_grad_norm_(
@@ -164,36 +172,48 @@ def main(config: DictConfig) -> None:
                     if gradient_norm is not None
                     else torch.full((), torch.nan, device=loss.device)
                 )
-                metrics = accelerator.reduce(
+                scalar_names = [
+                    name
+                    for name, value in losses.items()
+                    if torch.is_tensor(value)
+                    and value.ndim == 0
+                    and not _is_count(name)
+                ]
+                scalars = accelerator.reduce(
                     torch.stack(
-                        (
-                            losses["total"].detach().float(),
-                            losses["trajectory"].detach().float(),
-                            losses["turn_indicator"].detach().float(),
-                            gradient_norm_value,
-                        )
+                        [losses[name].detach().float() for name in scalar_names]
+                        + [gradient_norm_value]
                     ),
                     reduction="mean",
                 )
-                turn_counts = accelerator.reduce(
-                    torch.stack(
-                        (
-                            losses["turn_indicator_correct"],
-                            losses["turn_indicator_valid_count"],
-                        )
-                    ).to(torch.float32),
-                    reduction="sum",
-                )
-                metric_values = {
-                    "train/loss/total": metrics[0].item(),
-                    "train/loss/trajectory": metrics[1].item(),
-                    "train/loss/turn_indicator": metrics[2].item(),
-                    "train/turn_indicator_accuracy": (
-                        turn_counts[0] / turn_counts[1].clamp_min(1)
-                    ).item(),
-                    "train/grad_norm": metrics[3].item(),
-                    "train/learning_rate": optimizer.param_groups[0]["lr"],
+                counts = {
+                    name: accelerator.reduce(
+                        value.detach().to(torch.float32), reduction="sum"
+                    )
+                    for name, value in losses.items()
+                    if torch.is_tensor(value) and _is_count(name)
                 }
+                metric_values: dict[str, float] = {}
+                for name, value in zip(scalar_names, scalars[:-1], strict=True):
+                    prefix = "train/loss/" if name in LOSS_KEYS else "train/"
+                    metric_values[f"{prefix}{name}"] = value.item()
+                metric_values["train/grad_norm"] = scalars[-1].item()
+                metric_values["train/learning_rate"] = optimizer.param_groups[0]["lr"]
+                if {
+                    "turn_indicator_correct",
+                    "turn_indicator_valid_count",
+                } <= counts.keys():
+                    metric_values["train/turn_indicator_accuracy"] = (
+                        counts["turn_indicator_correct"]
+                        / counts["turn_indicator_valid_count"].clamp_min(1)
+                    ).item()
+                if "mode_target_counts" in counts:
+                    mode_counts = counts["mode_target_counts"]
+                    fractions = mode_counts / mode_counts.sum().clamp_min(1)
+                    for index, fraction in enumerate(fractions.tolist()):
+                        metric_values[f"train/mode_target_fraction/{index:02d}"] = (
+                            fraction
+                        )
                 if accelerator.is_main_process:
                     progress.set_postfix(
                         loss=f"{metric_values['train/loss/total']:.5f}",
