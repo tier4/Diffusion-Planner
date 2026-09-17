@@ -77,9 +77,23 @@ def _lane_half_widths(lane: torch.Tensor) -> tuple[float, float]:
 
 
 def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
-    """Return the index of the lanelet whose centerline is closest to ``point``."""
+    """Return the index of the lanelet the ego is travelling on at ``point``.
+
+    Candidates running against the ego's heading are rejected before the
+    nearest-centerline pick, so an oncoming or crossing lanelet that happens to
+    pass close by (common at an intersection) cannot become the source lane.
+    The ego frame puts the ego at the origin heading +x, so "with the ego" is
+    simply a positive x-component on the centerline tangent.
+
+    This does NOT disambiguate two parallel lanes: once the ego is past the
+    midpoint of a change already in progress, the lane it is moving INTO is the
+    nearest one. Such a scene is reported as a failed precondition by the
+    scorer rather than mis-scored — see ``evaluate_lane_change_with_details``.
+    """
     best_index = -1
     best_distance = float("inf")
+    best_aligned_index = -1
+    best_aligned_distance = float("inf")
     for index in range(lanes.shape[0]):
         centerline = _lane_centerline(lanes[index])
         if centerline.shape[0] < 2:
@@ -91,9 +105,31 @@ def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
         if distance < best_distance:
             best_distance = distance
             best_index = index
+        nearest_segment = int((((seg_p1 + seg_p2) / 2) - point.reshape(1, 2)).norm(dim=-1).argmin())
+        if float((seg_p2 - seg_p1)[nearest_segment, 0]) <= 0.0:
+            continue
+        if distance < best_aligned_distance:
+            best_aligned_distance = distance
+            best_aligned_index = index
+    if best_aligned_index >= 0:
+        return best_aligned_index
     if best_index < 0:
         raise ValueError("lane_change metric found no usable lanelet centerline")
     return best_index
+
+
+def _arc_length_behind(path: torch.Tensor, point: torch.Tensor) -> float:
+    """Return the path's arc length that lies behind ``point``'s projection."""
+    seg_p1, seg_p2 = _polyline_segments(path)
+    if seg_p1.shape[0] == 0:
+        return 0.0
+    segment = seg_p2 - seg_p1
+    lengths = segment.norm(dim=-1)
+    offset = point.reshape(1, 2) - seg_p1
+    t = ((offset * segment).sum(-1) / (lengths**2).clamp(min=1e-10)).clamp(0, 1)
+    closest = seg_p1 + t.unsqueeze(-1) * segment
+    nearest = int((point.reshape(1, 2) - closest).norm(dim=-1).argmin())
+    return float(lengths[:nearest].sum() + t[nearest] * lengths[nearest])
 
 
 def _build_source_lane_path(
@@ -109,15 +145,22 @@ def _build_source_lane_path(
     which carries no explicit connectivity).  Where several successors chain --
     a fork -- the one whose initial tangent best matches the current heading
     wins, so the reconstructed path follows the ego's own lane rather than a
-    turning branch.  Chaining stops once the path is long enough to cover the
-    scored trajectories.
+    turning branch.  Chaining stops once the path reaches ``required_length_m``
+    AHEAD OF THE EGO: lanelets are resampled to a fixed point count regardless
+    of length, so the ego often sits deep inside a long source lanelet, and
+    measuring the budget against the whole path (including what is behind the
+    ego) would stop chaining while the trajectories still run off the end.
     """
     path = _lane_centerline(lanes[source_index])
     if path.shape[0] < 2:
         raise ValueError("lane_change metric needs at least two points in the source lanelet")
 
+    # The ego is at the origin in the scene frame; the prefix behind it never
+    # changes as successors are appended, so it is measured once.
+    behind_ego = _arc_length_behind(path, torch.zeros(2, device=path.device, dtype=path.dtype))
+
     used = {source_index}
-    while float((path[1:] - path[:-1]).norm(dim=-1).sum()) < required_length_m:
+    while float((path[1:] - path[:-1]).norm(dim=-1).sum()) - behind_ego < required_length_m:
         tail_direction = path[-1] - path[-2]
         tail_norm = float(tail_direction.norm())
         if tail_norm <= _SEGMENT_MIN_LENGTH:
@@ -270,13 +313,17 @@ def evaluate_lane_change_with_details(
     starting a change without finishing it; the second rejects overshooting
     into the lane beyond the target.
 
-    ``minimum_lateral_shift_m`` is a floor under the boundary threshold, so a
-    map with missing or degenerate boundary offsets cannot make the crossing
-    test trivially true.
+    ``minimum_lateral_shift_m`` is a floor under the lane tolerance, so a map
+    with missing or degenerate boundary offsets cannot make the crossing test
+    trivially true nor the reached test impossible to satisfy.
 
-    Every sample must be a genuine lane-change scene: if the recorded ego never
-    leaves its own lane within the horizon, the NPZ does not belong in the
-    ``lane_change`` list and evaluation fails loudly rather than scoring it.
+    A sample whose recorded ego never leaves the reconstructed source lane
+    carries no lane change to score. It counts as a failure, and
+    ``gt_lane_change_detected`` reports the share of samples that did carry
+    one, so a summary can separate "the planner failed" from "this list (or the
+    source-lane reconstruction) is wrong" -- the latter is what a scene
+    captured after the change is already past its midpoint looks like, since
+    the nearest lane is then the one being entered.
     """
     horizon_seconds = float(parameters.get("horizon_seconds", _DEFAULT_HORIZON_SECONDS))
     minimum_lateral_shift_m = float(
@@ -295,6 +342,7 @@ def evaluate_lane_change_with_details(
     predicted_offsets = components["predicted_lateral_offset_m"]
     gt_offsets = components["gt_lateral_offset_m"]
 
+    horizon_s = steps * _PREDICTION_TIMESTEP_SECONDS
     successes = []
     completion_ratios = []
     offset_errors = []
@@ -302,42 +350,62 @@ def evaluate_lane_change_with_details(
     directions = []
     crossed_flags = []
     reached_flags = []
+    detected_flags = []
 
     for index in range(ego_trajs.shape[0]):
+        initial_shift = float(gt_offsets[index, 0])
         gt_shift = float(gt_offsets[index, -1])
-        direction = 1.0 if gt_shift >= 0.0 else -1.0
+        predicted_shift = float(predicted_offsets[index, -1])
+        direction = 1.0 if gt_shift >= initial_shift else -1.0
         half_width = float(
             components["lane_half_width_left_m"][index]
             if direction > 0
             else components["lane_half_width_right_m"][index]
         )
-        crossing_threshold = max(half_width, minimum_lateral_shift_m)
+        # One floored tolerance for both tests: a map whose boundary-offset
+        # columns are missing or degenerate reports a zero half width, which
+        # would otherwise make `crossed` trivially true and `reached` require an
+        # exact match.
+        lane_tolerance = max(half_width, minimum_lateral_shift_m)
 
-        if direction * gt_shift <= crossing_threshold:
-            horizon_s = steps * _PREDICTION_TIMESTEP_SECONDS
-            raise ValueError(
-                f"lane_change sample {index} is not a lane-change scene: the recorded ego ends "
-                f"{direction * gt_shift:.2f} m from its own lane center after {horizon_s:.1f} s, "
-                f"which never clears the {crossing_threshold:.2f} m lane boundary"
-            )
+        detected = bool(direction * gt_shift > lane_tolerance)
+        offset_errors.append(abs(predicted_shift - gt_shift))
+        directions.append(direction)
+        detected_flags.append(float(detected))
+        if not detected:
+            # The recorded ego never leaves the lane this metric reconstructed
+            # as its source, so there is no lane change to score. Reported as a
+            # failure rather than raised, with `gt_lane_change_detected` in the
+            # summary separating "the planner failed" from "the list or the
+            # source-lane reconstruction is wrong" -- the latter happens for a
+            # scene captured after the change is already past its midpoint.
+            successes.append(0.0)
+            completion_ratios.append(0.0)
+            change_times.append(horizon_s)
+            crossed_flags.append(0.0)
+            reached_flags.append(0.0)
+            continue
 
         signed_progress = direction * predicted_offsets[index]
-        crossed = bool(signed_progress[-1] > crossing_threshold)
-        predicted_shift = float(predicted_offsets[index, -1])
-        reached = bool(abs(predicted_shift - gt_shift) <= half_width)
+        crossed = bool(signed_progress[-1] > lane_tolerance)
+        reached = bool(abs(predicted_shift - gt_shift) <= lane_tolerance)
 
-        beyond = (signed_progress > crossing_threshold).nonzero()
+        beyond = (signed_progress > lane_tolerance).nonzero()
         change_time = (
-            float(beyond[0]) * _PREDICTION_TIMESTEP_SECONDS
-            if beyond.numel() > 0
-            else steps * _PREDICTION_TIMESTEP_SECONDS
+            float(beyond[0]) * _PREDICTION_TIMESTEP_SECONDS if beyond.numel() > 0 else horizon_s
         )
 
+        # Progress is measured from where the ego started, not from the lane
+        # center, so an ego that begins off-center and never moves scores 0.
+        # Closeness to the GT's lateral target (rather than raw progress) keeps
+        # an overshoot from reading as a completed change.
+        gt_progress = gt_shift - initial_shift
+        predicted_progress = predicted_shift - initial_shift
+        completion = 1.0 - abs(predicted_progress - gt_progress) / abs(gt_progress)
+
         successes.append(float(crossed and reached))
-        completion_ratios.append(min(max(predicted_shift / gt_shift, 0.0), 1.0))
-        offset_errors.append(abs(predicted_shift - gt_shift))
+        completion_ratios.append(min(max(completion, 0.0), 1.0))
         change_times.append(change_time)
-        directions.append(direction)
         crossed_flags.append(float(crossed))
         reached_flags.append(float(reached))
 
@@ -347,6 +415,7 @@ def evaluate_lane_change_with_details(
     return MetricEvaluation(
         scores={
             "lane_change_success": as_tensor(successes),
+            "gt_lane_change_detected": as_tensor(detected_flags),
             "lane_change_completion_ratio": as_tensor(completion_ratios),
             "final_lateral_offset_error_m": as_tensor(offset_errors),
             "lane_change_time_s": as_tensor(change_times),

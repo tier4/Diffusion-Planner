@@ -11,11 +11,21 @@ def _prepare_inputs(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Validate arrival inputs and return prediction/GT tensors with batch axes."""
-    if ego_trajs.ndim != 3 or ego_trajs.shape[-1] < 3:
+    """Validate arrival inputs and return prediction/GT tensors aligned end to end.
+
+    The layouts are accepted as exactly 3 or exactly 4 columns, never "at least
+    3": the third column means ``heading`` in one layout and ``cos(yaw)`` in the
+    other, so a wider tensor cannot be told apart and would silently be read as
+    ``atan2(extra_column, heading)``.
+
+    Both tensors are truncated to their common length, so a checkpoint whose
+    ``future_len`` differs from the NPZ's GT horizon compares the two at the
+    same instant instead of scoring t=8.0 s against t=9.0 s.
+    """
+    if ego_trajs.ndim != 3 or ego_trajs.shape[-1] not in (3, 4):
         raise ValueError(
-            "arrival prediction must have shape (N, T, D>=3) with [x, y, heading] "
-            "or [x, y, cos, sin], "
+            "arrival prediction must have shape (N, T, 3) with [x, y, heading] "
+            "or (N, T, 4) with [x, y, cos, sin], "
             f"got {tuple(ego_trajs.shape)}"
         )
 
@@ -24,10 +34,10 @@ def _prepare_inputs(
         raise ValueError("arrival metric requires ego_agent_future in data")
     if gt_future.ndim == 2:
         gt_future = gt_future.unsqueeze(0)
-    if gt_future.ndim != 3 or gt_future.shape[-1] < 3:
+    if gt_future.ndim != 3 or gt_future.shape[-1] not in (3, 4):
         raise ValueError(
-            "arrival ground truth must have shape (N, T, D>=3) with [x, y, heading] "
-            f"or [x, y, cos, sin], got {tuple(gt_future.shape)}"
+            "arrival ground truth must have shape (N, T, 3) with [x, y, heading] "
+            f"or (N, T, 4) with [x, y, cos, sin], got {tuple(gt_future.shape)}"
         )
     if gt_future.shape[0] not in (1, ego_trajs.shape[0]):
         raise ValueError(
@@ -37,7 +47,8 @@ def _prepare_inputs(
     gt_future = gt_future.to(device=ego_trajs.device, dtype=ego_trajs.dtype)
     if gt_future.shape[0] == 1:
         gt_future = gt_future.expand(ego_trajs.shape[0], -1, -1)
-    return ego_trajs, gt_future
+    steps = min(ego_trajs.shape[1], gt_future.shape[1])
+    return ego_trajs[:, :steps], gt_future[:, :steps]
 
 
 def _yaw_radians(trajectories: torch.Tensor) -> torch.Tensor:
