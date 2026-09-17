@@ -7,6 +7,7 @@ import torch
 from planner_metrics.evaluation import MetricEvaluation
 from planner_metrics.geometry import _point_to_segments_min_dist
 from planner_metrics.horizon import resolve_horizon_steps
+from planner_metrics.lane_tensor import resolve_lane_tensor
 from planner_metrics.lateral_deviation import compute_lateral_longitudinal_error_batch
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
@@ -51,19 +52,7 @@ def compute_centerline_distance_batch(
     lanes = data.get("route_lanes", data.get("lanes"))
     if lanes is None:
         raise ValueError("centerline metric requires route_lanes or lanes in data")
-    if lanes.ndim == 5:
-        if lanes.shape[1] != 1:
-            raise ValueError(
-                f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}"
-            )
-        lanes = lanes[:, 0]
-    if lanes.ndim == 3:
-        lanes = lanes.unsqueeze(0)
-    if lanes.ndim != 4 or lanes.shape[0] not in (1, ego_trajs.shape[0]):
-        raise ValueError(
-            "lanes must have shape (S,P,D), (1,S,P,D), or (N,S,P,D); "
-            f"got {tuple(lanes.shape)} for N={ego_trajs.shape[0]}"
-        )
+    lanes = resolve_lane_tensor(lanes, ego_trajs.shape[0])
 
     distances = []
     for index in range(ego_trajs.shape[0]):
@@ -96,19 +85,7 @@ def compute_centerline_error_components_batch(
     lanes = data.get("route_lanes", data.get("lanes"))
     if lanes is None:
         raise ValueError("centerline metric requires route_lanes or lanes in data")
-    if lanes.ndim == 5:
-        if lanes.shape[1] != 1:
-            raise ValueError(
-                f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}"
-            )
-        lanes = lanes[:, 0]
-    if lanes.ndim == 3:
-        lanes = lanes.unsqueeze(0)
-    if lanes.ndim != 4 or lanes.shape[0] not in (1, ego_trajs.shape[0]):
-        raise ValueError(
-            "lanes must have shape (S,P,D), (1,S,P,D), or (N,S,P,D); "
-            f"got {tuple(lanes.shape)} for N={ego_trajs.shape[0]}"
-        )
+    lanes = resolve_lane_tensor(lanes, ego_trajs.shape[0])
 
     def segments_for_sample(index: int) -> tuple[torch.Tensor, torch.Tensor]:
         return _centerline_segments(lanes[0 if lanes.shape[0] == 1 else index])

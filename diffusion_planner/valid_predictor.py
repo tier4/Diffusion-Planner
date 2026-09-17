@@ -254,6 +254,15 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_traffic_light_stop_tolerance_m=getattr(
                     config_obj, "scenario_traffic_light_stop_tolerance_m", 0.5
                 ),
+                scenario_lane_change_horizon_seconds=getattr(
+                    config_obj, "scenario_lane_change_horizon_seconds", 8.0
+                ),
+                scenario_lane_change_minimum_lateral_shift_m=getattr(
+                    config_obj, "scenario_lane_change_minimum_lateral_shift_m", 1.0
+                ),
+                scenario_lane_change_chain_tolerance_m=getattr(
+                    config_obj, "scenario_lane_change_chain_tolerance_m", 1.0
+                ),
                 batch_size=valid_cfg.batch_size,
                 num_workers=valid_cfg.num_workers,
                 pin_mem=valid_cfg.pin_mem,
