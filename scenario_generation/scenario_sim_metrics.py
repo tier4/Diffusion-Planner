@@ -1,9 +1,9 @@
 """Map scenario_sim rollout series onto the closed-loop segment-row schema.
 
 ``closed_loop_eval.aggregate`` consumes rows made of nested per-category blocks (``object`` /
-``road_border`` / ``red_light_violation`` / ``strong_brake`` / ``reproducer`` /
-``turn_indicator``) and fails fast on a missing block, so a missing metric can never read as a
-zero. The scenario_sim path
+``road_border`` / ``red_light_violation`` / ``deviation_collision`` / ``strong_brake`` /
+``reproducer`` / ``turn_indicator``) and fails fast on a missing block, so a missing metric can
+never read as a zero. The scenario_sim path
 produces the same raw series as the reproducer path -- per-step clearance, collision,
 road-border distance and speed -- but through a simulator rather than recorded NPZ frames, so
 the mapping onto that schema lives here.
@@ -39,6 +39,18 @@ def _red_light_block() -> dict:
     ``aggregate`` requires the block, so it is emitted with zero counts plus an explicit
     ``measured`` flag -- otherwise "0 violations" would be indistinguishable from "never
     checked". Detecting them needs stop-line geometry and per-tick traffic-light state.
+    """
+    return {"steps": 0, "count": 0, "measured": False}
+
+
+def _deviation_collision_block() -> dict:
+    """Off-GT-path collisions are not measured on this path.
+
+    The metric splits out collisions that happened while the ego was far off the drive it is
+    reproducing. A generated scenario has no recorded drive to be off, so the split has no
+    meaning here -- unlike ``_NO_REPRODUCER_CURSOR``, whose zeros are a real measurement. Same
+    shape and same ``measured`` flag as ``_red_light_block``, so "0 such collisions" stays
+    distinguishable from "never checked".
     """
     return {"steps": 0, "count": 0, "measured": False}
 
@@ -90,6 +102,7 @@ def build_segment_row(
             rb, road_border_collision_mask(rb), miss_thresh=near_miss_thresh
         ),
         "red_light_violation": _red_light_block(),
+        "deviation_collision": _deviation_collision_block(),
         "strong_brake": strong_brake_block(ac, strong_brake_mps2),
         "reproducer": {**_NO_REPRODUCER_CURSOR, "normal_steps": int(n_steps_run)},
         # No GT turn indicator to score against on this path -- zero counts are the true
