@@ -50,11 +50,11 @@ def test_lane_change_succeeds_when_prediction_reaches_the_gt_lane():
     gt = _trajectory(_LANE_WIDTH)
     result = _evaluate(gt.clone(), gt)
 
-    assert result.scores["lane_change_success"].item() == 1.0
-    assert result.scores["lane_change_completion_ratio"].item() == pytest.approx(1.0)
-    assert result.scores["final_lateral_offset_error_m"].item() < 1e-4
+    assert result.scores["success_rate_percent"].item() == 100.0
+    assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(1.0)
+    assert result.details["lane_change"]["final_lateral_offset_error_m"].item() < 1e-4
     # The ramp clears the 1.75 m boundary exactly halfway through the horizon.
-    assert result.scores["lane_change_time_s"].item() == pytest.approx(4.0, abs=0.1)
+    assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(4.0, abs=0.1)
     assert result.details["lane_change"]["gt_direction"].item() == 1.0
     assert result.details["lane_change"]["left_source_lane"].item() == 1.0
     assert result.details["lane_change"]["reached_gt_lane"].item() == 1.0
@@ -63,18 +63,18 @@ def test_lane_change_succeeds_when_prediction_reaches_the_gt_lane():
 def test_lane_change_fails_when_prediction_stays_in_the_source_lane():
     result = _evaluate(_trajectory(0.0), _trajectory(_LANE_WIDTH))
 
-    assert result.scores["lane_change_success"].item() == 0.0
-    assert result.scores["lane_change_completion_ratio"].item() == pytest.approx(0.0)
+    assert result.scores["success_rate_percent"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(0.0)
     assert result.details["lane_change"]["left_source_lane"].item() == 0.0
     # Never crossing the boundary reports the full horizon as the change time.
-    assert result.scores["lane_change_time_s"].item() == pytest.approx(8.0)
+    assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(8.0)
 
 
 def test_lane_change_fails_when_prediction_changes_to_the_wrong_side():
     result = _evaluate(_trajectory(-_LANE_WIDTH), _trajectory(_LANE_WIDTH))
 
-    assert result.scores["lane_change_success"].item() == 0.0
-    assert result.scores["lane_change_completion_ratio"].item() == pytest.approx(0.0)
+    assert result.scores["success_rate_percent"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(0.0)
     assert result.details["lane_change"]["left_source_lane"].item() == 0.0
 
 
@@ -83,7 +83,7 @@ def test_lane_change_fails_when_prediction_overshoots_past_the_gt_lane():
 
     assert result.details["lane_change"]["left_source_lane"].item() == 1.0
     assert result.details["lane_change"]["reached_gt_lane"].item() == 0.0
-    assert result.scores["lane_change_success"].item() == 0.0
+    assert result.scores["success_rate_percent"].item() == 0.0
 
 
 def test_lane_change_ignores_longitudinal_lag():
@@ -94,14 +94,14 @@ def test_lane_change_ignores_longitudinal_lag():
 
     result = _evaluate(slow, gt)
 
-    assert result.scores["lane_change_success"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 100.0
 
 
 def test_lane_change_partial_completion_is_reported_as_a_ratio():
     result = _evaluate(_trajectory(0.4 * _LANE_WIDTH), _trajectory(_LANE_WIDTH))
 
-    assert result.scores["lane_change_completion_ratio"].item() == pytest.approx(0.4, abs=1e-3)
-    assert result.scores["lane_change_success"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(0.4, abs=1e-3)
+    assert result.scores["success_rate_percent"].item() == 0.0
 
 
 def test_lane_change_batches_independent_samples():
@@ -110,7 +110,7 @@ def test_lane_change_batches_independent_samples():
 
     result = _evaluate(prediction, gt)
 
-    assert result.scores["lane_change_success"].tolist() == [1.0, 0.0]
+    assert result.scores["success_rate_percent"].tolist() == [100.0, 0.0]
     assert result.details["lane_change"]["gt_direction"].tolist() == [1.0, -1.0]
 
 
@@ -147,17 +147,17 @@ def test_lane_change_follows_the_source_lane_through_chained_lanelets():
 
     shift = result.details["lane_change"]["gt_lateral_shift_m"].item()
     assert shift == pytest.approx(_LANE_WIDTH, abs=0.1)
-    assert result.scores["lane_change_success"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 100.0
 
 
 def test_lane_change_fails_a_scene_where_the_gt_never_leaves_its_lane():
     """A mis-curated scene fails rather than aborting the whole validation run."""
     result = _evaluate(_trajectory(_LANE_WIDTH), _trajectory(0.0))
 
-    assert result.scores["lane_change_success"].item() == 0.0
-    assert result.scores["gt_lane_change_detected"].item() == 0.0
-    assert result.scores["lane_change_completion_ratio"].item() == 0.0
-    assert result.scores["lane_change_time_s"].item() == pytest.approx(8.0)
+    assert result.scores["success_rate_percent"].item() == 0.0
+    assert result.details["lane_change"]["gt_lane_change_detected"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == 0.0
+    assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(8.0)
 
 
 def test_lane_change_reports_the_precondition_separately_from_the_score():
@@ -167,8 +167,8 @@ def test_lane_change_reports_the_precondition_separately_from_the_score():
 
     result = _evaluate(prediction, gt)
 
-    assert result.scores["gt_lane_change_detected"].tolist() == [1.0, 0.0]
-    assert result.scores["lane_change_success"].tolist() == [1.0, 0.0]
+    assert result.details["lane_change"]["gt_lane_change_detected"].tolist() == [1.0, 0.0]
+    assert result.scores["success_rate_percent"].tolist() == [100.0, 0.0]
 
 
 def test_completion_ratio_is_zero_when_the_prediction_holds_its_initial_offset():
@@ -180,15 +180,15 @@ def test_completion_ratio_is_zero_when_the_prediction_holds_its_initial_offset()
 
     result = _evaluate(held, gt)
 
-    assert result.scores["lane_change_completion_ratio"].item() == pytest.approx(0.0, abs=1e-3)
-    assert result.scores["lane_change_success"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(0.0, abs=1e-3)
+    assert result.scores["success_rate_percent"].item() == 0.0
 
 
 def test_completion_ratio_does_not_reward_overshooting_the_target_lane():
     result = _evaluate(_trajectory(2 * _LANE_WIDTH), _trajectory(_LANE_WIDTH))
 
     # Overshooting by a full lane is as far from the GT target as not moving.
-    assert result.scores["lane_change_completion_ratio"].item() == pytest.approx(0.0, abs=1e-3)
+    assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(0.0, abs=1e-3)
 
 
 def test_reached_tolerance_survives_a_map_without_boundary_offsets():
@@ -200,9 +200,9 @@ def test_reached_tolerance_survives_a_map_without_boundary_offsets():
 
     result = _evaluate(close, gt, lanes=lanes)
 
-    assert result.scores["gt_lane_change_detected"].item() == 1.0
+    assert result.details["lane_change"]["gt_lane_change_detected"].item() == 1.0
     assert result.details["lane_change"]["reached_gt_lane"].item() == 1.0
-    assert result.scores["lane_change_success"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 100.0
 
 
 def test_source_lane_ignores_a_nearer_oncoming_lanelet():
@@ -220,7 +220,7 @@ def test_source_lane_ignores_a_nearer_oncoming_lanelet():
 
     assert result.details["lane_change"]["source_lane_index"].item() == 0
     assert result.details["lane_change"]["gt_direction"].item() == 1.0
-    assert result.scores["lane_change_success"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 100.0
 
 
 def test_source_lane_path_chains_when_the_ego_starts_deep_inside_a_long_lanelet():
@@ -258,7 +258,7 @@ def test_source_lane_path_chains_when_the_ego_starts_deep_inside_a_long_lanelet(
     assert result.details["lane_change"]["gt_lateral_shift_m"].item() == pytest.approx(
         _LANE_WIDTH, abs=0.3
     )
-    assert result.scores["lane_change_success"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 100.0
 
 
 def test_lane_change_requires_lane_boundary_columns():

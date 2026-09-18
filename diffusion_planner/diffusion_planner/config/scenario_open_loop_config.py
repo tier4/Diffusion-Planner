@@ -23,6 +23,8 @@ class ScenarioOpenLoopConfig:
     # ---------------------------------------------------------
     # Scenario-based Open-loop
     # ---------------------------------------------------------
+    scenario_arrival_position_tolerance_m: float = 2.0
+    scenario_arrival_heading_tolerance_deg: float = 10.0
     scenario_centerline_horizon_seconds: float = 8.0
     scenario_simple_turn_horizon_seconds: float = 8.0
     scenario_departure_horizon_seconds: float = 3.0

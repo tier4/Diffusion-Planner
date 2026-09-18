@@ -25,11 +25,11 @@ def test_arrival_compares_final_position_and_heading_against_legacy_gt():
 
     result = evaluate_arrival_with_details(prediction, {"ego_agent_future": gt}, {})
 
-    assert torch.allclose(result.scores["final_displacement_error_m"], torch.tensor([5.0]))
-    assert torch.allclose(result.scores["final_heading_error_deg"], torch.tensor([90.0]))
-    assert torch.allclose(
-        result.details["arrival"]["final_heading_error_rad"], torch.tensor([math.pi / 2])
-    )
+    details = result.details["arrival"]
+    assert torch.allclose(details["final_displacement_error_m"], torch.tensor([5.0]))
+    assert torch.allclose(details["final_heading_error_deg"], torch.tensor([90.0]))
+    assert torch.allclose(details["final_heading_error_rad"], torch.tensor([math.pi / 2]))
+    assert result.scores["success_rate_percent"].tolist() == [0.0]
 
 
 def test_arrival_wraps_final_heading_error_at_pi_boundary():
@@ -57,7 +57,27 @@ def test_arrival_compares_the_common_horizon_when_lengths_differ():
 
     result = evaluate_arrival_with_details(prediction, {"ego_agent_future": gt}, {})
 
-    assert torch.allclose(result.scores["final_displacement_error_m"], torch.tensor([5.0]))
+    assert torch.allclose(
+        result.details["arrival"]["final_displacement_error_m"], torch.tensor([5.0])
+    )
+
+
+def test_arrival_success_requires_both_position_and_heading_within_tolerance():
+    gt = torch.zeros(1, 3, 3)
+    gt[0, -1, :2] = torch.tensor([10.0, 0.0])
+    parameters = {"position_tolerance_m": 2.0, "heading_tolerance_deg": 10.0}
+
+    def score(prediction: torch.Tensor) -> float:
+        return (
+            evaluate_arrival_with_details(prediction, {"ego_agent_future": gt}, parameters)
+            .scores["success_rate_percent"]
+            .item()
+        )
+
+    assert score(_prediction(11.0, 1.0, math.radians(5.0))) == 100.0  # 1.41 m, 5 deg
+    assert score(_prediction(12.5, 0.0, 0.0)) == 0.0  # 2.5 m off
+    assert score(_prediction(10.0, 0.0, math.radians(15.0))) == 0.0  # 15 deg off
+    assert score(_prediction(11.9, 0.0, math.radians(9.0))) == 100.0  # both just inside
 
 
 def test_arrival_rejects_an_ambiguous_column_layout():

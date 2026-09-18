@@ -317,13 +317,16 @@ def evaluate_lane_change_with_details(
     with missing or degenerate boundary offsets cannot make the crossing test
     trivially true nor the reached test impossible to satisfy.
 
-    A sample whose recorded ego never leaves the reconstructed source lane
-    carries no lane change to score. It counts as a failure, and
-    ``gt_lane_change_detected`` reports the share of samples that did carry
-    one, so a summary can separate "the planner failed" from "this list (or the
-    source-lane reconstruction) is wrong" -- the latter is what a scene
-    captured after the change is already past its midpoint looks like, since
-    the nearest lane is then the one being entered.
+    The aggregate score is the success rate in percent, like the other
+    scenario metrics. A sample whose recorded ego never leaves the
+    reconstructed source lane carries no lane change to score. It counts as a
+    failure, and the per-sample ``gt_lane_change_detected`` detail records
+    which samples did carry one, so the details can separate "the planner
+    failed" from "this list (or the source-lane reconstruction) is wrong" --
+    the latter is what a scene captured after the change is already past its
+    midpoint looks like, since the nearest lane is then the one being entered.
+    Completion ratio, final lateral offset error and the time at which the
+    prediction left the source lane are also reported per sample in the details.
     """
     horizon_seconds = float(parameters.get("horizon_seconds", _DEFAULT_HORIZON_SECONDS))
     minimum_lateral_shift_m = float(
@@ -413,15 +416,13 @@ def evaluate_lane_change_with_details(
         return torch.tensor(values, device=ego_trajs.device, dtype=ego_trajs.dtype)
 
     return MetricEvaluation(
-        scores={
-            "lane_change_success": as_tensor(successes),
-            "gt_lane_change_detected": as_tensor(detected_flags),
-            "lane_change_completion_ratio": as_tensor(completion_ratios),
-            "final_lateral_offset_error_m": as_tensor(offset_errors),
-            "lane_change_time_s": as_tensor(change_times),
-        },
+        scores={"success_rate_percent": as_tensor(successes) * 100.0},
         details={
             "lane_change": {
+                "gt_lane_change_detected": as_tensor(detected_flags),
+                "completion_ratio": as_tensor(completion_ratios),
+                "final_lateral_offset_error_m": as_tensor(offset_errors),
+                "lane_change_time_s": as_tensor(change_times),
                 "predicted_lateral_shift_m": predicted_offsets[:, -1],
                 "gt_lateral_shift_m": gt_offsets[:, -1],
                 "initial_lateral_offset_m": gt_offsets[:, 0],

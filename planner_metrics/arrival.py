@@ -1,10 +1,13 @@
-"""Final-position and final-heading errors for arrival evaluation."""
+"""Arrival success: final position and heading within tolerance of the GT endpoint."""
 
 from __future__ import annotations
 
 import torch
 
 from planner_metrics.evaluation import MetricEvaluation
+
+_DEFAULT_POSITION_TOLERANCE_M = 2.0
+_DEFAULT_HEADING_TOLERANCE_DEG = 10.0
 
 
 def _prepare_inputs(
@@ -90,26 +93,41 @@ def evaluate_arrival_with_details(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> MetricEvaluation:
-    """Evaluate final displacement and final heading errors against GT.
+    """Score whether the prediction arrives where the GT does, as a success rate.
 
-    Both errors compare the final available prediction point with the final
-    available GT point. GT supports the legacy ``[x, y, heading]`` layout and
-    the canonical ``[x, y, cos(yaw), sin(yaw)]`` layout. Heading error is the
-    wrapped absolute difference in degrees, in the range ``[0, 180]``.
+    A sample succeeds when its final displacement error is within
+    ``position_tolerance_m`` AND its final heading error is within
+    ``heading_tolerance_deg``. Both errors compare the final available
+    prediction point with the final available GT point. GT supports the legacy
+    ``[x, y, heading]`` layout and the canonical ``[x, y, cos(yaw), sin(yaw)]``
+    layout. Heading error is the wrapped absolute difference in degrees, in the
+    range ``[0, 180]``. The raw errors stay available in the details section.
     """
-    del parameters
+    position_tolerance_m = float(
+        parameters.get("position_tolerance_m", _DEFAULT_POSITION_TOLERANCE_M)
+    )
+    heading_tolerance_deg = float(
+        parameters.get("heading_tolerance_deg", _DEFAULT_HEADING_TOLERANCE_DEG)
+    )
+    if position_tolerance_m < 0 or heading_tolerance_deg < 0:
+        raise ValueError("arrival tolerances must be non-negative")
+
     fde = compute_final_displacement_error_batch(ego_trajs, data)
     heading_error_deg = compute_final_heading_error_batch(ego_trajs, data)
+    position_ok = fde <= position_tolerance_m
+    heading_ok = heading_error_deg <= heading_tolerance_deg
+    passed = position_ok & heading_ok
     return MetricEvaluation(
-        scores={
-            "final_displacement_error_m": fde,
-            "final_heading_error_deg": heading_error_deg,
-        },
+        scores={"success_rate_percent": passed.to(ego_trajs.dtype) * 100.0},
         details={
             "arrival": {
                 "final_displacement_error_m": fde,
                 "final_heading_error_deg": heading_error_deg,
                 "final_heading_error_rad": torch.deg2rad(heading_error_deg),
+                "position_tolerance_m": torch.full_like(fde, position_tolerance_m),
+                "heading_tolerance_deg": torch.full_like(fde, heading_tolerance_deg),
+                "position_within_tolerance": position_ok.to(ego_trajs.dtype),
+                "heading_within_tolerance": heading_ok.to(ego_trajs.dtype),
             }
         },
     )

@@ -90,12 +90,14 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
             self.scenario_temporal_stop_maximum_forward_progress_m = 0.5
             self.scenario_obstacle_stop_tolerance_m = 0.5
             self.scenario_traffic_light_stop_tolerance_m = 0.5
+            self.scenario_arrival_position_tolerance_m = 2.0
+            self.scenario_arrival_heading_tolerance_deg = 10.0
             self.scenario_lane_change_horizon_seconds = 8.0
             self.scenario_lane_change_minimum_lateral_shift_m = 1.0
             self.scenario_lane_change_chain_tolerance_m = 1.0
 
     assert _metric_parameters_from_args(Args()) == {
-        "arrival": {},
+        "arrival": {"position_tolerance_m": 2.0, "heading_tolerance_deg": 10.0},
         "centerline": {"horizon_seconds": 8.0},
         "simple_turn": {"horizon_seconds": 8.0},
         "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},

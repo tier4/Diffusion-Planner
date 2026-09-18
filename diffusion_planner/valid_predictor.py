@@ -212,6 +212,12 @@ def run_validation(valid_cfg: ValidConfig):
             summary_path = output_root / "scenario_based_open_loop" / "summary.json"
             scenario_open_loop_args = SimpleNamespace(
                 scenario_based_open_loop_list=valid_cfg.scenario_based_open_loop_list,
+                scenario_arrival_position_tolerance_m=getattr(
+                    config_obj, "scenario_arrival_position_tolerance_m", 2.0
+                ),
+                scenario_arrival_heading_tolerance_deg=getattr(
+                    config_obj, "scenario_arrival_heading_tolerance_deg", 10.0
+                ),
                 scenario_centerline_horizon_seconds=getattr(
                     config_obj, "scenario_centerline_horizon_seconds", 8.0
                 ),
