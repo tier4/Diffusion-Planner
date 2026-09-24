@@ -85,8 +85,8 @@ def test_lane_change_succeeds_when_prediction_reaches_the_gt_lane():
     assert result.scores["success_rate_percent"].item() == 100.0
     assert result.details["lane_change"]["completion_ratio"].item() == pytest.approx(1.0)
     assert result.details["lane_change"]["final_lateral_offset_error_m"].item() < 1e-4
-    # The ramp clears the 1.75 m boundary exactly halfway through the horizon.
-    assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(4.0, abs=0.1)
+    # The ramp clears the 1.75 m boundary at index 40 of 80, i.e. t = 41 * 0.1 s.
+    assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(4.1)
     assert result.details["lane_change"]["gt_direction"].item() == 1.0
     assert result.details["lane_change"]["left_source_lane"].item() == 1.0
     assert result.details["lane_change"]["reached_gt_lane"].item() == 1.0
@@ -364,3 +364,42 @@ def test_source_lane_rejects_a_crossing_lanelet_through_the_ego_position():
 
     assert result.details["lane_change"]["source_lane_index"].item() == 1
     assert result.scores["success_rate_percent"].item() == 100.0
+
+
+def test_lane_change_time_counts_the_first_future_point_as_one_timestep():
+    """Prediction index 0 is already 0.1 s after t=0."""
+    gt = _trajectory(_LANE_WIDTH)
+    prediction = gt.clone()
+    prediction[0, :, 1] = _LANE_WIDTH  # in the target lane from the very first point
+    result = _evaluate(prediction, gt)
+
+    assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(0.1)
+
+
+def test_stationary_off_center_gt_does_not_divide_by_zero():
+    """GT parked outside the source lane has zero lateral progress; the sample
+    must be scored, not crash the run."""
+    gt = _trajectory(0.0)
+    gt[0, :, 1] = _HALF_WIDTH + 0.5  # constant offset beyond the lane boundary
+    result = _evaluate(gt.clone(), gt)
+
+    assert result.details["lane_change"]["gt_lane_change_detected"].item() == 1.0
+    assert result.details["lane_change"]["completion_ratio"].item() == 0.0
+
+
+def test_source_lane_flags_a_heading_rejected_fallback():
+    """With only an oncoming lanelet available the scorer still runs, but marks
+    the reference lane as not heading-aligned."""
+    oncoming = _straight_lane(0.0).flip(0)  # same geometry, opposite direction
+    lanes = torch.stack([oncoming, _straight_lane(_LANE_WIDTH).flip(0)])
+    gt = _trajectory(_LANE_WIDTH)
+    result = _evaluate(gt.clone(), gt, lanes)
+
+    assert result.details["lane_change"]["source_lane_heading_aligned"].item() == 0.0
+
+
+def test_source_lane_is_flagged_heading_aligned_on_a_normal_map():
+    gt = _trajectory(_LANE_WIDTH)
+    result = _evaluate(gt.clone(), gt)
+
+    assert result.details["lane_change"]["source_lane_heading_aligned"].item() == 1.0

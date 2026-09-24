@@ -725,80 +725,30 @@ def _point_to_segments_min_dist(
     return torch.cat(results)
 
 
-def _point_to_segments_error_components(
+def _point_to_segments_nearest_components(
     points: torch.Tensor,
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return lateral and beyond-segment longitudinal errors per point.
+    """Return signed lateral and beyond-segment longitudinal offsets per point.
 
     The nearest segment is selected using the usual clamped point-to-segment
-    distance.  Once selected, lateral error is measured against the infinite
-    supporting line, rather than against a clamped endpoint.  This prevents a
-    point beyond a centerline endpoint from turning longitudinal overshoot into
-    lateral error.  Longitudinal error is the distance beyond the selected
-    segment's endpoint; it is zero while the perpendicular projection lies
-    inside the segment.
-
-    Returns:
-        ``(lateral_error, longitudinal_error)`` with shape ``(Q,)``.
-    """
-    Q = points.shape[0]
-    E = seg_p1.shape[0]
-    if E == 0:
-        raise ValueError("at least one segment is required")
-
-    _MAX_QE = 10_000_000
-    chunk_size = max(1, _MAX_QE // E)
-    lateral_results = []
-    longitudinal_results = []
-
-    for start in range(0, Q, chunk_size):
-        end = min(start + chunk_size, Q)
-        chunk = points[start:end]
-        seg = seg_p2 - seg_p1
-        seg_len2 = (seg**2).sum(-1).clamp(min=1e-10)
-        seg_len = seg_len2.sqrt()
-        diff = chunk[:, None, :] - seg_p1[None, :, :]
-        t_raw = (diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]
-        t = t_raw.clamp(0, 1)
-        closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
-        distances = (chunk[:, None, :] - closest).norm(dim=-1)
-        nearest = distances.argmin(dim=1)
-        rows = torch.arange(chunk.shape[0], device=chunk.device)
-
-        nearest_seg = seg[nearest]
-        nearest_len = seg_len[nearest]
-        nearest_diff = diff[rows, nearest]
-        nearest_t_raw = t_raw[rows, nearest]
-        cross = nearest_seg[:, 0] * nearest_diff[:, 1] - nearest_seg[:, 1] * nearest_diff[:, 0]
-        lateral_results.append(cross.abs() / nearest_len)
-        longitudinal_results.append((nearest_t_raw - nearest_t_raw.clamp(0, 1)).abs() * nearest_len)
-
-    return torch.cat(lateral_results), torch.cat(longitudinal_results)
-
-
-def _point_to_segments_signed_lateral(
-    points: torch.Tensor,
-    seg_p1: torch.Tensor,
-    seg_p2: torch.Tensor,
-) -> torch.Tensor:
-    """Return the signed lateral offset from each point to its nearest segment.
-
-    Segment selection and the supporting-line measurement are the same as in
-    :func:`_point_to_segments_error_components`; the only difference is that the
-    sign survives -- positive when the point lies to the LEFT of the nearest
-    segment's direction, negative to the right.  Measuring against the infinite
-    supporting line rather than a clamped endpoint keeps the offset meaningful
-    for points that overshoot the end of the reference path, which is what makes
-    this usable as a lane-relative lateral coordinate.
+    distance.  Once selected, the lateral offset is measured against the
+    infinite supporting line, rather than against a clamped endpoint.  This
+    prevents a point beyond a centerline endpoint from turning longitudinal
+    overshoot into lateral error, and keeps the offset meaningful as a
+    lane-relative lateral coordinate for points that overshoot the reference
+    path.  The lateral offset is positive when the point lies to the LEFT of
+    the nearest segment's direction, negative to the right.  Longitudinal
+    offset is the distance beyond the selected segment's endpoint; it is zero
+    while the perpendicular projection lies inside the segment.
 
     Args:
         points: (Q, 2)
         seg_p1, seg_p2: (E, 2)
 
     Returns:
-        signed_lateral: (Q,)
+        ``(signed_lateral, longitudinal)`` with shape ``(Q,)``.
     """
     Q = points.shape[0]
     E = seg_p1.shape[0]
@@ -811,22 +761,62 @@ def _point_to_segments_signed_lateral(
 
     _MAX_QE = 10_000_000
     chunk_size = max(1, _MAX_QE // E)
-    results = []
+    lateral_results = []
+    longitudinal_results = []
 
     for start in range(0, Q, chunk_size):
         end = min(start + chunk_size, Q)
         chunk = points[start:end]
         diff = chunk[:, None, :] - seg_p1[None, :, :]
-        t = ((diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]).clamp(0, 1)
+        t_raw = (diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]
+        t = t_raw.clamp(0, 1)
         closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
         nearest = (chunk[:, None, :] - closest).norm(dim=-1).argmin(dim=1)
         rows = torch.arange(chunk.shape[0], device=chunk.device)
-        nearest_seg = seg[nearest]
-        nearest_diff = diff[rows, nearest]
-        cross = nearest_seg[:, 0] * nearest_diff[:, 1] - nearest_seg[:, 1] * nearest_diff[:, 0]
-        results.append(cross / seg_len[nearest])
 
-    return torch.cat(results)
+        nearest_seg = seg[nearest]
+        nearest_len = seg_len[nearest]
+        nearest_diff = diff[rows, nearest]
+        nearest_t_raw = t_raw[rows, nearest]
+        cross = nearest_seg[:, 0] * nearest_diff[:, 1] - nearest_seg[:, 1] * nearest_diff[:, 0]
+        lateral_results.append(cross / nearest_len)
+        longitudinal_results.append((nearest_t_raw - nearest_t_raw.clamp(0, 1)).abs() * nearest_len)
+
+    return torch.cat(lateral_results), torch.cat(longitudinal_results)
+
+
+def _point_to_segments_error_components(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unsigned lateral and beyond-segment longitudinal errors per point.
+
+    See :func:`_point_to_segments_nearest_components` for how the nearest
+    segment is chosen and measured.
+
+    Returns:
+        ``(lateral_error, longitudinal_error)`` with shape ``(Q,)``.
+    """
+    lateral, longitudinal = _point_to_segments_nearest_components(points, seg_p1, seg_p2)
+    return lateral.abs(), longitudinal
+
+
+def _point_to_segments_signed_lateral(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> torch.Tensor:
+    """Return the signed lateral offset from each point to its nearest segment.
+
+    Positive when the point lies to the LEFT of the nearest segment's
+    direction, negative to the right; see
+    :func:`_point_to_segments_nearest_components`.
+
+    Returns:
+        signed_lateral: (Q,)
+    """
+    return _point_to_segments_nearest_components(points, seg_p1, seg_p2)[0]
 
 
 def _points_inside_intersection_areas(

@@ -84,8 +84,8 @@ def _lane_half_widths(lane: torch.Tensor) -> tuple[float, float]:
     )
 
 
-def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
-    """Return the index of the lanelet the ego is travelling on at ``point``.
+def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> tuple[int, bool]:
+    """Return ``(index, heading_aligned)`` for the lanelet the ego is travelling on at ``point``.
 
     Candidates are first filtered by heading: the centerline tangent nearest
     the ego must be within ``_MIN_SOURCE_HEADING_ALIGNMENT`` of the ego heading
@@ -100,6 +100,11 @@ def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
     straight and turning branches start at the same point -- and the tie goes
     to the lanelet whose remaining run (from the ego to its end) points most
     along the ego heading, i.e. the straight branch.
+
+    When no lanelet passes the heading filter the nearest one is returned with
+    ``heading_aligned=False``; the scorer surfaces that flag per sample so a
+    scene scored against an oncoming or crossing reference lane can be told
+    apart from a genuine planner failure.
 
     This does NOT disambiguate two parallel lanes: once the ego is past the
     midpoint of a change already in progress, the lane it is moving INTO is the
@@ -136,10 +141,10 @@ def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
     if not candidates:
         if fallback_index < 0:
             raise ValueError("lane_change metric found no usable lanelet centerline")
-        return fallback_index
+        return fallback_index, False
     nearest_distance = min(distance for distance, _, _ in candidates)
     tied = [c for c in candidates if c[0] <= nearest_distance + _SOURCE_DISTANCE_TIE_M]
-    return max(tied, key=lambda c: c[1])[2]
+    return max(tied, key=lambda c: c[1])[2], True
 
 
 def _arc_length_behind(path: torch.Tensor, point: torch.Tensor) -> float:
@@ -287,6 +292,7 @@ def compute_lane_change_components_batch(
     half_width_left = []
     half_width_right = []
     source_lane_index = []
+    source_lane_heading_aligned = []
 
     origin = torch.zeros(2, device=ego_trajs.device, dtype=ego_trajs.dtype)
     for index in range(ego_trajs.shape[0]):
@@ -295,7 +301,7 @@ def compute_lane_change_components_batch(
         gt_xy = gt_future[index, :horizon_steps, :2]
 
         # The scene is in the ego frame at t=0, so the ego starts at the origin.
-        source_index = _nearest_lane_index(origin, scene_lanes)
+        source_index, heading_aligned = _nearest_lane_index(origin, scene_lanes)
         required_length = (
             float(torch.cat([predicted_xy, gt_xy], dim=0).norm(dim=-1).max())
             + _SOURCE_PATH_MARGIN_M
@@ -313,6 +319,7 @@ def compute_lane_change_components_batch(
         half_width_left.append(left)
         half_width_right.append(right)
         source_lane_index.append(source_index)
+        source_lane_heading_aligned.append(heading_aligned)
 
     def as_tensor(values: list[float]) -> torch.Tensor:
         return torch.tensor(values, device=ego_trajs.device, dtype=ego_trajs.dtype)
@@ -323,6 +330,9 @@ def compute_lane_change_components_batch(
         "lane_half_width_left_m": as_tensor(half_width_left),
         "lane_half_width_right_m": as_tensor(half_width_right),
         "source_lane_index": as_tensor([float(value) for value in source_lane_index]),
+        "source_lane_heading_aligned": as_tensor(
+            [float(value) for value in source_lane_heading_aligned]
+        ),
     }
 
 
@@ -421,9 +431,13 @@ def evaluate_lane_change_with_details(
         crossed = bool(signed_progress[-1] > lane_tolerance)
         reached = bool(abs(predicted_shift - gt_shift) <= lane_tolerance)
 
+        # Prediction index i is the pose at t=(i+1)*dt: the first future point
+        # already lies one timestep after the scene's t=0.
         beyond = (signed_progress > lane_tolerance).nonzero()
         change_time = (
-            float(beyond[0]) * _PREDICTION_TIMESTEP_SECONDS if beyond.numel() > 0 else horizon_s
+            (float(beyond[0]) + 1.0) * _PREDICTION_TIMESTEP_SECONDS
+            if beyond.numel() > 0
+            else horizon_s
         )
 
         # Progress is measured from where the ego started, not from the lane
@@ -432,7 +446,13 @@ def evaluate_lane_change_with_details(
         # an overshoot from reading as a completed change.
         gt_progress = gt_shift - initial_shift
         predicted_progress = predicted_shift - initial_shift
-        completion = 1.0 - abs(predicted_progress - gt_progress) / abs(gt_progress)
+        if abs(gt_progress) <= _SEGMENT_MIN_LENGTH:
+            # The recorded ego sat outside the source lane without moving
+            # laterally (e.g. stopped off-center), so there is no progress to
+            # measure against; report 0 rather than divide by zero.
+            completion = 0.0
+        else:
+            completion = 1.0 - abs(predicted_progress - gt_progress) / abs(gt_progress)
 
         successes.append(float(crossed and reached))
         completion_ratios.append(min(max(completion, 0.0), 1.0))
@@ -460,6 +480,7 @@ def evaluate_lane_change_with_details(
                 "lane_half_width_left_m": components["lane_half_width_left_m"],
                 "lane_half_width_right_m": components["lane_half_width_right_m"],
                 "source_lane_index": components["source_lane_index"],
+                "source_lane_heading_aligned": components["source_lane_heading_aligned"],
             }
         },
     )
