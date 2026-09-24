@@ -39,6 +39,14 @@ _SEGMENT_MIN_LENGTH = 1e-6
 # onto a real segment instead of the path's extrapolated tail.
 _SOURCE_PATH_MARGIN_M = 20.0
 
+# A lanelet only qualifies as the ego's own lane when its tangent at the ego is
+# within ~37 deg of the ego heading; a crossing road's turn lanelet that passes
+# through the ego position is steeper than that.
+_MIN_SOURCE_HEADING_ALIGNMENT = 0.8
+# Lanelets whose centerline distance from the ego differs by less than this are
+# a tie (typically two branches of a fork starting at the same point).
+_SOURCE_DISTANCE_TIE_M = 0.1
+
 _DEFAULT_HORIZON_SECONDS = 8.0
 _DEFAULT_MINIMUM_LATERAL_SHIFT_M = 1.0
 _DEFAULT_CHAIN_TOLERANCE_M = 1.0
@@ -79,21 +87,29 @@ def _lane_half_widths(lane: torch.Tensor) -> tuple[float, float]:
 def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
     """Return the index of the lanelet the ego is travelling on at ``point``.
 
-    Candidates running against the ego's heading are rejected before the
-    nearest-centerline pick, so an oncoming or crossing lanelet that happens to
-    pass close by (common at an intersection) cannot become the source lane.
-    The ego frame puts the ego at the origin heading +x, so "with the ego" is
-    simply a positive x-component on the centerline tangent.
+    Candidates are first filtered by heading: the centerline tangent nearest
+    the ego must be within ``_MIN_SOURCE_HEADING_ALIGNMENT`` of the ego heading
+    (the ego frame puts the ego at the origin heading +x, so that is simply the
+    tangent's x-component).  This rejects oncoming and crossing lanelets, and
+    also a crossing road's turn lanelet that sweeps through the ego position at
+    45-70 deg -- common at an intersection, and closer to the ego than its own
+    lane's centerline often enough to matter.
+
+    Among the aligned candidates the nearest centerline wins.  Distances within
+    ``_SOURCE_DISTANCE_TIE_M`` of the minimum are a tie -- at a fork the
+    straight and turning branches start at the same point -- and the tie goes
+    to the lanelet whose remaining run (from the ego to its end) points most
+    along the ego heading, i.e. the straight branch.
 
     This does NOT disambiguate two parallel lanes: once the ego is past the
     midpoint of a change already in progress, the lane it is moving INTO is the
     nearest one. Such a scene is reported as a failed precondition by the
     scorer rather than mis-scored — see ``evaluate_lane_change_with_details``.
     """
-    best_index = -1
-    best_distance = float("inf")
-    best_aligned_index = -1
-    best_aligned_distance = float("inf")
+    point = point.reshape(1, 2)
+    candidates: list[tuple[float, float, int]] = []
+    fallback_index = -1
+    fallback_distance = float("inf")
     for index in range(lanes.shape[0]):
         centerline = _lane_centerline(lanes[index])
         if centerline.shape[0] < 2:
@@ -101,21 +117,29 @@ def _nearest_lane_index(point: torch.Tensor, lanes: torch.Tensor) -> int:
         seg_p1, seg_p2 = _polyline_segments(centerline)
         if seg_p1.shape[0] == 0:
             continue
-        distance = float(_point_to_segments_min_dist(point.reshape(1, 2), seg_p1, seg_p2)[0])
-        if distance < best_distance:
-            best_distance = distance
-            best_index = index
-        nearest_segment = int((((seg_p1 + seg_p2) / 2) - point.reshape(1, 2)).norm(dim=-1).argmin())
-        if float((seg_p2 - seg_p1)[nearest_segment, 0]) <= 0.0:
+        distance = float(_point_to_segments_min_dist(point, seg_p1, seg_p2)[0])
+        if distance < fallback_distance:
+            fallback_distance = distance
+            fallback_index = index
+        nearest_segment = int((((seg_p1 + seg_p2) / 2) - point).norm(dim=-1).argmin())
+        tangent = seg_p2[nearest_segment] - seg_p1[nearest_segment]
+        heading_alignment = float(tangent[0] / tangent.norm())
+        if heading_alignment < _MIN_SOURCE_HEADING_ALIGNMENT:
             continue
-        if distance < best_aligned_distance:
-            best_aligned_distance = distance
-            best_aligned_index = index
-    if best_aligned_index >= 0:
-        return best_aligned_index
-    if best_index < 0:
-        raise ValueError("lane_change metric found no usable lanelet centerline")
-    return best_index
+        ahead = centerline[-1] - seg_p2[nearest_segment]
+        ahead_norm = float(ahead.norm())
+        ahead_alignment = (
+            float(ahead[0]) / ahead_norm if ahead_norm > _SEGMENT_MIN_LENGTH else heading_alignment
+        )
+        candidates.append((distance, ahead_alignment, index))
+
+    if not candidates:
+        if fallback_index < 0:
+            raise ValueError("lane_change metric found no usable lanelet centerline")
+        return fallback_index
+    nearest_distance = min(distance for distance, _, _ in candidates)
+    tied = [c for c in candidates if c[0] <= nearest_distance + _SOURCE_DISTANCE_TIE_M]
+    return max(tied, key=lambda c: c[1])[2]
 
 
 def _arc_length_behind(path: torch.Tensor, point: torch.Tensor) -> float:
@@ -143,9 +167,13 @@ def _build_source_lane_path(
     Two lanelets chain when the successor's first point coincides with the
     current tail (that is how lanelet2 successor links survive into the NPZ,
     which carries no explicit connectivity).  Where several successors chain --
-    a fork -- the one whose initial tangent best matches the current heading
-    wins, so the reconstructed path follows the ego's own lane rather than a
-    turning branch.  Chaining stops once the path reaches ``required_length_m``
+    a fork -- the one whose overall direction (last point minus first point)
+    best matches the current heading wins, so the reconstructed path follows
+    the ego's own lane rather than a turning branch.  The overall direction is
+    used, not the initial tangent: a turn lanelet leaves the fork tangent to
+    the straight one, so their first segments are indistinguishable and the
+    pick would come down to floating-point noise.  Chaining stops once the path
+    reaches ``required_length_m``
     AHEAD OF THE EGO: lanelets are resampled to a fixed point count regardless
     of length, so the ego often sits deep inside a long source lanelet, and
     measuring the budget against the whole path (including what is behind the
@@ -177,11 +205,11 @@ def _build_source_lane_path(
                 continue
             if float((centerline[0] - path[-1]).norm()) > chain_tolerance_m:
                 continue
-            start_direction = centerline[1] - centerline[0]
-            start_norm = float(start_direction.norm())
-            if start_norm <= _SEGMENT_MIN_LENGTH:
+            overall_direction = centerline[-1] - centerline[0]
+            overall_norm = float(overall_direction.norm())
+            if overall_norm <= _SEGMENT_MIN_LENGTH:
                 continue
-            alignment = float(tail_direction @ (start_direction / start_norm))
+            alignment = float(tail_direction @ (overall_direction / overall_norm))
             if alignment > best_alignment:
                 best_alignment = alignment
                 best_index = index

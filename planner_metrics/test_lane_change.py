@@ -25,6 +25,38 @@ def _straight_lane(center_y: float, x_start: float = -20.0, x_end: float = 120.0
     return lane
 
 
+def _turn_lane(
+    start_x: float, start_y: float, radius: float = 15.0, lead_in: float = 2.0
+) -> torch.Tensor:
+    """A left-turn lanelet: a short straight lead-in along +x, then a quarter arc to +y.
+
+    The lead-in makes the first segment identical in direction to a straight
+    lanelet leaving the same point, exactly as a lanelet2 turn branch does.
+    """
+    lane = torch.zeros(20, 13)
+    theta = torch.linspace(0.0, math.pi / 2, 18)
+    x = torch.cat(
+        [torch.tensor([start_x, start_x + lead_in]), start_x + lead_in + radius * torch.sin(theta)]
+    )
+    y = torch.cat([torch.tensor([start_y, start_y]), start_y + radius * (1 - torch.cos(theta))])
+    lane[:, 0] = x
+    lane[:, 1] = y
+    lane[:, 5] = _HALF_WIDTH
+    lane[:, 7] = -_HALF_WIDTH
+    return lane
+
+
+def _crossing_lane(through_x: float = 0.0, angle_deg: float = 60.0) -> torch.Tensor:
+    """A lanelet crossing the ego's road through ``(through_x, 0)`` at ``angle_deg``."""
+    lane = torch.zeros(20, 13)
+    t = torch.linspace(-30.0, 30.0, 20)
+    lane[:, 0] = through_x + t * math.cos(math.radians(angle_deg))
+    lane[:, 1] = t * math.sin(math.radians(angle_deg))
+    lane[:, 5] = _HALF_WIDTH
+    lane[:, 7] = -_HALF_WIDTH
+    return lane
+
+
 def _straight_map() -> torch.Tensor:
     """Three parallel lanes; the ego starts on the middle one."""
     return torch.stack(
@@ -273,3 +305,62 @@ def test_lane_change_requires_ground_truth():
         evaluate_lane_change_with_details(
             _trajectory(_LANE_WIDTH), {"lanes": _straight_map()}, _PARAMETERS
         )
+
+
+def test_source_lane_chaining_follows_the_straight_branch_at_a_fork():
+    """A turn lanelet leaves the fork tangent to the straight one; the whole-lanelet
+    direction, not the first segment, must decide which successor is chained."""
+    fork_x = 20.0
+    lanes = torch.stack(
+        [
+            _straight_lane(0.0, -20.0, fork_x),  # source: ends at the fork
+            _turn_lane(fork_x, 0.0),  # listed BEFORE the straight successor
+            _straight_lane(0.0, fork_x, 120.0),
+            _straight_lane(_LANE_WIDTH, -20.0, 120.0),
+            _straight_lane(-_LANE_WIDTH, -20.0, 120.0),
+        ]
+    )
+    gt = _trajectory(_LANE_WIDTH)
+    result = _evaluate(gt.clone(), gt, lanes)
+
+    details = result.details["lane_change"]
+    assert details["source_lane_index"].item() == 0
+    # Measured against a straight source path the GT moved exactly one lane;
+    # against the turn branch it would read as tens of meters.
+    assert details["gt_lateral_shift_m"].item() == pytest.approx(_LANE_WIDTH, abs=0.05)
+    assert result.scores["success_rate_percent"].item() == 100.0
+
+
+def test_source_lane_prefers_the_straight_branch_when_the_ego_sits_on_a_fork():
+    fork_x = -1.0
+    lanes = torch.stack(
+        [
+            _turn_lane(fork_x, 0.0),  # listed first, same distance as the straight lane
+            _straight_lane(0.0, fork_x, 120.0),
+            _straight_lane(_LANE_WIDTH, -20.0, 120.0),
+        ]
+    )
+    gt = _trajectory(_LANE_WIDTH)
+    result = _evaluate(gt.clone(), gt, lanes)
+
+    assert result.details["lane_change"]["source_lane_index"].item() == 1
+    assert result.details["lane_change"]["gt_lateral_shift_m"].item() == pytest.approx(
+        _LANE_WIDTH, abs=0.05
+    )
+
+
+def test_source_lane_rejects_a_crossing_lanelet_through_the_ego_position():
+    """A crossing road's lanelet passing through the origin is nearer than the
+    ego's own centerline, but its heading rules it out."""
+    lanes = torch.stack(
+        [
+            _crossing_lane(),  # distance 0 from the ego, 60 deg off heading
+            _straight_lane(0.3),  # the ego's lane, 0.3 m to the left
+            _straight_lane(0.3 + _LANE_WIDTH),
+        ]
+    )
+    gt = _trajectory(_LANE_WIDTH)
+    result = _evaluate(gt.clone(), gt, lanes)
+
+    assert result.details["lane_change"]["source_lane_index"].item() == 1
+    assert result.scores["success_rate_percent"].item() == 100.0
