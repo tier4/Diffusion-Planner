@@ -149,8 +149,7 @@ config) controls how the vehicle moves each step:
 | Mode | Description | Per-agent cost |
 |---|---|---|
 | `mpc` (**default**) | Bicycle-model MPC. numpy bicycle rollout + analytic reverse-mode gradient fed to scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). When the ego is idle and the model's 8 s plan has meaningful forward intent, MPC time-compresses the full plan into its 2 s horizon and seeds the warm start with a resume-from-rest accel so the ego launches instead of staying parked. | ~5 ms |
-| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. Same full-plan avg speed resume-from-rest push as MPC. | ~0.01 ms |
-| `teleport` | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. Useful only for bit-identical comparison with legacy `pred[0]` runs. | ~0 ms |
+| `perfect` | Perfect tracking: each step the vehicle lands exactly on the first predicted point, heading along the path (read over at least 0.5 m), never the model's heading output. No dynamics or limits: it drives exactly what the model plans. One implementation, `mpc_tracker.place_on_trajectory`, shared by every simulator. | ~0.01 ms |
 
 Both `perfect` and `mpc` modes apply C++-style post-processing to the
 reference trajectory before tracking: velocity moving average (window=8) and

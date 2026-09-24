@@ -44,6 +44,7 @@ from scenario_generation.metrics import (
     strong_brake_mask,
 )
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
+from scenario_generation.mpc_tracker import place_on_trajectory
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
@@ -909,10 +910,8 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
     ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
-    instead of running the tracker. Used to execute a CACHED plan open-loop between replans:
-    PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
-    multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
-    applied directly, which is the faithful "perfect tracking" of the cached plan.
+    instead of running the tracker. Used to execute a CACHED plan open-loop between replans; the
+    pose comes from ``place_on_trajectory``, the same function ``PerfectTracker`` uses.
 
     ``tracked`` = ``(new_pose(3,), new_speed)`` from a BATCHED tracker solve
     (``mpc_tracker_batched.track_many``): the caller already ran the tracker for
@@ -2061,9 +2060,8 @@ def render_segment(
             # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
             # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
             # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-            # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-            # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-            # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
+            # the ego is placed on the plan at `offset` (steps since the last inference) by the same
+            # place_on_trajectory the perfect tracker uses. The ego still single-steps at 10 Hz.
             offset = k % replan_interval
             override = None
             if plan_world is None or offset == 0:
@@ -2083,13 +2081,7 @@ def render_segment(
             else:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
-                tx, ty, th = (
-                    float(plan_world[0][off, 0]),
-                    float(plan_world[0][off, 1]),
-                    float(plan_world[1][off]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                override = place_on_trajectory(s.live_pose, plan_world[0][off:], DT)
                 pred_cur = _world_plan_to_ego(
                     plan_world[0][off:],
                     plan_world[1][off:],
@@ -2100,20 +2092,6 @@ def render_segment(
                 # No fresh inference this step: hold the last decoded turn indicator so the
                 # 10 Hz turn_indicators history keeps scrolling with the same signal.
                 _hold_turn_indicator(s)
-            # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
-            # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
-            # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
-            # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
-            # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
-            # override path implements). Every step then lands on the predicted polyline point.
-            if tracker_mode == "perfect" and override is None:
-                tx, ty, th = (
-                    float(plan_world[0][0, 0]),
-                    float(plan_world[0][0, 1]),
-                    float(plan_world[1][0]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
             if (
                 draw_every is not None
                 and (window is None or (window[0] <= k <= window[1]))

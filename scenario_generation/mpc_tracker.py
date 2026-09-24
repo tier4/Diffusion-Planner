@@ -532,29 +532,56 @@ def postprocess_reference(
 
 
 # ----------------------------------------------------------------------
-# Perfect tracker (simple Euler integration, no optimisation)
+# Perfect tracker
 # ----------------------------------------------------------------------
+
+# Distance along the reference over which the heading is read. Below it, point spacing at low speed
+# (centimetres) makes the direction noisy, so the current heading is kept.
+MIN_HEADING_DISTANCE_M = 0.5
+
+
+def place_on_trajectory(
+    current_pose: np.ndarray, ref_xy: np.ndarray, dt: float
+) -> tuple[np.ndarray, float]:
+    """Exact perfect tracking: the vehicle ends the step on the reference's first point.
+
+    The heading is the direction the reference runs from that point, read over at least
+    ``MIN_HEADING_DISTANCE_M``. It is deliberately not the model's heading output: the vehicle's
+    reference point is the rear axle, which moves in the direction the vehicle points, so a vehicle
+    that follows the positions exactly points along the path. When the reference is shorter than
+    that distance the current heading is kept.
+
+    Args:
+        current_pose: (3,) [x, y, yaw] in world frame.
+        ref_xy: (N, 2) reference positions in world frame, first point one ``dt`` ahead.
+        dt: timestep (seconds).
+
+    Returns:
+        new_pose: (3,) [x, y, yaw].
+        speed: distance moved this step / dt.
+    """
+    x, y, yaw = float(current_pose[0]), float(current_pose[1]), float(current_pose[2])
+    if len(ref_xy) < 1:
+        return np.array([x, y, yaw], dtype=np.float64), 0.0
+    ref_xy = np.asarray(ref_xy, dtype=np.float64)
+    tx, ty = float(ref_xy[0, 0]), float(ref_xy[0, 1])
+    far = np.flatnonzero(np.linalg.norm(ref_xy - ref_xy[0], axis=1) >= MIN_HEADING_DISTANCE_M)
+    heading = (
+        math.atan2(ref_xy[far[0], 1] - ty, ref_xy[far[0], 0] - tx) if len(far) else yaw
+    )
+    speed = math.hypot(tx - x, ty - y) / dt
+    return np.array([tx, ty, heading], dtype=np.float64), speed
 
 
 class PerfectTracker:
-    """Velocity-limited Euler trajectory follower.
-
-    Reads the target velocity from the reference trajectory's position
-    differences, integrates position via Euler step, and snaps heading
-    to the reference.  No optimisation, no feedback control — pure
-    open-loop trajectory following with physics-limited steps.
-
-    Much faster than :class:`MPCTracker` (~0.01 ms vs ~13 ms per call)
-    but has no lookahead or kinematic steering model.
+    """Perfect trajectory tracking: every step the vehicle lands exactly on the reference's first
+    point, heading along the path (see :func:`place_on_trajectory`). No dynamics, no limits.
     """
 
-    def __init__(self, dt: float = 0.1, max_speed: float = 20.0):
+    def __init__(self, dt: float = 0.1):
         self.dt = dt
-        self.max_speed = max_speed
-        # Parallel to MPCTracker.last_*: perfect-tracker telemetry set by
-        # track(). PerfectTracker has no steering control — it snaps to
-        # the reference heading — so last_steering stays 0.0 and
-        # last_yaw_rate is derived from the heading change per step.
+        # Parallel to MPCTracker.last_*. No steering model: last_steering stays 0.0 and
+        # last_yaw_rate is the heading change per step.
         self.last_accel: float = 0.0
         self.last_yaw_rate: float = 0.0
         self.last_steering: float = 0.0
@@ -569,67 +596,22 @@ class PerfectTracker:
 
         Args:
             x0: (4,) [x, y, yaw, v] current state in world frame.
-            ref_world: (N, 3) reference [x, y, yaw] in world frame.
+            ref_world: (N, 2+) reference [x, y, ...] in world frame; only positions are used.
 
         Returns:
             new_pos: (3,) [x, y, yaw] after one dt step.
             new_speed: scalar speed after one dt step.
         """
-        if len(ref_world) < 1:
-            return np.array([x0[0], x0[1], x0[2]], dtype=np.float32), 0.0
-
-        # Target velocity from reference step 0 displacement
-        dx = ref_world[0, 0] - x0[0]
-        dy = ref_world[0, 1] - x0[1]
-        v_target = min(math.hypot(dx, dy) / self.dt, self.max_speed)
-
-        # Resume-from-rest push (mirrors the MPCTracker branch). Use the
-        # model's FULL horizon (not the first 2 s) to decide whether to
-        # push — post-stop plans are back-loaded, so a short-horizon
-        # reach is near-zero while the 8 s reach is 20+ m. Push speed
-        # = avg over the full plan.
-        cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
-        full_n = len(ref_world)
-        full_tail_reach = (
-            math.hypot(
-                ref_world[-1, 0] - x0[0],
-                ref_world[-1, 1] - x0[1],
-            )
-            if full_n > 0
-            else 0.0
-        )
-        full_horizon_time = full_n * self.dt
-        avg_plan_speed = full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
-        if cur_speed < 0.1 and avg_plan_speed > 0.5:
-            v_target = max(v_target, min(self.max_speed, avg_plan_speed))
-
-        # Euler integration using current heading and target velocity
-        x, y, yaw = float(x0[0]), float(x0[1]), float(x0[2])
-        x_new = x + v_target * math.cos(yaw) * self.dt
-        y_new = y + v_target * math.sin(yaw) * self.dt
-
-        # Snap heading directly to the reference orientation
-        yaw_new = float(ref_world[0, 2])
-
-        # Telemetry for realistic agent-state propagation (same contract
-        # as MPCTracker.last_*).
-        dh = (yaw_new - yaw + math.pi) % (2 * math.pi) - math.pi
+        ref_world = np.asarray(ref_world)
+        ref_xy = ref_world[:, :2] if len(ref_world) else np.zeros((0, 2))
+        new_pos, speed = place_on_trajectory(np.asarray(x0)[:3], ref_xy, self.dt)
+        dh = (float(new_pos[2]) - float(x0[2]) + math.pi) % (2 * math.pi) - math.pi
         self.last_yaw_rate = dh / self.dt
         v_prev = float(x0[3]) if len(x0) > 3 else self._prev_speed
-        self.last_accel = (v_target - v_prev) / self.dt
-        self._prev_speed = v_target
-        # PerfectTracker doesn't model a steering wheel; recover an
-        # equivalent bicycle-model δ from the observed yaw rate if speed
-        # is nontrivial (matches how _advance_agent used to derive it).
-        if v_target > 0.2:
-            # Wheelbase isn't on this class; leave last_steering at 0 and
-            # let _advance_agent compute it from (yaw_rate, speed, wheelbase).
-            self.last_steering = 0.0
-        else:
-            self.last_steering = 0.0
-
-        new_pos = np.array([x_new, y_new, yaw_new], dtype=np.float32)
-        return new_pos, v_target
+        self.last_accel = (speed - v_prev) / self.dt
+        self._prev_speed = speed
+        self.last_steering = 0.0
+        return new_pos.astype(np.float32), speed
 
     def reset(self):
         """No-op (no internal state to clear)."""

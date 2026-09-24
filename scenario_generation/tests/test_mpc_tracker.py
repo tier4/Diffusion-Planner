@@ -107,28 +107,42 @@ class TestMPCTracker:
 
 
 class TestPerfectTracker:
-    def test_straight_advance(self):
+    def test_lands_exactly_on_first_point(self):
         tracker = PerfectTracker(dt=0.1)
         x0 = np.array([0.0, 0.0, 0.0, 5.0])
-        ref = np.array([[0.5, 0.0, 0.0]])  # 0.5m ahead = 5 m/s
+        ref = np.array([[0.5, 0.0, 0.0], [1.0, 0.0, 0.0]])
         pos, speed = tracker.track(x0, ref)
-        assert pos[0] == pytest.approx(0.5, abs=0.05)
-        assert abs(pos[1]) < 1e-6
-        assert speed == pytest.approx(5.0, abs=0.5)
+        assert pos[0] == pytest.approx(0.5)
+        assert pos[1] == pytest.approx(0.0)
+        assert speed == pytest.approx(5.0)
 
-    def test_heading_snapped_to_reference(self):
+    def test_lands_exactly_on_first_point_on_a_curve(self):
+        # Regression: the old tracker stepped along the CURRENT heading, so on a curve the
+        # vehicle drifted sideways off the predicted point every step.
         tracker = PerfectTracker(dt=0.1)
-        x0 = np.array([0.0, 0.0, 0.0, 5.0])  # heading east
-        ref = np.array([[0.5, 0.0, math.pi / 4]])  # ref heading NE
+        r = 20.0
+        ang = np.linspace(0.05, 1.0, 40)
+        ref = np.column_stack([r * np.sin(ang), r - r * np.cos(ang), ang])
+        x0 = np.array([0.0, 0.0, 0.0, 10.0])
         pos, _ = tracker.track(x0, ref)
-        assert pos[2] == pytest.approx(math.pi / 4, abs=1e-6)
+        assert pos[0] == pytest.approx(ref[0, 0])
+        assert pos[1] == pytest.approx(ref[0, 1])
 
-    def test_speed_capped(self):
-        tracker = PerfectTracker(dt=0.1, max_speed=10.0)
-        x0 = np.array([0.0, 0.0, 0.0, 5.0])
-        ref = np.array([[50.0, 0.0, 0.0]])  # 500 m/s implied
-        _, speed = tracker.track(x0, ref)
-        assert speed <= 10.0 + 1e-6
+    def test_heading_from_path_not_from_reference_heading(self):
+        # The path runs along +x; the reference's heading channel says 45 degrees.
+        tracker = PerfectTracker(dt=0.1)
+        x0 = np.array([0.0, 0.0, 0.3, 5.0])
+        ref = np.array([[0.5, 0.0, math.pi / 4], [1.0, 0.0, math.pi / 4], [1.5, 0.0, math.pi / 4]])
+        pos, _ = tracker.track(x0, ref)
+        assert pos[2] == pytest.approx(0.0, abs=1e-6)
+
+    def test_short_reference_keeps_current_heading(self):
+        # Points closer together than MIN_HEADING_DISTANCE_M give no reliable direction.
+        tracker = PerfectTracker(dt=0.1)
+        x0 = np.array([0.0, 0.0, 0.7, 0.0])
+        ref = np.array([[0.01, 0.0, 0.0], [0.02, 0.01, 0.0]])
+        pos, _ = tracker.track(x0, ref)
+        assert pos[2] == pytest.approx(0.7)
 
     def test_empty_reference(self):
         tracker = PerfectTracker(dt=0.1)
