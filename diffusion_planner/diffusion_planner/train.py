@@ -236,6 +236,15 @@ def model_training(args: TrainConfig):
     # the augmenter each rank builds; rank 0 alone serializes it.
     resolve_history_noise(args)
 
+    # Where the other ranks wait while rank 0 runs the OpenSCENARIO suite. An NCCL barrier is a
+    # kernel that spins on each rank's GPU until rank 0 arrives, and for the whole evaluation it
+    # competes with the suite's own inference on those GPUs. A gloo barrier waits on the host.
+    eval_wait_group = (
+        torch.distributed.new_group(backend="gloo", timeout=ddp.DDP_TIMEOUT)
+        if args.ddp and args.scenario_sim_driver
+        else None
+    )
+
     if global_rank == 0:
         # Logging
         print("------------- {} -------------".format(args.exp_name))
@@ -675,6 +684,9 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+
+        if eval_wait_group is not None and (epoch + 1 - init_epoch) % save_utd == 0:
+            torch.distributed.barrier(group=eval_wait_group)
 
         if epoch + 1 == train_epochs:
             # closed-loop validation runs on all ranks, only at the final epoch
