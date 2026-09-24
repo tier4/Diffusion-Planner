@@ -412,13 +412,13 @@ def advance_scene_mpc(
             force-stop to the reference before tracking (see
             ``mpc_tracker.postprocess_reference``).
         tracker_type: ``"mpc"`` for bicycle-model MPC, ``"perfect"``
-            for Euler velocity-limited follower.
+            for exact placement on the prediction (see ``perfect_tracker``).
     """
     from scenario_generation.mpc_tracker import (
         MPCTracker,
-        PerfectTracker,
         postprocess_reference,
     )
+    from scenario_generation.perfect_tracker import PerfectTracker
 
     for agent in scene.agents:
         if agent.id not in agent_predictions:

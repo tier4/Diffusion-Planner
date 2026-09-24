@@ -44,9 +44,9 @@ from scenario_generation.metrics import (
     strong_brake_mask,
 )
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
-from scenario_generation.mpc_tracker import place_on_trajectory
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
+from scenario_generation.perfect_tracker import place_on_trajectory
 from scenario_generation.render_pool import render_pool
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
@@ -581,7 +581,8 @@ def _seed_state(
     yaw_gate: bool = True,
     deviation_collision_thresh_m: float = 2.0,
 ) -> _SegState:
-    from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
+    from scenario_generation.mpc_tracker import MPCTracker
+    from scenario_generation.perfect_tracker import PerfectTracker
 
     # Step cap: defaults to the segment length, but can exceed it so a slow ego
     # (e.g. one that waited out a long red light) can still drive to the segment end.

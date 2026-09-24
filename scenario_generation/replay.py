@@ -227,7 +227,7 @@ class SpawnConfig:
     #                 accel / steering / speed)
     #   "perfect"   — perfect tracking: the vehicle lands exactly on the
     #                 predicted first point each step, heading along the
-    #                 path (mpc_tracker.place_on_trajectory)
+    #                 path (perfect_tracker.place_on_trajectory)
     advance_mode: str = "mpc"
     mpc_horizon_steps: int = 20
     mpc_n_knots: int = 5

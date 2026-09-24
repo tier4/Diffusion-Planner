@@ -1,5 +1,5 @@
 """Perfect tracking in the reproducer: the ego lands exactly on the predicted first point, heading
-along the path, through the one shared implementation (mpc_tracker.place_on_trajectory)."""
+along the path, through the one shared implementation (perfect_tracker.place_on_trajectory)."""
 
 import json
 import math
@@ -7,8 +7,8 @@ import math
 import numpy as np
 import pytest
 
-from scenario_generation.mpc_tracker import place_on_trajectory
 from scenario_generation.perf_timer import Timers
+from scenario_generation.perfect_tracker import place_on_trajectory
 from scenario_generation.reproducer_rollout import _advance_step, _ego_pred_to_world, _seed_state
 from scenario_generation.route_timeline import RouteTimeline
 
@@ -87,7 +87,7 @@ def test_perfect_mode_lands_on_the_predicted_point_heading_along_the_path(tmp_pa
 def test_cached_plan_steps_use_the_same_placement():
     # render_segment places the ego on a cached plan with place_on_trajectory; the tracker
     # does the same on a fresh plan, so both give the identical pose for the identical reference.
-    from scenario_generation.mpc_tracker import PerfectTracker
+    from scenario_generation.perfect_tracker import PerfectTracker
 
     ang = np.linspace(0.05, 1.5, 40)
     ref = np.column_stack([20 * np.sin(ang), 20 - 20 * np.cos(ang)])

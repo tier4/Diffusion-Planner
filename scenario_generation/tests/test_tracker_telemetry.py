@@ -11,7 +11,8 @@ import math
 import numpy as np
 import pytest
 
-from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
+from scenario_generation.mpc_tracker import MPCTracker
+from scenario_generation.perfect_tracker import PerfectTracker
 
 # ── MPCTracker.last_* telemetry ────────────────────────────────────────────
 
