@@ -1,23 +1,15 @@
-"""Lane-change completion metric for scenario-based open-loop evaluation.
+"""Lane-change completion: does the planner end up in the lane the GT moved to?
 
-A lane-change scene is scored against one question: within the prediction
-horizon, does the planner end up in the lane the recorded ego moved to?
+Every lateral quantity is measured against the *source lane* -- the lanelet the
+ego starts in, extended through its successors (see ``source_lane``). That
+deliberately decouples the score from longitudinal error: a planner that is
+merely too slow still gets credit for the lane change it performed, and
+``arrival``/``simple_turn`` already cover longitudinal and path-shape accuracy.
 
-Answering that needs a lateral reference that stays valid for the whole
-horizon, which the NPZ lane tensor does not offer directly -- each lanelet is a
-short polyline and the ego crosses several of them in 8 s.  So the metric first
-rebuilds the *source lane*: the lanelet the ego starts in, extended forward
-through its endpoint-chained successors.  Every lateral quantity below is then
-measured against that path, which deliberately decouples the score from
-longitudinal error -- a planner that is merely too slow still gets credit for
-the lane change it did perform, and ``arrival``/``simple_turn`` already cover
-longitudinal and path-shape accuracy.
-
-Lane *identity* is never compared, because the NPZ carries no lanelet ids, only
-geometry.  "Ended up in the GT lane" is therefore expressed as "ended up within
-half a lane width of the GT's final lateral position", and "left the original
-lane" as "crossed the source lane's own boundary", with the lane width read
-from the lane tensor's boundary-offset columns rather than hard-coded.
+Lane *identity* is never compared, since the NPZ carries no lanelet ids. "In
+the GT lane" is "within half a lane width of the GT's final lateral position",
+and "left the original lane" is "crossed the source lane's boundary", with the
+width read from the tensor's boundary-offset columns rather than hard-coded.
 """
 
 from __future__ import annotations
@@ -158,35 +150,19 @@ def evaluate_lane_change_with_details(
     data: dict[str, torch.Tensor],
     parameters: dict,
 ) -> MetricEvaluation:
-    """Score whether the prediction completes the GT's lane change within the horizon.
+    """Score whether the prediction completes the GT's lane change, as a success rate.
 
-    A sample succeeds when, at the end of the horizon, the prediction has
-    crossed the source lane's boundary in the same direction the GT went AND
-    has landed within half a lane width of the GT's final lateral position.
-    The first condition rejects staying put, drifting the wrong way, and
-    starting a change without finishing it; the second rejects overshooting
-    into the lane beyond the target.
+    A sample succeeds when the prediction crossed the source lane's boundary in
+    the GT's direction AND landed within the lane tolerance of the GT's final
+    lateral position -- rejecting respectively "never changed / wrong way /
+    unfinished" and "overshot past the target lane".
 
-    ``minimum_lateral_shift_m`` is a floor under the lane tolerance, so a map
-    with missing or degenerate boundary offsets cannot make the crossing test
-    trivially true nor the reached test impossible to satisfy. Where that floor
-    is what ends up being used, ``lane_tolerance_from_map`` is 0 for the sample:
-    a zeroed boundary column and a genuinely narrow lane are otherwise
-    indistinguishable in the output.
-
-    The aggregate score is the success rate in percent, like the other scenario
-    metrics. Two things make a sample unscorable rather than failed on merit:
-    no lanelet near the ego runs with it, so the reference lane fell back to an
-    oncoming or crossing one (``source_lane_heading_aligned``), or the recorded
-    ego never leaves the reconstructed source lane, so there is no lane change
-    (``gt_lane_change_detected``). Both count as failures -- nothing about the
-    planner was demonstrated. Neither is aggregated -- the summary carries the
-    success rate alone -- so the two per-sample details are what distinguish an
-    unscorable list from a weak planner: the second is what a scene
-    captured after the change is already past its midpoint looks like, since
-    the nearest lane is then the one being entered. Completion ratio, final
-    lateral offset error and the time at which the prediction left the source
-    lane are also reported per sample in the details.
+    Two things make a sample unscorable rather than failed on merit: the
+    reference lane fell back to an oncoming or crossing lanelet
+    (``source_lane_heading_aligned``), or the recorded ego performed no lane
+    change (``gt_lane_change_detected``). Both count as failures, and since
+    neither is aggregated, those two details are what distinguish an unscorable
+    list from a weak planner.
     """
     horizon_seconds = float(parameters.get("horizon_seconds", _DEFAULT_HORIZON_SECONDS))
     minimum_lateral_shift_m = float(
@@ -208,10 +184,9 @@ def evaluate_lane_change_with_details(
     gt = components["gt_lateral_offset_m"]  # (N, T)
     initial_shift, gt_shift, predicted_shift = gt[:, 0], gt[:, -1], predicted[:, -1]
 
-    # +1 when the GT moved left of the source lane, -1 when right.  One floored
-    # tolerance serves both tests below: a map whose boundary-offset columns are
-    # missing or degenerate reports a zero half width, which would otherwise
-    # make `crossed` trivially true and `reached` require an exact match.
+    # +1 when the GT moved left of the source lane, -1 when right. The floor
+    # keeps a map with zeroed boundary offsets from making `crossed` trivially
+    # true and `reached` impossible.
     direction = (gt_shift >= initial_shift).to(gt.dtype) * 2 - 1
     half_width = torch.where(
         direction > 0,
@@ -219,25 +194,15 @@ def evaluate_lane_change_with_details(
         components["lane_half_width_right_m"],
     )
     lane_tolerance = half_width.clamp(min=minimum_lateral_shift_m)
-    # The D>=8 check only proves the boundary-offset columns exist. Zeroed or
-    # corrupt ones produce a near-zero half width that the clamp quietly
-    # replaces with the floor, which is indistinguishable in the output from a
-    # genuinely narrow lane -- so record whether the tolerance came from the map.
+    # A substituted floor is indistinguishable in the output from a genuinely
+    # narrow lane, so record which one it was.
     tolerance_from_map = half_width >= minimum_lateral_shift_m
 
-    # Two preconditions, and every judgement below is gated on both. The source
-    # lane must be a lane the ego is actually travelling on -- the fallback to
-    # an oncoming or crossing lanelet reverses the lateral reference, which
-    # flips `direction` and would let a mirrored reading score as a success --
-    # and the recorded ego must have performed a lane change.
-    #
-    # That second one needs BOTH halves. Ending up outside the source lane is
-    # not enough on its own: an ego that STARTS outside it (a scene captured
-    # mid-change, or a lanelet whose width does not match where the ego drives)
-    # satisfies it while driving dead straight, and then a prediction that
-    # copies that motionless GT scores a full success. So the recorded ego must
-    # also have actually moved sideways, which is what `minimum_lateral_shift_m`
-    # is named for.
+    # Everything below is gated on both preconditions. An oncoming reference
+    # lane reverses the lateral readings, so a mirrored one would score as a
+    # success. And `detected` needs BOTH halves: ending up outside the source
+    # lane is also true of an ego that STARTS outside it and drives dead
+    # straight, so the GT must have moved sideways too.
     aligned = components["source_lane_heading_aligned"] > 0.5
     gt_progress = gt_shift - initial_shift
     moved = direction * gt_progress > minimum_lateral_shift_m
@@ -257,12 +222,8 @@ def evaluate_lane_change_with_details(
         scorable & beyond.any(dim=1), first_beyond, steps * _PREDICTION_TIMESTEP_SECONDS
     )
 
-    # Progress is measured from where the ego started, not from the lane
-    # center, so an ego that begins off-center and never moves scores 0.
-    # Closeness to the GT's lateral target (rather than raw progress) keeps an
-    # overshoot from reading as a completed change.  `scorable` already implies
-    # a non-zero `gt_progress`, so the divisor only needs a guard against
-    # float noise on the samples that are about to be zeroed anyway.
+    # Closeness to the GT's lateral target, measured from where the ego
+    # started: an overshoot then reads as far from complete as no motion does.
     predicted_progress = predicted_shift - initial_shift
     completion = 1 - (predicted_progress - gt_progress).abs() / gt_progress.abs().clamp(
         min=minimum_lateral_shift_m

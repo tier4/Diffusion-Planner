@@ -2,15 +2,9 @@
 
 The tensor gives geometry and nothing else: no lanelet ids, no connectivity,
 each lanelet a short polyline resampled to a fixed point count regardless of
-its real length.  A metric that needs a lateral reference valid for a whole
-8 s horizon therefore has to rebuild the lane itself -- pick the lanelet the
-ego is on, then walk forward through the successors that chain onto it.
-
-``lane_change`` is the caller today; the reconstruction is kept separate
-because it is a different problem from scoring, with its own failure modes
-(an oncoming lanelet passing closer than the ego's own, a fork whose branches
-are indistinguishable at their first segment, an ego sitting deep inside a
-long lanelet).
+its real length. A lateral reference valid for a whole horizon therefore has
+to be rebuilt -- pick the lanelet the ego is on, then walk forward through the
+successors that chain onto it.
 """
 
 from __future__ import annotations
@@ -39,15 +33,12 @@ class SourceLane:
 
     Attributes:
         path: ``(M, 2)`` chained centerline, the lateral reference itself.
-        owners: ``(M,)`` lanelet index each path point came from, so a caller
-            can read lane properties at the station it cares about rather than
-            assuming the whole chain matches the first lanelet.
+        owners: ``(M,)`` lanelet index per path point.
         index: the lanelet the ego starts on.
-        heading_aligned: False when no lanelet near the ego ran with it and the
-            pick fell back to the nearest one regardless -- possibly oncoming or
-            crossing, which mirrors or skews every lateral reading taken from
-            ``path``.  Callers are expected to surface this rather than score
-            through it.
+        heading_aligned: False when nothing near the ego ran with it and the
+            pick fell back to the nearest lanelet regardless -- possibly
+            oncoming, which mirrors every lateral reading taken from ``path``.
+            Callers are expected to surface this rather than score through it.
     """
 
     path: torch.Tensor
@@ -58,23 +49,19 @@ class SourceLane:
     def half_widths_at(self, lanes: torch.Tensor, point: torch.Tensor) -> tuple[float, float]:
         """Return the ``(left, right)`` half width where ``point`` meets the lane.
 
-        Read at a station rather than once for the lane: a chain can run through
-        a taper or a merge, so the first lanelet's width is not necessarily the
-        width where a caller's threshold applies.
+        Read at a station, since a chain can run through a taper or a merge.
+        Nearest SEGMENT, not nearest vertex: a long successor's vertices can be
+        metres apart, so past a joint the nearest vertex still belongs to the
+        short predecessor.
         """
         point = point.to(self.path).reshape(1, 2)
         seg_p1, seg_p2 = _polyline_segments(self.path)
-        # Nearest SEGMENT, not nearest vertex: lanelets are resampled to a fixed
-        # point count, so a long successor's vertices can be metres apart and the
-        # nearest vertex still belongs to the short predecessor well past the
-        # joint -- which would read the wrong lanelet's width for the whole gap.
         segment = int(_point_to_segments_dist(point, seg_p1, seg_p2)[0].argmin())
-        # `_polyline_segments` may have dropped degenerate segments, so map back
-        # through the kept mask rather than assuming index alignment.
+        # Degenerate segments were dropped, so map the index back through the
+        # kept mask; of a segment's two points the later one owns the station.
         kept = torch.nonzero(
             (self.path[1:] - self.path[:-1]).norm(dim=-1) > _SEGMENT_MIN_LENGTH
         ).squeeze(-1)
-        # A segment spans two points; the later one owns the station past the joint.
         return _lane_half_widths(lanes[int(self.owners[kept[segment] + 1])])
 
     def segments(
@@ -132,39 +119,27 @@ def _nearest_lane_index(
 ) -> tuple[int, bool]:
     """Return ``(index, heading_aligned)`` for the lanelet the ego is travelling on at ``point``.
 
-    Candidates are first filtered by heading: the centerline tangent nearest
-    the ego must be within ``_MIN_SOURCE_HEADING_ALIGNMENT`` of the ego heading
-    (the ego frame puts the ego at the origin heading +x, so that is simply the
-    tangent's x-component).  This rejects oncoming and crossing lanelets, and
-    also a crossing road's turn lanelet that sweeps through the ego position at
-    45-70 deg -- common at an intersection, and closer to the ego than its own
-    lane's centerline often enough to matter.
+    Candidates are filtered by heading first (in the ego frame that is just the
+    tangent's x-component), which rejects oncoming lanelets and the crossing
+    road's turn lanelet that sweeps through the ego position at 45-70 deg --
+    often closer to the ego than its own lane's centerline. The nearest of the
+    survivors wins; a tie within ``_SOURCE_DISTANCE_TIE_M`` goes to the one
+    running most along the ego heading, i.e. the straight branch of a fork.
+    With no survivors the nearest lanelet is returned as ``heading_aligned=
+    False`` for the caller to surface.
 
-    Among the aligned candidates the nearest centerline wins.  Distances within
-    ``_SOURCE_DISTANCE_TIE_M`` of the minimum are a tie -- at a fork the
-    straight and turning branches start at the same point -- and the tie goes
-    to the lanelet whose remaining run (from the ego to its end) points most
-    along the ego heading, i.e. the straight branch.
-
-    When no lanelet passes the heading filter the nearest one is returned with
-    ``heading_aligned=False``; the scorer surfaces that flag per sample so a
-    scene scored against an oncoming or crossing reference lane can be told
-    apart from a genuine planner failure.
-
-    This does NOT disambiguate two parallel lanes: once the ego is past the
-    midpoint of a lane change already in progress, the lane it is moving INTO
-    is the nearest one, and nothing in the geometry says otherwise.
+    This does NOT disambiguate two parallel lanes: past the midpoint of a lane
+    change already in progress, the lane being entered is the nearest one.
     """
     point = point.reshape(1, 2)
     nearest = (float("inf"), -1)
     candidates: list[tuple[float, float, int]] = []  # (distance, ahead alignment, index)
     for index, centerline in centerlines.items():
         seg_p1, seg_p2 = _polyline_segments(centerline)
-        # One distance computation serves both the ranking and the tangent, so
-        # the segment whose heading is tested is always the one that made this
-        # lanelet the nearest. Segments are very uneven after resampling, and a
-        # separately-picked nearest segment (by midpoint, say) can be a
-        # different one with a different tangent.
+        # One distance computation for both the ranking and the tangent, so the
+        # segment whose heading is tested is the one that made this lanelet the
+        # nearest; resampled segments are uneven enough for a separately-picked
+        # one to have a different tangent.
         distances = _point_to_segments_dist(point, seg_p1, seg_p2)[0]
         distance = float(distances.min())
         segment = int(distances.argmin())
@@ -173,8 +148,7 @@ def _nearest_lane_index(
         if float(tangent[0] / tangent.norm()) < _MIN_SOURCE_HEADING_ALIGNMENT:
             continue
         ahead = centerline[-1] - seg_p1[segment]  # spans at least the nearest segment
-        # Clamped so a centerline whose last point revisits the nearest segment's
-        # start yields 0.0 rather than a NaN, which would win every comparison.
+        # Clamped: a zero `ahead` would give NaN, which wins every comparison.
         candidates.append(
             (distance, float(ahead[0] / ahead.norm().clamp_min(_SEGMENT_MIN_LENGTH)), index)
         )
@@ -208,36 +182,28 @@ def _build_source_lane_path(
     """Extend the source lanelet forward through its endpoint-chained successors.
 
     Two lanelets chain when the successor's first point coincides with the
-    current tail (that is how lanelet2 successor links survive into the NPZ,
-    which carries no explicit connectivity).  Where several successors chain --
-    a fork -- the one whose overall direction (last point minus first point)
-    best matches the current heading wins, so the reconstructed path follows
-    the ego's own lane rather than a turning branch.  The overall direction is
-    used, not the initial tangent: a turn lanelet leaves the fork tangent to
-    the straight one, so their first segments are indistinguishable and the
-    pick would come down to floating-point noise.
+    current tail -- that is how lanelet2 successor links survive into the NPZ,
+    which carries no explicit connectivity. At a fork the branch whose OVERALL
+    direction best matches the current heading wins, not the one whose initial
+    tangent does: a turn lanelet leaves the fork tangent to the straight one,
+    so their first segments are indistinguishable.
 
-    Chaining stops once the path reaches ``required_length_m`` AHEAD OF THE
-    EGO: lanelets are resampled to a fixed point count regardless of length,
-    so the ego often sits deep inside a long source lanelet, and measuring the
-    budget against the whole path (including what is behind the ego) would
-    stop chaining while the trajectories still run off the end.
+    The budget is measured AHEAD OF THE EGO. Lanelets are resampled to a fixed
+    point count regardless of length, so the ego often sits deep inside a long
+    source lanelet and counting the path behind it would stop chaining while
+    the trajectories still run off the end.
 
-    Returns the path and, for each of its points, the lanelet the point came
-    from, so a caller can read lane properties (width, say) at the station it
-    cares about instead of assuming the whole chain matches the first lanelet.
+    Returns the path and the lanelet each point came from.
     """
     path = centerlines[source_index]
     owners = torch.full((path.shape[0],), source_index, dtype=torch.long, device=path.device)
-    # The prefix behind the ego never changes as successors are appended, so it
-    # is measured once.
+    # The prefix behind the ego never changes as successors are appended.
     behind_ego = _arc_length_behind(path, reference_point.to(path))
 
     used = {source_index}
     while float((path[1:] - path[:-1]).norm(dim=-1).sum()) - behind_ego < required_length_m:
-        # The last NON-DEGENERATE segment: a centerline is admitted on having one
-        # usable segment, so its final two points may be a duplicate pair, and
-        # reading those directly would end the chain at the first such lanelet.
+        # The last NON-degenerate segment: a centerline may end in a duplicate
+        # pair, and reading `path[-1] - path[-2]` would end the chain there.
         tail_p1, tail_p2 = _polyline_segments(path)
         tail_direction = tail_p2[-1] - tail_p1[-1]
         tail_direction = tail_direction / tail_direction.norm()
