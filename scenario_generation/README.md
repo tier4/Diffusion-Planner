@@ -149,8 +149,7 @@ config) controls how the vehicle moves each step:
 | Mode | Description | Per-agent cost |
 |---|---|---|
 | `mpc` (**default**) | Bicycle-model MPC. numpy bicycle rollout + analytic reverse-mode gradient fed to scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). When the ego is idle and the model's 8 s plan has meaningful forward intent, MPC time-compresses the full plan into its 2 s horizon and seeds the warm start with a resume-from-rest accel so the ego launches instead of staying parked. | ~5 ms |
-| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. Same full-plan avg speed resume-from-rest push as MPC. | ~0.01 ms |
-| `teleport` | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. Useful only for bit-identical comparison with legacy `pred[0]` runs. | ~0 ms |
+| `perfect` | Perfect tracking: each step the vehicle lands exactly on the first predicted point, heading along the path (read over at least 0.5 m), never the model's heading output. No dynamics or limits: it drives exactly what the model plans. One implementation, `perfect_tracker.place_on_trajectory`, shared by every simulator. | ~0.01 ms |
 
 Both `perfect` and `mpc` modes apply C++-style post-processing to the
 reference trajectory before tracking: velocity moving average (window=8) and
@@ -166,7 +165,8 @@ Key files for trajectory tracking:
 
 | File | Role |
 |---|---|
-| `mpc_tracker.py` | `MPCTracker` (bicycle MPC), `PerfectTracker` (Euler follower), `postprocess_reference` |
+| `mpc_tracker.py` | `MPCTracker` (bicycle MPC), `postprocess_reference` |
+| `perfect_tracker.py` | `PerfectTracker`, `place_on_trajectory` (exact placement, heading from the path) |
 | `simulate.py` | `advance_scene` (teleport), `advance_scene_mpc` (MPC/perfect tracked advance) |
 
 Per-step PNG `step_NNNN.png` is written to `output_dir`. The simulation ends
@@ -325,7 +325,8 @@ Relevant modules:
 | `scenario_generation/replay.py` | `run_route_replay`, `SceneNPCManager`, `SpawnConfig`, CLI. `SpawnConfig.dump_npz_dir` writes per-step observation NPZs via `tensor_converter.dump_step_npz`; the replay viz draws road borders (red) as a separate layer on top of lane markings. |
 | `scenario_generation/tensor_converter.py` | `to_model_tensors` (normalised for inference) and `dump_step_npz` (un-normalised, training-NPZ shape) |
 | `scenario_generation/simulate.py` | `advance_scene`, `advance_scene_mpc`, model inference helpers |
-| `scenario_generation/mpc_tracker.py` | `MPCTracker`, `PerfectTracker`, `postprocess_reference` |
+| `scenario_generation/mpc_tracker.py` | `MPCTracker`, `postprocess_reference` |
+| `scenario_generation/perfect_tracker.py` | `PerfectTracker`, `place_on_trajectory` |
 | `scenario_generation/traffic_light.py` | `TrafficLightController` + signal group state machines |
 | `scenario_generation/configs/replay_default.json` | Reference `SpawnConfig` template — not loaded automatically, `--config` is required |
 | `rlvr/autoresearch/tools/select_from_metrics_log.py` | Reads `metrics_log.json` + NPZ dir, emits pre-trigger scene list for training |

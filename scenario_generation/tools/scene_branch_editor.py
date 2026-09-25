@@ -3283,8 +3283,8 @@ def build_interface(
 
             from copy import deepcopy
 
-            from scenario_generation.mpc_tracker import PerfectTracker
             from scenario_generation.npz_loader import from_npz as _from_npz
+            from scenario_generation.perfect_tracker import PerfectTracker
             from scenario_generation.simulate import (
                 _advance_agent,
                 _predict_batch,

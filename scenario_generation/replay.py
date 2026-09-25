@@ -15,7 +15,7 @@ High-level flow
      pass with all agents concatenated along the batch dim, no sequential
      per-agent calls).
    * Advance every agent one physical step via
-     :func:`scenario_generation.simulate.advance_scene`.
+     :func:`scenario_generation.simulate.advance_scene_mpc` (MPC or perfect tracking).
    * Periodically run the NPC spawn manager:
 
      - **Despawn** any neighbor farther than ``despawn_distance`` m from ego.
@@ -106,7 +106,6 @@ from scenario_generation.simulate import (
     _ego_to_world,
     _predict_batch,
     _save_and_close,
-    advance_scene,
     advance_scene_mpc,
     load_model,
     resolve_keep_turn_indicator,
@@ -213,7 +212,7 @@ class SpawnConfig:
     # distribution. 200 m yields ~62, matching the median.
     map_mask_range_m: float = 200.0
     # Savitzky-Golay smoothing applied to each agent's predicted
-    # trajectory before ``advance_scene`` uses its first step. Matches the
+    # trajectory before the tracker uses it. Matches the
     # defaults from ``rlvr.grpo_sft_trainer._smooth_trajectory`` (ranked
     # SFT uses the same smoother on generated trajectories before the SFT
     # loss). Set ``sg_smooth_enabled=False`` to disable (e.g. for A/B
@@ -226,11 +225,9 @@ class SpawnConfig:
     #                 (default; numpy bicycle rollout + analytic gradient
     #                 via scipy L-BFGS-B; respects kinematic bounds on
     #                 accel / steering / speed)
-    #   "perfect"   — Euler integration with velocity from reference
-    #                 (matches Autoware autoware_perfect_tracker)
-    #   "teleport"  — original behaviour, snap to pred[0] each step
-    #                 (no physics; use only when comparing against
-    #                 legacy pred[0]-based runs)
+    #   "perfect"   — perfect tracking: the vehicle lands exactly on the
+    #                 predicted first point each step, heading along the
+    #                 path (perfect_tracker.place_on_trajectory)
     advance_mode: str = "mpc"
     mpc_horizon_steps: int = 20
     mpc_n_knots: int = 5
@@ -2661,7 +2658,10 @@ def run_route_replay(
     clearance_records: list[dict] = []
 
     # Tracker state (lazy-init per agent inside advance_scene_mpc).
-    _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
+    if spawn_config.advance_mode not in ("mpc", "perfect"):
+        raise ValueError(
+            f"advance_mode must be 'mpc' or 'perfect', got {spawn_config.advance_mode!r}"
+        )
     mpc_trackers: dict = {}
     # Per-agent turn-indicator hold state: {agent_id: (held_cls, steps_remaining)}.
     # When ``turn_indicator_hold_steps > 0``, a non-KEEP / non-NONE class
@@ -2669,15 +2669,14 @@ def run_route_replay(
     # model outputs are ignored during the hold window. Empty when hold
     # is disabled (turn_indicator_hold_steps == 0).
     turn_hold_state: dict[str, tuple[int, int]] = {}
-    if _use_tracker:
-        print(
-            f"  Advance mode: {spawn_config.advance_mode}"
-            + (
-                f" (horizon={spawn_config.mpc_horizon_steps}, knots={spawn_config.mpc_n_knots})"
-                if spawn_config.advance_mode == "mpc"
-                else ""
-            )
+    print(
+        f"  Advance mode: {spawn_config.advance_mode}"
+        + (
+            f" (horizon={spawn_config.mpc_horizon_steps}, knots={spawn_config.mpc_n_knots})"
+            if spawn_config.advance_mode == "mpc"
+            else ""
         )
+    )
 
     # --- Main loop. ---
     # save_step_figure builds its figure in Python, which the GIL serialises across threads, so
@@ -2709,10 +2708,9 @@ def run_route_replay(
                 if after > before:
                     n_npc_spawned += after - before
                 # Prune trackers for despawned agents.
-                if _use_tracker:
-                    alive_ids = {a.id for a in scene.agents}
-                    for stale_id in list(mpc_trackers.keys() - alive_ids):
-                        del mpc_trackers[stale_id]
+                alive_ids = {a.id for a in scene.agents}
+                for stale_id in list(mpc_trackers.keys() - alive_ids):
+                    del mpc_trackers[stale_id]
 
             # Refresh map_data + ego.route_lanes. Mirrors the C++ Autoware
             # planner, which rebuilds these every inference frame. We
@@ -3095,18 +3093,15 @@ def run_route_replay(
                 )
                 break
 
-            if spawn_config.advance_mode in ("mpc", "perfect"):
-                advance_scene_mpc(
-                    scene,
-                    agent_predictions,
-                    mpc_trackers,
-                    tracker_type=spawn_config.advance_mode,
-                    mpc_horizon_steps=spawn_config.mpc_horizon_steps,
-                    mpc_n_knots=spawn_config.mpc_n_knots,
-                    ego_max_steer=spawn_config.ego_max_steer,
-                )
-            else:
-                advance_scene(scene, agent_predictions)
+            advance_scene_mpc(
+                scene,
+                agent_predictions,
+                mpc_trackers,
+                tracker_type=spawn_config.advance_mode,
+                mpc_horizon_steps=spawn_config.mpc_horizon_steps,
+                mpc_n_knots=spawn_config.mpc_n_knots,
+                ego_max_steer=spawn_config.ego_max_steer,
+            )
 
             # Increment age for all agents so the tensor converter knows
             # how many history frames are "real" vs pre-spawn fabrication.
