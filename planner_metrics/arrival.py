@@ -8,10 +8,8 @@ from planner_metrics.evaluation import MetricEvaluation
 
 _DEFAULT_POSITION_TOLERANCE_M = 2.0
 _DEFAULT_HEADING_TOLERANCE_DEG = 10.0
-# Padding is an all-zero row, which is what the producers write; a real pose
-# parked at the ego origin still carries a heading (cos=1 in the 4-column
-# layout, or a non-zero yaw in the 3-column one), so testing every column
-# separates the two wherever the data allows it at all.
+# Tested over the whole row, not just xy: padding is all-zero, while a pose
+# parked at the ego origin still carries a heading.
 _GT_ROW_MIN_NORM = 1e-6
 
 
@@ -21,25 +19,16 @@ def _prepare_inputs(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Validate arrival inputs and return prediction, GT, and the arrival index.
 
-    The layouts are accepted as exactly 3 or exactly 4 columns, never "at least
-    3": the third column means ``heading`` in one layout and ``cos(yaw)`` in the
-    other, so a wider tensor cannot be told apart and would silently be read as
-    ``atan2(extra_column, heading)``.
+    Exactly 3 or exactly 4 columns, never "at least 3": the third column is
+    ``heading`` in one layout and ``cos(yaw)`` in the other, so a wider tensor
+    would be read as ``atan2(extra_column, heading)``.
 
-    Both tensors are truncated to their common length, so a checkpoint whose
-    ``future_len`` differs from the NPZ's GT horizon compares the two at the
-    same instant instead of scoring t=8.0 s against t=9.0 s.
-
-    The arrival index is the last step where the GT is a real recorded pose, per
-    sample. A GT future can be zero-padded at the tail when the recording ran
-    out (``scenario_generation/reproducer_rollout.py`` fills a zeros array and
-    breaks), and an all-zero row in the ego frame IS the ego's own t=0 pose --
-    so taking ``[:, -1]`` unconditionally would measure the prediction against
-    the origin and report roughly its total travel as the error. Index 0 is
-    always treated as real: the ego-frame GT legitimately starts at the origin.
-
-    The one case this cannot separate is a 3-column GT parked at the origin
-    with a yaw of exactly 0, which is byte-identical to padding.
+    The arrival index is the GT's last recorded step, which is not its last
+    stored step -- a future is zero-padded when the recording runs out, and an
+    all-zero row in the ego frame is the ego's own t=0 pose, so ``[:, -1]``
+    would measure against the origin. Index 0 is always real. A 3-column GT
+    parked at the origin with yaw 0 is byte-identical to padding and cannot be
+    told apart.
     """
     if ego_trajs.ndim != 3 or ego_trajs.shape[-1] not in (3, 4):
         raise ValueError(
