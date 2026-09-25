@@ -212,6 +212,12 @@ def run_validation(valid_cfg: ValidConfig):
             summary_path = output_root / "scenario_based_open_loop" / "summary.json"
             scenario_open_loop_args = SimpleNamespace(
                 scenario_based_open_loop_list=valid_cfg.scenario_based_open_loop_list,
+                scenario_arrival_position_tolerance_m=getattr(
+                    config_obj, "scenario_arrival_position_tolerance_m", 2.0
+                ),
+                scenario_arrival_heading_tolerance_deg=getattr(
+                    config_obj, "scenario_arrival_heading_tolerance_deg", 10.0
+                ),
                 scenario_centerline_horizon_seconds=getattr(
                     config_obj, "scenario_centerline_horizon_seconds", 8.0
                 ),
@@ -253,6 +259,15 @@ def run_validation(valid_cfg: ValidConfig):
                 ),
                 scenario_traffic_light_stop_tolerance_m=getattr(
                     config_obj, "scenario_traffic_light_stop_tolerance_m", 0.5
+                ),
+                scenario_lane_change_horizon_seconds=getattr(
+                    config_obj, "scenario_lane_change_horizon_seconds", 8.0
+                ),
+                scenario_lane_change_minimum_lateral_shift_m=getattr(
+                    config_obj, "scenario_lane_change_minimum_lateral_shift_m", 1.0
+                ),
+                scenario_lane_change_chain_tolerance_m=getattr(
+                    config_obj, "scenario_lane_change_chain_tolerance_m", 1.0
                 ),
                 batch_size=valid_cfg.batch_size,
                 num_workers=valid_cfg.num_workers,

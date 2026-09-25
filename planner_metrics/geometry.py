@@ -725,28 +725,48 @@ def _point_to_segments_min_dist(
     return torch.cat(results)
 
 
-def _point_to_segments_error_components(
+def _point_to_segments_nearest_components(
     points: torch.Tensor,
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return lateral and beyond-segment longitudinal errors per point.
+    """Return signed lateral and beyond-segment longitudinal offsets per point.
 
     The nearest segment is selected using the usual clamped point-to-segment
-    distance.  Once selected, lateral error is measured against the infinite
-    supporting line, rather than against a clamped endpoint.  This prevents a
-    point beyond a centerline endpoint from turning longitudinal overshoot into
-    lateral error.  Longitudinal error is the distance beyond the selected
-    segment's endpoint; it is zero while the perpendicular projection lies
-    inside the segment.
+    distance.  Once selected, the lateral offset is measured against the
+    infinite supporting line, rather than against a clamped endpoint.  This
+    prevents a point beyond a centerline endpoint from turning longitudinal
+    overshoot into lateral error, and keeps the offset meaningful as a
+    lane-relative lateral coordinate for points that overshoot the reference
+    path.  The lateral offset is positive when the point lies to the LEFT of
+    the nearest segment's direction, negative to the right.  Longitudinal
+    offset is the distance beyond the selected segment's endpoint; it is zero
+    while the perpendicular projection lies inside the segment.
+
+    Two caller obligations follow from measuring against a supporting line.
+    Zero-length segments must be filtered out first: theirs is undefined, and
+    they report a lateral offset of 0 ("on the line") for any point while tying
+    the clamped distance of the real segment they share a vertex with.  And the
+    reference path should be sampled finely enough that consecutive segments do
+    not meet at a sharp kink: a point past a vertex is measured against one
+    segment's line alone, which understates the offset by ~11% at a 20 deg kink
+    and ~39% at 45 deg.  Lane polylines at metre spacing stay well inside that.
+
+    Args:
+        points: (Q, 2)
+        seg_p1, seg_p2: (E, 2)
 
     Returns:
-        ``(lateral_error, longitudinal_error)`` with shape ``(Q,)``.
+        ``(signed_lateral, longitudinal)`` with shape ``(Q,)``.
     """
     Q = points.shape[0]
     E = seg_p1.shape[0]
     if E == 0:
         raise ValueError("at least one segment is required")
+
+    seg = seg_p2 - seg_p1
+    seg_len2 = (seg**2).sum(-1).clamp(min=1e-10)
+    seg_len = seg_len2.sqrt()
 
     _MAX_QE = 10_000_000
     chunk_size = max(1, _MAX_QE // E)
@@ -756,15 +776,11 @@ def _point_to_segments_error_components(
     for start in range(0, Q, chunk_size):
         end = min(start + chunk_size, Q)
         chunk = points[start:end]
-        seg = seg_p2 - seg_p1
-        seg_len2 = (seg**2).sum(-1).clamp(min=1e-10)
-        seg_len = seg_len2.sqrt()
         diff = chunk[:, None, :] - seg_p1[None, :, :]
         t_raw = (diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]
         t = t_raw.clamp(0, 1)
         closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
-        distances = (chunk[:, None, :] - closest).norm(dim=-1)
-        nearest = distances.argmin(dim=1)
+        nearest = (chunk[:, None, :] - closest).norm(dim=-1).argmin(dim=1)
         rows = torch.arange(chunk.shape[0], device=chunk.device)
 
         nearest_seg = seg[nearest]
@@ -772,10 +788,44 @@ def _point_to_segments_error_components(
         nearest_diff = diff[rows, nearest]
         nearest_t_raw = t_raw[rows, nearest]
         cross = nearest_seg[:, 0] * nearest_diff[:, 1] - nearest_seg[:, 1] * nearest_diff[:, 0]
-        lateral_results.append(cross.abs() / nearest_len)
+        lateral_results.append(cross / nearest_len)
         longitudinal_results.append((nearest_t_raw - nearest_t_raw.clamp(0, 1)).abs() * nearest_len)
 
     return torch.cat(lateral_results), torch.cat(longitudinal_results)
+
+
+def _point_to_segments_error_components(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unsigned lateral and beyond-segment longitudinal errors per point.
+
+    See :func:`_point_to_segments_nearest_components` for how the nearest
+    segment is chosen and measured.
+
+    Returns:
+        ``(lateral_error, longitudinal_error)`` with shape ``(Q,)``.
+    """
+    lateral, longitudinal = _point_to_segments_nearest_components(points, seg_p1, seg_p2)
+    return lateral.abs(), longitudinal
+
+
+def _point_to_segments_signed_lateral(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> torch.Tensor:
+    """Return the signed lateral offset from each point to its nearest segment.
+
+    Positive when the point lies to the LEFT of the nearest segment's
+    direction, negative to the right; see
+    :func:`_point_to_segments_nearest_components`.
+
+    Returns:
+        signed_lateral: (Q,)
+    """
+    return _point_to_segments_nearest_components(points, seg_p1, seg_p2)[0]
 
 
 def _points_inside_intersection_areas(
@@ -1065,6 +1115,7 @@ __all__ = [
     "_point_to_segments_min_dist",
     "_points_inside_intersection_areas",
     "_point_to_segments_signed_min_dist",
+    "_point_to_segments_signed_lateral",
     "_classify_outer_boundaries",
     "build_road_border_segments",
     "point_inside_any_lane_polygon",
