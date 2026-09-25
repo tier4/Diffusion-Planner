@@ -31,6 +31,32 @@ def _straight_lane(
     return lane
 
 
+def _bent_lane(start_x: float, bend: float, length: float) -> torch.Tensor:
+    """A lanelet leaving ``(start_x, 0)`` at ``bend`` radians, boundaries perpendicular."""
+    lane = torch.zeros(20, 13)
+    distance = torch.linspace(0.0, length, 20)
+    cos, sin = math.cos(bend), math.sin(bend)
+    lane[:, 0] = start_x + distance * cos
+    lane[:, 1] = distance * sin
+    lane[:, 2] = (distance[1] - distance[0]) * cos
+    lane[:, 3] = (distance[1] - distance[0]) * sin
+    lane[:, 4], lane[:, 5] = -_HALF_WIDTH * sin, _HALF_WIDTH * cos
+    lane[:, 6], lane[:, 7] = _HALF_WIDTH * sin, -_HALF_WIDTH * cos
+    return lane
+
+
+def _gt_along(centers: torch.Tensor, bend: float) -> torch.Tensor:
+    """A GT that follows ``centers`` while ramping one lane width to its left."""
+    walk = torch.linspace(0.0, centers.shape[0] - 1.0, _STEPS)
+    low = walk.floor().long().clamp(max=centers.shape[0] - 2)
+    frac = (walk - low).unsqueeze(-1)
+    normal = torch.tensor([-math.sin(bend), math.cos(bend)])
+    gt = torch.zeros(1, _STEPS, 4)
+    gt[0, :, :2] = centers[low] * (1 - frac) + centers[low + 1] * frac
+    gt[0, :, :2] += torch.linspace(0.0, _LANE_WIDTH, _STEPS).unsqueeze(-1) * normal
+    return gt
+
+
 def _turn_lane(
     start_x: float, start_y: float, radius: float = 15.0, lead_in: float = 2.0
 ) -> torch.Tensor:
@@ -156,30 +182,9 @@ def test_lane_change_follows_the_source_lane_through_chained_lanelets():
     """The lateral reference must bend with the lane, not with the first lanelet."""
     bend = math.radians(30.0)
     straight = _straight_lane(0.0, x_start=0.0, x_end=30.0)
-
-    bent = torch.zeros(20, 13)
-    distance = torch.linspace(0.0, 70.0, 20)
-    bent[:, 0] = 30.0 + distance * math.cos(bend)
-    bent[:, 1] = distance * math.sin(bend)
-    bent[:, 2] = (distance[1] - distance[0]) * math.cos(bend)
-    bent[:, 3] = (distance[1] - distance[0]) * math.sin(bend)
-    # Boundary offsets are perpendicular to the bent tangent.
-    bent[:, 4] = -_HALF_WIDTH * math.sin(bend)
-    bent[:, 5] = _HALF_WIDTH * math.cos(bend)
-    bent[:, 6] = _HALF_WIDTH * math.sin(bend)
-    bent[:, 7] = -_HALF_WIDTH * math.cos(bend)
-
+    bent = _bent_lane(start_x=30.0, bend=bend, length=70.0)
     lanes = torch.stack([straight, bent])
-    normal = torch.tensor([-math.sin(bend), math.cos(bend)])
-
-    # GT drives the chained lane and ends one lane width to its left.
-    gt = torch.zeros(1, _STEPS, 4)
-    centers = torch.cat([straight[:, :2], bent[1:, :2]], dim=0)
-    walk = torch.linspace(0.0, centers.shape[0] - 1.0, _STEPS)
-    low = walk.floor().long().clamp(max=centers.shape[0] - 2)
-    frac = (walk - low).unsqueeze(-1)
-    gt[0, :, :2] = centers[low] * (1 - frac) + centers[low + 1] * frac
-    gt[0, :, :2] += torch.linspace(0.0, _LANE_WIDTH, _STEPS).unsqueeze(-1) * normal
+    gt = _gt_along(torch.cat([straight[:, :2], bent[1:, :2]], dim=0), bend)
 
     result = _evaluate(gt.clone(), gt, lanes=lanes)
 
@@ -269,28 +274,12 @@ def test_source_lane_path_chains_when_the_ego_starts_deep_inside_a_long_lanelet(
     bend = math.radians(30.0)
     # A 160 m source lanelet with the ego 150 m in, so only 10 m lies ahead of it.
     behind = _straight_lane(0.0, x_start=-150.0, x_end=10.0)
-    ahead = torch.zeros(20, 13)
-    distance = torch.linspace(0.0, 120.0, 20)
-    ahead[:, 0] = 10.0 + distance * math.cos(bend)
-    ahead[:, 1] = distance * math.sin(bend)
-    ahead[:, 2] = (distance[1] - distance[0]) * math.cos(bend)
-    ahead[:, 3] = (distance[1] - distance[0]) * math.sin(bend)
-    ahead[:, 4] = -_HALF_WIDTH * math.sin(bend)
-    ahead[:, 5] = _HALF_WIDTH * math.cos(bend)
-    ahead[:, 6] = _HALF_WIDTH * math.sin(bend)
-    ahead[:, 7] = -_HALF_WIDTH * math.cos(bend)
+    ahead = _bent_lane(start_x=10.0, bend=bend, length=120.0)
     lanes = torch.stack([behind, ahead])
 
     # The GT starts at the ego (the origin), not at the far end of the lanelet.
     forward = behind[behind[:, 0] > 0.0][:, :2]
-    centers = torch.cat([torch.zeros(1, 2), forward, ahead[1:, :2]], dim=0)
-    normal = torch.tensor([-math.sin(bend), math.cos(bend)])
-    walk = torch.linspace(0.0, centers.shape[0] - 1.0, _STEPS)
-    low = walk.floor().long().clamp(max=centers.shape[0] - 2)
-    frac = (walk - low).unsqueeze(-1)
-    gt = torch.zeros(1, _STEPS, 4)
-    gt[0, :, :2] = centers[low] * (1 - frac) + centers[low + 1] * frac
-    gt[0, :, :2] += torch.linspace(0.0, _LANE_WIDTH, _STEPS).unsqueeze(-1) * normal
+    gt = _gt_along(torch.cat([torch.zeros(1, 2), forward, ahead[1:, :2]], dim=0), bend)
 
     result = _evaluate(gt.clone(), gt, lanes=lanes)
 
