@@ -164,10 +164,21 @@ def closed_loop_validate(model, args: TrainConfig, epoch: int, out_dir: str) -> 
         net.train(was_training)
 
 
+def scenario_sim_due(args, save_epoch: bool, final_epoch: bool) -> bool:
+    """Whether this epoch's checkpoint is evaluated against the OpenSCENARIO suite."""
+    if not args.scenario_sim_driver:
+        return False
+    if args.scenario_sim_timing == "final":
+        return final_epoch
+    if args.scenario_sim_timing == "both":
+        return save_epoch or final_epoch
+    return save_epoch
+
+
 def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> None:
     """Evaluate a just-saved checkpoint against the OpenSCENARIO suite, out of process.
 
-    Rank 0 only, on the checkpoint-save cadence. The other ranks wait at the next epoch's
+    Rank 0 only, at the epochs ``scenario_sim_due`` selects. The other ranks wait at the next epoch's
     ``torch.distributed.barrier()``, which inherits the process group's timeout.
 
     The driver fans out one process per scenario, which is the configuration the suite's
@@ -614,7 +625,9 @@ def model_training(args: TrainConfig):
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1 - init_epoch) % save_utd == 0:
+            save_epoch = (epoch + 1 - init_epoch) % save_utd == 0
+            run_scenario_sim = scenario_sim_due(args, save_epoch, epoch + 1 == train_epochs)
+            if save_epoch or run_scenario_sim:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
@@ -633,12 +646,13 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                scenario_sim_validate(
-                    args,
-                    epoch,
-                    f"{curr_dir}/best_model.pth",
-                    os.path.join(curr_dir, "scenario_sim"),
-                )
+                if run_scenario_sim:
+                    scenario_sim_validate(
+                        args,
+                        epoch,
+                        f"{curr_dir}/best_model.pth",
+                        os.path.join(curr_dir, "scenario_sim"),
+                    )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")

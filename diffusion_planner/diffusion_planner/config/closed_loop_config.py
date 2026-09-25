@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -213,6 +213,11 @@ class ClosedLoopConfig:
         "every other knob is its own environment's.",
         default="",
         path=True,
+    )
+    scenario_sim_timing: Literal["save_utd", "final", "both"] = cli(
+        "when scenario_sim_driver runs: 'save_utd' on every checkpoint save, 'final' after "
+        "the last epoch, 'both' at either. The last epoch is saved off-cadence to be evaluated.",
+        default="save_utd",
     )
 
     # Per-group pass conditions

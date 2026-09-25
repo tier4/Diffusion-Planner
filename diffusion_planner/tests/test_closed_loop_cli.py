@@ -49,6 +49,7 @@ def test_build_parser_required_and_defaults(tmp_path: Path):
     assert args.use_wandb is True
     assert args.closed_loop_draw_workers == 4
     assert args.scenario_sim_driver == ""
+    assert args.scenario_sim_timing == "save_utd"
     assert args.scenario_based_open_loop_list == ""
     assert args.scenario_based_open_loop_only is False
     assert args.batch_size == 512
@@ -135,6 +136,26 @@ def test_scenario_sim_validate_hook(tmp_path: Path, monkeypatch):
     assert cmd == ["bash", "/opt/run_suite.sh"]
     assert env["CKPT"] == "/path/ckpt.pth"
     assert env["OUT"] == "/path/out"
+
+
+def test_scenario_sim_due():
+    from types import SimpleNamespace
+
+    from diffusion_planner.train import scenario_sim_due
+
+    per_save = SimpleNamespace(
+        scenario_sim_driver="/opt/run_suite.sh", scenario_sim_timing="save_utd"
+    )
+    final = SimpleNamespace(scenario_sim_driver="/opt/run_suite.sh", scenario_sim_timing="final")
+    both = SimpleNamespace(scenario_sim_driver="/opt/run_suite.sh", scenario_sim_timing="both")
+    disabled = SimpleNamespace(scenario_sim_driver="", scenario_sim_timing="final")
+
+    for save_epoch in (False, True):
+        for final_epoch in (False, True):
+            assert scenario_sim_due(per_save, save_epoch, final_epoch) is save_epoch
+            assert scenario_sim_due(final, save_epoch, final_epoch) is final_epoch
+            assert scenario_sim_due(both, save_epoch, final_epoch) is (save_epoch or final_epoch)
+            assert scenario_sim_due(disabled, save_epoch, final_epoch) is False
 
 
 def test_build_config(tmp_path: Path):
