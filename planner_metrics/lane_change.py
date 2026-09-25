@@ -25,203 +25,20 @@ from __future__ import annotations
 import torch
 
 from planner_metrics.evaluation import MetricEvaluation
-from planner_metrics.geometry import (
-    _point_to_segments_dist,
-    _point_to_segments_signed_lateral,
-)
+from planner_metrics.geometry import _point_to_segments_signed_lateral
 from planner_metrics.horizon import resolve_horizon_steps
 from planner_metrics.lane_tensor import resolve_lane_tensor
+from planner_metrics.source_lane import reconstruct_source_lane
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
-_LANE_POINT_MIN_NORM = 1e-6
 _SEGMENT_MIN_LENGTH = 1e-6
 # Chain far enough past the trajectories that their endpoints still project
 # onto a real segment instead of the path's extrapolated tail.
 _SOURCE_PATH_MARGIN_M = 20.0
 
-# A lanelet only qualifies as the ego's own lane when its tangent at the ego is
-# within ~37 deg of the ego heading; a crossing road's turn lanelet that passes
-# through the ego position is steeper than that.
-_MIN_SOURCE_HEADING_ALIGNMENT = 0.8
-# Lanelets whose centerline distance from the ego differs by less than this are
-# a tie (typically two branches of a fork starting at the same point).
-_SOURCE_DISTANCE_TIE_M = 0.1
-
 _DEFAULT_HORIZON_SECONDS = 8.0
 _DEFAULT_MINIMUM_LATERAL_SHIFT_M = 1.0
 _DEFAULT_CHAIN_TOLERANCE_M = 1.0
-
-
-def _valid_point_mask(lane: torch.Tensor) -> torch.Tensor:
-    """Return which of a lanelet's ``(P, D)`` rows are real points, not padding."""
-    return lane[:, :4].abs().sum(dim=-1) > _LANE_POINT_MIN_NORM
-
-
-def _polyline_segments(polyline: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return a polyline's non-degenerate segments as ``(p1, p2)``."""
-    p1, p2 = polyline[:-1], polyline[1:]
-    keep = (p2 - p1).norm(dim=-1) > _SEGMENT_MIN_LENGTH
-    return p1[keep], p2[keep]
-
-
-def _scene_centerlines(lanes: torch.Tensor) -> dict[int, torch.Tensor]:
-    """Return each usable lanelet's centerline ``(K, 2)``, keyed by lanelet index.
-
-    Padded-out lanelets and those without a single real segment are dropped
-    here, once per scene, so the lane search below never has to guard for them.
-    """
-    centerlines = {}
-    for index in range(lanes.shape[0]):
-        centerline = lanes[index][_valid_point_mask(lanes[index])][:, :2]
-        if centerline.shape[0] >= 2 and _polyline_segments(centerline)[0].shape[0] > 0:
-            centerlines[index] = centerline
-    if not centerlines:
-        raise ValueError("lane_change metric found no usable lanelet centerline")
-    return centerlines
-
-
-def _lane_half_widths(lane: torch.Tensor) -> tuple[float, float]:
-    """Return the lanelet's ``(left, right)`` half width in meters.
-
-    The lane tensor stores each boundary as an offset from the centerline
-    point, so the half width is that offset's length.  The median over the
-    lanelet's points keeps a single malformed boundary point from distorting
-    the threshold.
-    """
-    points = lane[_valid_point_mask(lane)]
-    return (
-        float(points[:, 4:6].norm(dim=-1).median()),
-        float(points[:, 6:8].norm(dim=-1).median()),
-    )
-
-
-def _nearest_lane_index(
-    point: torch.Tensor, centerlines: dict[int, torch.Tensor]
-) -> tuple[int, bool]:
-    """Return ``(index, heading_aligned)`` for the lanelet the ego is travelling on at ``point``.
-
-    Candidates are first filtered by heading: the centerline tangent nearest
-    the ego must be within ``_MIN_SOURCE_HEADING_ALIGNMENT`` of the ego heading
-    (the ego frame puts the ego at the origin heading +x, so that is simply the
-    tangent's x-component).  This rejects oncoming and crossing lanelets, and
-    also a crossing road's turn lanelet that sweeps through the ego position at
-    45-70 deg -- common at an intersection, and closer to the ego than its own
-    lane's centerline often enough to matter.
-
-    Among the aligned candidates the nearest centerline wins.  Distances within
-    ``_SOURCE_DISTANCE_TIE_M`` of the minimum are a tie -- at a fork the
-    straight and turning branches start at the same point -- and the tie goes
-    to the lanelet whose remaining run (from the ego to its end) points most
-    along the ego heading, i.e. the straight branch.
-
-    When no lanelet passes the heading filter the nearest one is returned with
-    ``heading_aligned=False``; the scorer surfaces that flag per sample so a
-    scene scored against an oncoming or crossing reference lane can be told
-    apart from a genuine planner failure.
-
-    This does NOT disambiguate two parallel lanes: once the ego is past the
-    midpoint of a change already in progress, the lane it is moving INTO is the
-    nearest one. Such a scene is reported as a failed precondition by the
-    scorer rather than mis-scored — see ``evaluate_lane_change_with_details``.
-    """
-    point = point.reshape(1, 2)
-    nearest = (float("inf"), -1)
-    candidates: list[tuple[float, float, int]] = []  # (distance, ahead alignment, index)
-    for index, centerline in centerlines.items():
-        seg_p1, seg_p2 = _polyline_segments(centerline)
-        # One distance computation serves both the ranking and the tangent, so
-        # the segment whose heading is tested is always the one that made this
-        # lanelet the nearest. Segments are very uneven after resampling, and a
-        # separately-picked nearest segment (by midpoint, say) can be a
-        # different one with a different tangent.
-        distances = _point_to_segments_dist(point, seg_p1, seg_p2)[0]
-        distance = float(distances.min())
-        segment = int(distances.argmin())
-        nearest = min(nearest, (distance, index))
-        tangent = seg_p2[segment] - seg_p1[segment]
-        if float(tangent[0] / tangent.norm()) < _MIN_SOURCE_HEADING_ALIGNMENT:
-            continue
-        ahead = centerline[-1] - seg_p1[segment]  # spans at least the nearest segment
-        candidates.append((distance, float(ahead[0] / ahead.norm()), index))
-
-    if not candidates:
-        return nearest[1], False
-    nearest_distance = min(distance for distance, _, _ in candidates)
-    tied = [c for c in candidates if c[0] <= nearest_distance + _SOURCE_DISTANCE_TIE_M]
-    return max(tied, key=lambda c: c[1])[2], True
-
-
-def _arc_length_behind(path: torch.Tensor, point: torch.Tensor) -> float:
-    """Return the path's arc length that lies behind ``point``'s projection."""
-    seg_p1, seg_p2 = _polyline_segments(path)
-    segment = seg_p2 - seg_p1
-    lengths = segment.norm(dim=-1)
-    offset = point.reshape(1, 2) - seg_p1
-    t = ((offset * segment).sum(-1) / (lengths**2)).clamp(0, 1)
-    closest = seg_p1 + t.unsqueeze(-1) * segment
-    nearest = int((point.reshape(1, 2) - closest).norm(dim=-1).argmin())
-    return float(lengths[:nearest].sum() + t[nearest] * lengths[nearest])
-
-
-def _build_source_lane_path(
-    centerlines: dict[int, torch.Tensor],
-    source_index: int,
-    required_length_m: float,
-    chain_tolerance_m: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Extend the source lanelet forward through its endpoint-chained successors.
-
-    Two lanelets chain when the successor's first point coincides with the
-    current tail (that is how lanelet2 successor links survive into the NPZ,
-    which carries no explicit connectivity).  Where several successors chain --
-    a fork -- the one whose overall direction (last point minus first point)
-    best matches the current heading wins, so the reconstructed path follows
-    the ego's own lane rather than a turning branch.  The overall direction is
-    used, not the initial tangent: a turn lanelet leaves the fork tangent to
-    the straight one, so their first segments are indistinguishable and the
-    pick would come down to floating-point noise.
-
-    Chaining stops once the path reaches ``required_length_m`` AHEAD OF THE
-    EGO: lanelets are resampled to a fixed point count regardless of length,
-    so the ego often sits deep inside a long source lanelet, and measuring the
-    budget against the whole path (including what is behind the ego) would
-    stop chaining while the trajectories still run off the end.
-
-    Returns the path and, for each of its points, the lanelet the point came
-    from, so a caller can read lane properties (width, say) at the station it
-    cares about instead of assuming the whole chain matches the first lanelet.
-    """
-    path = centerlines[source_index]
-    owners = torch.full((path.shape[0],), source_index, dtype=torch.long)
-    # The ego is at the origin in the scene frame; the prefix behind it never
-    # changes as successors are appended, so it is measured once.
-    behind_ego = _arc_length_behind(path, torch.zeros(2, device=path.device, dtype=path.dtype))
-
-    used = {source_index}
-    while float((path[1:] - path[:-1]).norm(dim=-1).sum()) - behind_ego < required_length_m:
-        tail_direction = path[-1] - path[-2]
-        if float(tail_direction.norm()) <= _SEGMENT_MIN_LENGTH:
-            break
-        tail_direction = tail_direction / tail_direction.norm()
-
-        best_index, best_alignment = -1, 0.0
-        for index, centerline in centerlines.items():
-            if index in used or float((centerline[0] - path[-1]).norm()) > chain_tolerance_m:
-                continue
-            overall = centerline[-1] - centerline[0]
-            alignment = float(tail_direction @ overall) / max(
-                float(overall.norm()), _SEGMENT_MIN_LENGTH
-            )
-            if alignment > best_alignment:
-                best_alignment, best_index = alignment, index
-        if best_index < 0:
-            break
-        used.add(best_index)
-        appended = centerlines[best_index][1:]
-        path = torch.cat([path, appended], dim=0)
-        owners = torch.cat([owners, torch.full((appended.shape[0],), best_index, dtype=torch.long)])
-
-    return path, owners
 
 
 def _resolve_gt_future(ego_trajs: torch.Tensor, data: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -303,23 +120,18 @@ def compute_lane_change_components_batch(
         gt_xy = gt_future[index, :horizon_steps, :2]
 
         # The scene is in the ego frame at t=0, so the ego starts at the origin.
-        centerlines = _scene_centerlines(scene_lanes)
-        source_index, heading_aligned = _nearest_lane_index(torch.zeros(2), centerlines)
         required_length = (
             float(torch.cat([predicted_xy, gt_xy], dim=0).norm(dim=-1).max())
             + _SOURCE_PATH_MARGIN_M
         )
-        path, owners = _build_source_lane_path(
-            centerlines, source_index, required_length, chain_tolerance_m
+        source = reconstruct_source_lane(
+            scene_lanes, torch.zeros(2), required_length, chain_tolerance_m
         )
-        seg_p1, seg_p2 = _polyline_segments(path.to(ego_trajs.device))
+        seg_p1, seg_p2 = source.segments(ego_trajs.device)
         # The half width is the tolerance every threshold is built from, so it
-        # is read where the scorer decides -- at the GT's final position, the
-        # same station its lateral offset is measured against. The chain can
-        # run through a taper or a merge, so the first lanelet's width is not
-        # necessarily the width there.
-        station = int((path - gt_xy[-1].to(path)).norm(dim=-1).argmin())
-        left, right = _lane_half_widths(scene_lanes[int(owners[station])])
+        # is read where the scorer decides: at the GT's final position, the same
+        # station its lateral offset is measured against.
+        left, right = source.half_widths_at(scene_lanes, gt_xy[-1])
 
         offsets["predicted_lateral_offset_m"].append(
             _point_to_segments_signed_lateral(predicted_xy, seg_p1, seg_p2)
@@ -329,8 +141,8 @@ def compute_lane_change_components_batch(
         )
         offsets["lane_half_width_left_m"].append(left)
         offsets["lane_half_width_right_m"].append(right)
-        offsets["source_lane_index"].append(float(source_index))
-        offsets["source_lane_heading_aligned"].append(float(heading_aligned))
+        offsets["source_lane_index"].append(float(source.index))
+        offsets["source_lane_heading_aligned"].append(float(source.heading_aligned))
 
     return {
         key: torch.stack(values, dim=0)
@@ -381,6 +193,8 @@ def evaluate_lane_change_with_details(
         parameters.get("minimum_lateral_shift_m", _DEFAULT_MINIMUM_LATERAL_SHIFT_M)
     )
     chain_tolerance_m = float(parameters.get("chain_tolerance_m", _DEFAULT_CHAIN_TOLERANCE_M))
+    if minimum_lateral_shift_m <= 0:
+        raise ValueError("lane_change minimum_lateral_shift_m must be positive")
 
     gt_future = _resolve_gt_future(ego_trajs, data)
     steps = resolve_horizon_steps(
@@ -415,10 +229,19 @@ def evaluate_lane_change_with_details(
     # lane must be a lane the ego is actually travelling on -- the fallback to
     # an oncoming or crossing lanelet reverses the lateral reference, which
     # flips `direction` and would let a mirrored reading score as a success --
-    # and the recorded ego must itself have left that lane, or there is no lane
-    # change to score.
+    # and the recorded ego must have performed a lane change.
+    #
+    # That second one needs BOTH halves. Ending up outside the source lane is
+    # not enough on its own: an ego that STARTS outside it (a scene captured
+    # mid-change, or a lanelet whose width does not match where the ego drives)
+    # satisfies it while driving dead straight, and then a prediction that
+    # copies that motionless GT scores a full success. So the recorded ego must
+    # also have actually moved sideways, which is what `minimum_lateral_shift_m`
+    # is named for.
     aligned = components["source_lane_heading_aligned"] > 0.5
-    detected = direction * gt_shift > lane_tolerance
+    gt_progress = gt_shift - initial_shift
+    moved = direction * gt_progress > minimum_lateral_shift_m
+    detected = moved & (direction * gt_shift > lane_tolerance)
     scorable = aligned & detected
     signed_progress = direction[:, None] * predicted  # (N, T), positive towards the GT's side
     crossed = scorable & (signed_progress[:, -1] > lane_tolerance)
@@ -427,7 +250,9 @@ def evaluate_lane_change_with_details(
     # Prediction index i is the pose at t=(i+1)*dt; a sample that never leaves
     # the source lane reports the full horizon.
     beyond = signed_progress > lane_tolerance[:, None]
-    first_beyond = (beyond.to(torch.int8).argmax(dim=1) + 1) * _PREDICTION_TIMESTEP_SECONDS
+    first_beyond = (
+        beyond.to(torch.int8).argmax(dim=1).to(gt.dtype) + 1
+    ) * _PREDICTION_TIMESTEP_SECONDS
     change_time = torch.where(
         scorable & beyond.any(dim=1), first_beyond, steps * _PREDICTION_TIMESTEP_SECONDS
     )
@@ -435,16 +260,14 @@ def evaluate_lane_change_with_details(
     # Progress is measured from where the ego started, not from the lane
     # center, so an ego that begins off-center and never moves scores 0.
     # Closeness to the GT's lateral target (rather than raw progress) keeps an
-    # overshoot from reading as a completed change.  A GT with no lateral
-    # progress at all (parked off-center) has nothing to complete.
-    gt_progress = gt_shift - initial_shift
+    # overshoot from reading as a completed change.  `scorable` already implies
+    # a non-zero `gt_progress`, so the divisor only needs a guard against
+    # float noise on the samples that are about to be zeroed anyway.
     predicted_progress = predicted_shift - initial_shift
     completion = 1 - (predicted_progress - gt_progress).abs() / gt_progress.abs().clamp(
-        min=_SEGMENT_MIN_LENGTH
+        min=minimum_lateral_shift_m
     )
-    completion = torch.where(
-        scorable & (gt_progress.abs() > _SEGMENT_MIN_LENGTH), completion.clamp(0, 1), 0.0
-    )
+    completion = torch.where(scorable, completion.clamp(0, 1), 0.0)
 
     to_score = gt.dtype
     return MetricEvaluation(

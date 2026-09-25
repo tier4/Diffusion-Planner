@@ -5,10 +5,8 @@ import math
 import pytest
 import torch
 
-from planner_metrics.lane_change import (
-    _nearest_lane_index,
-    evaluate_lane_change_with_details,
-)
+from planner_metrics.lane_change import evaluate_lane_change_with_details
+from planner_metrics.source_lane import _nearest_lane_index, reconstruct_source_lane
 
 _PARAMETERS = {"horizon_seconds": 8.0}
 _HALF_WIDTH = 1.75
@@ -387,15 +385,40 @@ def test_lane_change_time_counts_the_first_future_point_as_one_timestep():
     assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(0.1)
 
 
-def test_stationary_off_center_gt_does_not_divide_by_zero():
-    """GT parked outside the source lane has zero lateral progress; the sample
-    must be scored, not crash the run."""
+def test_gt_that_never_moves_sideways_is_not_a_lane_change():
+    """Ending up outside the source lane is not enough -- the GT must have moved.
+
+    An ego parked (or driving straight) outside its own lanelet's width satisfies
+    every absolute-offset test, so a prediction that simply copies that
+    motionless GT would otherwise score a full success.
+    """
     gt = _trajectory(0.0)
     gt[0, :, 1] = _HALF_WIDTH + 0.5  # constant offset beyond the lane boundary
     result = _evaluate(gt.clone(), gt)
 
-    assert result.details["lane_change"]["gt_lane_change_detected"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 0.0
+    assert result.details["lane_change"]["gt_lane_change_detected"].item() == 0.0
     assert result.details["lane_change"]["completion_ratio"].item() == 0.0
+
+
+def test_a_drift_smaller_than_the_minimum_shift_is_not_a_lane_change():
+    """A few centimetres of drift must not read as a completed lane change."""
+    gt = _trajectory(0.0)
+    gt[0, :, 1] = _HALF_WIDTH + 0.5 + torch.linspace(0.0, 0.02, _STEPS)
+    result = _evaluate(gt.clone(), gt)
+
+    assert result.scores["success_rate_percent"].item() == 0.0
+    assert result.details["lane_change"]["gt_lane_change_detected"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == 0.0
+
+
+def test_lane_change_rejects_a_non_positive_minimum_lateral_shift():
+    with pytest.raises(ValueError, match="minimum_lateral_shift_m must be positive"):
+        evaluate_lane_change_with_details(
+            _trajectory(_LANE_WIDTH),
+            {"ego_agent_future": _trajectory(_LANE_WIDTH), "lanes": _straight_map()},
+            {**_PARAMETERS, "minimum_lateral_shift_m": 0.0},
+        )
 
 
 def test_source_lane_flags_a_heading_rejected_fallback():
@@ -448,3 +471,29 @@ def test_lane_half_width_comes_from_the_lanelet_at_the_decision_station():
     details = result.details["lane_change"]
     assert details["source_lane_index"].item() == 0
     assert details["lane_half_width_left_m"].item() == pytest.approx(1.0)
+
+
+def test_half_width_resolves_the_station_by_segment_not_by_vertex():
+    """Lanelets are resampled to a fixed point count, so vertices are uneven."""
+    short = _straight_lane(0.0, x_start=-2.0, x_end=3.0, half_width=1.0)
+    long_lanelet = _straight_lane(0.0, x_start=3.0, x_end=103.0, half_width=3.0)
+    lanes = torch.stack([short, long_lanelet])
+    source = reconstruct_source_lane(lanes, torch.zeros(2), 60.0, 1.0)
+
+    # Just past the joint the nearest VERTEX still belongs to the short lanelet.
+    assert source.half_widths_at(lanes, torch.tensor([2.9, 0.0]))[0] == pytest.approx(1.0)
+    assert source.half_widths_at(lanes, torch.tensor([3.1, 0.0]))[0] == pytest.approx(3.0)
+    assert source.half_widths_at(lanes, torch.tensor([4.0, 0.0]))[0] == pytest.approx(3.0)
+
+
+def test_chaining_survives_a_duplicated_tail_vertex():
+    """A centerline ending [.., p, p] must not end the chain at that lanelet."""
+    duplicated = _straight_lane(0.0, x_start=-20.0, x_end=30.0)
+    duplicated[-2] = duplicated[-1]
+    successor = _straight_lane(0.0, x_start=30.0, x_end=80.0)
+    lanes = torch.stack([duplicated, successor])
+
+    source = reconstruct_source_lane(lanes, torch.zeros(2), 70.0, 1.0)
+
+    assert sorted(set(source.owners.tolist())) == [0, 1]
+    assert float(source.path[-1, 0]) == pytest.approx(80.0)
