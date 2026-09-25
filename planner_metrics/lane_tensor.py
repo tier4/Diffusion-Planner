@@ -18,19 +18,23 @@ def resolve_lane_tensor(lanes: torch.Tensor, batch_size: int) -> torch.Tensor:
 
     ``B == 1`` means one lane tensor shared by every trajectory in the batch;
     callers index it with ``0 if lanes.shape[0] == 1 else sample_index``.
+
+    The ``D`` axis is deliberately not validated: callers read different columns
+    (``centerline`` needs ``D>=4``, ``lane_change`` needs the boundary offsets at
+    ``D>=8``) and each checks the ones it reads. The result is a view of the
+    input, not a copy.
     """
+    original_shape = tuple(lanes.shape)
     if lanes.ndim == 5:
         if lanes.shape[1] != 1:
-            raise ValueError(
-                f"expected singleton route_lanes context axis, got {tuple(lanes.shape)}"
-            )
+            raise ValueError(f"expected a singleton lane context axis, got {original_shape}")
         lanes = lanes[:, 0]
     if lanes.ndim == 3:
         lanes = lanes.unsqueeze(0)
     if lanes.ndim != 4 or lanes.shape[0] not in (1, batch_size):
         raise ValueError(
-            "lanes must have shape (S,P,D), (1,S,P,D), or (N,S,P,D); "
-            f"got {tuple(lanes.shape)} for N={batch_size}"
+            "lanes must have shape (S,P,D), (1,S,P,D), (N,S,P,D), or (N,1,S,P,D); "
+            f"got {original_shape} for N={batch_size}"
         )
     return lanes
 

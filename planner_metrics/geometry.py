@@ -743,6 +743,15 @@ def _point_to_segments_nearest_components(
     offset is the distance beyond the selected segment's endpoint; it is zero
     while the perpendicular projection lies inside the segment.
 
+    Two caller obligations follow from measuring against a supporting line.
+    Zero-length segments must be filtered out first: theirs is undefined, and
+    they report a lateral offset of 0 ("on the line") for any point while tying
+    the clamped distance of the real segment they share a vertex with.  And the
+    reference path should be sampled finely enough that consecutive segments do
+    not meet at a sharp kink: a point past a vertex is measured against one
+    segment's line alone, which understates the offset by ~11% at a 20 deg kink
+    and ~39% at 45 deg.  Lane polylines at metre spacing stay well inside that.
+
     Args:
         points: (Q, 2)
         seg_p1, seg_p2: (E, 2)
