@@ -26,7 +26,7 @@ import torch
 
 from planner_metrics.evaluation import MetricEvaluation
 from planner_metrics.geometry import (
-    _point_to_segments_min_dist,
+    _point_to_segments_dist,
     _point_to_segments_signed_lateral,
 )
 from planner_metrics.horizon import resolve_horizon_steps
@@ -129,9 +129,15 @@ def _nearest_lane_index(
     candidates: list[tuple[float, float, int]] = []  # (distance, ahead alignment, index)
     for index, centerline in centerlines.items():
         seg_p1, seg_p2 = _polyline_segments(centerline)
-        distance = float(_point_to_segments_min_dist(point, seg_p1, seg_p2)[0])
+        # One distance computation serves both the ranking and the tangent, so
+        # the segment whose heading is tested is always the one that made this
+        # lanelet the nearest. Segments are very uneven after resampling, and a
+        # separately-picked nearest segment (by midpoint, say) can be a
+        # different one with a different tangent.
+        distances = _point_to_segments_dist(point, seg_p1, seg_p2)[0]
+        distance = float(distances.min())
+        segment = int(distances.argmin())
         nearest = min(nearest, (distance, index))
-        segment = int((((seg_p1 + seg_p2) / 2) - point).norm(dim=-1).argmin())
         tangent = seg_p2[segment] - seg_p1[segment]
         if float(tangent[0] / tangent.norm()) < _MIN_SOURCE_HEADING_ALIGNMENT:
             continue
@@ -162,7 +168,7 @@ def _build_source_lane_path(
     source_index: int,
     required_length_m: float,
     chain_tolerance_m: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Extend the source lanelet forward through its endpoint-chained successors.
 
     Two lanelets chain when the successor's first point coincides with the
@@ -180,8 +186,13 @@ def _build_source_lane_path(
     so the ego often sits deep inside a long source lanelet, and measuring the
     budget against the whole path (including what is behind the ego) would
     stop chaining while the trajectories still run off the end.
+
+    Returns the path and, for each of its points, the lanelet the point came
+    from, so a caller can read lane properties (width, say) at the station it
+    cares about instead of assuming the whole chain matches the first lanelet.
     """
     path = centerlines[source_index]
+    owners = torch.full((path.shape[0],), source_index, dtype=torch.long)
     # The ego is at the origin in the scene frame; the prefix behind it never
     # changes as successors are appended, so it is measured once.
     behind_ego = _arc_length_behind(path, torch.zeros(2, device=path.device, dtype=path.dtype))
@@ -206,9 +217,11 @@ def _build_source_lane_path(
         if best_index < 0:
             break
         used.add(best_index)
-        path = torch.cat([path, centerlines[best_index][1:]], dim=0)
+        appended = centerlines[best_index][1:]
+        path = torch.cat([path, appended], dim=0)
+        owners = torch.cat([owners, torch.full((appended.shape[0],), best_index, dtype=torch.long)])
 
-    return path
+    return path, owners
 
 
 def _resolve_gt_future(ego_trajs: torch.Tensor, data: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -296,11 +309,17 @@ def compute_lane_change_components_batch(
             float(torch.cat([predicted_xy, gt_xy], dim=0).norm(dim=-1).max())
             + _SOURCE_PATH_MARGIN_M
         )
-        path = _build_source_lane_path(
+        path, owners = _build_source_lane_path(
             centerlines, source_index, required_length, chain_tolerance_m
         )
         seg_p1, seg_p2 = _polyline_segments(path.to(ego_trajs.device))
-        left, right = _lane_half_widths(scene_lanes[source_index])
+        # The half width is the tolerance every threshold is built from, so it
+        # is read where the scorer decides -- at the GT's final position, the
+        # same station its lateral offset is measured against. The chain can
+        # run through a taper or a merge, so the first lanelet's width is not
+        # necessarily the width there.
+        station = int((path - gt_xy[-1].to(path)).norm(dim=-1).argmin())
+        left, right = _lane_half_widths(scene_lanes[int(owners[station])])
 
         offsets["predicted_lateral_offset_m"].append(
             _point_to_segments_signed_lateral(predicted_xy, seg_p1, seg_p2)
@@ -338,18 +357,24 @@ def evaluate_lane_change_with_details(
 
     ``minimum_lateral_shift_m`` is a floor under the lane tolerance, so a map
     with missing or degenerate boundary offsets cannot make the crossing test
-    trivially true nor the reached test impossible to satisfy.
+    trivially true nor the reached test impossible to satisfy. Where that floor
+    is what ends up being used, ``lane_tolerance_from_map`` is 0 for the sample:
+    a zeroed boundary column and a genuinely narrow lane are otherwise
+    indistinguishable in the output.
 
-    The aggregate score is the success rate in percent, like the other
-    scenario metrics. A sample whose recorded ego never leaves the
-    reconstructed source lane carries no lane change to score. It counts as a
-    failure, and the per-sample ``gt_lane_change_detected`` detail records
-    which samples did carry one, so the details can separate "the planner
-    failed" from "this list (or the source-lane reconstruction) is wrong" --
-    the latter is what a scene captured after the change is already past its
-    midpoint looks like, since the nearest lane is then the one being entered.
-    Completion ratio, final lateral offset error and the time at which the
-    prediction left the source lane are also reported per sample in the details.
+    The aggregate score is the success rate in percent, like the other scenario
+    metrics. Two things make a sample unscorable rather than failed on merit:
+    no lanelet near the ego runs with it, so the reference lane fell back to an
+    oncoming or crossing one (``source_lane_heading_aligned``), or the recorded
+    ego never leaves the reconstructed source lane, so there is no lane change
+    (``gt_lane_change_detected``). Both count as failures -- nothing about the
+    planner was demonstrated. Neither is aggregated -- the summary carries the
+    success rate alone -- so the two per-sample details are what distinguish an
+    unscorable list from a weak planner: the second is what a scene
+    captured after the change is already past its midpoint looks like, since
+    the nearest lane is then the one being entered. Completion ratio, final
+    lateral offset error and the time at which the prediction left the source
+    lane are also reported per sample in the details.
     """
     horizon_seconds = float(parameters.get("horizon_seconds", _DEFAULT_HORIZON_SECONDS))
     minimum_lateral_shift_m = float(
@@ -380,20 +405,31 @@ def evaluate_lane_change_with_details(
         components["lane_half_width_right_m"],
     )
     lane_tolerance = half_width.clamp(min=minimum_lateral_shift_m)
+    # The D>=8 check only proves the boundary-offset columns exist. Zeroed or
+    # corrupt ones produce a near-zero half width that the clamp quietly
+    # replaces with the floor, which is indistinguishable in the output from a
+    # genuinely narrow lane -- so record whether the tolerance came from the map.
+    tolerance_from_map = half_width >= minimum_lateral_shift_m
 
-    # The recorded ego must itself have left the source lane, or there is no
-    # lane change to score; every judgement below is gated on that.
+    # Two preconditions, and every judgement below is gated on both. The source
+    # lane must be a lane the ego is actually travelling on -- the fallback to
+    # an oncoming or crossing lanelet reverses the lateral reference, which
+    # flips `direction` and would let a mirrored reading score as a success --
+    # and the recorded ego must itself have left that lane, or there is no lane
+    # change to score.
+    aligned = components["source_lane_heading_aligned"] > 0.5
     detected = direction * gt_shift > lane_tolerance
+    scorable = aligned & detected
     signed_progress = direction[:, None] * predicted  # (N, T), positive towards the GT's side
-    crossed = detected & (signed_progress[:, -1] > lane_tolerance)
-    reached = detected & ((predicted_shift - gt_shift).abs() <= lane_tolerance)
+    crossed = scorable & (signed_progress[:, -1] > lane_tolerance)
+    reached = scorable & ((predicted_shift - gt_shift).abs() <= lane_tolerance)
 
     # Prediction index i is the pose at t=(i+1)*dt; a sample that never leaves
     # the source lane reports the full horizon.
     beyond = signed_progress > lane_tolerance[:, None]
     first_beyond = (beyond.to(torch.int8).argmax(dim=1) + 1) * _PREDICTION_TIMESTEP_SECONDS
     change_time = torch.where(
-        detected & beyond.any(dim=1), first_beyond, steps * _PREDICTION_TIMESTEP_SECONDS
+        scorable & beyond.any(dim=1), first_beyond, steps * _PREDICTION_TIMESTEP_SECONDS
     )
 
     # Progress is measured from where the ego started, not from the lane
@@ -407,7 +443,7 @@ def evaluate_lane_change_with_details(
         min=_SEGMENT_MIN_LENGTH
     )
     completion = torch.where(
-        detected & (gt_progress.abs() > _SEGMENT_MIN_LENGTH), completion.clamp(0, 1), 0.0
+        scorable & (gt_progress.abs() > _SEGMENT_MIN_LENGTH), completion.clamp(0, 1), 0.0
     )
 
     to_score = gt.dtype
@@ -425,6 +461,8 @@ def evaluate_lane_change_with_details(
                 "gt_direction": direction,
                 "left_source_lane": crossed.to(to_score),
                 "reached_gt_lane": reached.to(to_score),
+                "lane_tolerance_m": lane_tolerance,
+                "lane_tolerance_from_map": tolerance_from_map.to(to_score),
                 "lane_half_width_left_m": components["lane_half_width_left_m"],
                 "lane_half_width_right_m": components["lane_half_width_right_m"],
                 "source_lane_index": components["source_lane_index"],

@@ -5,7 +5,10 @@ import math
 import pytest
 import torch
 
-from planner_metrics.lane_change import evaluate_lane_change_with_details
+from planner_metrics.lane_change import (
+    _nearest_lane_index,
+    evaluate_lane_change_with_details,
+)
 
 _PARAMETERS = {"horizon_seconds": 8.0}
 _HALF_WIDTH = 1.75
@@ -13,15 +16,20 @@ _LANE_WIDTH = 2 * _HALF_WIDTH
 _STEPS = 80
 
 
-def _straight_lane(center_y: float, x_start: float = -20.0, x_end: float = 120.0) -> torch.Tensor:
+def _straight_lane(
+    center_y: float,
+    x_start: float = -20.0,
+    x_end: float = 120.0,
+    half_width: float = _HALF_WIDTH,
+) -> torch.Tensor:
     """A straight lanelet along +x at ``center_y``, in the canonical 13-column layout."""
     lane = torch.zeros(20, 13)
     x = torch.linspace(x_start, x_end, 20)
     lane[:, 0] = x
     lane[:, 1] = center_y
     lane[:, 2] = x[1] - x[0]  # centerline tangent
-    lane[:, 5] = _HALF_WIDTH  # left boundary offset
-    lane[:, 7] = -_HALF_WIDTH  # right boundary offset
+    lane[:, 5] = half_width  # left boundary offset
+    lane[:, 7] = -half_width  # right boundary offset
     return lane
 
 
@@ -224,7 +232,8 @@ def test_completion_ratio_does_not_reward_overshooting_the_target_lane():
 
 
 def test_reached_tolerance_survives_a_map_without_boundary_offsets():
-    """Zero half widths must fall back to the floor, not demand an exact match."""
+    """Zero half widths fall back to the floor, and say so rather than passing
+    for a genuinely narrow lane."""
     lanes = _straight_map()
     lanes[:, :, 4:8] = 0.0
     gt = _trajectory(_LANE_WIDTH)
@@ -234,6 +243,8 @@ def test_reached_tolerance_survives_a_map_without_boundary_offsets():
 
     assert result.details["lane_change"]["gt_lane_change_detected"].item() == 1.0
     assert result.details["lane_change"]["reached_gt_lane"].item() == 1.0
+    assert result.details["lane_change"]["lane_tolerance_from_map"].item() == 0.0
+    assert result.details["lane_change"]["lane_tolerance_m"].item() == pytest.approx(1.0)
     assert result.scores["success_rate_percent"].item() == 100.0
 
 
@@ -388,14 +399,20 @@ def test_stationary_off_center_gt_does_not_divide_by_zero():
 
 
 def test_source_lane_flags_a_heading_rejected_fallback():
-    """With only an oncoming lanelet available the scorer still runs, but marks
-    the reference lane as not heading-aligned."""
+    """An oncoming fallback reference is unscorable, not a perfect score.
+
+    The prediction here matches the GT exactly. Measured against a reversed
+    reference lane the lateral offsets mirror, which reads as a completed lane
+    change unless the heading flag gates the score.
+    """
     oncoming = _straight_lane(0.0).flip(0)  # same geometry, opposite direction
     lanes = torch.stack([oncoming, _straight_lane(_LANE_WIDTH).flip(0)])
     gt = _trajectory(_LANE_WIDTH)
     result = _evaluate(gt.clone(), gt, lanes)
 
     assert result.details["lane_change"]["source_lane_heading_aligned"].item() == 0.0
+    assert result.scores["success_rate_percent"].item() == 0.0
+    assert result.details["lane_change"]["completion_ratio"].item() == 0.0
 
 
 def test_source_lane_is_flagged_heading_aligned_on_a_normal_map():
@@ -403,3 +420,31 @@ def test_source_lane_is_flagged_heading_aligned_on_a_normal_map():
     result = _evaluate(gt.clone(), gt)
 
     assert result.details["lane_change"]["source_lane_heading_aligned"].item() == 1.0
+    assert result.details["lane_change"]["lane_tolerance_from_map"].item() == 1.0
+    assert result.details["lane_change"]["lane_tolerance_m"].item() == pytest.approx(_HALF_WIDTH)
+
+
+def test_source_lane_measures_distance_and_heading_on_the_same_segment():
+    """Uneven resampled segments must not split ranking from the heading test.
+
+    The short opening segment has the nearest MIDPOINT but runs at 45 deg, so
+    picking the tangent by midpoint rejects the lane as misaligned; the segment
+    that actually brings the lanelet closest to the ego runs straight ahead.
+    """
+    centerline = torch.tensor([[-3.0, 2.0], [-2.0, 1.0], [98.0, 1.0]])
+
+    assert _nearest_lane_index(torch.zeros(2), {0: centerline}) == (0, True)
+
+
+def test_lane_half_width_comes_from_the_lanelet_at_the_decision_station():
+    """A chain that tapers must not be scored against the first lanelet's width."""
+    near = _straight_lane(0.0, x_start=-20.0, x_end=40.0)
+    tapered = _straight_lane(0.0, x_start=40.0, x_end=160.0, half_width=1.0)
+    lanes = torch.stack([near, tapered, _straight_lane(_LANE_WIDTH, -20.0, 40.0)])
+    gt = _trajectory(_LANE_WIDTH)  # ends at x=100, well inside the tapered lanelet
+
+    result = _evaluate(gt.clone(), gt, lanes=lanes)
+
+    details = result.details["lane_change"]
+    assert details["source_lane_index"].item() == 0
+    assert details["lane_half_width_left_m"].item() == pytest.approx(1.0)
