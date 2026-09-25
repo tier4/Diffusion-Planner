@@ -436,6 +436,9 @@ def test_source_lane_flags_a_heading_rejected_fallback():
     assert result.details["lane_change"]["source_lane_heading_aligned"].item() == 0.0
     assert result.scores["success_rate_percent"].item() == 0.0
     assert result.details["lane_change"]["completion_ratio"].item() == 0.0
+    # Both gates individually, since the score would hide either one alone.
+    assert result.details["lane_change"]["left_source_lane"].item() == 0.0
+    assert result.details["lane_change"]["reached_gt_lane"].item() == 0.0
 
 
 def test_source_lane_is_flagged_heading_aligned_on_a_normal_map():
@@ -497,3 +500,17 @@ def test_chaining_survives_a_duplicated_tail_vertex():
 
     assert sorted(set(source.owners.tolist())) == [0, 1]
     assert float(source.path[-1, 0]) == pytest.approx(80.0)
+
+
+def test_lane_tolerance_uses_the_half_width_on_the_side_the_gt_went():
+    """Asymmetric boundaries: a left change must not be judged by the right width."""
+    source = _straight_lane(0.0)
+    source[:, 5] = 1.0  # left boundary offset
+    source[:, 7] = -3.0  # right boundary offset
+    lanes = torch.stack([source, _straight_lane(_LANE_WIDTH), _straight_lane(-_LANE_WIDTH)])
+
+    leftward = _evaluate(_trajectory(_LANE_WIDTH), _trajectory(_LANE_WIDTH), lanes=lanes)
+    rightward = _evaluate(_trajectory(-_LANE_WIDTH), _trajectory(-_LANE_WIDTH), lanes=lanes)
+
+    assert leftward.details["lane_change"]["lane_tolerance_m"].item() == pytest.approx(1.0)
+    assert rightward.details["lane_change"]["lane_tolerance_m"].item() == pytest.approx(3.0)
