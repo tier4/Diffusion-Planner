@@ -1,10 +1,4 @@
-"""A scenario_sim row has to survive the aggregator it is built for.
-
-``closed_loop_eval.aggregate`` raises on a missing nested block, and it gains blocks as new
-metrics land on the closed-loop path. Every one of those has to be answered here too -- the
-scenario_sim rollout produces its rows through a different route and would otherwise take the
-whole evaluation down at the final aggregation step, after every case has already run.
-"""
+"""A scenario_sim row has to survive the aggregator it is built for."""
 
 import numpy as np
 

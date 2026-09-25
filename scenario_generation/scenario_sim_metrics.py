@@ -44,13 +44,9 @@ def _red_light_block() -> dict:
 
 
 def _deviation_collision_block() -> dict:
-    """Off-GT-path collisions are not measured on this path.
+    """A generated scenario has no recorded drive to be off, so this is never measured.
 
-    The metric splits out collisions that happened while the ego was far off the drive it is
-    reproducing. A generated scenario has no recorded drive to be off, so the split has no
-    meaning here -- unlike ``_NO_REPRODUCER_CURSOR``, whose zeros are a real measurement. Same
-    shape and same ``measured`` flag as ``_red_light_block``, so "0 such collisions" stays
-    distinguishable from "never checked".
+    ``measured=False`` rather than a zero, which would claim the scenario had no such collision.
     """
     return {"steps": 0, "count": 0, "measured": False}
 
