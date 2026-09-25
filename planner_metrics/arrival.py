@@ -8,13 +8,18 @@ from planner_metrics.evaluation import MetricEvaluation
 
 _DEFAULT_POSITION_TOLERANCE_M = 2.0
 _DEFAULT_HEADING_TOLERANCE_DEG = 10.0
+# Padding is an all-zero row, which is what the producers write; a real pose
+# parked at the ego origin still carries a heading (cos=1 in the 4-column
+# layout, or a non-zero yaw in the 3-column one), so testing every column
+# separates the two wherever the data allows it at all.
+_GT_ROW_MIN_NORM = 1e-6
 
 
 def _prepare_inputs(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Validate arrival inputs and return prediction/GT tensors aligned end to end.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Validate arrival inputs and return prediction, GT, and the arrival index.
 
     The layouts are accepted as exactly 3 or exactly 4 columns, never "at least
     3": the third column means ``heading`` in one layout and ``cos(yaw)`` in the
@@ -24,6 +29,17 @@ def _prepare_inputs(
     Both tensors are truncated to their common length, so a checkpoint whose
     ``future_len`` differs from the NPZ's GT horizon compares the two at the
     same instant instead of scoring t=8.0 s against t=9.0 s.
+
+    The arrival index is the last step where the GT is a real recorded pose, per
+    sample. A GT future can be zero-padded at the tail when the recording ran
+    out (``scenario_generation/reproducer_rollout.py`` fills a zeros array and
+    breaks), and an all-zero row in the ego frame IS the ego's own t=0 pose --
+    so taking ``[:, -1]`` unconditionally would measure the prediction against
+    the origin and report roughly its total travel as the error. Index 0 is
+    always treated as real: the ego-frame GT legitimately starts at the origin.
+
+    The one case this cannot separate is a 3-column GT parked at the origin
+    with a yaw of exactly 0, which is byte-identical to padding.
     """
     if ego_trajs.ndim != 3 or ego_trajs.shape[-1] not in (3, 4):
         raise ValueError(
@@ -51,7 +67,16 @@ def _prepare_inputs(
     if gt_future.shape[0] == 1:
         gt_future = gt_future.expand(ego_trajs.shape[0], -1, -1)
     steps = min(ego_trajs.shape[1], gt_future.shape[1])
-    return ego_trajs[:, :steps], gt_future[:, :steps]
+    if steps < 1:
+        raise ValueError("arrival needs at least one prediction and ground-truth step")
+    ego_trajs, gt_future = ego_trajs[:, :steps], gt_future[:, :steps]
+
+    recorded = gt_future.abs().sum(dim=-1) > _GT_ROW_MIN_NORM
+    recorded[:, 0] = True
+    # Last True per row: weight each index by its own position and take the max.
+    positions = torch.arange(steps, device=recorded.device)
+    arrival_index = (recorded * positions).amax(dim=1)
+    return ego_trajs, gt_future, arrival_index
 
 
 def _yaw_radians(trajectories: torch.Tensor) -> torch.Tensor:
@@ -66,9 +91,14 @@ def compute_final_displacement_error_batch(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Return endpoint Euclidean position error in meters, shape ``(N,)``."""
-    ego_trajs, gt_future = _prepare_inputs(ego_trajs, data)
-    return (ego_trajs[:, -1, :2] - gt_future[:, -1, :2]).norm(dim=-1)
+    """Return endpoint Euclidean position error in meters, shape ``(N,)``.
+
+    The endpoint is the GT's last recorded step, which is not the last stored
+    step when the future is zero-padded.
+    """
+    ego_trajs, gt_future, arrival_index = _prepare_inputs(ego_trajs, data)
+    rows = torch.arange(ego_trajs.shape[0], device=ego_trajs.device)
+    return (ego_trajs[rows, arrival_index, :2] - gt_future[rows, arrival_index, :2]).norm(dim=-1)
 
 
 @torch.no_grad()
@@ -77,9 +107,10 @@ def compute_final_heading_error_batch(
     data: dict[str, torch.Tensor],
 ) -> torch.Tensor:
     """Return wrapped absolute endpoint yaw error in degrees, shape ``(N,)``."""
-    ego_trajs, gt_future = _prepare_inputs(ego_trajs, data)
-    prediction_yaw = _yaw_radians(ego_trajs[:, -1])
-    gt_yaw = _yaw_radians(gt_future[:, -1])
+    ego_trajs, gt_future, arrival_index = _prepare_inputs(ego_trajs, data)
+    rows = torch.arange(ego_trajs.shape[0], device=ego_trajs.device)
+    prediction_yaw = _yaw_radians(ego_trajs[rows, arrival_index])
+    gt_yaw = _yaw_radians(gt_future[rows, arrival_index])
     difference_rad = torch.atan2(
         torch.sin(prediction_yaw - gt_yaw),
         torch.cos(prediction_yaw - gt_yaw),
