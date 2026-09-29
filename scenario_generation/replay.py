@@ -1990,9 +1990,12 @@ def save_step_figure(
     # the old :+.0f° rounded to "+0°" and was mistakable for radians.
     steer_deg = math.degrees(ego.steering_angle)
     yaw_rate_deg = math.degrees(ego.yaw_rate)
+    # Realized longitudinal acceleration (m/s^2), same quantity the strong-brake metric uses.
+    ego_accel = float(ego.acceleration[0])
     title = (
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
         f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
+        f"accel={ego_accel:+.2f} m/s²  "
         f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
         f"goal_d={goal_d:.1f} m"
     )
