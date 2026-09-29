@@ -13,6 +13,8 @@ route under an npz_root.
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -430,11 +432,17 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             digests_path.open("w", encoding="utf-8") as fdigest,
             # One pool for every segment: a spawned worker re-imports torch and matplotlib.
             render_pool(self.config.params.draw_workers) as draw_pool,
+            # ffmpeg consumes and deletes these, so they must not land in the output tree.
+            tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
                 partial = self.run_job(
-                    job, segments_file=fout, digest_file=fdigest, draw_pool=draw_pool
+                    job,
+                    segments_file=fout,
+                    digest_file=fdigest,
+                    draw_pool=draw_pool,
+                    frames_root=Path(frames_root),
                 )
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
@@ -445,6 +453,12 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
+    def _preserve_rollout_trace(self, png_dir: Path, segment_key: str) -> None:
+        """Call after colormaps consume the trace, before scratch frames are removed."""
+        rollout_src = png_dir / "rollout.jsonl"
+        if rollout_src.exists():
+            shutil.move(str(rollout_src), self.out_dir / f"{segment_key}.rollout.jsonl")
+
     def run_job(
         self,
         job: ClosedLoopJob,
@@ -452,16 +466,18 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         segments_file=None,
         digest_file=None,
         draw_pool=None,
+        frames_root: Path | None = None,
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
+        frames_root = frames_root if frames_root is not None else self.out_dir
         timers = Timers()
         tl = RouteTimeline(job.route_paths, sidecar_dir=job.npz_root, timers=timers)
         rows: list[dict] = []
         video_mp4s: list[Path] = []
 
         for start, end in tl.iter_segments(job.seg_len):
-            png_dir = self.out_dir / f"{job.route_key}_{start}_{end}"
+            png_dir = frames_root / f"{job.route_key}_{start}_{end}"
             metrics = render_segment(
                 self.model,
                 self.model_args,
@@ -484,8 +500,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     metrics=params.colormap_metrics,
                     near_miss_thresh=params.near_miss_thresh,
                     strong_brake_mps2=params.strong_brake_mps2,
+                    centerline_thresh_m=params.deviation_collision_thresh_m,
                     title=f"{job.route_key} [{start},{end}]",
                 )
+            self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
+
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
                 row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)

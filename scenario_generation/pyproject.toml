@@ -11,6 +11,7 @@ dependencies = [
     "rlvr",
     "scene-search",
     "scipy",
+    "tag-toolkit",
     "tdigest==0.5.2.2",
     "torch",
 ]
@@ -35,3 +36,4 @@ scenario_generation = ["configs/*.json"]
 diffusion-planner = { workspace = true }
 rlvr = { workspace = true }
 scene-search = { workspace = true }
+tag-toolkit = { workspace = true }

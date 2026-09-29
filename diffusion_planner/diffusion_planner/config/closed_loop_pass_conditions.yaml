@@ -28,6 +28,17 @@ default:
 
 # Per-group overrides
 groups:
+  # Open-loop ``centerline`` measures lateral error to the route centerline.
+  # The closed-loop pass contract has no centerline-error threshold; road-border
+  # clearance is its available binary safety counterpart.
+  centerline:
+    collision: false
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: false
+    snap: false
+
   departure:
     collision: false
     road_border: false
@@ -59,6 +70,48 @@ groups:
     strong_brake: true
     goal_reach: true
     snap: true
+
+  # Names used by the H5 override release.  Keep these explicit rather than
+  # relying on the strict default or on legacy group-name aliases below.
+  object_avoidance:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: true
+    goal_reach: true
+    snap: true
+
+  pedestrian_yield:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  traffic_light_go:
+    collision: false
+    road_border: false
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: true
+
+  traffic_light_stop:
+    collision: true
+    road_border: true
+    red_light_violation: true
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  vehicle_yield:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
 
   obstacle_stop:
     collision: true

@@ -93,9 +93,9 @@ def build_segment_row(
         "strong_brake": strong_brake_block(ac, strong_brake_mps2),
         "reproducer": {**_NO_REPRODUCER_CURSOR, "normal_steps": int(n_steps_run)},
         # No GT turn indicator to score against on this path -- zero counts are the true
-        # measurement (transition_accuracy then aggregates to None/"N/A"), same idea as
-        # ``_NO_REPRODUCER_CURSOR`` above.
-        "turn_indicator": turn_indicator_block(0, 0),
+        # measurement (transition_accuracy/false_positive_rate then aggregate to None/"N/A"),
+        # same idea as ``_NO_REPRODUCER_CURSOR`` above.
+        "turn_indicator": turn_indicator_block(0, 0, 0, 0),
     }
 
 

@@ -28,7 +28,11 @@ from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 
 # ``aggregate`` reduces these from row keys this path never writes, and a mean over no samples
 # is 0.0 -- which reads as a measured total failure. Dropped, and named instead.
-_UNMEASURED_SUMMARY_KEYS = ("mean_route_completion", "mean_gt_deviation_m")
+_UNMEASURED_SUMMARY_KEYS = (
+    "mean_route_completion",
+    "mean_gt_deviation_m",
+    "mean_centerline_dist_m",
+)
 _UNMEASURED_MARKER_KEY = "unmeasured_keys"
 
 # The suite's own names for its scenarios. Copied rather than read, so what a name means stays
@@ -438,6 +442,7 @@ def write_viewer_tree(
 
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
+        centerline_thresh = float(rows[0].get("deviation_collision", {}).get("thresh_m") or 2.0)
 
         # One read per case: the scenario's description, and what its expansion set.
         read = {
@@ -473,6 +478,7 @@ def write_viewer_tree(
                         case,
                         near_miss_thresh=near_miss,
                         strong_brake_mps2=strong_brake,
+                        centerline_thresh_m=centerline_thresh,
                         title=f"{scenario} {case}",
                     )
                     for metric, drawn in rendered.items():

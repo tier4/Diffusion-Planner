@@ -36,6 +36,7 @@ from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.inference_compile import mark_inference_step
 from scenario_generation.metrics import (
+    score_centerline_step,
     score_object_step,
     score_object_step_batched,
     score_red_light_step,
@@ -229,6 +230,47 @@ def build_input_np(
     torch conversion + normalization happen once for the whole batch afterwards
     (see ``_to_torch_batch``).
     """
+    if getattr(tl, "native_h5", False):
+        from new_dp_h5_eval.transforms import recenter_frame_to_pose
+
+        frame = tl.npz(idx)
+        dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+        recen0 = recenter_frame_to_pose(
+            frame,
+            np.asarray([dx, dy], dtype=np.float32),
+            np.asarray([math.cos(dyaw), math.sin(dyaw)], dtype=np.float32),
+        )
+        recen = {key: np.asarray(value)[None] for key, value in recen0.items()}
+        live4 = _live_ego_past(ego_hist_world, live_pose)[0]
+        live6 = np.zeros((PAST, 6), dtype=np.float32)
+        live6[:, :4] = live4
+        if ego_hist_world.shape[1] >= 5:
+            live6[:, 4:6] = ego_hist_world[-PAST:, 3:5]
+        elif len(ego_hist_world) > 1:
+            delta = np.diff(ego_hist_world[-PAST:, :], axis=0)
+            speeds = np.linalg.norm(delta[:, :2], axis=1) / DT
+            yaw_rates = np.arctan2(np.sin(delta[:, 2]), np.cos(delta[:, 2])) / DT
+            live6[1:, 4] = speeds[-(PAST - 1) :]
+            live6[1:, 5] = yaw_rates[-(PAST - 1) :]
+            live6[0, 4:6] = live6[1, 4:6]
+        live6[-1, 4], live6[-1, 5] = dyn.speed, dyn.yaw_rate
+        recen["ego_agent_past"] = live6[None]
+        # Exact native fields -> legacy scoring-only views. They never enter ONNX.
+        neighbors_live = np.zeros((frame["neighbor_agents_past"].shape[0], 11), dtype=np.float32)
+        neighbors_live[:, :4] = recen0["neighbor_agents_past"][:, -1]
+        neighbors_live[:, 6:8] = frame["agent_shape"]
+        neighbors_live[:, 8:11] = frame["agent_label"]
+        lines = np.zeros((*recen0["road_borders"].shape[:-1], 4), dtype=np.float32)
+        lines[..., :2] = recen0["road_borders"]
+        lines[..., 3] = (np.linalg.norm(lines[..., :2], axis=-1) > 0).astype(np.float32)
+        recen["line_strings"] = lines[None]
+        from new_dp_h5_eval.metric_compat import legacy_lanes, legacy_route_lanes
+
+        recen["metric_lanes"] = legacy_lanes(recen0)[None]
+        route33 = legacy_route_lanes(recen0)
+        recen["metric_route_lanes"] = route33[None]
+        return recen, neighbors_live
+
     base = _npz_to_model_base(tl.npz(idx))
     dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
     recen = world_to_ego_frame(base, dx, dy, dyaw)  # re-center recorded frame on live ego
@@ -291,6 +333,15 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     """
     N = len(np_dicts)
     arrays = {k: np.concatenate([d[k] for d in np_dicts], axis=0) for k in np_dicts[0]}
+    if getattr(model_args, "new_dp_h5", False):
+        from new_dp_h5_eval.schema import MODEL_INPUT_NAMES
+
+        arrays = {k: arrays[k] for k in MODEL_INPUT_NAMES}
+        data = {
+            key: torch.from_numpy(np.asarray(value, dtype=np.float32)).to(device)
+            for key, value in arrays.items()
+        }
+        return model_args.observation_normalizer(data)
     data = _arrays_to_device(arrays, device)
     _add_static_inputs(data, model_args, N, device)
     return model_args.observation_normalizer(data)
@@ -494,6 +545,33 @@ class _SegState:
     # on an unstick teleport (see ``_advance_step``), so a teleport's environment jump is never
     # itself counted as a transition.
     turn_indicator_prev_scored_gt: int = 0
+    # Closed-loop turn-indicator SPURIOUS-TRANSITION ("false positive") counters: how often the
+    # model's own resolved prediction changes from ITS OWN previous scored prediction while GT
+    # held steady since the previous scored step. Mirrors turn_indicator_transition_*, but is
+    # keyed off the model's own prior prediction (turn_indicator_prev_scored_pred), not GT --
+    # comparing against GT's previous value would just remeasure transition_accuracy's
+    # complement. Gated on the SAME "GT unchanged since previous scored step" condition
+    # ``_score_turn_indicator`` already computes for the transition counters, so every scored
+    # step falls into exactly one of {gt changed -> transition_total} or
+    # {gt unchanged -> fp_total}, never both.
+    turn_indicator_fp_count: int = 0
+    turn_indicator_fp_total: int = 0
+    # Model's own RESOLVED prediction at the PREVIOUS scored (real-inference) step -- the
+    # baseline turn_indicator_fp_count/total is measured against. Seeded in ``_seed_state`` and
+    # re-seeded on an unstick teleport, exactly like ``turn_indicator_prev_scored_gt``, so a
+    # teleport's environment jump is never itself counted as a spurious flip.
+    turn_indicator_prev_scored_pred: int = 0
+    # Running sum/count of per-step route-centerline distance (m), for the
+    # mean_centerline_dist_m metric: mean nearest-segment distance from the live ego to
+    # the route_lanes/lanes centerline polyline (see ``score_centerline_step``). Same
+    # graded-signal treatment as gt_dev_sum/gt_dev_count, just measured against the map
+    # instead of the recorded ego trajectory.
+    centerline_dev_sum: float = 0.0
+    centerline_dev_count: int = 0
+    # Per-step route-centerline distance (m), parallel to ``clearances``/``gt_devs`` -- lets
+    # the per-step rollout.jsonl trace expose the same value ``mean_centerline_dist_m`` is
+    # averaged from, instead of only the segment-level mean.
+    centerline_devs: np.ndarray | None = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -509,6 +587,12 @@ def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.n
         [pose[0] + ep[:, 0] * c - ep[:, 1] * s, pose[1] + ep[:, 0] * s + ep[:, 1] * c],
         axis=-1,
     )
+    if getattr(tl, "native_h5", False):
+        local_yaw = np.arctan2(ep[:, 3], ep[:, 2])
+        ego_hist = np.column_stack([hist_xy, local_yaw + pose[2], ep[:, 4], ep[:, 5]]).astype(
+            np.float64
+        )
+        return pose, ego_hist, _EgoDyn(speed=float(ep[-1, 4]), yaw_rate=float(ep[-1, 5]))
     ego_hist = np.column_stack([hist_xy, ep[:, 2] + pose[2]]).astype(np.float64)
     return pose, ego_hist, _EgoDyn(speed=float(tl.speeds[idx]))
 
@@ -579,6 +663,8 @@ def _seed_state(
     # Closed-loop turn indicators: seed from the recorded frame, then feed the model's own
     # prediction back each step (phasing the seed out) — the model context never carries the
     # recorded driver's signals beyond the seed, only its own predictions.
+    # ``turn_indicator_prev_scored_pred`` is seeded the same way since nothing has been
+    # predicted yet.
     turn_hist = np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
     if tracker_mode == "perfect":
         tracker = PerfectTracker(dt=DT)
@@ -607,6 +693,7 @@ def _seed_state(
         turn_hist=turn_hist,
         last_turn_indicator=int(turn_hist[-1]),
         turn_indicator_prev_scored_gt=int(turn_hist[-1]),
+        turn_indicator_prev_scored_pred=int(turn_hist[-1]),
         ego_shape=ego_shape,
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
@@ -616,6 +703,7 @@ def _seed_state(
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
+        centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
@@ -668,6 +756,10 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
             s.live_pose
         )  # (1,320,31,11) live-ego
     if gpu_transform:
+        if getattr(s.tl, "native_h5", False):
+            raise ValueError(
+                "native H5 requires its schema-aware CPU transform; disable gpu_transform"
+            )
         # 8-tuple (..., sim_nb, slot_uuids, world_by_uuid); sim_nb overrides the recorded
         # neighbor block AFTER the batched world_to_ego transform (None = recorded mode).
         base, dxyz, live_past, live_cur, ridx = build_input_raw(
@@ -677,7 +769,9 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         return (base, dxyz, live_past, live_cur, ridx, sim_nb, slot_uuids, world_by_uuid)
     np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
     if sim_nb is not None:
-        np_dict["neighbor_agents_past"] = sim_nb
+        np_dict["neighbor_agents_past"] = (
+            sim_nb[..., :4] if getattr(s.tl, "native_h5", False) else sim_nb
+        )
         neighbors_live = sim_nb[0, :, -1, :].copy()
     np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
@@ -701,7 +795,9 @@ def _feed_turn_indicator(s: _SegState, outputs) -> None:
 def _hold_turn_indicator(s: _SegState) -> None:
     """Cached-plan step (``replan_interval`` > 1, no fresh inference): keep the 10 Hz turn
     history scrolling by re-appending the LAST decoded turn indicator, so the next replan
-    sees the held signal as if the model had re-confirmed it every step."""
+    sees the held signal as if the model had re-confirmed it every step. Touches only
+    ``turn_hist`` -- never the scoring accumulators or either ``prev_scored_*`` field
+    (including the spurious-transition FP counters), since no fresh prediction was made."""
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
@@ -728,6 +824,17 @@ def _score_turn_indicator(s: _SegState, idx: int) -> None:
     or a cursor skip/repeat, a GT transition can occur entirely BETWEEN two scored
     steps and never show up in either step's own one-tick-back window. The next scored
     step is the model's first real chance to react to it, so that's where it's counted.
+
+    Also accumulates the SPURIOUS-TRANSITION ("false positive") counters
+    ``turn_indicator_fp_count``/``turn_indicator_fp_total``: on a scored step where GT did
+    NOT change since the previous scored step (the complement of the transition-accuracy
+    gate above), a "false positive" is a resolved prediction that changed from the model's
+    OWN previous scored prediction (``turn_indicator_prev_scored_pred``), not from GT -- GT
+    is steady by construction in this branch, so comparing against GT would just remeasure
+    the same population as an inverted transition metric. The two counter pairs are
+    mutually exclusive per scored step (one increments the transition pair, the other
+    increments the fp pair, never both), so ``transition_total + fp_total`` across a run
+    always equals the total number of scored steps.
     """
     gt = int(np.asarray(s.tl.npz(idx)["turn_indicators"]).reshape(-1)[-1])
     pred = int(s.last_turn_indicator)
@@ -735,7 +842,11 @@ def _score_turn_indicator(s: _SegState, idx: int) -> None:
     if gt != s.turn_indicator_prev_scored_gt:
         s.turn_indicator_transition_total += 1
         s.turn_indicator_transition_correct += int(correct)
+    else:
+        s.turn_indicator_fp_total += 1
+        s.turn_indicator_fp_count += int(pred != s.turn_indicator_prev_scored_pred)
     s.turn_indicator_prev_scored_gt = gt
+    s.turn_indicator_prev_scored_pred = pred
 
 
 # GT-deviation lookup window: ±15 s of recorded trajectory around the cursor. Wide enough to
@@ -821,7 +932,8 @@ def _score_into(
     object_col: bool | None = None,
     object_rear_col: bool | None = None,
 ):
-    """Score this step's object / road-border / red-light metrics into the segment state.
+    """Score this step's object / road-border / centerline / red-light metrics into the
+    segment state.
 
     When ``object_cl`` / ``object_col`` / ``object_rear_col`` are provided (batched path
     already scored neighbors), reuse them instead of calling ``score_object_step`` again.
@@ -839,6 +951,12 @@ def _score_into(
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
+            cl_dev = score_centerline_step(np_dict, device=device)
+            if s.centerline_devs is not None:
+                s.centerline_devs[s.k] = float(cl_dev["centerline_dist_m"])
+            if np.isfinite(cl_dev["centerline_dist_m"]):
+                s.centerline_dev_sum += cl_dev["centerline_dist_m"]
+                s.centerline_dev_count += 1
             red = score_red_light_step(
                 np_dict,
                 device=device,
@@ -904,7 +1022,13 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             steering=steering,
         )
         s.live_pose = new_pose
-        s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
+        if getattr(s.tl, "native_h5", False):
+            native_state = np.asarray(
+                [*s.live_pose, s.dyn.speed, s.dyn.yaw_rate], dtype=np.float64
+            )[None]
+            s.ego_hist = np.vstack([s.ego_hist[1:], native_state])
+        else:
+            s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
         s.sim_time += DT
         # Record this step's realized accel (aligned with clearances[k], written pre-increment)
         # for the strong-brake metric; guard states built without an accels buffer.
@@ -970,10 +1094,12 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                     np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
                 )
                 s.last_turn_indicator = int(s.turn_hist[-1])
-                # Re-seed the transition-comparison basis too: without this, the next scored
-                # step would compare the pre-teleport GT against the teleport target's GT and
-                # count the environment jump itself as a (spurious) transition.
+                # Re-seed the transition-comparison basis too (both the GT baseline and the
+                # model's own prediction baseline): without this, the next scored step would
+                # compare pre-teleport state against the teleport target's GT/context and count
+                # the environment jump itself as a (spurious) transition or false positive.
                 s.turn_indicator_prev_scored_gt = int(s.turn_hist[-1])
+                s.turn_indicator_prev_scored_pred = int(s.turn_hist[-1])
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
@@ -1158,18 +1284,28 @@ def deviation_collision_block(collisions: np.ndarray, gt_devs: np.ndarray, thres
     }
 
 
-def turn_indicator_block(transition_correct: int, transition_total: int) -> dict:
+def turn_indicator_block(
+    transition_correct: int, transition_total: int, fp_count: int, fp_total: int
+) -> dict:
     """The ``turn_indicator`` segment-row block: closed-loop turn-indicator TRANSITION
-    accuracy, scored only on real inference steps (see ``_score_turn_indicator``). A plain
-    accumulator, like ``reproducer`` -- the accuracy ratio is computed at aggregate time, not
-    here, so this stays summable across segments without re-deriving a rate. Only transitions
-    are tracked (no plain per-step accuracy): it's the metric that actually demonstrates
-    correct indicator switching, unlike per-step accuracy which is dominated by long stable
-    KEEP/NONE periods.
+    accuracy AND spurious-transition ("false positive") rate, both scored only on real
+    inference steps (see ``_score_turn_indicator``). Plain accumulators, like ``reproducer``
+    -- both ratios are computed at aggregate time, not here, so this stays summable across
+    segments without re-deriving a rate.
+
+    ``transition_*`` and ``fp_*`` partition the same population of scored steps (GT-changed
+    vs GT-unchanged since the previous scored step) into two disjoint, complementary
+    metrics: transition accuracy asks "did the model follow a real GT change correctly?";
+    the false-positive rate asks "did the model flip when GT gave it no reason to?" Only
+    transitions/flips are tracked (no plain per-step accuracy): it's what actually
+    demonstrates correct indicator switching vs. spurious switching, unlike per-step
+    accuracy which is dominated by long stable KEEP/NONE periods.
     """
     return {
         "transition_correct": int(transition_correct),
         "transition_total": int(transition_total),
+        "fp_count": int(fp_count),
+        "fp_total": int(fp_total),
     }
 
 
@@ -1196,6 +1332,9 @@ def _finalize(s: _SegState) -> dict:
         "route_completion": route_completion,
         "mean_gt_deviation_m": float(s.gt_dev_sum / s.gt_dev_count)
         if s.gt_dev_count
+        else float("inf"),
+        "mean_centerline_dist_m": float(s.centerline_dev_sum / s.centerline_dev_count)
+        if s.centerline_dev_count
         else float("inf"),
         "progress_m": progress_m,
         "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
@@ -1232,6 +1371,8 @@ def _finalize(s: _SegState) -> dict:
         "turn_indicator": turn_indicator_block(
             s.turn_indicator_transition_correct,
             s.turn_indicator_transition_total,
+            s.turn_indicator_fp_count,
+            s.turn_indicator_fp_total,
         ),
         "reproducer": {
             "expand_count": int(s.expand_count),
@@ -1633,6 +1774,11 @@ def _draw_step(
     from scenario_generation.scene_context import SceneContext
 
     data = {k: np.asarray(v)[0] for k, v in np_dict.items()}
+    # Native-H5 runners retain six-column lanes for ONNX but attach an
+    # eight-column legacy view for metrics.  SceneContext is a legacy renderer,
+    # so it must consume that compatibility view as well.
+    if "metric_lanes" in data:
+        data["lanes"] = data["metric_lanes"]
     es = np.asarray(ego_shape).reshape(-1)
     ego = nl._extract_ego_agent(data, float(es[0]), float(es[1]), float(es[2]))
     neighbors = nl._extract_neighbors(data)
@@ -1962,8 +2108,19 @@ def render_segment(
                         "rb_dist_m": round(float(s.rb_dists[k]), 4)
                         if np.isfinite(s.rb_dists[k])
                         else None,
+                        "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
+                        if np.isfinite(s.centerline_devs[k])
+                        else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        # Resolved closed-loop turn indicator going into this tick, and the
+                        # recorded GT at the same frame -- same values (and same read) the
+                        # segment-level turn_indicator block and the PNG renderer use, so a
+                        # transition/false-positive can be reconstructed post hoc from the trace.
+                        "turn_indicator_pred": int(s.last_turn_indicator),
+                        "turn_indicator_gt": int(
+                            np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
+                        ),
                         # collision AND off the recorded GT path by > deviation_collision_thresh_m
                         # (see ``deviation_collision_block``); same per-step definition the
                         # segment-level "deviation_collision" metric rolls up from.
