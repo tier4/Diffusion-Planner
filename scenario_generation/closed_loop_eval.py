@@ -25,7 +25,7 @@ from diffusion_planner.config.closed_loop_config import ClosedLoopPassCondition
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
-from scenario_generation.reproducer_rollout import render_segment
+from scenario_generation.reproducer_rollout import GT_DIFF_BIN, render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -140,6 +140,43 @@ def _require_block(row: dict, category: str) -> dict:
             f"segment metrics missing nested category {category!r} (got keys={sorted(row.keys())})"
         )
     return block
+
+
+def _pool_gt_speed(rows: list[dict]) -> dict | None:
+    """Pool the per-segment ``gt_speed`` blocks into step-weighted means, the max, and pooled
+    p99 (from the summed sparse histograms, exact to ``GT_DIFF_BIN``) for each of
+    slow / fast (speed) and brake / accel (acceleration). None when no row carries the block
+    (e.g. the scenario_sim path, which has no recorded GT to compare against)."""
+    blocks = [r["gt_speed"] for r in rows if isinstance(r.get("gt_speed"), dict)]
+    if not blocks:
+        return None
+    n = sum(int(b["n"]) for b in blocks)
+    out: dict = {"n_steps": n}
+    for name in ("slow", "fast", "brake", "accel"):
+        hist: dict[int, int] = {}
+        for b in blocks:
+            for k, c in b[f"{name}_hist"].items():
+                hist[int(k)] = hist.get(int(k), 0) + int(c)
+        p99 = None
+        if n:
+            # Steps with a zero (or negative) diff are absent from the histogram; they sit
+            # below every bin, so the 99th percentile rank counts them first.
+            target = 0.99 * n
+            below = n - sum(hist.values())
+            p99 = 0.0
+            if below < target:
+                cum = below
+                for k in sorted(hist):
+                    cum += hist[k]
+                    if cum >= target:
+                        p99 = (k + 1) * GT_DIFF_BIN  # upper edge: never under-reports
+                        break
+        out[name] = {
+            "mean": float(sum(b[f"{name}_sum"] for b in blocks) / n) if n else None,
+            "p99": p99,
+            "max": max(float(b[f"{name}_max"]) for b in blocks),
+        }
+    return out
 
 
 def _event_family_block(
@@ -542,6 +579,9 @@ def aggregate(
             "repeat_step_rate": repeat / total_steps if total_steps else 0.0,
         },
     }
+    gt_speed = _pool_gt_speed(rows)
+    if gt_speed is not None:
+        summary["gt_speed"] = gt_speed
 
     # Per-segment pass/fail. Attach ``passed`` to each row (in place) so the value survives
     # segment_row_for_json / segments.jsonl and downstream consumers can read it without

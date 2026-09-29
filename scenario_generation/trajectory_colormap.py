@@ -32,7 +32,13 @@ METRIC_CHOICES = (
     "turn_indicator",
     "deviation_collision",
     "collision_rear",
+    "speed_diff",
+    "accel_diff",
 )
+
+# |live - recorded| at which the speed_diff / accel_diff colormaps saturate.
+_SPEED_DIFF_CAP_MPS = 5.0
+_ACCEL_DIFF_CAP_MPS2 = 3.0
 
 # Fixed sim step (must match reproducer_rollout.DT) -- rollout.jsonl rows are one per sim step
 # regardless of draw_every/replan_interval, so consecutive "speed" samples are always DT apart.
@@ -69,6 +75,8 @@ _METRIC_TRACE_KEYS = {
     "turn_indicator": "turn_indicator_pred",
     "deviation_collision": "deviation_collision",
     "collision_rear": "collision_rear",
+    "speed_diff": "gt_speed_diff_mps",
+    "accel_diff": "gt_accel_diff_mps2",
 }
 
 # Short colorbar axis label. The ticks themselves (see _risk_and_ticks) carry the actual
@@ -86,6 +94,8 @@ _METRIC_AXIS_LABELS = {
     "turn_indicator": "",
     "deviation_collision": "",
     "collision_rear": "",
+    "speed_diff": "|ego speed - recorded speed| (m/s)",
+    "accel_diff": "|ego accel - recorded accel| (m/s²)",
 }
 
 
@@ -222,6 +232,19 @@ def _risk_and_ticks(
             [1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64
         )
         return risk, [0.0, 1.0], ["no rear collision", "rear collision"]
+    if metric in ("speed_diff", "accel_diff"):
+        # Absolute live-vs-recorded difference (either sign is a departure from the GT drive).
+        # None = no valid GT segment at that step -> 0.0 (no evidence), like "centerline".
+        key, cap = _METRIC_TRACE_KEYS[metric], (
+            _SPEED_DIFF_CAP_MPS if metric == "speed_diff" else _ACCEL_DIFF_CAP_MPS2
+        )
+        vals = np.array(
+            [abs(r[key]) if r.get(key) is not None else 0.0 for r in rows], dtype=np.float64
+        )
+        risk = np.clip(vals / cap, 0.0, 1.0)
+        ticks = [0.0, 0.33, 0.66, 1.0]
+        unit = "m/s" if metric == "speed_diff" else "m/s²"
+        return risk, ticks, [f"{cap * t:.2f}{unit}" for t in ticks]
     raise ValueError(f"Unknown colormap metric: {metric!r} (choices: {METRIC_CHOICES})")
 
 

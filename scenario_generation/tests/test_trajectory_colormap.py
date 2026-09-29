@@ -14,7 +14,14 @@ from scenario_generation.trajectory_colormap import (
     render_trajectory_colormaps,
 )
 
-_NEW_METRICS = ("centerline", "turn_indicator", "deviation_collision", "collision_rear")
+_NEW_METRICS = (
+    "centerline",
+    "turn_indicator",
+    "deviation_collision",
+    "collision_rear",
+    "speed_diff",
+    "accel_diff",
+)
 
 
 def _write_rollout(png_dir: Path, rows: list[dict]) -> None:
@@ -38,6 +45,8 @@ def _full_row(k: int, **overrides) -> dict:
         "gt_deviation_m": 0.1,
         "deviation_collision": False,
         "centerline_dist_m": 0.3,
+        "gt_speed_diff_mps": -1.0,
+        "gt_accel_diff_mps2": 0.5,
         "turn_indicator_pred": 0,
         "turn_indicator_gt": 0,
     }
