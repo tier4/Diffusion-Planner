@@ -49,6 +49,9 @@ def _write_groups_manifest(out_dir: Path, summaries: dict[str, dict]) -> None:
         "n_groups": len(summaries),
         "n_segments": n_segments,
         "total_steps": total_steps,
+        "gt_total_steps": sum(
+            int(summary.get("gt_total_steps", 0) or 0) for summary in summaries.values()
+        ),
         "mean_route_completion": route_completion / n_segments if n_segments else 0.0,
         "mean_gt_deviation_m": dev_num / dev_steps if dev_steps else float("inf"),
         "total_curb_hits": sum(
