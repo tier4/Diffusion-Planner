@@ -466,15 +466,30 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
         max_steps=1000,
         strong_brake_mps2=-2.5,
     )
-    # Raw over-thresh: F T T F F F T  — consecutive mask: F F T F F F F
-    # One sustained pair -> steps=1, count=1. Trailing single-frame spike ignored.
-    s.k = 7
-    s.accels[:7] = np.array([0.0, -5.0, -4.5, 0.0, 0.0, 0.0, -6.0], dtype=np.float32)
+    # Scored plan accelerations enter the final block without smoothing.
+    s.k = 10
+    s.accels[:10] = -4.5
+    s.brake_metric_accels[:10] = -4.5
     metrics = _finalize(s)
-    assert metrics["strong_brake"]["steps"] == 1
-    assert metrics["strong_brake"]["count"] == 1
-    # Mask keeps only the 2nd frame of the consecutive pair (-4.5); lone -6.0 spike excluded.
-    assert abs(metrics["strong_brake"]["strongest_mps2"] - (-4.5)) < 1e-6
+    brake = metrics["strong_brake"]
+    assert brake["steps"] == 9
+    assert brake["count"] == 1
+    assert brake["strongest_mps2"] == pytest.approx(-4.5)
+    assert brake["filter_type"] == "active_plan_three_point"
+    assert brake["event_clear_frames"] == 5
+    assert brake["event_count_type"] == "confirmed_start_raw_clear"
+    assert set(brake) == {
+        "thresh_mps2",
+        "filter_type",
+        "acceleration_window_s",
+        "plan_points",
+        "event_clear_frames",
+        "event_count_type",
+        "future_source",
+        "strongest_mps2",
+        "steps",
+        "count",
+    }
 
 
 def test_finalize_road_border_collision_thresh(tmp_path):

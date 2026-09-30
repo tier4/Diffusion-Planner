@@ -35,13 +35,20 @@ from diffusion_planner.dimensions import INPUT_T, POSE_DIM
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.inference_compile import mark_inference_step
+from scenario_generation.longitudinal_kinematics import (
+    PLAN_BRAKE_FILTER_TYPE,
+    PLAN_BRAKE_POINTS,
+    PLAN_BRAKE_SOURCE,
+    brake_event_onsets,
+    confirmed_brake_mask,
+    plan_suffix_acceleration,
+)
 from scenario_generation.metrics import (
     score_centerline_step,
     score_object_step,
     score_object_step_batched,
     score_red_light_step,
     score_road_border_step,
-    strong_brake_mask,
 )
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
@@ -61,6 +68,8 @@ STUCK_SPEED_MPS = 0.5
 # Falling-edge debounce for ``*_count`` metrics: once an event starts, fewer than this many
 # consecutive False steps do not end it (threshold flicker does not re-count).
 EVENT_COUNT_CLEAR_FRAMES = 3
+# Brake events end after 0.5 s without raw score threshold crossings.
+STRONG_BRAKE_CLEAR_FRAMES = round(0.5 / DT)
 # Unsigned curb distance below this (m) counts as a road-border collision in ``_finalize``.
 # Hardcoded (not RewardConfig.rb_cross_thresh): closed-loop metrics use unsigned clearance.
 RB_COLLISION_THRESH_M = 0.1
@@ -458,10 +467,11 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Per-step realized tangential accel (m/s^2); a step is a "strong brake" when it drops
-    # at or below ``strong_brake_mps2`` (negative). Allocated by ``_seed_state`` (like
-    # ``clearances``); stays None for manually-built states that never step.
+    # Raw realized acceleration remains physical telemetry. The scored acceleration
+    # is a separate active-plan three-point value; both are invalid on a teleport step.
+    # Allocated by ``_seed_state``; None for manually-built states that never step.
     accels: np.ndarray | None = None
+    brake_metric_accels: np.ndarray | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -702,6 +712,7 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
+        brake_metric_accels=np.full(cap, np.nan, dtype=np.float64),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
@@ -967,7 +978,16 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
-def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
+def _advance_step(
+    s: _SegState,
+    pred: np.ndarray,
+    idx,
+    device,
+    timers,
+    override=None,
+    tracked=None,
+    metric_plan_xy=None,
+):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
     ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
@@ -984,6 +1004,8 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
     """
     from scenario_generation.mpc_tracker import postprocess_reference
 
+    was_warmup = s.k < s.warmup_steps
+    snaps_before = getattr(s, "snap_count", 0)
     with timers("advance"):
         if s.k < s.warmup_steps:
             tgt = min(idx + 1, len(s.tl) - 1)
@@ -1022,7 +1044,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             steering=steering,
         )
         s.live_pose = new_pose
-        if getattr(s.tl, "native_h5", False):
+        if getattr(getattr(s, "tl", None), "native_h5", False):
             native_state = np.asarray(
                 [*s.live_pose, s.dyn.speed, s.dyn.yaw_rate], dtype=np.float64
             )[None]
@@ -1106,6 +1128,20 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.ego_stuck = 0
                 s.stuck = 0
                 s.snap_count += 1
+                # Artificial resets are not physical braking transitions.
+                if s.accels is not None:
+                    s.accels[s.k - 1] = np.nan
+
+        # Metric C scores the current active plan suffix only. The controller may
+        # execute a different post-step pose; it must not enter this score.
+        scored_buffer = getattr(s, "brake_metric_accels", None)
+        if scored_buffer is not None and s.k - 1 < len(scored_buffer):
+            plan_xy = pred[:, :2] if metric_plan_xy is None else metric_plan_xy
+            scored_buffer[s.k - 1] = (
+                float("nan")
+                if was_warmup or getattr(s, "snap_count", 0) != snaps_before
+                else plan_suffix_acceleration(plan_xy, dt=DT)
+            )
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
@@ -1244,16 +1280,25 @@ def clearance_family_block(
     }
 
 
-def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
-    """The ``strong_brake`` segment-row block from a realized-acceleration series."""
-    mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
+def strong_brake_block(scored_accels: np.ndarray, thresh_mps2: float) -> dict:
+    """Count confirmed active-plan three-point acceleration steps."""
+    values = np.asarray(scored_accels, dtype=np.float64)
+    mask = confirmed_brake_mask(values, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
-        # Strongest over-threshold accel after the 2-frame consecutive mask
-        # (single-frame tracker/replan spikes are excluded).
-        "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
+        "filter_type": PLAN_BRAKE_FILTER_TYPE,
+        "plan_points": PLAN_BRAKE_POINTS,
+        "acceleration_window_s": DT,
+        "future_source": PLAN_BRAKE_SOURCE,
+        "event_clear_frames": STRONG_BRAKE_CLEAR_FRAMES,
+        "event_count_type": "confirmed_start_raw_clear",
+        "strongest_mps2": float(values[mask].min()) if mask.any() else float("inf"),
         "steps": int(mask.sum()),
-        "count": _event_count(mask),
+        "count": len(
+            brake_event_onsets(
+                values, thresh_mps2=float(thresh_mps2), clear_frames=STRONG_BRAKE_CLEAR_FRAMES
+            )
+        ),
     }
 
 
@@ -1312,7 +1357,11 @@ def turn_indicator_block(
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
     rb = s.rb_dists[: s.k]
-    accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
+    scored_accels = (
+        s.brake_metric_accels[: s.k]
+        if s.brake_metric_accels is not None
+        else np.full(s.k, np.nan, dtype=np.float64)
+    )
     red_mask = s.red_light[: s.k]
 
     # Graded (non-saturating) headline metrics: improve smoothly as the model trains, unlike the
@@ -1367,7 +1416,7 @@ def _finalize(s: _SegState) -> dict:
             "steps": int(red_mask.sum()),
             "count": _event_count(red_mask),
         },
-        "strong_brake": strong_brake_block(accels, s.strong_brake_mps2),
+        "strong_brake": strong_brake_block(scored_accels, s.strong_brake_mps2),
         "turn_indicator": turn_indicator_block(
             s.turn_indicator_transition_correct,
             s.turn_indicator_transition_total,
@@ -1891,11 +1940,10 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
-    ``tracker_mode="mpc_batched"`` (default) uses the bicycle-model MPC tracker for ego advance
-    (in the batched rollout, one vectorized solve for all segments per tick; in THIS
-    single-segment path it behaves exactly like ``"mpc"``, the serial per-segment scipy
-    solve) while
-    keeping the same reproduced perception inputs. ``tracker_mode="perfect"`` is *complete* perfect
+    ``tracker_mode="mpc_batched"`` (default) uses the bicycle-model MPC tracker on model
+    refresh ticks (in the batched rollout, one vectorized solve for all segments per tick;
+    in THIS single-segment path it behaves like ``"mpc"``, the serial scipy solve).
+    Cached ticks execute the raw world-plan point directly. ``tracker_mode="perfect"`` is *complete* perfect
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
     heading-snap drift and no MPC physical smoothing.
@@ -1920,7 +1968,9 @@ def render_segment(
     itself), ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame carries no
     lane geometry), and ``red_light_violation`` alongside the ego pose — see
     :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
-    (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
+    (which colors the saved ``brake_metric_accel_mps2`` score when present).
+    ``replan`` and ``plan_offset`` identify the executed prediction sample;
+    ``snap_after_step`` marks a reset, whose acceleration is unscored (``None``).
 
     ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
     ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
@@ -1971,6 +2021,8 @@ def render_segment(
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
+    plan_local_xy = None  # raw local prediction, indexed by the selected cached point
+    plan_anchor_xy = None  # pose at inference, for the first raw plan chord speed
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
@@ -2081,88 +2133,70 @@ def render_segment(
 
             # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
             # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
-            dbg.write(
-                json.dumps(
-                    {
-                        "k": k,
-                        "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
-                        "yaw": round(float(s.live_pose[2]), 4),
-                        "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
-                        "speed": round(float(s.dyn.speed), 3),
-                        "rec_frame_id": _frame_id(tl, idx),
-                        "rec_idx": int(idx),
-                        "max_idx_reached": int(s.cursor.max_idx_reached),
-                        "stuck": int(s.stuck),
-                        "ego_stuck": int(s.ego_stuck),
-                        # Cursor's own state (normal/repeat) + the rollout's escalation counts
-                        # (an expand/teleport this tick shows as a *_count delta on the next line).
-                        "state": s.cursor.state,
-                        "state_run_steps": int(s.cursor.state_run_steps),
-                        "expand_count": int(s.expand_count),
-                        "snap_count": int(s.snap_count),
-                        "clearance_m": round(float(s.clearances[k]), 4)
-                        if np.isfinite(s.clearances[k])
-                        else None,
-                        "collision": bool(s.collisions[k]),
-                        "collision_rear": bool(s.rear_collisions[k]),
-                        "rb_dist_m": round(float(s.rb_dists[k]), 4)
-                        if np.isfinite(s.rb_dists[k])
-                        else None,
-                        "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
-                        if np.isfinite(s.centerline_devs[k])
-                        else None,
-                        "red_light_violation": bool(s.red_light[k]),
-                        "gt_deviation_m": round(gt_deviation_m, 3),
-                        # Resolved closed-loop turn indicator going into this tick, and the
-                        # recorded GT at the same frame -- same values (and same read) the
-                        # segment-level turn_indicator block and the PNG renderer use, so a
-                        # transition/false-positive can be reconstructed post hoc from the trace.
-                        "turn_indicator_pred": int(s.last_turn_indicator),
-                        "turn_indicator_gt": int(
-                            np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
-                        ),
-                        # collision AND off the recorded GT path by > deviation_collision_thresh_m
-                        # (see ``deviation_collision_block``); same per-step definition the
-                        # segment-level "deviation_collision" metric rolls up from.
-                        "deviation_collision": bool(
-                            s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
-                        ),
-                    }
-                )
-                + "\n"
-            )
-            # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
-            # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
-            # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-            # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-            # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-            # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
+            trace_row = {
+                "k": k,
+                "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+                "yaw": round(float(s.live_pose[2]), 4),
+                "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+                "speed": round(float(s.dyn.speed), 3),
+                "rec_frame_id": _frame_id(tl, idx),
+                "rec_idx": int(idx),
+                "max_idx_reached": int(s.cursor.max_idx_reached),
+                "stuck": int(s.stuck),
+                "ego_stuck": int(s.ego_stuck),
+                # Cursor's own state (normal/repeat) + the rollout's escalation counts
+                # (an expand/teleport this tick shows as a *_count delta on the next line).
+                "state": s.cursor.state,
+                "state_run_steps": int(s.cursor.state_run_steps),
+                "expand_count": int(s.expand_count),
+                "snap_count": int(s.snap_count),
+                "clearance_m": round(float(s.clearances[k]), 4)
+                if np.isfinite(s.clearances[k])
+                else None,
+                "collision": bool(s.collisions[k]),
+                "collision_rear": bool(s.rear_collisions[k]),
+                "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
+                "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
+                if np.isfinite(s.centerline_devs[k])
+                else None,
+                "red_light_violation": bool(s.red_light[k]),
+                "gt_deviation_m": round(gt_deviation_m, 3),
+                # Resolved closed-loop turn indicator going into this tick, and the
+                # recorded GT at the same frame -- same values (and same read) the
+                # segment-level turn_indicator block and the PNG renderer use, so a
+                # transition/false-positive can be reconstructed post hoc from the trace.
+                "turn_indicator_pred": int(s.last_turn_indicator),
+                "turn_indicator_gt": int(
+                    np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
+                ),
+                # collision AND off the recorded GT path by > deviation_collision_thresh_m
+                # (see ``deviation_collision_block``); same per-step definition the
+                # segment-level "deviation_collision" metric rolls up from.
+                "deviation_collision": bool(
+                    s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
+                ),
+            }
+            # Re-plan every N steps. On an in-between step, execute the cached
+            # raw world prediction directly; only refresh steps run MPC.
             offset = k % replan_interval
-            override = None
-            if plan_world is None or offset == 0:
+            replanned = plan_world is None or offset == 0
+            if replanned:
                 with timers("to_torch"):
                     data = _to_torch_batch([np_dict], model_args, device)
-                # No-op unless the model was compiled with cudagraphs; one inference is one step.
                 mark_inference_step()
                 with timers("model_forward"):
                     _, outputs = model(data)
                 pred = outputs["prediction"][0, 0].cpu().numpy()
+                plan_local_xy = np.asarray(pred[:, :2]).copy()
+                plan_anchor_xy = np.asarray(s.live_pose[:2], dtype=np.float64).copy()
                 plan_world = _ego_pred_to_world(
                     pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
                 )
-                pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+                pred_cur = pred
                 _feed_turn_indicator(s, outputs)
                 _score_turn_indicator(s, idx)
             else:
-                # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
-                tx, ty, th = (
-                    float(plan_world[0][off, 0]),
-                    float(plan_world[0][off, 1]),
-                    float(plan_world[1][off]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
                 pred_cur = _world_plan_to_ego(
                     plan_world[0][off:],
                     plan_world[1][off:],
@@ -2170,23 +2204,21 @@ def render_segment(
                     s.live_pose[1],
                     s.live_pose[2],
                 )
-                # No fresh inference this step: hold the last decoded turn indicator so the
-                # 10 Hz turn_indicators history keeps scrolling with the same signal.
                 _hold_turn_indicator(s)
-            # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
-            # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
-            # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
-            # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
-            # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
-            # override path implements). Every step then lands on the predicted polyline point.
-            if tracker_mode == "perfect" and override is None:
+            plan_offset = 0 if replanned else min(offset, len(plan_world[0]) - 1)
+            chord_start = plan_anchor_xy if plan_offset == 0 else plan_world[0][plan_offset - 1]
+            plan_chord_speed = float(np.linalg.norm(plan_world[0][plan_offset] - chord_start) / DT)
+            if tracker_mode == "perfect" or not replanned:
                 tx, ty, th = (
-                    float(plan_world[0][0, 0]),
-                    float(plan_world[0][0, 1]),
-                    float(plan_world[1][0]),
+                    float(plan_world[0][plan_offset, 0]),
+                    float(plan_world[0][plan_offset, 1]),
+                    float(plan_world[1][plan_offset]),
                 )
                 spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
                 override = (np.array([tx, ty, th], dtype=np.float64), spd)
+            else:
+                override = None
+            target_xy = plan_world[0][plan_offset]
             if (
                 draw_every is not None
                 and (window is None or (window[0] <= k <= window[1]))
@@ -2233,12 +2265,67 @@ def render_segment(
                         )
                     )
             snaps_before = s.snap_count
-            _advance_step(s, pred_cur, idx, device, timers, override=override)
+            _advance_step(
+                s,
+                pred_cur,
+                idx,
+                device,
+                timers,
+                override=override,
+                metric_plan_xy=plan_local_xy[plan_offset:],
+            )
+            snapped = s.snap_count > snaps_before
+            used_mpc = k >= s.warmup_steps and tracker_mode != "perfect" and replanned
+            commanded_accel = float(s.tracker.last_accel) if used_mpc else None
+            executed_mode = (
+                "recorded_warmup"
+                if k < s.warmup_steps
+                else "perfect"
+                if tracker_mode == "perfect"
+                else "mpc"
+                if replanned
+                else "cached_pose"
+            )
+            trace_row.update(
+                accel_mps2=float(s.accels[k]) if np.isfinite(s.accels[k]) else None,
+                brake_metric_accel_mps2=(
+                    float(s.brake_metric_accels[k])
+                    if s.brake_metric_accels is not None and np.isfinite(s.brake_metric_accels[k])
+                    else None
+                ),
+                strong_brake_filter_type=PLAN_BRAKE_FILTER_TYPE,
+                strong_brake_plan_points=PLAN_BRAKE_POINTS,
+                strong_brake_acceleration_window_s=DT,
+                strong_brake_future_source=PLAN_BRAKE_SOURCE,
+                speed_after_mps=float(s.dyn.speed),
+                ego_after_world=[float(s.live_pose[0]), float(s.live_pose[1])],
+                executed_tracker_mode=executed_mode,
+                replan=replanned,
+                plan_offset=int(plan_offset),
+                plan_chord_speed_mps=plan_chord_speed,
+                planned_next_world=[float(target_xy[0]), float(target_xy[1])],
+                tracking_error_m=(
+                    None
+                    if snapped or k < s.warmup_steps
+                    else float(np.linalg.norm(s.live_pose[:2] - target_xy))
+                ),
+                mpc_commanded_accel_mps2=commanded_accel,
+                mpc_commanded_steering_rad=(float(s.tracker.last_steering) if used_mpc else None),
+                mpc_accel_saturated=(
+                    abs(commanded_accel - s.tracker.min_accel) < 1e-5
+                    or abs(commanded_accel - s.tracker.max_accel) < 1e-5
+                    if commanded_accel is not None
+                    else None
+                ),
+                snap_after_step=snapped,
+            )
+            dbg.write(json.dumps(trace_row) + "\n")
             if s.snap_count > snaps_before:
                 # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
                 # world location, so executing it next step would drag the ego right back. Invalidate
                 # it to force a fresh inference at the snapped pose (else the snap never sticks).
                 plan_world = None
+                plan_local_xy = None
     # Every PNG must be on disk before the caller globs the directory for ffmpeg, and a worker
     # exception only surfaces here.
     with timers("render_drain"):

@@ -557,24 +557,24 @@ Outputs (`red_light_violation`):
 |---|---|
 | `steps` / `count` | Violating frames / events |
 
-### strong_brake — hard braking
+### strong_brake — active-plan three-point deceleration
 
-Realized longitudinal accel after each tracker step. A frame counts only when
-this and the previous frame are both at or below the threshold.
+At each tick, use the first three points of the active raw prediction suffix:
+`a = (norm(p2 - p1) - norm(p1 - p0)) / 0.1²`. Cached ticks advance the suffix
+with the executed plan index. This scores predicted deceleration without the ego
+seam, realized speed, or smoothing.
 
-Inputs:
+Two consecutive scores at or below `-2.5 m/s²` confirm an event. Once active,
+five consecutive **raw scores above the threshold** end it (0.5 s). The clear
+timer does not use the two-frame confirmation mask. Missing predictions, warmup,
+and reset ticks are unscored and break event state.
 
-| | |
-|---|---|
-| Strong-brake threshold (default `-2.5` m/s²) | Tunable; echoed as `thresh_mps2` |
-| Consecutive-pair rule (fixed) | Need two frames in a row over threshold — the current simulator’s realized speed often spikes for a single frame at replan, which would otherwise look like a hard brake |
-
-Outputs (`strong_brake`):
-
-| Field | Meaning |
-|---|---|
-| `steps` / `count` | Counted frames / events |
-| `strongest_mps2` | Most negative counted accel (`inf` if none) |
+`steps` counts confirmed ticks; `count` uses this start/release state machine.
+The result declares `filter_type=active_plan_three_point`,
+`event_count_type=confirmed_start_raw_clear`, and `event_clear_frames=5`.
+The trace retains physical `accel_mps2` separately from `brake_metric_accel_mps2`.
+See [the metric definition](../docs/strong_brake_metric.md) for formulas,
+metadata, and historical-trace compatibility.
 
 ### reproducer — unstick and cursor health
 

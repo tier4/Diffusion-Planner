@@ -372,8 +372,7 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"terminated={summary['terminated_counts']}",
         f"turn_indicator transition accuracy: "
         f"{ti['transition_correct']}/{ti['transition_total']} ({ti_acc_str})",
-        f"turn_indicator false positive rate: "
-        f"{ti['fp_count']}/{ti['fp_total']} ({ti_fp_str})",
+        f"turn_indicator false positive rate: {ti['fp_count']}/{ti['fp_total']} ({ti_fp_str})",
         f"mean gt_deviation={summary['mean_gt_deviation_m']:.3f} m  "
         f"mean centerline_deviation={summary['mean_centerline_dist_m']:.3f} m",
     ]
@@ -418,9 +417,7 @@ def aggregate(
         if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
     )
     cl_den = sum(
-        r["n_steps_run"]
-        for r in rows
-        if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
+        r["n_steps_run"] for r in rows if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
     )
 
     term_counts: dict[str, int] = {}
@@ -482,9 +479,50 @@ def aggregate(
         thresh_key="thresh_mps2",
         thresh_value=float(strong_brake_mps2),
     )
-    # Strongest consecutive-pair accel across segments (mask-filtered; +inf if none).
+    # Strongest counted filtered acceleration across segments (+inf if none).
     strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
     brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
+    definitions = set()
+    event_types = {
+        row["strong_brake"].get("event_count_type", "confirmed_mask_clear") for row in rows
+    }
+    if len(event_types) > 1:
+        raise ValueError("Cannot aggregate different strong-brake event counting rules")
+    if event_types:
+        brake["event_count_type"] = event_types.pop()
+    clear_frames = {row["strong_brake"].get("event_clear_frames", 3) for row in rows}
+    if len(clear_frames) > 1:
+        raise ValueError("Cannot aggregate different strong-brake event clear times")
+    if clear_frames:
+        brake["event_clear_frames"] = clear_frames.pop()
+    for row in rows:
+        block = row["strong_brake"]
+        if block.get("filter_type") == "active_plan_three_point":
+            definitions.add(
+                (
+                    block["filter_type"],
+                    block["plan_points"],
+                    block["acceleration_window_s"],
+                    block["future_source"],
+                )
+            )
+        elif block.get("filter_type") is None:
+            definitions.add(("legacy_realized_accel", block.get("acceleration_window_s", 0.1)))
+        else:
+            raise ValueError(f"Unknown strong-brake filter type: {block['filter_type']!r}")
+    if len(definitions) > 1:
+        raise ValueError("Cannot aggregate different strong-brake metric definitions")
+    if definitions:
+        definition = definitions.pop()
+        if definition[0] == "active_plan_three_point":
+            brake.update(
+                filter_type=definition[0],
+                plan_points=definition[1],
+                acceleration_window_s=definition[2],
+                future_source=definition[3],
+            )
+        else:
+            brake["acceleration_window_s"] = definition[1]
 
     turn_transition_correct = sum(
         int(_require_block(r, "turn_indicator")["transition_correct"]) for r in rows
@@ -529,9 +567,7 @@ def aggregate(
             "fp_total": turn_fp_total,
             # None (not 0.0) when no GT-steady scored step ever occurred: a silent 0.0 would
             # misread as "never flips spuriously" rather than "nothing to measure".
-            "false_positive_rate": (
-                (turn_fp_count / turn_fp_total) if turn_fp_total > 0 else None
-            ),
+            "false_positive_rate": ((turn_fp_count / turn_fp_total) if turn_fp_total > 0 else None),
         },
         "terminated_counts": term_counts,
         "reproducer": {
