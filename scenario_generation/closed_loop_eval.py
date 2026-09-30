@@ -397,6 +397,12 @@ def aggregate(
 
     n_seg = len(rows)
     total_steps = sum(int(r["n_steps_run"]) for r in rows)
+    # Recorded GT frames spanned by the evaluated segments (``segment`` = [start, end)), i.e. the
+    # step count a run would have if the ego followed GT to the end of every segment. Rows
+    # without a ``segment`` (scenario_sim path, failed workers) contribute 0.
+    gt_total_steps = sum(
+        max(int(r["segment"][1]) - int(r["segment"][0]), 0) for r in rows if r.get("segment")
+    )
 
     # Graded (non-saturating) headline metrics: these improve smoothly as the model trains,
     # unlike the binary *_segment_rate / worst-moment *_min_clearance keys nested below.
@@ -504,6 +510,7 @@ def aggregate(
     summary = {
         "n_segments": n_seg,
         "total_steps": total_steps,
+        "gt_total_steps": gt_total_steps,
         "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
         "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
         "mean_centerline_dist_m": float(cl_num / cl_den) if cl_den else float("inf"),
