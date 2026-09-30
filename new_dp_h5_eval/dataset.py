@@ -10,7 +10,7 @@ import hdf5plugin  # noqa: F401 - registers the zstd HDF5 filter
 import numpy as np
 import pyarrow.parquet as pq
 
-from .schema import H5_FORMAT, H5_FORMAT_VERSION, MODEL_INPUT_NAMES
+from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 
 
 class H5FrameIndex:
@@ -112,7 +112,7 @@ class H5FrameIndex:
         if file.attrs.get("format") != H5_FORMAT:
             file.close()
             raise ValueError(f"Unexpected H5 format: {path}")
-        if int(file.attrs.get("format_version", -1)) != H5_FORMAT_VERSION:
+        if int(file.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
             file.close()
             raise ValueError(f"Unsupported H5 format version: {path}")
         if "frames" not in file or "num_frames" not in file.attrs:

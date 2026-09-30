@@ -37,7 +37,7 @@ from .model import (
     legacy_feedback_turn_logits,
     seeded_initial_noise,
 )
-from .schema import H5_FORMAT, H5_FORMAT_VERSION, MODEL_INPUT_NAMES
+from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 
 
 class NativeH5RouteTimeline(RouteTimeline):
@@ -57,10 +57,15 @@ class NativeH5RouteTimeline(RouteTimeline):
         try:
             if self._h5.attrs.get("format") != H5_FORMAT:
                 raise ValueError(f"unexpected H5 format: {self.h5_path}")
-            if int(self._h5.attrs.get("format_version", -1)) != H5_FORMAT_VERSION:
+            if int(self._h5.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
                 raise ValueError(f"unsupported H5 format version: {self.h5_path}")
             metadata = self._h5["metadata"]
-            required = {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
+            format_version = int(self._h5.attrs["format_version"])
+            required = (
+                {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
+                if format_version == 4
+                else {"frame_time_ns", "x", "y", "z", "qx", "qy", "qz", "qw"}
+            )
             missing = required.difference(metadata.keys())
             if missing:
                 raise ValueError(
@@ -79,13 +84,31 @@ class NativeH5RouteTimeline(RouteTimeline):
             self._rows = np.arange(start, stop, dtype=np.int64)
             self.frame_indices = self._rows.copy()
             self.frame_times_ns = np.asarray(metadata["frame_time_ns"][start:stop], dtype=np.int64)
-            self.poses = np.column_stack(
-                [
-                    metadata["ego_x"][start:stop],
-                    metadata["ego_y"][start:stop],
-                    metadata["ego_yaw"][start:stop],
-                ]
-            ).astype(np.float64)
+            if format_version == 4:
+                self.poses = np.column_stack(
+                    [
+                        metadata["ego_x"][start:stop],
+                        metadata["ego_y"][start:stop],
+                        metadata["ego_yaw"][start:stop],
+                    ]
+                ).astype(np.float64)
+            else:
+                x, y, z, qx, qy, qz, qw = (
+                    np.asarray(metadata[name][start:stop], dtype=np.float64)
+                    for name in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                )
+                quaternion_norm_sq = qx * qx + qy * qy + qz * qz + qw * qw
+                if (
+                    not np.isfinite(z).all()
+                    or not np.isfinite(quaternion_norm_sq).all()
+                    or np.any(quaternion_norm_sq <= 0)
+                ):
+                    raise ValueError(f"invalid closed-loop v5 pose in {self.h5_path}")
+                yaw = np.arctan2(
+                    2.0 * (qw * qz + qx * qy),
+                    qw * qw + qx * qx - qy * qy - qz * qz,
+                )
+                self.poses = np.column_stack([x, y, yaw])
             if not np.isfinite(self.poses).all():
                 raise ValueError(f"non-finite closed-loop poses in {self.h5_path}")
         except BaseException:
