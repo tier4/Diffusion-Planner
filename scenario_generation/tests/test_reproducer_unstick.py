@@ -214,6 +214,8 @@ def test_unstick_widens_radius_before_teleporting(tmp_path):
     for i in range(after + teleport_after - 1):
         s.cursor.last_was_repeat = True  # stuck repeating (see module docstring)
         _advance_step(s, pred, idx=i, device="cpu", timers=timers)
+        assert np.isnan(s.accels[i])
+        assert s.brake_ema_speed == s.dyn.speed
     assert s.cursor.search_radius == base_r * mult, "stuck ego must widen the cursor radius"
     assert s.snap_count == 0, "teleport must be deferred while only the radius has been widened"
     assert s.expand_count == 1, "stage-1 widen must be counted as an expand event"
@@ -223,6 +225,12 @@ def test_unstick_widens_radius_before_teleporting(tmp_path):
     _advance_step(s, pred, idx=after + teleport_after - 1, device="cpu", timers=timers)
     assert s.snap_count == 1, "still-stuck ego must teleport after the grace window"
     assert s.cursor.search_radius == base_r, "teleport restores the nominal search_radius"
+    assert np.isnan(s.accels[s.k - 1])
+    assert s.brake_ema_speed == s.dyn.speed
+    s.warmup_steps = s.k  # Resume normal tracking after the reset.
+    s.unstick_after = 0
+    _advance_step(s, pred, idx=s.k, device="cpu", timers=timers, tracked=(s.live_pose, s.dyn.speed))
+    assert s.accels[s.k - 1] == 0.0
 
 
 def test_stuck_requires_repeat_not_just_stopped(tmp_path):
@@ -447,7 +455,7 @@ def test_event_onset_count_gates_on_the_onset_step():
 
 
 def test_finalize_strong_brake_steps_and_count(tmp_path):
-    """``strong_brake.steps`` needs two consecutive over-threshold frames;
+    """``strong_brake.steps`` needs three consecutive over-threshold frames;
     ``strong_brake.count`` is the number of discrete braking events (debounced rising edges)."""
     from scenario_generation.reproducer_rollout import _finalize
 
@@ -466,18 +474,13 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
         max_steps=1000,
         strong_brake_mps2=-2.5,
     )
-    from scenario_generation.metrics.strong_brake import plan_acceleration
-
-    # Four raw clear frames keep an event active; five end it. Actual speed
-    # changes do not enter the plan-only score.
-    scores = [-5.0, -5.0] + [0.0] * 4 + [-5.0, -5.0] + [0.0] * 5 + [-5.0, -5.0]
+    # Four raw clear frames keep an event active; five end it.
+    scores = [-5.0] * 4 + [0.0] * 4 + [-5.0] * 3 + [0.0] * 5 + [-5.0] * 3
     s.k = len(scores)
-    s.accels[: s.k] = [
-        plan_acceleration(np.array([[0.0, 0.0], [1.0, 0.0], [2.0 + a * 0.01, 0.0]])) for a in scores
-    ]
+    s.accels[: s.k] = scores
     metrics = _finalize(s)
     brake = metrics["strong_brake"]
-    assert brake["steps"] == 3
+    assert brake["steps"] == 4
     assert brake["count"] == 2
     assert brake["strongest_mps2"] == pytest.approx(-5.0)
     assert set(brake) == {"thresh_mps2", "strongest_mps2", "steps", "count"}

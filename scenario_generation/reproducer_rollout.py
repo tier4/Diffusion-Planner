@@ -43,7 +43,7 @@ from scenario_generation.metrics import (
     score_road_border_step,
     strong_brake_mask,
 )
-from scenario_generation.metrics.strong_brake import plan_acceleration, strong_brake_count
+from scenario_generation.metrics.strong_brake import strong_brake_count
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
@@ -459,8 +459,9 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Per-step active-plan acceleration for the strong-brake metric.
+    # Per-step acceleration of EMA-smoothed executed speed for the strong-brake metric.
     accels: np.ndarray | None = None
+    brake_ema_speed: float | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -701,6 +702,7 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
+        brake_ema_speed=float(dyn.speed),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
@@ -966,16 +968,7 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
-def _advance_step(
-    s: _SegState,
-    pred: np.ndarray,
-    idx,
-    device,
-    timers,
-    override=None,
-    tracked=None,
-    metric_plan_xy=None,
-):
+def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
     ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
@@ -994,6 +987,9 @@ def _advance_step(
 
     was_warmup = s.k < s.warmup_steps
     snaps_before = getattr(s, "snap_count", 0)
+    prev_ema_speed = getattr(s, "brake_ema_speed", None)
+    if prev_ema_speed is None:
+        prev_ema_speed = float(s.dyn.speed)
     with timers("advance"):
         if s.k < s.warmup_steps:
             tgt = min(idx + 1, len(s.tl) - 1)
@@ -1113,11 +1109,14 @@ def _advance_step(
                 s.stuck = 0
                 s.snap_count += 1
 
+        if was_warmup or getattr(s, "snap_count", 0) != snaps_before:
+            s.brake_ema_speed = float(s.dyn.speed)
+            brake_accel = np.nan
+        else:
+            s.brake_ema_speed = 0.3 * float(s.dyn.speed) + 0.7 * prev_ema_speed
+            brake_accel = (s.brake_ema_speed - prev_ema_speed) / DT
         if s.accels is not None and s.k - 1 < len(s.accels):
-            xy = pred[:, :2] if metric_plan_xy is None else metric_plan_xy
-            s.accels[s.k - 1] = (
-                np.nan if was_warmup or s.snap_count != snaps_before else plan_acceleration(xy, DT)
-            )
+            s.accels[s.k - 1] = brake_accel
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
@@ -1257,11 +1256,11 @@ def clearance_family_block(
 
 
 def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
-    """The ``strong_brake`` block from the active-plan acceleration series."""
+    """The ``strong_brake`` block from EMA-smoothed executed-speed acceleration."""
     mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
-        # Strongest over-threshold accel after the 2-frame consecutive mask
+        # Strongest over-threshold accel after the 3-frame consecutive mask
         # (single-frame tracker/replan spikes are excluded).
         "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
         "steps": int(mask.sum()),
@@ -1983,7 +1982,6 @@ def render_segment(
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
-    plan_local_xy = None  # raw local XY for the plan-only braking metric
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
@@ -2152,7 +2150,6 @@ def render_segment(
             # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
             offset = k % replan_interval
             override = None
-            metric_offset = 0
             if plan_world is None or offset == 0:
                 with timers("to_torch"):
                     data = _to_torch_batch([np_dict], model_args, device)
@@ -2161,7 +2158,6 @@ def render_segment(
                 with timers("model_forward"):
                     _, outputs = model(data)
                 pred = outputs["prediction"][0, 0].cpu().numpy()
-                plan_local_xy = pred[:, :2].copy()
                 plan_world = _ego_pred_to_world(
                     pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
                 )
@@ -2171,7 +2167,6 @@ def render_segment(
             else:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
-                metric_offset = off
                 tx, ty, th = (
                     float(plan_world[0][off, 0]),
                     float(plan_world[0][off, 1]),
@@ -2249,15 +2244,7 @@ def render_segment(
                         )
                     )
             snaps_before = s.snap_count
-            _advance_step(
-                s,
-                pred_cur,
-                idx,
-                device,
-                timers,
-                override=override,
-                metric_plan_xy=plan_local_xy[metric_offset:],
-            )
+            _advance_step(s, pred_cur, idx, device, timers, override=override)
             if s.snap_count > snaps_before:
                 # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
                 # world location, so executing it next step would drag the ego right back. Invalidate

@@ -273,13 +273,13 @@ def test_road_border_step_is_zero_when_border_intersects_ego():
 
 
 def test_strong_brake_mask():
-    # Isolated spike (-5) does not count; only the 2nd frame of a consecutive pair does.
+    # Isolated spikes and pairs do not count; the third consecutive frame does.
     # Uses an explicit thresh (not the default) so the fixture values stay readable.
     mask = strong_brake_mask(
-        np.array([0.0, -5.0, -4.0, -3.9, -6.0, -5.0], dtype=np.float32),
+        np.array([0.0, -5.0, -4.0, -4.1, -3.9, -6.0, -5.0], dtype=np.float32),
         thresh_mps2=-4.0,
     )
-    assert mask.tolist() == [False, False, True, False, False, True]
+    assert mask.tolist() == [False, False, False, True, False, False, False]
 
 
 def _segment_row(**overrides) -> dict:
