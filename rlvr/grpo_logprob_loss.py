@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 
 from rlvr.vpsde_logprob import (
     compute_discount_weights,
@@ -103,12 +102,8 @@ def _build_model_inputs(
         neighbor_slice = all_gt[:, 1 : 1 + nf_pn]
         neighbor_slice.masked_fill_(full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0)
 
-    # Build t tensor [N, P, T+1, 1]
-    t_4d = torch.full((N, P, future_len + 1, 1), t_value, device=device)
-
-    # Prefix mask (no random delay for logprob — use fixed delay=0)
-    delay = torch.zeros(N, dtype=torch.long, device=device)
-    prefix_mask = generate_prefix_mask(delay, P, future_len + 1)
+    # Build t tensor [N]
+    t = torch.full((N,), t_value, device=device)
 
     # Normalize observation data
     data_normalized = model_args.observation_normalizer(
@@ -118,10 +113,7 @@ def _build_model_inputs(
     merged = {**data_normalized}
     merged["gt_trajectories"] = all_gt
     merged["sampled_trajectories"] = x_t
-    merged["diffusion_time"] = t_4d
-    merged["prefix_mask"] = prefix_mask
-    if "delay" not in merged:
-        merged["delay"] = delay
+    merged["diffusion_time"] = t
 
     return merged, all_gt
 
