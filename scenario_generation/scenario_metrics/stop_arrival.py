@@ -136,6 +136,21 @@ def _stop_runs(speed: np.ndarray, dt: float, p: StopParams) -> list[tuple[int, i
     return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]) if b - a >= width]
 
 
+def _ego_stop_speed(inp: ClosedLoopScenarioInput, p: StopParams) -> np.ndarray:
+    """Live ego speed for stop detection: net displacement over ``sustained_stop_s``.
+
+    A stopped closed-loop ego jitters by a few centimetres per step, so the rollout's
+    per-step ``speed`` (and per-step pose deltas) swing across the stop threshold
+    while it stands still and no sustained stop is ever seen. The net displacement over
+    a centred window of the stop duration is what "standing still" means here.
+    """
+    n, w = inp.n_steps, max(1, round(p.sustained_stop_s / inp.dt))
+    a = np.clip(np.arange(n) - w // 2, 0, max(n - 1 - w, 0))
+    b = np.minimum(a + w, n - 1)
+    span = np.maximum(b - a, 1) * inp.dt
+    return np.linalg.norm(inp.ego_xy[b] - inp.ego_xy[a], axis=1) / span
+
+
 def _extended_path(inp: ClosedLoopScenarioInput) -> np.ndarray:
     yaw = inp.rec_yaw[-1]
     tip = inp.rec_xy[-1] + PATH_EXTENSION_M * np.array([np.cos(yaw), np.sin(yaw)])
@@ -165,7 +180,7 @@ def _ol_stop_values(inp: ClosedLoopScenarioInput, p: StopParams) -> dict[str, fl
     # Same rule as ``_stop_position_s`` (final sustained stop, else terminal s), with the
     # rollout's speed and step length instead of 0.1 s pose deltas.
     ego_pos = _project_along_route(ego, segments)
-    runs = _stop_runs(inp.ego_speed[steps], inp.dt, p)
+    runs = _stop_runs(_ego_stop_speed(inp, p)[steps], inp.dt, p)
     ego_s = float(np.median(ego_pos[runs[-1][0] : runs[-1][1]])) if runs else float(ego_pos[-1])
     overshoot = max(0.0, ego_s - gt_s)
     return {
@@ -232,7 +247,7 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     values["human_stop_s_m"] = human_s
     details["human_stop_frames"] = [h0, h1]
 
-    live = [r for r in _stop_runs(inp.ego_speed, inp.dt, p) if r[1] > k0]
+    live = [r for r in _stop_runs(_ego_stop_speed(inp, p), inp.dt, p) if r[1] > k0]
     beyond = np.flatnonzero(s_ego[k0:] > limit)
     k_cross = k0 + int(beyond[0]) if len(beyond) else None
     before = [r for r in live if k_cross is None or r[0] < k_cross]
@@ -304,7 +319,9 @@ def _score_arrival_stop(
         "arrival_mode": "stop_at_arrival_point",
         "human_stop_frames": [h0, h1],
     }
-    live = [r for r in _stop_runs(inp.ego_speed, inp.dt, _STOP_RULE) if r[1] > k0]
+    live = [
+        r for r in _stop_runs(_ego_stop_speed(inp, _STOP_RULE), inp.dt, _STOP_RULE) if r[1] > k0
+    ]
     if not live:
         if (
             inp.terminated != "goal"

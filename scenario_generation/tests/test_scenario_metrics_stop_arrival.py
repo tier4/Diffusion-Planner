@@ -271,3 +271,24 @@ def test_extended_arrival_trace_ending_before_the_point_is_not_scored():
     r = registry.score(_extended_arrival(np.full(30, 5.0), terminated="max_steps"))
     assert r.passed is None
     assert r.reason.startswith("trace ended (max_steps) before the ego reached")
+
+
+def test_a_jittering_stopped_ego_still_counts_as_stopped():
+    # Stopped at the human's stop, but the pose jitters 8 cm back and forth each step and
+    # the logged speed swings across the 0.5 m/s threshold, as in closed-loop rollouts.
+    ego_xy, ego_yaw = speed_profile_path(_profile(50, 100))
+    ego_xy[50:, 0] += np.where(np.arange(100) % 2, 0.08, 0.0)
+    swinging = np.where(np.arange(150) % 2, 0.8, 0.1)
+    r = registry.score(
+        make_input(
+            label="traffic_light_stop",
+            ego_xy=ego_xy,
+            ego_yaw=ego_yaw,
+            rec_xy=speed_profile_path(_profile(50, 100))[0],
+            rec_yaw=np.zeros(150),
+            anchor_frame=ANCHOR,
+            ego_speed=swinging,
+        )
+    )
+    assert r.passed is True and r.values["ego_sustained_stop"] == 1.0
+    assert r.values["overshoot_m"] < 0.1
