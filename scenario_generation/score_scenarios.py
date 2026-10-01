@@ -65,7 +65,10 @@ def _windows(entries: list[str]) -> dict[str, tuple[list[Path], Path, str, list[
     return by_key
 
 
-def score_group(group_dir: Path, entries: list[str]) -> list[dict]:
+def score_group(group_dir: Path, entries: list[str], config=None) -> list[dict]:
+    """Score every (window, anchor) of one group. ``config`` carries the thresholds shared
+    with open loop (``ScenarioOpenLoopConfig`` or an args object with its fields); None
+    uses its defaults."""
     windows = _windows(entries)
     rows = []
     for seg_file in sorted(group_dir.glob("segments*.jsonl")):
@@ -104,7 +107,7 @@ def score_group(group_dir: Path, entries: list[str]) -> list[dict]:
                     anchor_frame=int(anchor["frame_offset"]),
                     span_frames=span,
                 )
-                rows.append({**base, **score(inp).to_json()})
+                rows.append({**base, **score(inp, config).to_json()})
     return rows
 
 

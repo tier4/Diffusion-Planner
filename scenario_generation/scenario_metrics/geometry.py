@@ -56,21 +56,20 @@ from scenario_generation.scenario_metrics.base import (
     project_onto_path,
 )
 from scenario_generation.scenario_metrics.registry import register
+from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
 
 _REC_DT_S = 0.1  # one recorded frame per 0.1 s (see base)
 
-# Horizons: config/scenario_open_loop_config.py (scenario_<label>_horizon_seconds);
-# object_avoidance has none there and scores the whole 8 s prediction.
-SIMPLE_TURN_HORIZON_S = 8.0
-CENTERLINE_HORIZON_S = 8.0
-LANE_CHANGE_HORIZON_S = 8.0
+# From the open-loop config (``shared_config``): the simple_turn / centerline /
+# lane_change horizons (``scenario_<label>_horizon_seconds``) and lane_change's
+# ``minimum_lateral_shift_m`` / ``chain_tolerance_m``. Everything below is closed loop
+# only, or an open-loop module constant that is not a config field.
+
+# object_avoidance has no open-loop horizon field; open loop scores the whole 8 s prediction.
 OBJECT_AVOIDANCE_HORIZON_S = 8.0
-# lane_change: scenario_lane_change_{minimum_lateral_shift_m,chain_tolerance_m};
-# the path margin is planner_metrics/lane_change.py::_SOURCE_PATH_MARGIN_M.
-LANE_CHANGE_MIN_LATERAL_SHIFT_M = 1.0
-LANE_CHANGE_CHAIN_TOLERANCE_M = 1.0
+# planner_metrics/lane_change.py::_SOURCE_PATH_MARGIN_M.
 LANE_CHANGE_SOURCE_PATH_MARGIN_M = 20.0
-# New in closed loop (no open-loop threshold). 1.0 m is lane_change's minimum
+# New in closed loop (no open-loop threshold). 1.0 m is lane_change's default minimum
 # lateral shift: a smaller deviation cannot have put the ego in another lane.
 MAX_LATERAL_ERROR_M = 1.0
 # New in closed loop: the anti-stall check. A human arc below the floor is "did not
@@ -173,6 +172,10 @@ def _window(
     )
 
 
+def _horizon_s(label: str, config) -> float:
+    return float(open_loop_parameters(label, config)["horizon_seconds"])
+
+
 def _to_local(inp: ClosedLoopScenarioInput, xy: np.ndarray, frame: int) -> np.ndarray:
     """Inverse of ``inp.to_world``: world points into recorded frame ``frame``'s ego frame."""
     c, s = np.cos(inp.rec_yaw[frame]), np.sin(inp.rec_yaw[frame])
@@ -227,7 +230,7 @@ def _lateral_result(
 
 
 @register("simple_turn")
-def score_simple_turn(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+def score_simple_turn(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """Lateral deviation of the realized path from the recorded human path over the turn.
 
     Mirrors ``planner_metrics/gt_lateral_deviation.py`` (the open-loop ``simple_turn``
@@ -235,7 +238,7 @@ def score_simple_turn(inp: ClosedLoopScenarioInput) -> ScenarioResult:
     in the anchor frame so the torch helper runs unchanged.
     """
     metric = "gt_lateral_deviation"
-    w = _window(inp, SIMPLE_TURN_HORIZON_S)
+    w = _window(inp, _horizon_s("simple_turn", config))
     if w is None:
         return _not_reached(metric)
     if w.rec_progress_m < MIN_REC_PROGRESS_M:
@@ -254,7 +257,7 @@ def score_simple_turn(inp: ClosedLoopScenarioInput) -> ScenarioResult:
 
 
 @register("centerline")
-def score_centerline(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+def score_centerline(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """Lateral deviation of the realized path from the route-lane centerline after the anchor.
 
     Mirrors ``planner_metrics/centerline.py`` on the anchor frame's ``route_lanes``
@@ -262,7 +265,7 @@ def score_centerline(inp: ClosedLoopScenarioInput) -> ScenarioResult:
     ~100 m ahead, more than 8 s of recorded drive at urban speeds.
     """
     metric = "centerline"
-    w = _window(inp, CENTERLINE_HORIZON_S)
+    w = _window(inp, _horizon_s("centerline", config))
     if w is None:
         return _not_reached(metric)
     frame = inp.load_frame(w.start_frame)
@@ -280,7 +283,7 @@ def score_centerline(inp: ClosedLoopScenarioInput) -> ScenarioResult:
 
 
 @register("lane_change")
-def score_lane_change(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """Did the realized trajectory complete the human's lane change?
 
     Mirrors ``planner_metrics/lane_change.py::evaluate_lane_change_with_details``: the
@@ -294,7 +297,9 @@ def score_lane_change(inp: ClosedLoopScenarioInput) -> ScenarioResult:
     progress check: as in open loop, a slow ego still gets credit for its lateral move.
     """
     metric = "lane_change"
-    w = _window(inp, LANE_CHANGE_HORIZON_S)
+    params = open_loop_parameters("lane_change", config)
+    min_lateral_shift_m = float(params["minimum_lateral_shift_m"])
+    w = _window(inp, float(params["horizon_seconds"]))
     if w is None:
         return _not_reached(metric)
     frame = inp.load_frame(w.start_frame)
@@ -316,7 +321,7 @@ def score_lane_change(inp: ClosedLoopScenarioInput) -> ScenarioResult:
     )
     try:
         source = reconstruct_source_lane(
-            lanes, torch.zeros(2), required, LANE_CHANGE_CHAIN_TOLERANCE_M
+            lanes, torch.zeros(2), required, float(params["chain_tolerance_m"])
         )
     except ValueError as exc:
         return ScenarioResult(metric=metric, passed=None, reason=str(exc))
@@ -329,19 +334,16 @@ def score_lane_change(inp: ClosedLoopScenarioInput) -> ScenarioResult:
     direction = 1.0 if gt_shift >= initial else -1.0
     half_width = left if direction > 0 else right
     # The floor keeps zeroed map boundary offsets from making "crossed" trivial.
-    tolerance = max(half_width, LANE_CHANGE_MIN_LATERAL_SHIFT_M)
+    tolerance = max(half_width, min_lateral_shift_m)
     gt_progress = gt_shift - initial
-    detected = (
-        direction * gt_progress > LANE_CHANGE_MIN_LATERAL_SHIFT_M
-        and direction * gt_shift > tolerance
-    )
+    detected = direction * gt_progress > min_lateral_shift_m and direction * gt_shift > tolerance
 
     signed = direction * pred
     beyond = np.flatnonzero(signed > tolerance)
     crossed = bool(signed[-1] > tolerance)
     reached = abs(pred_shift - gt_shift) <= tolerance
     completion = 1.0 - abs((pred_shift - initial) - gt_progress) / max(
-        abs(gt_progress), LANE_CHANGE_MIN_LATERAL_SHIFT_M
+        abs(gt_progress), min_lateral_shift_m
     )
     values = {
         "completion_ratio": float(np.clip(completion, 0.0, 1.0)),
@@ -364,7 +366,7 @@ def score_lane_change(inp: ClosedLoopScenarioInput) -> ScenarioResult:
         **_base_details(inp, w),
         "source_lane_index": source.index,
         "source_lane_heading_aligned": source.heading_aligned,
-        "lane_tolerance_from_map": half_width >= LANE_CHANGE_MIN_LATERAL_SHIFT_M,
+        "lane_tolerance_from_map": half_width >= min_lateral_shift_m,
         "lane_half_width_left_m": left,
         "lane_half_width_right_m": right,
         "gt_lane_change_detected": detected,
@@ -387,7 +389,7 @@ def score_lane_change(inp: ClosedLoopScenarioInput) -> ScenarioResult:
 
 
 @register("object_avoidance")
-def score_object_avoidance(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """No collision after the anchor, and the ego actually got past the obstacle.
 
     Mirrors ``planner_metrics/object_avoidance.py`` (collision = OBB clearance <= 0
@@ -457,7 +459,7 @@ def _route_lane_lateral(
 
 
 @register("lane_follow")
-def score_lane_follow(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+def score_lane_follow(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """Stay on the route-lane centerline over the lane-follow span, without stalling or
     touching a road border.
 

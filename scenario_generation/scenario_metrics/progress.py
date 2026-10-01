@@ -3,8 +3,9 @@
 Owns labels: departure, traffic_light_go, pedestrian_yield, vehicle_yield, temporal_stop.
 
 The open-loop scorers (``planner_metrics/departure.py``, ``planner_metrics/yield_progress.py``)
-read one predicted trajectory; here the same thresholds are applied to the ego's
-*realized* trajectory from ``anchor_step`` on. Progress is the arc length gained along
+read one predicted trajectory; here the same thresholds (read from
+``ScenarioOpenLoopConfig``, see ``shared_config``) are applied to the ego's *realized*
+trajectory from ``anchor_step`` on. Progress is the arc length gained along
 the recorded path (``project_onto_path``), not Euclidean displacement, so a swerve or a
 sideways drift at standstill does not count as progress. A path that passes near itself
 (a loop) could snap a point onto the wrong pass; windows are 30 s of forward driving, so
@@ -38,6 +39,10 @@ from scenario_generation.scenario_metrics.base import (
     project_onto_path,
 )
 from scenario_generation.scenario_metrics.registry import register
+from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
+
+DEPARTURE_LABELS = ("departure", "traffic_light_go")
+YIELD_LABELS = ("pedestrian_yield", "vehicle_yield", "temporal_stop")
 
 
 @dataclass(frozen=True)
@@ -45,24 +50,30 @@ class DepartureParams:
     horizon_s: float
     minimum_progress_m: float
 
+    @classmethod
+    def from_config(cls, label: str, config=None) -> DepartureParams:
+        """Both from the open-loop config (``scenario_<label>_*``, see ``shared_config``)."""
+        p = open_loop_parameters(label, config)
+        return cls(
+            horizon_s=float(p["horizon_seconds"]),
+            # Open loop's displacement threshold, measured here as arc length gained.
+            minimum_progress_m=float(p["minimum_displacement_m"]),
+        )
+
 
 @dataclass(frozen=True)
 class YieldParams:
     horizon_s: float
     maximum_forward_progress_m: float
 
-
-# Defaults mirror diffusion_planner/config/scenario_open_loop_config.py
-# (scenario_<label>_horizon_seconds / _minimum_displacement_m / _maximum_forward_progress_m).
-DEPARTURE_PARAMS: dict[str, DepartureParams] = {
-    "departure": DepartureParams(horizon_s=3.0, minimum_progress_m=2.0),
-    "traffic_light_go": DepartureParams(horizon_s=3.0, minimum_progress_m=2.0),
-}
-YIELD_PARAMS: dict[str, YieldParams] = {
-    "pedestrian_yield": YieldParams(horizon_s=3.0, maximum_forward_progress_m=0.5),
-    "vehicle_yield": YieldParams(horizon_s=3.0, maximum_forward_progress_m=0.5),
-    "temporal_stop": YieldParams(horizon_s=3.0, maximum_forward_progress_m=0.5),
-}
+    @classmethod
+    def from_config(cls, label: str, config=None) -> YieldParams:
+        """Both from the open-loop config (``scenario_<label>_*``, see ``shared_config``)."""
+        p = open_loop_parameters(label, config)
+        return cls(
+            horizon_s=float(p["horizon_seconds"]),
+            maximum_forward_progress_m=float(p["maximum_forward_progress_m"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -144,14 +155,14 @@ def _yield_goal_verdict(
     )
 
 
-@register(*DEPARTURE_PARAMS)
-def departure_progress(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+@register(*DEPARTURE_LABELS)
+def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """The ego must gain ``minimum_progress_m`` along the recorded path within the horizon.
 
     Anchor never reached -> not applicable, even on goal: the ego never saw the scene it
     should depart from, so reaching the end says nothing about departing from it.
     """
-    params = DEPARTURE_PARAMS[inp.label]
+    params = DepartureParams.from_config(inp.label, config)
     metric = "departure_progress"
     if inp.anchor_step is None:
         return ScenarioResult(
@@ -185,14 +196,14 @@ def departure_progress(inp: ClosedLoopScenarioInput) -> ScenarioResult:
     )
 
 
-@register(*YIELD_PARAMS)
-def yield_progress(inp: ClosedLoopScenarioInput) -> ScenarioResult:
+@register(*YIELD_LABELS)
+def yield_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """The ego must not gain more than ``maximum_forward_progress_m`` within the horizon.
 
     A goal termination before the verdict is decided (also before the anchor was
     replayed) is judged by ``_yield_goal_verdict``.
     """
-    params = YIELD_PARAMS[inp.label]
+    params = YieldParams.from_config(inp.label, config)
     metric = "yield_progress"
     tol = params.maximum_forward_progress_m
     base_values = {"threshold_m": tol, "horizon_s": params.horizon_s}

@@ -28,6 +28,10 @@ from scenario_generation.scenario_metrics.base import (
     wrap_angle,
 )
 from scenario_generation.scenario_metrics.registry import register
+from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
+
+# Closed-loop-only constants (no open-loop counterpart); the tolerances shared with open
+# loop come from ``ScenarioOpenLoopConfig`` through ``StopParams`` / ``ArrivalParams``.
 
 # Goal radius the closed-loop evaluator runs windows with (``closed_loop_eval.py``,
 # ``goal_reach_m=5.0``); not in the trace, so mirrored here.
@@ -42,25 +46,36 @@ PATH_EXTENSION_M = 200.0
 
 @dataclass(frozen=True)
 class StopParams:
-    # ``scenario_{obstacle,traffic_light}_stop_tolerance_m`` (scenario_open_loop_config.py).
-    tolerance_m: float = 0.5
-    # ``_STOP_SPEED_THRESHOLD_MPS`` / ``_SUSTAINED_STOP_DURATION_S`` (stop_overshoot.py).
+    # Open-loop config: ``scenario_{obstacle,traffic_light}_stop_tolerance_m``.
+    tolerance_m: float
+    # Closed loop only; ``_STOP_SPEED_THRESHOLD_MPS`` / ``_SUSTAINED_STOP_DURATION_S``
+    # (stop_overshoot.py) are module constants there, not config fields.
     stop_speed_mps: float = 0.5
     sustained_stop_s: float = 0.5
+
+    @classmethod
+    def from_config(cls, label: str, config=None) -> StopParams:
+        return cls(tolerance_m=float(open_loop_parameters(label, config)["tolerance_m"]))
 
 
 @dataclass(frozen=True)
 class ArrivalParams:
-    # ``scenario_arrival_{position,heading}_tolerance_*`` (scenario_open_loop_config.py).
-    position_tolerance_m: float = 2.0
-    heading_tolerance_deg: float = 10.0
+    # Open-loop config: ``scenario_arrival_{position,heading}_tolerance_*``.
+    position_tolerance_m: float
+    heading_tolerance_deg: float
     # Radius within which the endpoint counts as reached. The rollout stops the ego at
     # ``GOAL_REACH_M``, so any tighter radius would be decided by termination alone.
-    reach_m: float = max(2.0, GOAL_REACH_M)
+    reach_m: float
 
-
-STOP = StopParams()
-ARRIVAL = ArrivalParams()
+    @classmethod
+    def from_config(cls, config=None) -> ArrivalParams:
+        p = open_loop_parameters("arrival", config)
+        position_tolerance_m = float(p["position_tolerance_m"])
+        return cls(
+            position_tolerance_m=position_tolerance_m,
+            heading_tolerance_deg=float(p["heading_tolerance_deg"]),
+            reach_m=max(position_tolerance_m, GOAL_REACH_M),
+        )
 
 
 def _stop_runs(speed: np.ndarray, dt: float, p: StopParams) -> list[tuple[int, int]]:
@@ -86,7 +101,7 @@ def _no_anchor(metric: str, inp: ClosedLoopScenarioInput) -> ScenarioResult:
     )
 
 
-def score_stop(inp: ClosedLoopScenarioInput, p: StopParams = STOP) -> ScenarioResult:
+def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     """Realized stop position must not pass the human's by more than ``tolerance_m``.
 
     Human stop: the first sustained stop of the recording still ongoing at/after the
@@ -173,7 +188,7 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams = STOP) -> ScenarioRe
     return ScenarioResult(metric, passed, values, details)
 
 
-def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams = ARRIVAL) -> ScenarioResult:
+def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioResult:
     """Closest approach to the recorded endpoint, and pose there, within tolerance.
 
     Open loop compares the final predicted pose to the GT endpoint. Here the rollout
@@ -224,10 +239,10 @@ def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams = ARRIVAL) -> S
 
 
 @register("traffic_light_stop", "obstacle_stop")
-def _stop(inp: ClosedLoopScenarioInput) -> ScenarioResult:
-    return score_stop(inp)
+def _stop(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
+    return score_stop(inp, StopParams.from_config(inp.label, config))
 
 
 @register("arrival")
-def _arrival(inp: ClosedLoopScenarioInput) -> ScenarioResult:
-    return score_arrival(inp)
+def _arrival(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
+    return score_arrival(inp, ArrivalParams.from_config(config))
