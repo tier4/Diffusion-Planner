@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
@@ -48,6 +49,13 @@ class _IndexMixin:
         if db_path.exists() and not force_rebuild:
             return TagStore(db_path)
 
+        # The fallback shares its call with the fast path, so without this a rebuild --
+        # which reads every sidecar under the source -- is indistinguishable from a load.
+        print(
+            f"[TagStore] no index at {db_path}; scanning sidecars instead "
+            "(build it once to skip this)",
+            file=sys.stderr,
+        )
         store = TagStore()
         store.rebuild_index(source)
 
