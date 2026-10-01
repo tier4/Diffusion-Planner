@@ -466,37 +466,22 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
         max_steps=1000,
         strong_brake_mps2=-2.5,
     )
-    from scenario_generation.longitudinal_kinematics import plan_suffix_acceleration
+    from scenario_generation.metrics.strong_brake import plan_acceleration
 
     # Four raw clear frames keep an event active; five end it. Actual speed
     # changes do not enter the plan-only score.
     scores = [-5.0, -5.0] + [0.0] * 4 + [-5.0, -5.0] + [0.0] * 5 + [-5.0, -5.0]
     s.k = len(scores)
     s.accels[: s.k] = 0.0
-    s.brake_metric_accels[: s.k] = [
-        plan_suffix_acceleration(np.array([[0.0, 0.0], [1.0, 0.0], [2.0 + a * 0.01, 0.0]]))
-        for a in scores
+    s.plan_accels[: s.k] = [
+        plan_acceleration(np.array([[0.0, 0.0], [1.0, 0.0], [2.0 + a * 0.01, 0.0]])) for a in scores
     ]
     metrics = _finalize(s)
     brake = metrics["strong_brake"]
     assert brake["steps"] == 3
     assert brake["count"] == 2
     assert brake["strongest_mps2"] == pytest.approx(-5.0)
-    assert brake["filter_type"] == "active_plan_three_point"
-    assert brake["event_clear_frames"] == 5
-    assert brake["event_count_type"] == "confirmed_start_raw_clear"
-    assert set(brake) == {
-        "thresh_mps2",
-        "filter_type",
-        "acceleration_window_s",
-        "plan_points",
-        "event_clear_frames",
-        "event_count_type",
-        "future_source",
-        "strongest_mps2",
-        "steps",
-        "count",
-    }
+    assert brake["definition"] == "plan_three_point_confirm2_clear5"
 
 
 def test_finalize_road_border_collision_thresh(tmp_path):

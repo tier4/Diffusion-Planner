@@ -479,50 +479,14 @@ def aggregate(
         thresh_key="thresh_mps2",
         thresh_value=float(strong_brake_mps2),
     )
-    # Strongest counted filtered acceleration across segments (+inf if none).
+    # Strongest consecutive-pair accel across segments (mask-filtered; +inf if none).
     strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
     brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
-    definitions = set()
-    event_types = {
-        row["strong_brake"].get("event_count_type", "confirmed_mask_clear") for row in rows
-    }
-    if len(event_types) > 1:
-        raise ValueError("Cannot aggregate different strong-brake event counting rules")
-    if event_types:
-        brake["event_count_type"] = event_types.pop()
-    clear_frames = {row["strong_brake"].get("event_clear_frames", 3) for row in rows}
-    if len(clear_frames) > 1:
-        raise ValueError("Cannot aggregate different strong-brake event clear times")
-    if clear_frames:
-        brake["event_clear_frames"] = clear_frames.pop()
-    for row in rows:
-        block = row["strong_brake"]
-        if block.get("filter_type") == "active_plan_three_point":
-            definitions.add(
-                (
-                    block["filter_type"],
-                    block["plan_points"],
-                    block["acceleration_window_s"],
-                    block["future_source"],
-                )
-            )
-        elif block.get("filter_type") is None:
-            definitions.add(("legacy_realized_accel", block.get("acceleration_window_s", 0.1)))
-        else:
-            raise ValueError(f"Unknown strong-brake filter type: {block['filter_type']!r}")
+    definitions = {r["strong_brake"].get("definition", "realized_accel") for r in rows}
     if len(definitions) > 1:
-        raise ValueError("Cannot aggregate different strong-brake metric definitions")
+        raise ValueError("Cannot aggregate different strong-brake definitions")
     if definitions:
-        definition = definitions.pop()
-        if definition[0] == "active_plan_three_point":
-            brake.update(
-                filter_type=definition[0],
-                plan_points=definition[1],
-                acceleration_window_s=definition[2],
-                future_source=definition[3],
-            )
-        else:
-            brake["acceleration_window_s"] = definition[1]
+        brake["definition"] = definitions.pop()
 
     turn_transition_correct = sum(
         int(_require_block(r, "turn_indicator")["transition_correct"]) for r in rows
