@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
 from new_dp_h5_eval.dataset import H5FrameIndex
@@ -135,11 +136,20 @@ def test_route_timeline_accepts_v4_and_v5_pose(tmp_path):
             file.attrs["format"] = H5_FORMAT
             file.attrs["format_version"] = version
             file.attrs["num_frames"] = 2
+            file.attrs["frame_interval_s"] = 0.1
+            if version == 5:
+                file.attrs["pose_frame_id"] = "map"
             frames = file.create_group("frames")
             for name in MODEL_INPUT_NAMES:
-                frames.create_dataset(name, data=np.zeros((2, 1), np.float32))
+                shape = {
+                    "ego_agent_past": (2, 31, 6),
+                    "neighbor_agents_past": (2, 320, 31, 4),
+                    "agent_shape": (2, 320, 2),
+                    "agent_label": (2, 320, 3),
+                }.get(name, (2, 1))
+                frames.create_dataset(name, data=np.zeros(shape, np.float32))
             metadata = file.create_group("metadata")
-            metadata.create_dataset("frame_time_ns", data=[1_000_000_000, 2_000_000_000])
+            metadata.create_dataset("frame_time_ns", data=[1_000_000_000, 1_100_000_000])
             if version == 4:
                 metadata.create_dataset("ego_x", data=[1.0, 2.0])
                 metadata.create_dataset("ego_y", data=[3.0, 3.0])
@@ -165,7 +175,7 @@ def test_route_timeline_accepts_v4_and_v5_pose(tmp_path):
             index,
         )
         with H5FrameIndex(index) as frames:
-            assert frames._open(shard).attrs["format_version"] == version
+            assert frames.frame(0)["ego_agent_past"].shape == (31, 6)
 
 
 def test_route_timeline_rejects_invalid_v5_quaternion(tmp_path):
@@ -174,6 +184,8 @@ def test_route_timeline_rejects_invalid_v5_quaternion(tmp_path):
         file.attrs["format"] = H5_FORMAT
         file.attrs["format_version"] = 5
         file.attrs["num_frames"] = 1
+        file.attrs["frame_interval_s"] = 0.1
+        file.attrs["pose_frame_id"] = "map"
         frames = file.create_group("frames")
         for name in MODEL_INPUT_NAMES:
             frames.create_dataset(name, data=np.zeros((1, 1), np.float32))
@@ -189,9 +201,5 @@ def test_route_timeline_rejects_invalid_v5_quaternion(tmp_path):
             "qw": [0.0],
         }.items():
             metadata.create_dataset(name, data=value)
-    try:
+    with pytest.raises(ValueError, match="invalid closed-loop v5 pose"):
         NativeH5RouteTimeline(shard)
-    except ValueError as error:
-        assert "invalid closed-loop v5 pose" in str(error)
-    else:
-        raise AssertionError("zero quaternion was accepted")

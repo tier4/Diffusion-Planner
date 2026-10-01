@@ -28,8 +28,9 @@ from scenario_generation.closed_loop_evaluation import (
     RolloutParams,
 )
 from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import render_segment
+from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
+from scenario_generation.transforms import yaw_from_quat
 
 from .model import (
     NewDpOnnxRunner,
@@ -84,6 +85,13 @@ class NativeH5RouteTimeline(RouteTimeline):
             self._rows = np.arange(start, stop, dtype=np.int64)
             self.frame_indices = self._rows.copy()
             self.frame_times_ns = np.asarray(metadata["frame_time_ns"][start:stop], dtype=np.int64)
+            interval = float(self._h5.attrs.get("frame_interval_s", float("nan")))
+            if not np.isfinite(interval) or not np.isclose(interval, DT, atol=1e-3):
+                raise ValueError(f"closed-loop H5 must have 0.1 s frame interval: {self.h5_path}")
+            if len(self.frame_times_ns) > 1 and not np.all(
+                np.abs(np.diff(self.frame_times_ns) - round(DT * 1e9)) <= 1_000_000
+            ):
+                raise ValueError(f"non-contiguous 0.1 s closed-loop frames in {self.h5_path}")
             if format_version == 4:
                 self.poses = np.column_stack(
                     [
@@ -93,21 +101,22 @@ class NativeH5RouteTimeline(RouteTimeline):
                     ]
                 ).astype(np.float64)
             else:
+                pose_frame_id = self._h5.attrs.get("pose_frame_id", "")
+                if pose_frame_id != "map":
+                    raise ValueError(
+                        f"closed-loop v5 pose must be in map frame, got {pose_frame_id!r}: "
+                        f"{self.h5_path}"
+                    )
                 x, y, z, qx, qy, qz, qw = (
                     np.asarray(metadata[name][start:stop], dtype=np.float64)
                     for name in ("x", "y", "z", "qx", "qy", "qz", "qw")
                 )
                 quaternion_norm_sq = qx * qx + qy * qy + qz * qz + qw * qw
-                if (
-                    not np.isfinite(z).all()
-                    or not np.isfinite(quaternion_norm_sq).all()
-                    or np.any(quaternion_norm_sq <= 0)
+                if not np.isfinite(z).all() or not np.all(
+                    np.isfinite(quaternion_norm_sq) & (np.abs(quaternion_norm_sq - 1.0) < 2e-3)
                 ):
                     raise ValueError(f"invalid closed-loop v5 pose in {self.h5_path}")
-                yaw = np.arctan2(
-                    2.0 * (qw * qz + qx * qy),
-                    qw * qw + qx * qx - qy * qy - qz * qz,
-                )
+                yaw = np.array([yaw_from_quat(*quaternion) for quaternion in zip(qx, qy, qz, qw)])
                 self.poses = np.column_stack([x, y, yaw])
             if not np.isfinite(self.poses).all():
                 raise ValueError(f"non-finite closed-loop poses in {self.h5_path}")
@@ -308,7 +317,15 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                         title=f"{job.route_key} [{start},{end}]",
                     )
                 self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
-                row = {"route": job.route_key, **metrics}
+                row = {
+                    "route": job.route_key,
+                    **{
+                        key: route[key]
+                        for key in ("anchors", "segment_start_ns", "segment_end_ns")
+                        if key in route
+                    },
+                    **metrics,
+                }
                 if self.config.pass_condition is not None:
                     row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
                 if segments_file is not None:
