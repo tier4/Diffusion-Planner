@@ -12,6 +12,25 @@ The rollout ends when the live ego comes within ``GOAL_REACH_M`` of the window's
 recorded pose (``terminated == "goal"``). Both metrics must live with that: it hides
 the last few metres before the endpoint, which is exactly where an arrival settles and,
 when the recording ends with the human still stopped, where a stop happens.
+
+Open-loop reference values (``ol_*``, reported only, never part of the verdict or the
+reason) say what the open-loop definition measures on the realized trajectory:
+
+- stop: ``planner_metrics/stop_overshoot.py`` as is. Both paths are expressed in the
+  anchor frame's ego frame and projected onto that frame's chained route-lane centerlines
+  (``route_lanes``, ``lanes`` as fallback); each stop is the median s of the *final*
+  sustained stop within the interval, or its terminal s without one. The interval is the
+  open-loop 8 s (``OL_STOP_HORIZON_S``): recorded frames ``anchor_frame`` + 1 .. + 80 for
+  the human (speed from 0.1 s pose deltas, as open loop), sim steps ``anchor_step`` + 1 ..
+  + ``round(8 / dt)`` for the ego (speed as logged by the rollout), cut short where the
+  window or the trace ends -- a goal termination then reads the terminal s ``GOAL_REACH_M``
+  short of a stop at the window's end. Omitted when the anchor frame has no usable route
+  lane or either interval is empty.
+- arrival: the ego's *final* pose in the trace vs the recorded endpoint (FDE and wrapped
+  heading error). Biased by the goal radius: a goal termination ends up to
+  ``GOAL_REACH_M`` short, which alone exceeds the 2 m open-loop tolerance.
+
+``ol_passed`` (0/1) is the open-loop rule with the same tolerance(s).
 """
 
 from __future__ import annotations
@@ -20,6 +39,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from planner_metrics.stop_overshoot import (
+    _current_route_segments,
+    _project_along_route,
+    _speed_mps,
+    _stop_position_s,
+)
 from scenario_generation.scenario_metrics.base import (
     ClosedLoopScenarioInput,
     ScenarioResult,
@@ -27,6 +52,7 @@ from scenario_generation.scenario_metrics.base import (
     project_onto_path,
     wrap_angle,
 )
+from scenario_generation.scenario_metrics.geometry import _to_local
 from scenario_generation.scenario_metrics.registry import register
 from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
 
@@ -42,6 +68,9 @@ REC_DT_S = 0.1
 # live ego is projected on it; otherwise a window ending at the human's stop point (or
 # endpoint) would clamp any overshoot to zero.
 PATH_EXTENSION_M = 200.0
+# Length of the open-loop GT future / prediction ``stop_overshoot`` reads; the interval
+# of the ``ol_*`` stop values.
+OL_STOP_HORIZON_S = 8.0
 
 
 @dataclass(frozen=True)
@@ -92,6 +121,42 @@ def _extended_path(inp: ClosedLoopScenarioInput) -> np.ndarray:
     return np.vstack([inp.rec_xy, tip])
 
 
+def _ol_stop_values(inp: ClosedLoopScenarioInput, p: StopParams) -> dict[str, float]:
+    """Open-loop ``stop_overshoot`` of the realized ego vs the human (see module doc)."""
+    a, k0 = inp.anchor_frame, inp.anchor_step
+    try:
+        frame = inp.load_frame(a)
+    except KeyError:  # frame not available
+        return {}
+    lanes = frame.get("route_lanes", frame.get("lanes"))
+    if lanes is None:
+        return {}
+    try:
+        segments = _current_route_segments(np.asarray(lanes, dtype=np.float64))
+    except ValueError:  # no usable centerline
+        return {}
+    gt = _to_local(inp, inp.rec_xy[a + 1 : a + 1 + round(OL_STOP_HORIZON_S / REC_DT_S)], a)
+    steps = slice(k0 + 1, k0 + 1 + round(OL_STOP_HORIZON_S / inp.dt))
+    ego = _to_local(inp, inp.ego_xy[steps], a)
+    if not len(gt) or not len(ego):
+        return {}
+    gt_s, gt_stopped = _stop_position_s(gt, _speed_mps(gt), segments)
+    # Same rule as ``_stop_position_s`` (final sustained stop, else terminal s), with the
+    # rollout's speed and step length instead of 0.1 s pose deltas.
+    ego_pos = _project_along_route(ego, segments)
+    runs = _stop_runs(inp.ego_speed[steps], inp.dt, p)
+    ego_s = float(np.median(ego_pos[runs[-1][0] : runs[-1][1]])) if runs else float(ego_pos[-1])
+    overshoot = max(0.0, ego_s - gt_s)
+    return {
+        "ol_gt_stop_s_m": gt_s,
+        "ol_ego_stop_s_m": ego_s,
+        "ol_stop_overshoot_m": overshoot,
+        "ol_gt_sustained_stop": float(gt_stopped),
+        "ol_ego_sustained_stop": float(bool(runs)),
+        "ol_passed": float(overshoot <= p.tolerance_m),
+    }
+
+
 def _no_anchor(metric: str, inp: ClosedLoopScenarioInput) -> ScenarioResult:
     return ScenarioResult(
         metric,
@@ -129,7 +194,7 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     a, k0 = inp.anchor_frame, inp.anchor_step
     red = np.asarray(inp.red_light_violation[k0:], dtype=bool)
     details: dict = {"terminated": inp.terminated}
-    values: dict[str, float] = {"tolerance_m": p.tolerance_m}
+    values: dict[str, float] = {"tolerance_m": p.tolerance_m, **_ol_stop_values(inp, p)}
     if inp.label == "traffic_light_stop":
         # Reported only; red light is its own generic metric.
         values["red_light_violation_steps"] = float(red.sum())
@@ -224,6 +289,17 @@ def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioRes
         "position_tolerance_m": p.position_tolerance_m,
         "heading_tolerance_deg": p.heading_tolerance_deg,
     }
+    ol_heading_err = float(np.degrees(abs(wrap_angle(inp.ego_yaw[-1] - end_yaw))))
+    values.update(
+        {
+            "ol_final_displacement_error_m": values["final_distance_m"],
+            "ol_final_heading_error_deg": ol_heading_err,
+            "ol_passed": float(
+                values["final_distance_m"] <= p.position_tolerance_m
+                and ol_heading_err <= p.heading_tolerance_deg
+            ),
+        }
+    )
     reached = values["closest_distance_m"] <= p.reach_m
     lateral_ok = abs(values["lateral_offset_m"]) <= p.position_tolerance_m
     heading_ok = heading_err <= p.heading_tolerance_deg

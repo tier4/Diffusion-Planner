@@ -24,6 +24,15 @@ ends before that:
   shows whether it would have held;
 - otherwise the available steps are scored and ``horizon_truncated`` is recorded (no
   step after the anchor at all -> not applicable).
+
+Open-loop reference values (``ol_*``, reported only, never part of the verdict): the
+open-loop quantity measured on the same realized steps (``anchor_step`` + 1 .. the horizon
+or the trace's end), with the ego pose at ``anchor_step`` standing in for the open-loop
+current pose. Departure reports ``ol_max_displacement_m`` (max Euclidean distance from
+that pose), yield ``ol_max_forward_progress_m`` (max progress along that pose's heading,
+the open-loop ego +x); ``ol_passed`` (0/1) is the open-loop rule with the same threshold.
+Both read a swerve as movement where arc progress does not. Omitted without a step
+after the anchor.
 """
 
 from __future__ import annotations
@@ -84,6 +93,9 @@ class _Progress:
     horizon_steps: int
     truncated: bool
     reference_m: float  # the human's progress over the same horizon from the anchor frame
+    # Open-loop definitions over the same steps (nan without a step after the anchor).
+    ol_max_displacement_m: float  # Euclidean, from the anchor_step pose
+    ol_max_forward_progress_m: float  # along the anchor_step heading
 
     @property
     def available_steps(self) -> int:
@@ -101,6 +113,8 @@ def _progress(inp: ClosedLoopScenarioInput, horizon_s: float) -> _Progress:
     k1 = min(k0 + h, inp.n_steps - 1)
     arc, _ = project_onto_path(inp.ego_xy[k0 : k1 + 1], inp.rec_xy)
     rec_arc = path_arclength(inp.rec_xy)
+    rel = inp.ego_xy[k0 + 1 : k1 + 1] - inp.ego_xy[k0]
+    forward = rel @ np.array([np.cos(inp.ego_yaw[k0]), np.sin(inp.ego_yaw[k0])])
     # The human's reference uses recorded frames (0.1 s each), which match sim steps only at dt=0.1.
     ref_end = min(inp.anchor_frame + int(round(horizon_s / 0.1)), inp.n_frames - 1)
     return _Progress(
@@ -108,6 +122,8 @@ def _progress(inp: ClosedLoopScenarioInput, horizon_s: float) -> _Progress:
         horizon_steps=h,
         truncated=k0 + h > inp.n_steps - 1,
         reference_m=float(rec_arc[ref_end] - rec_arc[inp.anchor_frame]),
+        ol_max_displacement_m=float(np.linalg.norm(rel, axis=1).max()) if len(rel) else np.nan,
+        ol_max_forward_progress_m=float(forward.max()) if len(rel) else np.nan,
     )
 
 
@@ -175,6 +191,15 @@ def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioRes
     departed = p.max_m >= params.minimum_progress_m
     details = _details(inp, p)
     details["time_to_threshold_s"] = _first_time_s(p.progress >= params.minimum_progress_m, inp.dt)
+    values = {
+        "progress_m": p.max_m,
+        "threshold_m": params.minimum_progress_m,
+        "horizon_s": params.horizon_s,
+        "reference_progress_m": p.reference_m,
+    }
+    if p.available_steps:
+        values["ol_max_displacement_m"] = p.ol_max_displacement_m
+        values["ol_passed"] = float(p.ol_max_displacement_m >= params.minimum_progress_m)
     reason = ""
     if not departed and p.truncated and inp.terminated == "goal":
         departed, reason = True, "goal reached before the horizon ended"
@@ -185,12 +210,7 @@ def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioRes
     return ScenarioResult(
         metric,
         departed,
-        values={
-            "progress_m": p.max_m,
-            "threshold_m": params.minimum_progress_m,
-            "horizon_s": params.horizon_s,
-            "reference_progress_m": p.reference_m,
-        },
+        values=values,
         details=details,
         reason=reason,
     )
@@ -222,14 +242,13 @@ def yield_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     yielded = p.max_m <= tol
     details = _details(inp, p)
     details["time_exceeded_s"] = _first_time_s(p.progress > tol, inp.dt)
+    values = {"progress_m": p.max_m, **base_values, "reference_progress_m": p.reference_m}
+    if p.available_steps:
+        values["ol_max_forward_progress_m"] = p.ol_max_forward_progress_m
+        values["ol_passed"] = float(p.ol_max_forward_progress_m <= tol)
     reason = ""
     if yielded and p.truncated and inp.terminated == "goal":
-        return _yield_goal_verdict(
-            inp,
-            tol,
-            {"progress_m": p.max_m, **base_values, "reference_progress_m": p.reference_m},
-            details,
-        )
+        return _yield_goal_verdict(inp, tol, values, details)
     if yielded and p.truncated:
         reason = f"trace ended ({inp.terminated}) before the horizon; scored on {p.available_steps} steps"
         if not p.available_steps:
@@ -237,7 +256,7 @@ def yield_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     return ScenarioResult(
         metric,
         yielded,
-        values={"progress_m": p.max_m, **base_values, "reference_progress_m": p.reference_m},
+        values=values,
         details=details,
         reason=reason,
     )

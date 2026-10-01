@@ -134,3 +134,44 @@ def test_progress_is_measured_along_the_path_not_euclidean():
 def test_reference_progress_is_the_humans():
     r = departure_progress(_input("departure", *_ego_with_speeds(np.full(40, 1.0))))
     assert r.values["reference_progress_m"] == pytest.approx(2.0 * 3.0)
+
+
+def test_open_loop_reference_counts_a_swerve_as_departure():
+    # The swerve above: open loop's Euclidean displacement departs, arc progress does not.
+    xy, yaw = _ego_with_speeds(np.zeros(40))
+    xy[ANCHOR + 1 :, 1] = np.minimum(np.arange(len(xy) - ANCHOR - 1) * 0.3, 3.0)
+    dep = departure_progress(_input("departure", xy, yaw))
+    assert dep.passed is False and dep.values["progress_m"] == pytest.approx(0.0)
+    assert dep.values["ol_max_displacement_m"] == pytest.approx(3.0)
+    assert dep.values["ol_passed"] == 1.0
+
+
+def test_open_loop_reference_forward_is_along_the_anchor_heading():
+    # Ego heading 30 deg off the recorded path, creeping 0.55 m along its own heading:
+    # 0.48 m of arc progress (yielded), 0.55 m along its +x (open loop: not yielded).
+    heading = np.radians(30.0)
+    speeds = np.r_[np.zeros(ANCHOR), np.full(11, 0.5), np.zeros(29)]
+    xy, yaw = speed_profile_path(speeds, heading=heading)
+    r = yield_progress(_input("pedestrian_yield", xy, yaw))
+    assert r.passed is True
+    assert r.values["progress_m"] == pytest.approx(0.55 * np.cos(heading))
+    assert r.values["ol_max_forward_progress_m"] == pytest.approx(0.55)
+    assert r.values["ol_passed"] == 0.0
+
+
+def test_open_loop_reference_leaves_verdicts_and_values_unchanged():
+    existing = {"progress_m", "threshold_m", "horizon_s", "reference_progress_m"}
+    dep = departure_progress(_input("departure", *_ego_with_speeds(np.full(40, 1.0))))
+    assert dep.passed is True and dep.values["progress_m"] == pytest.approx(3.0)
+    assert set(dep.values) == existing | {"ol_max_displacement_m", "ol_passed"}
+    # Straight along the path, the two definitions agree.
+    assert dep.values["ol_max_displacement_m"] == pytest.approx(3.0)
+    held = yield_progress(_input("pedestrian_yield", *_ego_with_speeds(np.full(40, 0.1))))
+    assert held.passed is True and held.values["progress_m"] == pytest.approx(0.3)
+    assert set(held.values) == existing | {"ol_max_forward_progress_m", "ol_passed"}
+    assert held.values["ol_max_forward_progress_m"] == pytest.approx(0.3)
+    assert held.values["ol_passed"] == 1.0
+    # Nothing after the anchor: no reference values either.
+    xy, yaw = _ego_with_speeds(np.zeros(1))
+    r = yield_progress(_input("pedestrian_yield", xy, yaw))
+    assert r.passed is None and not any(k.startswith("ol_") for k in r.values)

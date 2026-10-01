@@ -103,6 +103,48 @@ def test_traffic_light_stop_reports_red_light_steps_after_anchor_only():
     )
 
 
+def _route_frames(lanes: np.ndarray | None = None) -> dict[int, dict[str, np.ndarray]]:
+    """Anchor frame with one straight route lane along its +x, from 10 m behind the ego."""
+    if lanes is None:
+        x = np.linspace(-10.0, 90.0, 21)
+        lanes = np.stack([x, np.zeros_like(x)], axis=-1)[None]
+    return {ANCHOR: {"route_lanes": lanes}}
+
+
+def test_open_loop_stop_reference_uses_the_final_stop():
+    # The human stops at 25 m for 1 s, creeps 2 m and stops again at 27 m; the ego drives
+    # straight to 27 m. Closed loop measures the first human stop (fail, 2 m over), open
+    # loop the final one within 8 s (pass). The anchor pose is at 5 m, the route lane
+    # starts 10 m behind it, so route s = path arc + 5 m.
+    rec = np.r_[_profile(50, 10, 4), np.zeros(86)]
+    r = registry.score(_stop_input(_profile(54, 96), rec_speeds=rec, frames=_route_frames()))
+    assert r.passed is False
+    assert r.values["human_stop_s_m"] == pytest.approx(25.0)
+    assert r.values["overshoot_m"] == pytest.approx(2.0)
+    assert r.values["ol_gt_stop_s_m"] == pytest.approx(27.0 + 5.0)
+    assert r.values["ol_ego_stop_s_m"] == pytest.approx(27.0 + 5.0)
+    assert r.values["ol_stop_overshoot_m"] == pytest.approx(0.0)
+    assert r.values["ol_gt_sustained_stop"] == 1.0 and r.values["ol_ego_sustained_stop"] == 1.0
+    assert r.values["ol_passed"] == 1.0
+
+
+def test_open_loop_stop_reference_leaves_verdicts_and_values_unchanged():
+    ego = _profile(56, 100)  # 3 m past
+    plain = registry.score(_stop_input(ego))
+    ref = registry.score(_stop_input(ego, frames=_route_frames()))
+    assert not any(k.startswith("ol_") for k in plain.values)
+    assert ref.passed is plain.passed is False and ref.reason == plain.reason
+    assert ref.details == plain.details
+    assert {k: v for k, v in ref.values.items() if not k.startswith("ol_")} == plain.values
+    assert ref.values["ol_stop_overshoot_m"] == pytest.approx(3.0)
+    assert ref.values["ol_passed"] == 0.0
+    # A frame without a usable route lane: omitted, nothing raised.
+    empty = registry.score(_stop_input(ego, frames=_route_frames(np.zeros((2, 20, 4)))))
+    assert empty.values == plain.values
+
+
+# --- arrival ---------------------------------------------------------------------
+
 # --- arrival ---------------------------------------------------------------------
 
 
@@ -162,3 +204,17 @@ def test_arrival_anchor_never_reached_is_not_scored():
     xy, yaw = straight_path(5, 5.0)
     r = registry.score(_arrival_input(xy, yaw))
     assert r.passed is None
+
+
+def test_open_loop_arrival_reference_uses_the_final_pose():
+    # Goal-terminated 3 m short: closed loop passes, open loop's FDE fails on the goal radius.
+    xy, yaw = straight_path(100, 5.0)
+    keep = xy[:, 0] <= 49.5 - 3.0
+    r = registry.score(_arrival_input(xy[keep], yaw[keep] + np.radians(5.0)))
+    assert r.passed is True
+    assert r.values["ol_final_displacement_error_m"] == pytest.approx(3.0)
+    assert r.values["ol_final_heading_error_deg"] == pytest.approx(5.0)
+    assert r.values["ol_passed"] == 0.0
+    at_end = registry.score(_arrival_input(xy, yaw))
+    assert at_end.passed is True and at_end.values["ol_passed"] == 1.0
+    assert at_end.values["ol_final_displacement_error_m"] == pytest.approx(0.0)
