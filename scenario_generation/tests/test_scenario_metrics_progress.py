@@ -34,7 +34,7 @@ def _input(label: str, ego_xy, ego_yaw, *, terminated: str = "max_steps", n_fram
     "label", ["departure", "traffic_light_go", "pedestrian_yield", "vehicle_yield", "temporal_stop"]
 )
 def test_labels_are_registered(label):
-    assert registry.METRICS[label] in (departure_progress, yield_progress)
+    assert label in registry.METRICS
 
 
 def test_departure_pass_and_fail():

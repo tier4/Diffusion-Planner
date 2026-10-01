@@ -2,7 +2,10 @@ import numpy as np
 import pytest
 
 from scenario_generation.scenario_metrics import registry
-from scenario_generation.scenario_metrics.stop_arrival import GOAL_REACH_M
+from scenario_generation.scenario_metrics.stop_arrival import (
+    GOAL_REACH_M,
+    TEMPORAL_STOP_TOLERANCE_M,
+)
 from scenario_generation.scenario_metrics.testing import (
     make_input,
     speed_profile_path,
@@ -31,7 +34,7 @@ def _stop_input(ego_speeds, rec_speeds=None, label="traffic_light_stop", **kw):
     )
 
 
-@pytest.mark.parametrize("label", ["traffic_light_stop", "obstacle_stop"])
+@pytest.mark.parametrize("label", ["traffic_light_stop", "obstacle_stop", "temporal_stop"])
 def test_stop_matching_the_human_passes(label):
     r = registry.score(_stop_input(_profile(50, 100), label=label))
     assert r.metric == "stop_overshoot" and r.passed is True
@@ -218,3 +221,15 @@ def test_open_loop_arrival_reference_uses_the_final_pose():
     at_end = registry.score(_arrival_input(xy, yaw))
     assert at_end.passed is True and at_end.values["ol_passed"] == 1.0
     assert at_end.values["ol_final_displacement_error_m"] == pytest.approx(0.0)
+
+
+def test_temporal_stop_is_a_stop_with_the_closed_loop_tolerance():
+    # The human stops at the line and moves on: a stop past the 0.5 m tolerance fails
+    # even though the trace ends well past the stop line.
+    human = _profile(50, 20, 80)
+    rolled_through = registry.score(_stop_input(_profile(56, 20, 74), human, label="temporal_stop"))
+    assert rolled_through.metric == "stop_overshoot" and rolled_through.passed is False
+    assert rolled_through.values["tolerance_m"] == TEMPORAL_STOP_TOLERANCE_M
+    assert rolled_through.values["overshoot_m"] == pytest.approx(3.0)
+    held = registry.score(_stop_input(_profile(50, 20, 80), human, label="temporal_stop"))
+    assert held.passed is True

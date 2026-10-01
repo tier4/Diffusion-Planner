@@ -1,6 +1,6 @@
 """Closed-loop scenario metrics: progress family.
 
-Owns labels: departure, traffic_light_go, pedestrian_yield, vehicle_yield, temporal_stop.
+Owns labels: departure, traffic_light_go, pedestrian_yield, vehicle_yield.
 
 The open-loop scorers (``planner_metrics/departure.py``, ``planner_metrics/yield_progress.py``)
 read one predicted trajectory; here the same thresholds (read from
@@ -51,7 +51,9 @@ from scenario_generation.scenario_metrics.registry import register
 from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
 
 DEPARTURE_LABELS = ("departure", "traffic_light_go")
-YIELD_LABELS = ("pedestrian_yield", "vehicle_yield", "temporal_stop")
+# temporal_stop is a stop-line stop, scored by the stop family (``stop_arrival``); open
+# loop still scores it as a yield, so ``yield_progress`` keeps reading its config.
+YIELD_LABELS = ("pedestrian_yield", "vehicle_yield")
 
 
 @dataclass(frozen=True)

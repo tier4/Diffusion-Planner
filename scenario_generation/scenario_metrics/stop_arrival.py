@@ -1,12 +1,19 @@
 """Closed-loop scenario metrics: stop_arrival family.
 
-Owns labels: traffic_light_stop, obstacle_stop, arrival.
+Owns labels: traffic_light_stop, obstacle_stop, temporal_stop, arrival.
 
 Closed-loop mirrors of ``planner_metrics/stop_overshoot.py`` and
 ``planner_metrics/arrival.py``, scored on the live ego's realized path after the
 anchor instead of one predicted trajectory. Positions are arc lengths along the
 recorded path (``project_onto_path``, extended past its end), so "past the stop
 point" means further along the road, not further in xy.
+
+``temporal_stop`` (a stop-line stop the human holds briefly before moving on) is scored as
+a stop too: its event span runs from the approach to the human's stop at the line, so the
+question is the same as at a red light. Open loop still scores it as a yield and has no
+stop tolerance for it, so its tolerance is the closed-loop ``TEMPORAL_STOP_TOLERANCE_M``.
+Unlike a red light the human departs within the window, so the goal radius rarely ends
+the rollout before the stop.
 
 The rollout ends when the live ego comes within ``GOAL_REACH_M`` of the window's last
 recorded pose (``terminated == "goal"``). Both metrics must live with that: it hides
@@ -68,6 +75,9 @@ REC_DT_S = 0.1
 # live ego is projected on it; otherwise a window ending at the human's stop point (or
 # endpoint) would clamp any overshoot to zero.
 PATH_EXTENSION_M = 200.0
+# Closed loop only: open loop scores temporal_stop as a yield, so its config has no stop
+# tolerance. The same 0.5 m as the open-loop red-light and obstacle stops.
+TEMPORAL_STOP_TOLERANCE_M = 0.5
 # Length of the open-loop GT future / prediction ``stop_overshoot`` reads; the interval
 # of the ``ol_*`` stop values.
 OL_STOP_HORIZON_S = 8.0
@@ -75,7 +85,8 @@ OL_STOP_HORIZON_S = 8.0
 
 @dataclass(frozen=True)
 class StopParams:
-    # Open-loop config: ``scenario_{obstacle,traffic_light}_stop_tolerance_m``.
+    # Open-loop config: ``scenario_{obstacle,traffic_light}_stop_tolerance_m``;
+    # ``TEMPORAL_STOP_TOLERANCE_M`` for temporal_stop.
     tolerance_m: float
     # Closed loop only; ``_STOP_SPEED_THRESHOLD_MPS`` / ``_SUSTAINED_STOP_DURATION_S``
     # (stop_overshoot.py) are module constants there, not config fields.
@@ -84,6 +95,8 @@ class StopParams:
 
     @classmethod
     def from_config(cls, label: str, config=None) -> StopParams:
+        if label == "temporal_stop":
+            return cls(tolerance_m=TEMPORAL_STOP_TOLERANCE_M)
         return cls(tolerance_m=float(open_loop_parameters(label, config)["tolerance_m"]))
 
 
@@ -314,7 +327,7 @@ def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioRes
     return ScenarioResult(metric, reached and lateral_ok and heading_ok, values, details)
 
 
-@register("traffic_light_stop", "obstacle_stop")
+@register("traffic_light_stop", "obstacle_stop", "temporal_stop")
 def _stop(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     return score_stop(inp, StopParams.from_config(inp.label, config))
 
