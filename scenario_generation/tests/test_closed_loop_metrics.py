@@ -447,6 +447,17 @@ def test_aggregate_turn_indicator_fp_zero_total_rate_is_na():
     assert summary["turn_indicator"]["false_positive_rate"] is None
 
 
+def test_aggregate_gt_total_steps_sums_segment_spans():
+    rows = [
+        {**_segment_row(), "segment": [10, 60]},
+        {**_segment_row(), "segment": [0, 25]},
+        _segment_row(),  # no "segment" (scenario_sim / failed worker) contributes 0
+    ]
+    rows[2].pop("segment", None)
+    summary = aggregate(rows, near_miss_thresh=0.5, strong_brake_mps2=-2.5)
+    assert summary["gt_total_steps"] == 75
+
+
 def test_aggregate_missing_turn_indicator_category_fails():
     bad = _segment_row()
     del bad["turn_indicator"]
