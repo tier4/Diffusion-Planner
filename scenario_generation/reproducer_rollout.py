@@ -528,6 +528,10 @@ class _SegState:
     # ``deviation_collision_block`` AND it against ``collisions`` positionally.
     # None for manually-built states that never step (like ``accels``/``clearances``).
     gt_devs: np.ndarray | None = None
+    # Per-step live-minus-recorded ego speed (m/s) / accel (m/s^2) at the nearest recorded GT
+    # segment (see ``gt_speed_block``); NaN where no valid GT segment. None for manually-built states.
+    gt_dvs: np.ndarray | None = None
+    gt_das: np.ndarray | None = None
     # A collision counts as "deviation collision" when the live ego was more than this far
     # off the recorded GT path at the same step (see ``deviation_collision_block``).
     deviation_collision_thresh_m: float = 2.0
@@ -703,6 +707,8 @@ def _seed_state(
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
+        gt_dvs=np.full(cap, np.nan, dtype=np.float32),
+        gt_das=np.full(cap, np.nan, dtype=np.float32),
         centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
@@ -868,6 +874,10 @@ class GTDeviation(NamedTuple):
     nearest_xy: np.ndarray | None  # world (2,); None when no valid/yaw-gated window point
     lo: int  # recorded-pose window bounds ([lo, hi)) the distance was searched over
     hi: int
+    # Absolute index j of the nearest recorded segment (poses[j] -> poses[j+1]); -1 when
+    # nearest_xy is None. Lets callers read the recorded speed/accel at the same place along
+    # the GT path (``_gt_speed_accel``).
+    seg_idx: int = -1
 
 
 def _gt_deviation_m(
@@ -899,7 +909,9 @@ def _gt_deviation_m(
         pose = window[0]
         if abs(_wrap_pi(float(pose[2]) - float(live_yaw))) > (np.pi / 2.0):
             return GTDeviation(_GT_DEV_INF, None, lo, hi)
-        return GTDeviation(float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi)
+        return GTDeviation(
+            float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi, lo
+        )
     a = window[:-1, :2]
     b = window[1:, :2]
     ab = b - a  # (M-1, 2)
@@ -918,7 +930,79 @@ def _gt_deviation_m(
     i = int(np.argmin(d))
     if not np.isfinite(d[i]):
         return GTDeviation(_GT_DEV_INF, None, lo, hi)
-    return GTDeviation(float(d[i]), proj[i].copy(), lo, hi)
+    return GTDeviation(float(d[i]), proj[i].copy(), lo, hi, lo + i)
+
+
+# Smoothing window (frames, 0.1 s each) for the recorded accel: recorded speed is a pose
+# finite-difference, so differencing it again unsmoothed is dominated by pose jitter.
+_GT_ACCEL_SMOOTH_FRAMES = 5
+
+
+def _gt_accels(tl: RouteTimeline) -> np.ndarray:
+    """Recorded tangential accel per frame (m/s^2), cached on the timeline.
+
+    Moving-average smoothed ``tl.speeds`` differenced over the real (gap-aware) frame times.
+    """
+    cached = getattr(tl, "_gt_accels_cache", None)
+    if cached is not None:
+        return cached
+    n = len(tl.speeds)
+    if n < 2:
+        acc = np.zeros(n, dtype=np.float64)
+    else:
+        w = _GT_ACCEL_SMOOTH_FRAMES
+        pad = np.pad(np.asarray(tl.speeds, dtype=np.float64), (w // 2, w // 2), mode="edge")
+        smooth = np.convolve(pad, np.ones(w) / w, mode="valid")
+        t = np.asarray(tl.frame_indices, dtype=np.float64) * DT
+        acc = np.gradient(smooth, t)
+    tl._gt_accels_cache = acc
+    return acc
+
+
+def _gt_speed_accel(tl: RouteTimeline, gt_dev: GTDeviation) -> tuple[float, float] | None:
+    """Recorded (speed, accel) at the GT segment nearest the live ego, or None when the
+    deviation search found no valid segment (same yaw gate / empty window as the distance)."""
+    if gt_dev.seg_idx < 0 or gt_dev.nearest_xy is None:
+        return None
+    j = gt_dev.seg_idx
+    return float(tl.speeds[j]), float(_gt_accels(tl)[j])
+
+
+# Sparse-histogram bin width (m/s or m/s^2) for the pooled p99 of the GT speed/accel diffs.
+# Per-segment rows carry these instead of raw per-step arrays so ``aggregate`` can pool an
+# exact-to-bin-width percentile across segments (a mean of per-segment p99s would not be one).
+GT_DIFF_BIN = 0.05
+GT_DIFF_CAP = 20.0
+
+
+def _sparse_hist(vals: np.ndarray) -> dict[str, int]:
+    v = np.clip(vals[vals > 0.0], 0.0, GT_DIFF_CAP - GT_DIFF_BIN)
+    if v.size == 0:
+        return {}
+    bins, counts = np.unique((v / GT_DIFF_BIN).astype(np.int64), return_counts=True)
+    return {str(int(b)): int(c) for b, c in zip(bins, counts)}
+
+
+def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
+    """The ``gt_speed`` segment-row block: live minus recorded ego speed / accel, measured at
+    the recorded segment nearest the live ego (same window/yaw gate as ``mean_gt_deviation_m``).
+
+    Signed diffs are split by sign before averaging so opposite errors don't cancel:
+    ``slow`` = recorded speed minus live speed when positive (too slow: needless slowing,
+    late start), ``fast`` the reverse; ``brake`` = recorded accel minus live accel when
+    positive (braking harder than the recorded drive), ``accel`` the reverse. NaN steps
+    (no valid GT segment) are dropped. ``*_hist`` are sparse bin-index -> count histograms.
+    """
+    ok = np.isfinite(dvs) & np.isfinite(das)
+    dv, da = dvs[ok].astype(np.float64), das[ok].astype(np.float64)
+    parts = {"slow": -dv, "fast": dv, "brake": -da, "accel": da}
+    block: dict = {"n": int(ok.sum())}
+    for name, x in parts.items():
+        pos = np.maximum(x, 0.0)
+        block[f"{name}_sum"] = float(pos.sum())
+        block[f"{name}_max"] = float(pos.max()) if pos.size else 0.0
+        block[f"{name}_hist"] = _sparse_hist(pos)
+    return block
 
 
 def _score_into(
@@ -1368,6 +1452,10 @@ def _finalize(s: _SegState) -> dict:
             "count": _event_count(red_mask),
         },
         "strong_brake": strong_brake_block(accels, s.strong_brake_mps2),
+        "gt_speed": gt_speed_block(
+            s.gt_dvs[: s.k] if s.gt_dvs is not None else np.zeros(0, dtype=np.float32),
+            s.gt_das[: s.k] if s.gt_das is not None else np.zeros(0, dtype=np.float32),
+        ),
         "turn_indicator": turn_indicator_block(
             s.turn_indicator_transition_correct,
             s.turn_indicator_transition_total,
@@ -2045,6 +2133,13 @@ def render_segment(
             s.gt_dev_count += 1
             if s.gt_devs is not None:
                 s.gt_devs[k] = gt_deviation_m
+            gt_va = _gt_speed_accel(tl, gt_dev)
+            gt_dv = gt_da = None
+            if gt_va is not None and s.gt_dvs is not None:
+                # Pre-step pair: dyn.speed is this tick's speed, dyn.accel the accel that produced it.
+                gt_dv = float(s.dyn.speed) - gt_va[0]
+                gt_da = float(s.dyn.accel) - gt_va[1]
+                s.gt_dvs[k], s.gt_das[k] = gt_dv, gt_da
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
                 deviation_streak += 1
             else:
@@ -2113,6 +2208,8 @@ def render_segment(
                         else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        "gt_speed_diff_mps": round(gt_dv, 3) if gt_dv is not None else None,
+                        "gt_accel_diff_mps2": round(gt_da, 3) if gt_da is not None else None,
                         # Resolved closed-loop turn indicator going into this tick, and the
                         # recorded GT at the same frame -- same values (and same read) the
                         # segment-level turn_indicator block and the PNG renderer use, so a

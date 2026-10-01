@@ -32,7 +32,21 @@ METRIC_CHOICES = (
     "turn_indicator",
     "deviation_collision",
     "collision_rear",
+    "speed_slow",
+    "speed_fast",
+    "brake_excess",
+    "accel_excess",
 )
+
+# One-sided live-vs-recorded metrics, kept as separate maps so each direction is checked on its
+# own: metric -> (trace key, sign applied to the trace value, saturation cap, unit).
+# gt_speed_diff = live - recorded speed; gt_accel_diff = live - recorded accel.
+_SIGNED_DIFF_METRICS = {
+    "speed_slow": ("gt_speed_diff_mps", -1.0, 5.0, "m/s"),  # slower than the recorded drive
+    "speed_fast": ("gt_speed_diff_mps", 1.0, 5.0, "m/s"),
+    "brake_excess": ("gt_accel_diff_mps2", -1.0, 3.0, "m/s²"),  # braking harder than recorded
+    "accel_excess": ("gt_accel_diff_mps2", 1.0, 3.0, "m/s²"),
+}
 
 # Fixed sim step (must match reproducer_rollout.DT) -- rollout.jsonl rows are one per sim step
 # regardless of draw_every/replan_interval, so consecutive "speed" samples are always DT apart.
@@ -69,6 +83,7 @@ _METRIC_TRACE_KEYS = {
     "turn_indicator": "turn_indicator_pred",
     "deviation_collision": "deviation_collision",
     "collision_rear": "collision_rear",
+    **{m: spec[0] for m, spec in _SIGNED_DIFF_METRICS.items()},
 }
 
 # Short colorbar axis label. The ticks themselves (see _risk_and_ticks) carry the actual
@@ -86,6 +101,10 @@ _METRIC_AXIS_LABELS = {
     "turn_indicator": "",
     "deviation_collision": "",
     "collision_rear": "",
+    "speed_slow": "recorded speed - ego speed, slower only (m/s)",
+    "speed_fast": "ego speed - recorded speed, faster only (m/s)",
+    "brake_excess": "recorded accel - ego accel, harder braking only (m/s²)",
+    "accel_excess": "ego accel - recorded accel, harder accel only (m/s²)",
 }
 
 
@@ -222,6 +241,17 @@ def _risk_and_ticks(
             [1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64
         )
         return risk, [0.0, 1.0], ["no rear collision", "rear collision"]
+    if metric in _SIGNED_DIFF_METRICS:
+        # One direction only: the other sign (and a step with no valid GT segment, None) reads
+        # 0.0 = no evidence, like "centerline".
+        key, sign, cap, unit = _SIGNED_DIFF_METRICS[metric]
+        vals = np.array(
+            [max(sign * r[key], 0.0) if r.get(key) is not None else 0.0 for r in rows],
+            dtype=np.float64,
+        )
+        risk = np.clip(vals / cap, 0.0, 1.0)
+        ticks = [0.0, 0.33, 0.66, 1.0]
+        return risk, ticks, [f"{cap * t:.2f}{unit}" for t in ticks]
     raise ValueError(f"Unknown colormap metric: {metric!r} (choices: {METRIC_CHOICES})")
 
 

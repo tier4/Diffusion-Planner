@@ -14,7 +14,26 @@ from scenario_generation.trajectory_colormap import (
     render_trajectory_colormaps,
 )
 
-_NEW_METRICS = ("centerline", "turn_indicator", "deviation_collision", "collision_rear")
+_NEW_METRICS = (
+    "centerline",
+    "turn_indicator",
+    "deviation_collision",
+    "collision_rear",
+    "speed_slow",
+    "speed_fast",
+    "brake_excess",
+    "accel_excess",
+)
+
+
+def test_signed_diff_metrics_are_one_sided():
+    rows = [{"gt_speed_diff_mps": -2.5, "gt_accel_diff_mps2": 1.5}, {"gt_speed_diff_mps": None}]
+    slow, *_ = _risk_and_ticks(rows, "speed_slow", 1.0)
+    fast, *_ = _risk_and_ticks(rows, "speed_fast", 1.0)
+    brake, *_ = _risk_and_ticks(rows, "brake_excess", 1.0)
+    accel, *_ = _risk_and_ticks(rows, "accel_excess", 1.0)
+    assert slow.tolist() == [0.5, 0.0] and fast.tolist() == [0.0, 0.0]
+    assert brake.tolist() == [0.0, 0.0] and accel.tolist() == [0.5, 0.0]
 
 
 def _write_rollout(png_dir: Path, rows: list[dict]) -> None:
@@ -38,6 +57,8 @@ def _full_row(k: int, **overrides) -> dict:
         "gt_deviation_m": 0.1,
         "deviation_collision": False,
         "centerline_dist_m": 0.3,
+        "gt_speed_diff_mps": -1.0,
+        "gt_accel_diff_mps2": 0.5,
         "turn_indicator_pred": 0,
         "turn_indicator_gt": 0,
     }

@@ -203,6 +203,10 @@ class ClosedLoopConfig:
             "turn_indicator",
             "deviation_collision",
             "collision_rear",
+            "speed_slow",
+            "speed_fast",
+            "brake_excess",
+            "accel_excess",
         ]
     )
 
