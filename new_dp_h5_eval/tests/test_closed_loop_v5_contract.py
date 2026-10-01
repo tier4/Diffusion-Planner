@@ -4,11 +4,8 @@ import json
 
 import h5py
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from new_dp_h5_eval.build_closed_loop_h5_manifest import build_manifest
 from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
 from new_dp_h5_eval.run_all_groups_closed_loop import _load_groups
 from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
@@ -116,78 +113,3 @@ def test_h5_and_npz_timeline_match_on_two_windows(tmp_path):
                     )
         finally:
             with_h5.close()
-
-
-def test_build_manifest_from_index_and_selected_spans(tmp_path):
-    shard = tmp_path / "frames.h5"
-    _write_route(shard)
-    index = tmp_path / "routes.parquet"
-    pq.write_table(
-        pa.Table.from_pylist(
-            [
-                {
-                    "h5_path": shard.name,
-                    "frame_index": frame,
-                    "frame_time_ns": 1_000_000_000 + frame * 100_000_000,
-                    "area_map_id": "site",
-                    "route_group_id": 0,
-                }
-                for frame in range(4)
-            ]
-        ),
-        index,
-    )
-    output = tmp_path / "manifest.json"
-    assert len(build_manifest(index, output)["site"]) == 1
-    assert _load_groups(output)["site"][0]["h5_path"] == str(shard)
-
-    selection = tmp_path / "selection.json"
-    selection.write_text(
-        json.dumps(
-            {
-                "departure": [
-                    {
-                        "h5_path": shard.name,
-                        "segment_start_ns": 1_000_000_000,
-                        "segment_end_ns": 1_100_000_000,
-                        "anchors": [{"eval_label": "departure", "timestamp": 1_100_000_000}],
-                    },
-                    {
-                        "h5_path": shard.name,
-                        "segment_start_ns": 1_200_000_000,
-                        "segment_end_ns": 1_300_000_000,
-                    },
-                ]
-            }
-        )
-    )
-    routes = build_manifest(index, output, selection=selection)["departure"]
-    assert [(route["frame_start"], route["frame_stop"]) for route in routes] == [(0, 2), (2, 4)]
-    assert len({route["route_id"] for route in _load_groups(output)["departure"]}) == 2
-
-
-def test_manifest_builder_rejects_gap_without_publishing(tmp_path):
-    shard = tmp_path / "frames.h5"
-    _write_route(shard)
-    index = tmp_path / "routes.parquet"
-    pq.write_table(
-        pa.Table.from_pylist(
-            [
-                {
-                    "h5_path": shard.name,
-                    "frame_index": frame,
-                    "frame_time_ns": 1_000_000_000
-                    + frame * 100_000_000
-                    + (2_000_000_000 if frame >= 2 else 0),
-                    "area_map_id": "site",
-                    "route_group_id": 0,
-                }
-                for frame in range(4)
-            ]
-        ),
-        index,
-    )
-    output = tmp_path / "manifest.json"
-    with pytest.raises(ValueError, match="non-contiguous"):
-        build_manifest(index, output)
-    assert not output.exists()

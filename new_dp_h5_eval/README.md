@@ -52,21 +52,10 @@ windows of one shard are separate routes. Optional `anchors`,
 `segment_start_ns`, and `segment_end_ns` are retained in segment results.
 
 [ML-Planner #44](https://github.com/tier4/ML-Planner/pull/44) generates v5
-route shards with `scripts/dataset/create_h5_dataset.py` and a Parquet index.
-Build a site-grouped evaluator manifest from that index:
-
-```bash
-PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.build_closed_loop_h5_manifest \
-  /path/to/indexes/valid.parquet /path/to/closed_loop_site_h5.json
-```
-
-For curated override labels or intervals, pass `--selection selection.json`.
-That JSON maps each evaluation group to H5 path strings or objects containing
-`h5_path`, optional inclusive `segment_start_ns`/`segment_end_ns`, and
-optional `anchors`. The builder converts time spans to frame ranges using the
-Parquet timestamps, preserves the anchor/span metadata, and rejects incomplete
-or non-10 Hz routes. The evaluator also rejects gaps, non-0.1 s frame intervals,
-and v5 source poses not in the `map` frame.
+route shards with `scripts/dataset/create_h5_dataset.py`. Dataset release
+tooling supplies the grouped evaluation manifest; this package only reads it.
+The evaluator rejects gaps, non-0.1 s frame intervals, and v5 source poses
+not in the `map` frame.
 
 ```bash
 PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.run_all_groups_closed_loop \
