@@ -307,3 +307,59 @@ def test_a_brief_stop_short_of_the_line_then_rolling_through_fails():
     r = registry.score(_stop_input(ego))
     assert r.passed is False
     assert r.values["overshoot_m"] > 10.0
+
+
+def _line_frames(line_x_ahead: float):
+    """The human's stop frame (99, pose x = 25 m) with a stop line ``line_x_ahead`` metres
+    ahead of its rear axle, across the lane; ego front 3 m ahead of the axle."""
+    line = np.array([[[line_x_ahead, -2.0], [line_x_ahead, 2.0]]] + [[[0.0, 0.0]] * 2] * 2)
+    return {99: {"stop_lines": line, "ego_shape": np.array([2.0, 4.0, 2.0])}}
+
+
+def _line_input(line_x_ahead: float):
+    """Human stops at x = 25 m; the ego rolls on 1.8 m at 1 m/s and stops at 26.8 m."""
+    ego_xy, ego_yaw = speed_profile_path(np.r_[np.full(50, 5.0), np.full(18, 1.0), np.zeros(82)])
+    return make_input(
+        label="traffic_light_stop",
+        ego_xy=ego_xy,
+        ego_yaw=ego_yaw,
+        rec_xy=speed_profile_path(_profile(50, 100))[0],
+        rec_yaw=np.zeros(150),
+        anchor_frame=ANCHOR,
+        frames=_line_frames(line_x_ahead),
+    )
+
+
+def test_stop_line_labels_are_judged_by_the_front_against_the_line():
+    # Line at x = 30 m, 2 m ahead of the human's front (28 m). The ego's front stops at
+    # 29.8 m: short of the line, though 1.8 m past the human's stop.
+    r = registry.score(_line_input(5.0))
+    assert r.details["stop_reference"] == "stop_line"
+    assert r.values["stop_line_s_m"] == pytest.approx(30.0)
+    assert r.values["human_front_past_line_m"] == pytest.approx(-2.0)
+    assert r.values["past_human_stop_m"] == pytest.approx(1.8)
+    assert r.passed is True and r.values["overshoot_m"] == 0.0
+
+
+def test_stop_line_crossing_by_the_front_fails():
+    # Line at x = 28.5 m: the same stop puts the ego's front 1.3 m past it.
+    r = registry.score(_line_input(3.5))
+    assert r.passed is False
+    assert r.values["overshoot_m"] == pytest.approx(1.3)
+
+
+def test_without_a_stop_line_the_human_stop_is_the_reference():
+    r = registry.score(_stop_input(_profile(50, 100)))
+    assert r.details["stop_reference"] == "human_stop"
+    obstacle = registry.score(
+        make_input(
+            label="obstacle_stop",
+            ego_xy=speed_profile_path(_profile(50, 100))[0],
+            ego_yaw=np.zeros(150),
+            rec_xy=speed_profile_path(_profile(50, 100))[0],
+            rec_yaw=np.zeros(150),
+            anchor_frame=ANCHOR,
+            frames=_line_frames(3.5),
+        )
+    )
+    assert obstacle.details["stop_reference"] == "human_stop"  # not a stop-line label

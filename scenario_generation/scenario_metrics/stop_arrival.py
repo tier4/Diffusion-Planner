@@ -82,6 +82,13 @@ PATH_EXTENSION_M = 200.0
 # Closed loop only: open loop scores temporal_stop as a yield, so its config has no stop
 # tolerance. The same 0.5 m as the open-loop red-light and obstacle stops.
 TEMPORAL_STOP_TOLERANCE_M = 0.5
+# Labels whose stop is at a stop line (vse ``stop_line_classifier``): they are judged by
+# the ego's front against that line when the human's stop frame has one.
+STOP_LINE_LABELS = ("traffic_light_stop", "temporal_stop")
+# The stop line is searched from this far behind the human's front (humans stop up to
+# ~0.5 m past it) to this far ahead of it.
+STOP_LINE_SEARCH_BEHIND_M = 2.0
+STOP_LINE_SEARCH_AHEAD_M = 10.0
 # Length of the open-loop GT future / prediction ``stop_overshoot`` reads; the interval
 # of the ``ol_*`` stop values.
 OL_STOP_HORIZON_S = 8.0
@@ -134,6 +141,50 @@ def _stop_runs(speed: np.ndarray, dt: float, p: StopParams) -> list[tuple[int, i
     stopped = np.r_[False, np.asarray(speed) <= p.stop_speed_mps, False].astype(np.int8)
     edges = np.flatnonzero(np.diff(stopped))
     return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]) if b - a >= width]
+
+
+def _front_offset_m(frame: dict) -> float | None:
+    """Rear axle (the pose) to the front face: ``(wheelbase + length) / 2``, as the
+    evaluator's box (centre half a wheelbase ahead of the axle)."""
+    shape = frame.get("ego_shape")
+    if shape is None:
+        return None
+    shape = np.asarray(shape, dtype=np.float64).reshape(-1)
+    return float(shape[0] + shape[1]) / 2.0
+
+
+def _stop_line_arc(
+    inp: ClosedLoopScenarioInput, frame_idx: int, human_s: float
+) -> tuple[float, float] | None:
+    """``(arc of the stop line, front offset)`` the human stopped for, or None.
+
+    ``human_s`` is the human's stop (rear-axle arc) and ``frame_idx`` a frame of it.
+
+    The stop lines of the human's stop frame (``stop_lines``, ego-centric segments) are
+    taken to the world frame; the line the human stopped for is the first one crossing
+    the recorded path within ``STOP_LINE_SEARCH_BEHIND_M`` behind to
+    ``STOP_LINE_SEARCH_AHEAD_M`` ahead of the human's front.
+    """
+    try:
+        frame = inp.load_frame(frame_idx)
+    except KeyError:  # frame not available
+        return None
+    lines, front = frame.get("stop_lines"), _front_offset_m(frame)
+    if lines is None or front is None:
+        return None
+    human_front_s = human_s + front
+    lines = np.asarray(lines, dtype=np.float64)
+    lines = lines[np.abs(lines).sum(axis=(1, 2)) > 0]
+    path = _extended_path(inp)
+    crossings = []
+    for seg in lines:
+        arc, lat = project_onto_path(inp.to_world(seg, frame_idx), path)
+        if lat[0] * lat[1] > 0 or lat[0] == lat[1]:
+            continue  # the segment does not cross the recorded path
+        s_cross = arc[0] + (arc[1] - arc[0]) * lat[0] / (lat[0] - lat[1])
+        if -STOP_LINE_SEARCH_BEHIND_M <= s_cross - human_front_s <= STOP_LINE_SEARCH_AHEAD_M:
+            crossings.append(float(s_cross))
+    return (min(crossings), front) if crossings else None
 
 
 def _ego_stop_speed(inp: ClosedLoopScenarioInput, p: StopParams) -> np.ndarray:
@@ -211,6 +262,14 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     first one is the stop the label is about -- a human creeping up in two stops is
     measured at the first). Its position is the run's median arc length.
 
+    Reference: for ``STOP_LINE_LABELS`` the stop line the human stopped for (from the
+    human's stop frame, see ``_stop_line_arc``), compared with the ego's *front*; humans
+    stop with their front within about -0.5..+2 m of it, while the ego is driven by its
+    rear axle and stops some metres past the human's own position. Without a stop line
+    (or for obstacle_stop) the human's stop, compared with the rear axle, as before.
+    ``overshoot_m`` / ``undershoot_m`` are against the reference; ``past_human_stop_m``
+    is always against the human's stop.
+
     Live stop: judged while the replay is still inside the human's stop (sim steps from
     ``anchor_step`` whose replayed frame is before the human's departure). The ego must
     make a sustained stop then, and the furthest it gets meanwhile must not pass
@@ -247,9 +306,23 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
         )
     h0, h1 = human[0]
     human_s = float(np.median(s_rec[h0:h1]))
-    limit = human_s + p.tolerance_m
     values["human_stop_s_m"] = human_s
     details["human_stop_frames"] = [h0, h1]
+    # Reference stop position (rear-axle arc): the stop line minus the front offset when
+    # the label stops at a line and the human's stop frame has it, else the human's stop.
+    line = (
+        _stop_line_arc(inp, (h0 + h1 - 1) // 2, human_s) if inp.label in STOP_LINE_LABELS else None
+    )
+    if line is not None:
+        line_s, front = line
+        ref_s = line_s - front
+        values["stop_line_s_m"] = line_s
+        values["human_front_past_line_m"] = human_s + front - line_s
+        details["stop_reference"] = "stop_line"
+    else:
+        ref_s = human_s
+        details["stop_reference"] = "human_stop"
+    limit = ref_s + p.tolerance_m
 
     live = [r for r in _stop_runs(_ego_stop_speed(inp, p), inp.dt, p) if r[1] > k0]
     beyond = np.flatnonzero(s_ego[k0:] > limit)
@@ -285,8 +358,10 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     values.update(
         {
             "ego_stop_s_m": stop_s,
-            "overshoot_m": max(0.0, stop_s - human_s),
-            "undershoot_m": max(0.0, human_s - stop_s),
+            # Past the reference (the stop line, by the ego's front, or the human's stop).
+            "overshoot_m": max(0.0, stop_s - ref_s),
+            "undershoot_m": max(0.0, ref_s - stop_s),
+            "past_human_stop_m": stop_s - human_s,
             "ego_sustained_stop": float(stopped),
         }
     )
