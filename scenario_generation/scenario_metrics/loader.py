@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -69,6 +70,35 @@ def load_input_from_frames(
     ``rec_idx``.
     """
     window_dir = Path(sidecar_dir)
+    return load_input_from_timeline(
+        rollout_path,
+        RouteTimeline(list(npz_paths), sidecar_dir=window_dir),
+        window_dir=window_dir,
+        label=label,
+        anchor_frame=anchor_frame,
+        dt=dt,
+        span_frames=span_frames,
+    )
+
+
+def load_input_from_timeline(
+    rollout_path: Path,
+    timeline: RouteTimeline,
+    *,
+    window_dir: Path,
+    label: str,
+    anchor_frame: int,
+    dt: float = SIM_DT_S,
+    span_frames: tuple[int, int] | None = None,
+    load_frame: Callable[[int], dict[str, np.ndarray]] | None = None,
+) -> ClosedLoopScenarioInput:
+    """Assemble one window's input from the timeline the rollout replayed.
+
+    ``timeline`` must cover exactly the window the trace was run on (its index ``i`` is
+    the cursor's ``rec_idx``); any ``RouteTimeline``-like source with ``poses``,
+    ``speeds`` and ``npz`` works. ``load_frame`` replaces ``timeline.npz`` when the
+    source's frames need converting to the NPZ field layout the metrics read.
+    """
     steps, terminated = read_rollout(Path(rollout_path))
     if not steps:
         raise ValueError(f"rollout has no steps: {rollout_path}")
@@ -88,7 +118,6 @@ def load_input_from_frames(
         )
     reached = np.flatnonzero(rec_idx >= anchor_frame)
 
-    tl = RouteTimeline(list(npz_paths), sidecar_dir=window_dir)
     return ClosedLoopScenarioInput(
         label=label,
         window_dir=str(window_dir),
@@ -103,10 +132,10 @@ def load_input_from_frames(
         clearance_m=clearance,
         red_light_violation=red,
         terminated=str(terminated.get("reason", "unknown")),
-        rec_xy=tl.poses[:, :2].copy(),
-        rec_yaw=tl.poses[:, 2].copy(),
-        rec_speed=tl.speeds.copy(),
-        load_frame=tl.npz,
+        rec_xy=timeline.poses[:, :2].copy(),
+        rec_yaw=timeline.poses[:, 2].copy(),
+        rec_speed=timeline.speeds.copy(),
+        load_frame=timeline.npz if load_frame is None else load_frame,
         span_frames=None if span_frames is None else (int(span_frames[0]), int(span_frames[1])),
         road_border_m=road_border,
     )
