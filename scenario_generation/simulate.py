@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
@@ -132,8 +133,18 @@ class _OnnxModel:
             for provider, option in zip(providers, options):
                 if provider in _ACCELERATED:
                     option["device_id"] = device_id
+        # One intra-op thread. onnxruntime sizes its pool from the machine's core count and
+        # ignores the affinity mask, so every rank of a torchrun job spawns a pool as wide as the
+        # whole box and they contend for the same cores -- while the work itself is on the GPU, so
+        # the pool buys nothing back. This decides how the host feeds the accelerator, not what is
+        # computed. SCENARIO_SIM_ORT_INTRA overrides it for a host that wants otherwise.
+        sess_options = ort.SessionOptions()
+        sess_options.intra_op_num_threads = int(os.environ.get("SCENARIO_SIM_ORT_INTRA", "1"))
         self.session = ort.InferenceSession(
-            str(onnx_path), providers=providers, provider_options=options
+            str(onnx_path),
+            sess_options=sess_options,
+            providers=providers,
+            provider_options=options,
         )
         _require_accelerator(self.session, providers, onnx_path)
         self._inputs = [(i.name, i.type) for i in self.session.get_inputs()]

@@ -19,12 +19,20 @@ _TRT_CACHE_OPTIONS = {
 }
 
 
+class _SessionOptions:
+    """Stands in for ``ort.SessionOptions``; only the thread count is read back."""
+
+    def __init__(self):
+        self.intra_op_num_threads = 0
+
+
 class _Session:
     """Stands in for ``ort.InferenceSession``, reporting the providers it was handed as active."""
 
-    def __init__(self, providers, provider_options=None):
+    def __init__(self, providers, provider_options=None, sess_options=None):
         self.providers = providers
         self.provider_options = provider_options
+        self.sess_options = sess_options
 
     def get_providers(self):
         return self.providers
@@ -40,12 +48,14 @@ def _open_session(monkeypatch, device, providers=None, **kwargs):
     """Build an ``_OnnxModel`` against a fake onnxruntime and hand back the session it opened."""
     import scenario_generation.simulate as simulate
 
-    def _factory(path, providers, provider_options):
-        return _Session(providers, provider_options)
+    def _factory(path, sess_options, providers, provider_options):
+        return _Session(providers, provider_options, sess_options)
 
     monkeypatch.setattr(simulate.torch.cuda, "current_device", lambda: _CURRENT_DEVICE)
     monkeypatch.setitem(
-        sys.modules, "onnxruntime", types.SimpleNamespace(InferenceSession=_factory)
+        sys.modules,
+        "onnxruntime",
+        types.SimpleNamespace(InferenceSession=_factory, SessionOptions=_SessionOptions),
     )
     return simulate._OnnxModel("m.onnx", device, providers, **kwargs).session
 
@@ -108,3 +118,15 @@ def test_gpu_providers_follow_requested_device(monkeypatch, device, providers, e
     session = _open_session(monkeypatch, device, providers, engine_cache_dir=_TRT_CACHE)
 
     assert dict(zip(session.providers, session.provider_options)) == expected
+
+
+def test_intra_op_threads_default_to_one(monkeypatch):
+    """Left unset, ORT sizes the pool from the machine's core count in every rank at once."""
+    assert _open_session(monkeypatch, "cuda").sess_options.intra_op_num_threads == 1
+
+
+def test_intra_op_threads_follow_the_environment(monkeypatch):
+    """A host that wants a wider pool has to be able to say so without editing the adapter."""
+    monkeypatch.setenv("SCENARIO_SIM_ORT_INTRA", "4")
+
+    assert _open_session(monkeypatch, "cuda").sess_options.intra_op_num_threads == 4
