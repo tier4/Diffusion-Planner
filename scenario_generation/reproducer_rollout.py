@@ -459,10 +459,8 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Realized acceleration for physical telemetry; plan_accels supplies the
-    # closed-loop strong-brake metric. Allocated by _seed_state.
+    # Per-step active-plan acceleration for the strong-brake metric.
     accels: np.ndarray | None = None
-    plan_accels: np.ndarray | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -703,7 +701,6 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
-        plan_accels=np.full(cap, np.nan, dtype=np.float64),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
@@ -1043,10 +1040,6 @@ def _advance_step(
         else:
             s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
         s.sim_time += DT
-        # Record this step's realized accel (aligned with clearances[k], written pre-increment)
-        # for the strong-brake metric; guard states built without an accels buffer.
-        if s.accels is not None and s.k < s.accels.shape[0]:
-            s.accels[s.k] = s.dyn.accel
         s.k += 1
 
         # Unstick (two-stage): if the ego has been STUCK for too long, FIRST widen the
@@ -1120,9 +1113,9 @@ def _advance_step(
                 s.stuck = 0
                 s.snap_count += 1
 
-        if getattr(s, "plan_accels", None) is not None:
+        if s.accels is not None and s.k - 1 < len(s.accels):
             xy = pred[:, :2] if metric_plan_xy is None else metric_plan_xy
-            s.plan_accels[s.k - 1] = (
+            s.accels[s.k - 1] = (
                 np.nan if was_warmup or s.snap_count != snaps_before else plan_acceleration(xy, DT)
             )
 
@@ -1273,7 +1266,6 @@ def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
         "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
         "steps": int(mask.sum()),
         "count": strong_brake_count(accels, thresh_mps2=float(thresh_mps2)),
-        "definition": "plan_three_point_confirm2_clear5",
     }
 
 
@@ -1332,7 +1324,7 @@ def turn_indicator_block(
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
     rb = s.rb_dists[: s.k]
-    accels = s.plan_accels[: s.k] if s.plan_accels is not None else np.full(s.k, np.nan)
+    accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
     red_mask = s.red_light[: s.k]
 
     # Graded (non-saturating) headline metrics: improve smoothly as the model trains, unlike the

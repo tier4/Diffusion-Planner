@@ -485,11 +485,6 @@ def aggregate(
     # Strongest consecutive-pair accel across segments (mask-filtered; +inf if none).
     strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
     brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
-    definitions = {r["strong_brake"].get("definition", "realized_accel") for r in rows}
-    if len(definitions) > 1:
-        raise ValueError("Cannot aggregate different strong-brake definitions")
-    if definitions:
-        brake["definition"] = definitions.pop()
 
     turn_transition_correct = sum(
         int(_require_block(r, "turn_indicator")["transition_correct"]) for r in rows

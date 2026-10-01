@@ -472,8 +472,7 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
     # changes do not enter the plan-only score.
     scores = [-5.0, -5.0] + [0.0] * 4 + [-5.0, -5.0] + [0.0] * 5 + [-5.0, -5.0]
     s.k = len(scores)
-    s.accels[: s.k] = 0.0
-    s.plan_accels[: s.k] = [
+    s.accels[: s.k] = [
         plan_acceleration(np.array([[0.0, 0.0], [1.0, 0.0], [2.0 + a * 0.01, 0.0]])) for a in scores
     ]
     metrics = _finalize(s)
@@ -481,7 +480,7 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
     assert brake["steps"] == 3
     assert brake["count"] == 2
     assert brake["strongest_mps2"] == pytest.approx(-5.0)
-    assert brake["definition"] == "plan_three_point_confirm2_clear5"
+    assert set(brake) == {"thresh_mps2", "strongest_mps2", "steps", "count"}
 
 
 def test_finalize_road_border_collision_thresh(tmp_path):
