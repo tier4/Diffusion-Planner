@@ -48,6 +48,7 @@ import torch
 
 from planner_metrics.centerline import compute_centerline_error_components_batch
 from planner_metrics.gt_lateral_deviation import compute_gt_lateral_deviation_batch
+from planner_metrics.lane_change import lane_change_decision
 from planner_metrics.source_lane import reconstruct_source_lane
 from scenario_generation.scenario_metrics.base import (
     ClosedLoopScenarioInput,
@@ -290,7 +291,8 @@ def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
     source lane is rebuilt from the anchor frame's ``lanes`` at the recorded anchor pose
     (``source_lane.reconstruct_source_lane``), and every lateral reading is taken
     against it. Passing needs the ego's final offset past the source lane's boundary on
-    the human's side AND within the lane tolerance of the human's final offset.
+    the human's side AND within the lane tolerance of the human's final offset -- the
+    decision is open loop's own ``lane_change_decision``, not a copy of it.
 
     Unlike open loop -- which counts them as failures -- a window whose human drove no
     lane change, or whose source lane is not heading-aligned, is not applicable. No
@@ -330,43 +332,44 @@ def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
     _, gt_lat = project_onto_path(gt, path)
     left, right = source.half_widths_at(lanes, torch.from_numpy(gt[-1]))
 
-    initial, gt_shift, pred_shift = float(gt_lat[0]), float(gt_lat[-1]), float(pred[-1])
-    direction = 1.0 if gt_shift >= initial else -1.0
-    half_width = left if direction > 0 else right
-    # The floor keeps zeroed map boundary offsets from making "crossed" trivial.
-    tolerance = max(half_width, min_lateral_shift_m)
-    gt_progress = gt_shift - initial
-    detected = direction * gt_progress > min_lateral_shift_m and direction * gt_shift > tolerance
-
-    signed = direction * pred
-    beyond = np.flatnonzero(signed > tolerance)
-    crossed = bool(signed[-1] > tolerance)
-    reached = abs(pred_shift - gt_shift) <= tolerance
-    completion = 1.0 - abs((pred_shift - initial) - gt_progress) / max(
-        abs(gt_progress), min_lateral_shift_m
-    )
-    values = {
-        "completion_ratio": float(np.clip(completion, 0.0, 1.0)),
-        "final_lateral_offset_error_m": abs(pred_shift - gt_shift),
+    # The decision is open loop's own, run as a batch of one. Its verdicts come back
+    # ungated; the two preconditions are turned into "not applicable" below.
+    decision = lane_change_decision(
+        torch.from_numpy(pred)[None],
+        torch.from_numpy(gt_lat)[None],
+        torch.tensor([left], dtype=torch.float64),
+        torch.tensor([right], dtype=torch.float64),
+        torch.tensor([source.heading_aligned]),
+        min_lateral_shift_m,
         # Sim time from the anchor step to the first step past the boundary; the whole
         # window when it never got there (open loop reports the horizon likewise).
-        "lane_change_time_s": float((w.steps[beyond[0]] - w.start_step) * inp.dt)
-        if len(beyond)
-        else len(w.steps) * inp.dt,
-        "predicted_lateral_shift_m": pred_shift,
-        "gt_lateral_shift_m": gt_shift,
-        "initial_lateral_offset_m": initial,
-        "gt_direction": direction,
-        "lane_tolerance_m": tolerance,
-        "left_source_lane": float(crossed),
-        "reached_gt_lane": float(reached),
-        **w.values(inp.dt),
+        torch.from_numpy((w.steps - w.start_step) * inp.dt),
+        len(w.steps) * inp.dt,
+    )
+    detected = bool(decision["gt_lane_change_detected"][0])
+    crossed = bool(decision["left_source_lane"][0])
+    reached = bool(decision["reached_gt_lane"][0])
+    values = {
+        key: float(decision[key][0])
+        for key in (
+            "completion_ratio",
+            "final_lateral_offset_error_m",
+            "lane_change_time_s",
+            "predicted_lateral_shift_m",
+            "gt_lateral_shift_m",
+            "initial_lateral_offset_m",
+            "gt_direction",
+            "lane_tolerance_m",
+        )
     }
+    values.update(
+        {"left_source_lane": float(crossed), "reached_gt_lane": float(reached), **w.values(inp.dt)}
+    )
     details = {
         **_base_details(inp, w),
         "source_lane_index": source.index,
         "source_lane_heading_aligned": source.heading_aligned,
-        "lane_tolerance_from_map": half_width >= min_lateral_shift_m,
+        "lane_tolerance_from_map": bool(decision["lane_tolerance_from_map"][0]),
         "lane_half_width_left_m": left,
         "lane_half_width_right_m": right,
         "gt_lane_change_detected": detected,
