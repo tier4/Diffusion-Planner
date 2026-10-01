@@ -47,7 +47,12 @@ class ModelConfig:
     # ---------------------------------------------------------
     # Model Architecture
     # ---------------------------------------------------------
-    encoder_mixer_depth: int = 6
+    # Per-element MLP-Mixer size. These blocks run on every element (~560 per sample)
+    # at every point (20-31), so their activations dominate encoder time and memory:
+    # cost scales as depth * mixer dims, not as hidden_dim. 128/64/6 is what ran before.
+    encoder_mixer_hidden_dim: int = 32
+    encoder_mixer_token_dim: int = 32
+    encoder_mixer_depth: int = 1
     encoder_fusion_depth: int = 6
     decoder_depth: int = 3
     num_heads: int = 8
