@@ -509,6 +509,9 @@ def model_training(args: TrainConfig):
             replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
             replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
         valid_sec = time.perf_counter() - valid_start_time
+        # On every rank: the ranks that do not evaluate must know when to wait.
+        save_epoch = (epoch + 1 - init_epoch) % save_utd == 0
+        run_scenario_sim = scenario_sim_due(args, save_epoch, epoch + 1 == train_epochs)
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
@@ -634,8 +637,6 @@ def model_training(args: TrainConfig):
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
-            save_epoch = (epoch + 1 - init_epoch) % save_utd == 0
-            run_scenario_sim = scenario_sim_due(args, save_epoch, epoch + 1 == train_epochs)
             if save_epoch or run_scenario_sim:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
@@ -685,7 +686,7 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
-        if eval_wait_group is not None and (epoch + 1 - init_epoch) % save_utd == 0:
+        if eval_wait_group is not None and run_scenario_sim:
             torch.distributed.barrier(group=eval_wait_group)
 
         if epoch + 1 == train_epochs:
