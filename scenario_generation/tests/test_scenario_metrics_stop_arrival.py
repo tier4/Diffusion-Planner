@@ -292,3 +292,18 @@ def test_a_jittering_stopped_ego_still_counts_as_stopped():
     )
     assert r.passed is True and r.values["ego_sustained_stop"] == 1.0
     assert r.values["overshoot_m"] < 0.1
+
+
+def test_creeping_past_the_line_after_stopping_fails():
+    # Stops 1 m short, then creeps on at 0.3 m/s (still a "stop" by speed) to 2 m past.
+    ego = np.r_[np.full(48, 5.0), np.zeros(10), np.full(100, 0.3)]
+    r = registry.score(_stop_input(ego))
+    assert r.passed is False and r.values["ego_sustained_stop"] == 1.0
+    assert r.values["overshoot_m"] > 1.5
+
+
+def test_a_brief_stop_short_of_the_line_then_rolling_through_fails():
+    ego = np.r_[np.full(44, 5.0), np.zeros(10), np.full(96, 5.0)]  # stops 3 m short
+    r = registry.score(_stop_input(ego))
+    assert r.passed is False
+    assert r.values["overshoot_m"] > 10.0

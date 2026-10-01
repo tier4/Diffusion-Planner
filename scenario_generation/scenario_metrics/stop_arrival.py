@@ -211,11 +211,15 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     first one is the stop the label is about -- a human creeping up in two stops is
     measured at the first). Its position is the run's median arc length.
 
-    Live stop: the ego's last sustained stop (ongoing at/after ``anchor_step``) before
-    it first passes ``human + tolerance``. Stopping short passes and reports the
-    undershoot; stopping and later driving on (after the release) is not penalized.
-    Passing the limit without a stop before it fails, with the overshoot measured at
-    the ego's first stop after it, or its furthest point if it never stops.
+    Live stop: judged while the replay is still inside the human's stop (sim steps from
+    ``anchor_step`` whose replayed frame is before the human's departure). The ego must
+    make a sustained stop then, and the furthest it gets meanwhile must not pass
+    ``human + tolerance``: creeping on after stopping counts, and a brief stop short of
+    the line followed by rolling through fails. Judging by where the ego stopped *first*
+    would pass both. Stopping short passes and reports the undershoot; driving on after
+    the human's release is not penalized. Without a stop in that interval the ego fails
+    once it passed the limit, with the overshoot measured at its first stop after it,
+    or its furthest point if it never stops.
 
     Not scored: the human never stops after the anchor; or the trace ends (goal,
     max_steps, abort) before the ego either stops or passes the limit. The latter is
@@ -250,12 +254,14 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     live = [r for r in _stop_runs(_ego_stop_speed(inp, p), inp.dt, p) if r[1] > k0]
     beyond = np.flatnonzero(s_ego[k0:] > limit)
     k_cross = k0 + int(beyond[0]) if len(beyond) else None
-    before = [r for r in live if k_cross is None or r[0] < k_cross]
     values["max_s_after_anchor_m"] = float(s_ego[k0:].max())
-    if before:
-        r0, r1 = before[-1]
-        stop_s = float(np.median(s_ego[r0:r1]))
-        passed, stopped = True, True
+    # Steps whose replayed frame is before the human's departure: the light is still red.
+    holding = np.flatnonzero((np.arange(inp.n_steps) >= k0) & (inp.rec_idx < h1))
+    held = [r for r in live if len(holding) and r[0] <= holding[-1]]
+    if held:
+        r0, r1 = held[0]
+        stop_s = float(s_ego[holding].max())
+        passed, stopped = stop_s <= limit, True
     elif k_cross is not None:
         after = [r for r in live if r[0] >= k_cross]
         if after:
