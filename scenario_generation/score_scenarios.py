@@ -65,49 +65,59 @@ def _windows(entries: list[str]) -> dict[str, tuple[list[Path], Path, str, list[
     return by_key
 
 
+def segment_rows(group_dir: Path) -> list[dict]:
+    """The group's segment rows, each once.
+
+    A DDP run leaves the per-rank shards (``segments_<rank>.jsonl``) next to the merged
+    ``segments.jsonl``; the merged file is read when present, the shards otherwise
+    (a run that stopped before merging).
+    """
+    merged = group_dir / "segments.jsonl"
+    files = [merged] if merged.is_file() else sorted(group_dir.glob("segments_*.jsonl"))
+    return [json.loads(line) for f in files for line in f.read_text().splitlines() if line.strip()]
+
+
 def score_group(group_dir: Path, entries: list[str], config=None) -> list[dict]:
     """Score every (window, anchor) of one group. ``config`` carries the thresholds shared
     with open loop (``ScenarioOpenLoopConfig`` or an args object with its fields); None
     uses its defaults."""
     windows = _windows(entries)
     rows = []
-    for seg_file in sorted(group_dir.glob("segments*.jsonl")):
-        for line in seg_file.read_text().splitlines():
-            seg = json.loads(line)
-            key, (start, end) = seg["route"], seg["segment"]
-            paths, window_dir, label, anchors = windows[key]
-            trace = group_dir / f"{key}_{start}_{end}.rollout.jsonl"
-            for anchor in anchors:
-                base = {
-                    "route": key,
-                    "segment": [start, end],
-                    "window": str(window_dir),
-                    "anchor": anchor,
-                }
-                if not trace.is_file():
-                    rows.append(
-                        {
-                            **base,
-                            "metric": "none",
-                            "passed": None,
-                            "reason": f"missing trace {trace.name}",
-                        }
-                    )
-                    continue
-                span = (
-                    (int(anchor["span_frame_start"]), int(anchor["span_frame_stop"]) - 1)
-                    if "span_frame_start" in anchor
-                    else None
+    for seg in segment_rows(group_dir):
+        key, (start, end) = seg["route"], seg["segment"]
+        paths, window_dir, label, anchors = windows[key]
+        trace = group_dir / f"{key}_{start}_{end}.rollout.jsonl"
+        for anchor in anchors:
+            base = {
+                "route": key,
+                "segment": [start, end],
+                "window": str(window_dir),
+                "anchor": anchor,
+            }
+            if not trace.is_file():
+                rows.append(
+                    {
+                        **base,
+                        "metric": "none",
+                        "passed": None,
+                        "reason": f"missing trace {trace.name}",
+                    }
                 )
-                inp = load_input_from_frames(
-                    trace,
-                    paths,
-                    window_dir,
-                    label=label,
-                    anchor_frame=int(anchor["frame_offset"]),
-                    span_frames=span,
-                )
-                rows.append({**base, **score(inp, config).to_json()})
+                continue
+            span = (
+                (int(anchor["span_frame_start"]), int(anchor["span_frame_stop"]) - 1)
+                if "span_frame_start" in anchor
+                else None
+            )
+            inp = load_input_from_frames(
+                trace,
+                paths,
+                window_dir,
+                label=label,
+                anchor_frame=int(anchor["frame_offset"]),
+                span_frames=span,
+            )
+            rows.append({**base, **score(inp, config).to_json()})
     return rows
 
 

@@ -1,9 +1,9 @@
-"""Tests for the per-group summary and log dict of ``score_scenarios``."""
+"""Tests for the segment reader, per-group summary and log dict of ``score_scenarios``."""
 
 import json
 import math
 
-from scenario_generation.score_scenarios import summarize, summary_log_dict
+from scenario_generation.score_scenarios import segment_rows, summarize, summary_log_dict
 
 
 def _row(passed, values, metric="centerline", reason=""):
@@ -79,3 +79,24 @@ def test_summary_log_dict_keys_and_drops():
     assert math.isclose(log[f"{p}/average_lateral_error_m"], 0.3)
     assert log[f"{q}/n_not_applicable"] == 1.0
     assert all(isinstance(v, float) for v in log.values())
+
+
+def _write_rows(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def test_segment_rows_reads_the_merged_file_once_next_to_ddp_shards(tmp_path):
+    a = {"route": "r0", "segment": [0, 10]}
+    b = {"route": "r1", "segment": [0, 10]}
+    _write_rows(tmp_path / "segments_0.jsonl", [a])
+    _write_rows(tmp_path / "segments_1.jsonl", [b])
+    _write_rows(tmp_path / "segments.jsonl", [a, b])
+    assert segment_rows(tmp_path) == [a, b]
+
+
+def test_segment_rows_falls_back_to_the_shards_without_a_merged_file(tmp_path):
+    a = {"route": "r0", "segment": [0, 10]}
+    b = {"route": "r1", "segment": [0, 10]}
+    _write_rows(tmp_path / "segments_0.jsonl", [a])
+    _write_rows(tmp_path / "segments_1.jsonl", [b])
+    assert segment_rows(tmp_path) == [a, b]
