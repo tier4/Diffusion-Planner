@@ -19,6 +19,10 @@ The rollout ends when the live ego comes within ``GOAL_REACH_M`` of the window's
 recorded pose (``terminated == "goal"``). Both metrics must live with that: it hides
 the last few metres before the endpoint, which is exactly where an arrival settles and,
 when the recording ends with the human still stopped, where a stop happens.
+Windows extended until the human departs (``build_scenario_manifest
+--extend_until_departure``) put the goal past the stop: the stop metric then sees the
+ego's stop as is, and the arrival metric scores the ego's stop at the human's arrival
+stop instead of the closest approach to the window's end.
 
 Open-loop reference values (``ol_*``, reported only, never part of the verdict or the
 reason) say what the open-loop definition measures on the realized trajectory:
@@ -118,6 +122,10 @@ class ArrivalParams:
             heading_tolerance_deg=float(p["heading_tolerance_deg"]),
             reach_m=max(position_tolerance_m, GOAL_REACH_M),
         )
+
+
+# The sustained-stop rule alone (its tolerance is not read), for the arrival stops.
+_STOP_RULE = StopParams(tolerance_m=0.0)
 
 
 def _stop_runs(speed: np.ndarray, dt: float, p: StopParams) -> list[tuple[int, int]]:
@@ -266,8 +274,84 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     return ScenarioResult(metric, passed, values, details)
 
 
+def _score_arrival_stop(
+    inp: ClosedLoopScenarioInput, p: ArrivalParams, human: tuple[int, int]
+) -> ScenarioResult:
+    """The ego must stop within ``position_tolerance_m`` of the human's arrival stop.
+
+    Used when the window runs on past the human's stop (``extend_until_departure``), so
+    the goal radius no longer hides it. The arrival point is the middle of the human's
+    first sustained stop at/after the anchor; the ego's stop is its sustained stop
+    (after ``anchor_step``) closest to that point along the road. Driving past without
+    a stop fails. The open-loop reference values compare the final pose with the
+    window's end and say nothing here, so they are left out.
+    """
+    metric = "arrival"
+    k0 = inp.anchor_step
+    h0, h1 = human
+    i_arr = (h0 + h1 - 1) // 2
+    s_rec = path_arclength(inp.rec_xy)
+    s_ego, lat = project_onto_path(inp.ego_xy, _extended_path(inp))
+    s_arr = float(s_rec[i_arr])
+    values: dict[str, float] = {
+        "arrival_point_s_m": s_arr,
+        "position_tolerance_m": p.position_tolerance_m,
+        "heading_tolerance_deg": p.heading_tolerance_deg,
+        "max_s_after_anchor_m": float(s_ego[k0:].max()),
+    }
+    details: dict = {
+        "terminated": inp.terminated,
+        "arrival_mode": "stop_at_arrival_point",
+        "human_stop_frames": [h0, h1],
+    }
+    live = [r for r in _stop_runs(inp.ego_speed, inp.dt, _STOP_RULE) if r[1] > k0]
+    if not live:
+        if (
+            inp.terminated != "goal"
+            and values["max_s_after_anchor_m"] < s_arr - p.position_tolerance_m
+        ):
+            return ScenarioResult(
+                metric,
+                None,
+                values,
+                details,
+                reason=f"trace ended ({inp.terminated}) before the ego reached the arrival point",
+            )
+        return ScenarioResult(
+            metric, False, values, details, reason="ego never stopped after the anchor"
+        )
+    r0, r1 = min(live, key=lambda r: abs(float(np.median(s_ego[r[0] : r[1]])) - s_arr))
+    k = (r0 + r1 - 1) // 2
+    heading_err = float(np.degrees(abs(wrap_angle(inp.ego_yaw[k] - inp.rec_yaw[i_arr]))))
+    values.update(
+        {
+            "ego_stop_s_m": float(np.median(s_ego[r0:r1])),
+            "stop_distance_m": float(np.linalg.norm(inp.ego_xy[k] - inp.rec_xy[i_arr])),
+            "longitudinal_offset_m": float(s_ego[k]) - s_arr,
+            "lateral_offset_m": float(lat[k]),
+            "heading_error_deg": heading_err,
+        }
+    )
+    details["ego_stop_steps"] = [r0, r1]
+    near = values["stop_distance_m"] <= p.position_tolerance_m
+    heading_ok = heading_err <= p.heading_tolerance_deg
+    details["position_within_tolerance"] = near
+    details["heading_within_tolerance"] = heading_ok
+    if not near:
+        reason = "ego stopped away from the arrival point"
+    elif not heading_ok:
+        reason = "heading off at the arrival point"
+    else:
+        reason = ""
+    return ScenarioResult(metric, near and heading_ok, values, details, reason)
+
+
 def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioResult:
     """Closest approach to the recorded endpoint, and pose there, within tolerance.
+
+    When the window runs on more than ``GOAL_REACH_M`` past the human's first sustained
+    stop at/after the anchor (a window extended until the bus moves on), the arrival is
+    that stop instead and ``_score_arrival_stop`` decides. Otherwise:
 
     Open loop compares the final predicted pose to the GT endpoint. Here the rollout
     stops the ego ``GOAL_REACH_M`` (> the 2 m tolerance) from the endpoint, so the
@@ -282,6 +366,12 @@ def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioRes
     metric = "arrival"
     if inp.anchor_step is None:
         return _no_anchor(metric, inp)
+    human = [r for r in _stop_runs(inp.rec_speed, REC_DT_S, _STOP_RULE) if r[1] > inp.anchor_frame]
+    if human:
+        s_rec = path_arclength(inp.rec_xy)
+        i_arr = (human[0][0] + human[0][1] - 1) // 2
+        if s_rec[-1] - s_rec[i_arr] > GOAL_REACH_M:
+            return _score_arrival_stop(inp, p, human[0])
     k0 = inp.anchor_step
     end_xy, end_yaw = inp.rec_xy[-1], inp.rec_yaw[-1]
     dist = np.linalg.norm(inp.ego_xy[k0:] - end_xy, axis=1)

@@ -233,3 +233,41 @@ def test_temporal_stop_is_a_stop_with_the_closed_loop_tolerance():
     assert rolled_through.values["overshoot_m"] == pytest.approx(3.0)
     held = registry.score(_stop_input(_profile(50, 20, 80), human, label="temporal_stop"))
     assert held.passed is True
+
+
+def _extended_arrival(ego_speeds, terminated="goal"):
+    """Bus drives 5 m/s, holds at the stop (x = 25 m) for 3 s, then moves on 25 m."""
+    rec_xy, rec_yaw = speed_profile_path(_profile(50, 30, 50))
+    ego_xy, ego_yaw = speed_profile_path(ego_speeds)
+    return make_input(
+        label="arrival",
+        ego_xy=ego_xy,
+        ego_yaw=ego_yaw,
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=ANCHOR,
+        terminated=terminated,
+    )
+
+
+def test_extended_arrival_is_scored_at_the_humans_stop():
+    r = registry.score(_extended_arrival(_profile(50, 30, 50)))
+    assert r.passed is True and r.details["arrival_mode"] == "stop_at_arrival_point"
+    assert r.values["arrival_point_s_m"] == pytest.approx(25.0)
+    assert r.values["stop_distance_m"] == pytest.approx(0.0)
+    assert "ol_passed" not in r.values
+
+
+def test_extended_arrival_stopping_away_or_driving_through_fails():
+    short = registry.score(_extended_arrival(_profile(42, 30, 58)))  # 4 m short
+    assert short.passed is False
+    assert short.values["longitudinal_offset_m"] == pytest.approx(-4.0)
+    assert short.reason == "ego stopped away from the arrival point"
+    through = registry.score(_extended_arrival(np.full(130, 5.0)))
+    assert through.passed is False and through.reason == "ego never stopped after the anchor"
+
+
+def test_extended_arrival_trace_ending_before_the_point_is_not_scored():
+    r = registry.score(_extended_arrival(np.full(30, 5.0), terminated="max_steps"))
+    assert r.passed is None
+    assert r.reason.startswith("trace ended (max_steps) before the ego reached")
