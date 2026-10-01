@@ -3,7 +3,12 @@
 import json
 import math
 
-from scenario_generation.score_scenarios import segment_rows, summarize, summary_log_dict
+from scenario_generation.score_scenarios import (
+    segment_rows,
+    summarize,
+    summary_log_dict,
+    trace_problem,
+)
 
 
 def _row(passed, values, metric="centerline", reason=""):
@@ -100,3 +105,13 @@ def test_segment_rows_falls_back_to_the_shards_without_a_merged_file(tmp_path):
     _write_rows(tmp_path / "segments_0.jsonl", [a])
     _write_rows(tmp_path / "segments_1.jsonl", [b])
     assert segment_rows(tmp_path) == [a, b]
+
+
+def test_trace_problem_names_missing_and_empty_traces(tmp_path):
+    assert trace_problem(tmp_path / "x.rollout.jsonl") == "missing trace x.rollout.jsonl"
+    empty = tmp_path / "e.rollout.jsonl"
+    _write_rows(empty, [{"event": "start"}, {"event": "terminated", "k": 0, "reason": "goal"}])
+    assert trace_problem(empty) == "trace has no steps (terminated=goal at step 0)"
+    ok = tmp_path / "o.rollout.jsonl"
+    _write_rows(ok, [{"k": 0, "ego": [0, 0]}, {"event": "terminated", "reason": "goal"}])
+    assert trace_problem(ok) is None

@@ -42,7 +42,7 @@ from pathlib import Path
 
 from scenario_generation.closed_loop_eval import enumerate_multi_root_routes
 from scenario_generation.scenario_metrics import score
-from scenario_generation.scenario_metrics.loader import load_input_from_frames
+from scenario_generation.scenario_metrics.loader import load_input_from_frames, read_rollout
 
 # Summary fields copied into the log dict as-is (``pass_rate`` is left out: it is
 # ``success_rate_percent / 100``).
@@ -77,6 +77,20 @@ def segment_rows(group_dir: Path) -> list[dict]:
     return [json.loads(line) for f in files for line in f.read_text().splitlines() if line.strip()]
 
 
+def trace_problem(trace: Path) -> str | None:
+    """Why ``trace`` cannot be scored (missing, or no sim step), or None.
+
+    A rollout can end at step 0: a window whose start is already within the goal radius
+    of its last pose (the human hardly moved) terminates before the first step.
+    """
+    if not trace.is_file():
+        return f"missing trace {trace.name}"
+    steps, terminated = read_rollout(trace)
+    if not steps:
+        return f"trace has no steps (terminated={terminated.get('reason', 'unknown')} at step 0)"
+    return None
+
+
 def score_group(group_dir: Path, entries: list[str], config=None) -> list[dict]:
     """Score every (window, anchor) of one group. ``config`` carries the thresholds shared
     with open loop (``ScenarioOpenLoopConfig`` or an args object with its fields); None
@@ -87,6 +101,7 @@ def score_group(group_dir: Path, entries: list[str], config=None) -> list[dict]:
         key, (start, end) = seg["route"], seg["segment"]
         paths, window_dir, label, anchors = windows[key]
         trace = group_dir / f"{key}_{start}_{end}.rollout.jsonl"
+        problem = trace_problem(trace)
         for anchor in anchors:
             base = {
                 "route": key,
@@ -94,15 +109,8 @@ def score_group(group_dir: Path, entries: list[str], config=None) -> list[dict]:
                 "window": str(window_dir),
                 "anchor": anchor,
             }
-            if not trace.is_file():
-                rows.append(
-                    {
-                        **base,
-                        "metric": "none",
-                        "passed": None,
-                        "reason": f"missing trace {trace.name}",
-                    }
-                )
+            if problem is not None:
+                rows.append({**base, "metric": "none", "passed": None, "reason": problem})
                 continue
             span = (
                 (int(anchor["span_frame_start"]), int(anchor["span_frame_stop"]) - 1)
