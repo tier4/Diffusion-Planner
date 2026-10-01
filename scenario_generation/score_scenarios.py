@@ -4,7 +4,16 @@ Reads the run directory ``run_all_groups_closed_loop.py`` wrote for one manifest
 (``<out_root>/<timestamp>/<manifest name>/``) plus the manifest itself, and writes
 
 - ``<group>/scenario_metrics.jsonl``: one row per (window, anchor);
-- ``scenario_summary.json``: per-group scored / passed / not-applicable counts.
+- ``scenario_summary.json``: per group, the scored / passed / not-applicable counts,
+  ``pass_rate`` and ``success_rate_percent`` (``pass_rate * 100``; both None when nothing
+  was scored), and ``values``: for each metric value key, its mean over the *scored* rows
+  (``passed`` not None) that carry it, as ``{"mean", "n", "n_nonfinite"}``. Not-applicable
+  rows are left out because they can carry partial values (e.g. a lateral error measured
+  before the metric gave up); non-finite values (inf/nan) are skipped and counted in
+  ``n_nonfinite``, and ``mean`` is None when no finite value is left.
+
+``summary_log_dict`` flattens that summary into ``scenario_based_closed_loop/<label>/<key>``
+scalars, mirroring the open-loop ``scenario_based_open_loop/<label>/<key>`` namespace.
 
 The manifest is the grouped closed-loop input (``label -> [window dir]``). Each window
 directory holds the window's recorded frames plus a ``scenario.json``:
@@ -27,12 +36,22 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
+import math
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from scenario_generation.closed_loop_eval import enumerate_multi_root_routes
 from scenario_generation.scenario_metrics import score
 from scenario_generation.scenario_metrics.loader import load_input_from_frames
+
+# Summary fields copied into the log dict as-is (``pass_rate`` is left out: it is
+# ``success_rate_percent / 100``).
+_LOGGED_SUMMARY_KEYS = ("success_rate_percent", "n_anchors", "n_scored", "n_not_applicable")
+# Value keys that echo a metric parameter (the same number on every row), so their mean is
+# not a measurement; kept in ``scenario_summary.json`` but not logged.
+_PARAMETER_VALUE_KEYS = frozenset(
+    {"threshold_m", "tolerance_m", "horizon_s", "reach_m", "position_tolerance_m"}
+)
 
 
 def _windows(entries: list[str]) -> dict[str, tuple[list[Path], Path, str, list[dict]]]:
@@ -94,6 +113,23 @@ def summarize(rows: list[dict]) -> dict:
         "na" if r["passed"] is None else ("pass" if r["passed"] else "fail") for r in rows
     )
     scored = verdicts["pass"] + verdicts["fail"]
+    finite, n_nonfinite = defaultdict(list), Counter()
+    for r in rows:
+        if r["passed"] is None:
+            continue
+        for key, v in r.get("values", {}).items():
+            if math.isfinite(v):
+                finite[key].append(v)
+            else:
+                n_nonfinite[key] += 1
+    values = {
+        key: {
+            "mean": sum(finite[key]) / len(finite[key]) if finite[key] else None,
+            "n": len(finite[key]),
+            "n_nonfinite": n_nonfinite[key],
+        }
+        for key in sorted(finite.keys() | n_nonfinite.keys())
+    }
     return {
         "n_anchors": len(rows),
         "n_scored": scored,
@@ -103,7 +139,28 @@ def summarize(rows: list[dict]) -> dict:
         "pass_rate": verdicts["pass"] / scored if scored else None,
         "metrics": sorted({r["metric"] for r in rows}),
         "not_applicable_reasons": dict(Counter(r["reason"] for r in rows if r["passed"] is None)),
+        "success_rate_percent": 100.0 * verdicts["pass"] / scored if scored else None,
+        "values": values,
     }
+
+
+def summary_log_dict(summary: dict[str, dict]) -> dict[str, float]:
+    """Flatten ``{label: summarize(...)}`` into W&B-ready scalars.
+
+    Keys are ``scenario_based_closed_loop/<label>/<key>``: the ``_LOGGED_SUMMARY_KEYS``
+    fields plus each value's ``mean`` under the value key itself (as open loop logs
+    ``average_lateral_error_m``). None entries and ``_PARAMETER_VALUE_KEYS`` are dropped.
+    """
+    log = {}
+    for label, s in summary.items():
+        prefix = f"scenario_based_closed_loop/{label}"
+        for key in _LOGGED_SUMMARY_KEYS:
+            if s.get(key) is not None:
+                log[f"{prefix}/{key}"] = float(s[key])
+        for key, agg in s.get("values", {}).items():
+            if key not in _PARAMETER_VALUE_KEYS and agg["mean"] is not None:
+                log[f"{prefix}/{key}"] = float(agg["mean"])
+    return log
 
 
 def main() -> int:
