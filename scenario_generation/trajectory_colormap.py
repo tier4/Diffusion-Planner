@@ -176,13 +176,15 @@ def _risk_and_ticks(
         )
         return risk, [0.0, 1.0], ["no violation", "red light violation"]
     if metric == "strong_brake":
-        if any("brake_metric_accel_mps2" in r for r in rows):
-            accels = np.array([r.get("brake_metric_accel_mps2") for r in rows], dtype=np.float64)
-        else:
-            # Historical traces only contain realized speed.
-            speeds = np.array([r.get("speed", 0.0) for r in rows], dtype=np.float64)
-            accels = np.diff(speeds) / _DT if speeds.size > 1 else np.zeros(0, dtype=np.float64)
-            accels = np.append(accels, accels[-1] if accels.size else 0.0)
+        # accel isn't logged per-step directly -- derive it the same way reproducer_rollout
+        # does (accel = d(speed)/DT between consecutive steps), then reapply the same
+        # two-consecutive-frame rule as scenario_generation.metrics.strong_brake.strong_brake_mask
+        # (inlined rather than imported -- that module drags in scenario_generation.metrics'
+        # package __init__, which pulls in torch/diffusion_planner.model transitively, and this
+        # module stays import-light for wandb_closed_loop_workspace.py's standalone CLI).
+        speeds = np.array([r.get("speed", 0.0) for r in rows], dtype=np.float64)
+        accels = np.diff(speeds) / _DT if speeds.size > 1 else np.zeros(0, dtype=np.float64)
+        accels = np.append(accels, accels[-1] if accels.size else 0.0)  # align length with rows
         raw = accels <= float(strong_brake_mps2)
         risk = np.zeros_like(raw, dtype=np.float64)
         risk[1:] = (raw[:-1] & raw[1:]).astype(np.float64)
@@ -197,10 +199,7 @@ def _risk_and_ticks(
         # measure against) reads as "no evidence of deviation" (0.0), not "worst case".
         cap = max(centerline_thresh_m * 2.0, 1e-6)
         vals = np.array(
-            [
-                r.get("centerline_dist_m") if r.get("centerline_dist_m") is not None else 0.0
-                for r in rows
-            ],
+            [r.get("centerline_dist_m") if r.get("centerline_dist_m") is not None else 0.0 for r in rows],
             dtype=np.float64,
         )
         risk = np.clip(vals / cap, 0.0, 1.0)
@@ -209,10 +208,7 @@ def _risk_and_ticks(
         return risk, ticks, labels
     if metric == "turn_indicator":
         risk = np.array(
-            [
-                1.0 if r.get("turn_indicator_pred") != r.get("turn_indicator_gt") else 0.0
-                for r in rows
-            ],
+            [1.0 if r.get("turn_indicator_pred") != r.get("turn_indicator_gt") else 0.0 for r in rows],
             dtype=np.float64,
         )
         return risk, [0.0, 1.0], ["indicator matches GT", "indicator mismatch"]
@@ -222,7 +218,9 @@ def _risk_and_ticks(
         )
         return risk, [0.0, 1.0], ["no deviation collision", "deviation collision"]
     if metric == "collision_rear":
-        risk = np.array([1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64)
+        risk = np.array(
+            [1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64
+        )
         return risk, [0.0, 1.0], ["no rear collision", "rear collision"]
     raise ValueError(f"Unknown colormap metric: {metric!r} (choices: {METRIC_CHOICES})")
 

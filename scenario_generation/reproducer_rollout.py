@@ -758,7 +758,7 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
             s.live_pose
         )  # (1,320,31,11) live-ego
     if gpu_transform:
-        if getattr(getattr(s, "tl", None), "native_h5", False):
+        if getattr(s.tl, "native_h5", False):
             raise ValueError(
                 "native H5 requires its schema-aware CPU transform; disable gpu_transform"
             )
@@ -1035,7 +1035,7 @@ def _advance_step(
             steering=steering,
         )
         s.live_pose = new_pose
-        if getattr(getattr(s, "tl", None), "native_h5", False):
+        if getattr(s.tl, "native_h5", False):
             native_state = np.asarray(
                 [*s.live_pose, s.dyn.speed, s.dyn.yaw_rate], dtype=np.float64
             )[None]
@@ -2102,49 +2102,56 @@ def render_segment(
 
             # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
             # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
-            trace_row = {
-                "k": k,
-                "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
-                "yaw": round(float(s.live_pose[2]), 4),
-                "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
-                "speed": round(float(s.dyn.speed), 3),
-                "rec_frame_id": _frame_id(tl, idx),
-                "rec_idx": int(idx),
-                "max_idx_reached": int(s.cursor.max_idx_reached),
-                "stuck": int(s.stuck),
-                "ego_stuck": int(s.ego_stuck),
-                # Cursor's own state (normal/repeat) + the rollout's escalation counts
-                # (an expand/teleport this tick shows as a *_count delta on the next line).
-                "state": s.cursor.state,
-                "state_run_steps": int(s.cursor.state_run_steps),
-                "expand_count": int(s.expand_count),
-                "snap_count": int(s.snap_count),
-                "clearance_m": round(float(s.clearances[k]), 4)
-                if np.isfinite(s.clearances[k])
-                else None,
-                "collision": bool(s.collisions[k]),
-                "collision_rear": bool(s.rear_collisions[k]),
-                "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
-                "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
-                if np.isfinite(s.centerline_devs[k])
-                else None,
-                "red_light_violation": bool(s.red_light[k]),
-                "gt_deviation_m": round(gt_deviation_m, 3),
-                # Resolved closed-loop turn indicator going into this tick, and the
-                # recorded GT at the same frame -- same values (and same read) the
-                # segment-level turn_indicator block and the PNG renderer use, so a
-                # transition/false-positive can be reconstructed post hoc from the trace.
-                "turn_indicator_pred": int(s.last_turn_indicator),
-                "turn_indicator_gt": int(
-                    np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
-                ),
-                # collision AND off the recorded GT path by > deviation_collision_thresh_m
-                # (see ``deviation_collision_block``); same per-step definition the
-                # segment-level "deviation_collision" metric rolls up from.
-                "deviation_collision": bool(
-                    s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
-                ),
-            }
+            dbg.write(
+                json.dumps(
+                    {
+                        "k": k,
+                        "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+                        "yaw": round(float(s.live_pose[2]), 4),
+                        "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+                        "speed": round(float(s.dyn.speed), 3),
+                        "rec_frame_id": _frame_id(tl, idx),
+                        "rec_idx": int(idx),
+                        "max_idx_reached": int(s.cursor.max_idx_reached),
+                        "stuck": int(s.stuck),
+                        "ego_stuck": int(s.ego_stuck),
+                        # Cursor's own state (normal/repeat) + the rollout's escalation counts
+                        # (an expand/teleport this tick shows as a *_count delta on the next line).
+                        "state": s.cursor.state,
+                        "state_run_steps": int(s.cursor.state_run_steps),
+                        "expand_count": int(s.expand_count),
+                        "snap_count": int(s.snap_count),
+                        "clearance_m": round(float(s.clearances[k]), 4)
+                        if np.isfinite(s.clearances[k])
+                        else None,
+                        "collision": bool(s.collisions[k]),
+                        "collision_rear": bool(s.rear_collisions[k]),
+                        "rb_dist_m": round(float(s.rb_dists[k]), 4)
+                        if np.isfinite(s.rb_dists[k])
+                        else None,
+                        "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
+                        if np.isfinite(s.centerline_devs[k])
+                        else None,
+                        "red_light_violation": bool(s.red_light[k]),
+                        "gt_deviation_m": round(gt_deviation_m, 3),
+                        # Resolved closed-loop turn indicator going into this tick, and the
+                        # recorded GT at the same frame -- same values (and same read) the
+                        # segment-level turn_indicator block and the PNG renderer use, so a
+                        # transition/false-positive can be reconstructed post hoc from the trace.
+                        "turn_indicator_pred": int(s.last_turn_indicator),
+                        "turn_indicator_gt": int(
+                            np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
+                        ),
+                        # collision AND off the recorded GT path by > deviation_collision_thresh_m
+                        # (see ``deviation_collision_block``); same per-step definition the
+                        # segment-level "deviation_collision" metric rolls up from.
+                        "deviation_collision": bool(
+                            s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
+                        ),
+                    }
+                )
+                + "\n"
+            )
             # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
             # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
             # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
@@ -2259,9 +2266,6 @@ def render_segment(
                 override=override,
                 metric_plan_xy=plan_local_xy[metric_offset:],
             )
-            score = s.plan_accels[k]
-            trace_row["brake_metric_accel_mps2"] = float(score) if np.isfinite(score) else None
-            dbg.write(json.dumps(trace_row) + "\n")
             if s.snap_count > snaps_before:
                 # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
                 # world location, so executing it next step would drag the ego right back. Invalidate
