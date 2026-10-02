@@ -122,3 +122,33 @@ def test_sampler_contract_helpers_are_deterministic_and_preserve_turn_semantics(
     np.testing.assert_array_equal(legacy.argmax(axis=1), [3, 3])
     np.testing.assert_array_equal(legacy[:, 1:4], logits)
     assert np.all(legacy[:, (0, 4)] < -1e8)
+
+
+def test_native_build_input_exposes_live_ego_dynamics_to_the_renderer():
+    from scenario_generation import npz_loader as nl
+    from scenario_generation.reproducer_rollout import PAST, _EgoDyn, build_input_np
+
+    frame = {
+        "ego_agent_past": np.zeros((PAST, 6), np.float32),
+        "neighbor_agents_past": np.zeros((320, PAST, 4), np.float32),
+        "agent_shape": np.zeros((320, 2), np.float32),
+        "agent_label": np.zeros((320, 3), np.float32),
+        "lanes": np.zeros((140, 20, 6), np.float32),
+        "route_lanes": np.zeros((25, 20, 6), np.float32),
+        "route_traffic_light_past": np.zeros((25, 20, 5), np.float32),
+        "road_borders": np.zeros((100, 20, 2), np.float32),
+    }
+
+    class Timeline:
+        native_h5 = True
+        poses = np.array([[0.0, 0.0, 0.0]])
+
+        def npz(self, _index):
+            return frame
+
+    dyn = _EgoDyn(speed=6.0, accel=0.5, yaw_rate=0.2, steering=0.05)
+    recen, _ = build_input_np(Timeline(), 0, np.zeros(3), np.zeros((PAST, 5)), dyn)
+    ego = nl._extract_ego_agent({k: v[0] for k, v in recen.items()}, 2.7, 4.8, 1.9)
+    assert np.isclose(ego.past_velocities[-1, 0], 6.0)
+    assert np.isclose(ego.yaw_rate, 0.2) and np.isclose(ego.steering_angle, 0.05)
+    assert np.isclose(ego.acceleration[0], 0.5)

@@ -255,6 +255,9 @@ def build_input_np(
             live6[0, 4:6] = live6[1, 4:6]
         live6[-1, 4], live6[-1, 5] = dyn.speed, dyn.yaw_rate
         recen["ego_agent_past"] = live6[None]
+        # Never fed to ONNX (MODEL_INPUT_NAMES filter); the HUD/renderer reads the live
+        # speed/accel/steer/yaw_rate from it, as in the NPZ path below.
+        recen["ego_current_state"] = _live_ego_current(dyn)
         # Exact native fields -> legacy scoring-only views. They never enter ONNX.
         neighbors_live = np.zeros((frame["neighbor_agents_past"].shape[0], 11), dtype=np.float32)
         neighbors_live[:, :4] = recen0["neighbor_agents_past"][:, -1]
