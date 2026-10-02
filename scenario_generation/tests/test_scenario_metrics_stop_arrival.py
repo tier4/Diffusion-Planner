@@ -363,3 +363,35 @@ def test_without_a_stop_line_the_human_stop_is_the_reference():
         )
     )
     assert obstacle.details["stop_reference"] == "human_stop"  # not a stop-line label
+
+
+def test_extended_arrival_needs_the_ego_to_stay_for_the_humans_dwell():
+    # The bus holds at the stop over recorded frames 50..80 (3 s). The ego stops there
+    # too; the replay either plays the dwell out one frame per step (it stays) or jumps
+    # past it after 1 s (it edged on and pulled the recording forward).
+    rec_xy, rec_yaw = speed_profile_path(_profile(50, 30, 50))
+    ego_xy, ego_yaw = speed_profile_path(_profile(50, 30, 50))
+    stayed = make_input(
+        label="arrival",
+        ego_xy=ego_xy,
+        ego_yaw=ego_yaw,
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=ANCHOR,
+    )
+    r = registry.score(stayed)
+    assert r.passed is True and r.values["wait_ratio"] == pytest.approx(1.0)
+    jumped = np.r_[np.arange(60), np.arange(81, 81 + 70)]
+    left = make_input(
+        label="arrival",
+        ego_xy=ego_xy,
+        ego_yaw=ego_yaw,
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=ANCHOR,
+        rec_idx=np.minimum(jumped, 129),
+    )
+    r = registry.score(left)
+    assert r.passed is False
+    assert r.values["wait_ratio"] == pytest.approx(1.0 / 3.0, abs=0.05)
+    assert r.reason == "ego left the bus stop before staying long enough"

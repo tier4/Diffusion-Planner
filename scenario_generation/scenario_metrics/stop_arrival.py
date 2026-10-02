@@ -82,6 +82,9 @@ PATH_EXTENSION_M = 200.0
 # Closed loop only: open loop scores temporal_stop as a yield, so its config has no stop
 # tolerance. The same 0.5 m as the open-loop red-light and obstacle stops.
 TEMPORAL_STOP_TOLERANCE_M = 0.5
+# Closed loop only: the share of the human's dwell at the bus stop the ego must stay
+# before the replay leaves it (the same rule and value as ``progress.YIELD_MIN_WAIT_RATIO``).
+ARRIVAL_MIN_WAIT_RATIO = 0.8
 # Labels whose stop is at a stop line (vse ``stop_line_classifier``): they are judged by
 # the ego's front against that line when the human's stop frame has one.
 STOP_LINE_LABELS = ("traffic_light_stop", "temporal_stop")
@@ -373,13 +376,21 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
 def _score_arrival_stop(
     inp: ClosedLoopScenarioInput, p: ArrivalParams, human: tuple[int, int]
 ) -> ScenarioResult:
-    """The ego must stop within ``position_tolerance_m`` of the human's arrival stop.
+    """The ego must stop within ``position_tolerance_m`` of the human's arrival stop and
+    stay there for ``ARRIVAL_MIN_WAIT_RATIO`` of the human's dwell.
 
     Used when the window runs on past the human's stop (``extend_until_departure``), so
     the goal radius no longer hides it. The arrival point is the middle of the human's
     first sustained stop at/after the anchor; the ego's stop is its sustained stop
     (after ``anchor_step``) closest to that point along the road. Driving past without
-    a stop fails. The open-loop reference values compare the final pose with the
+    a stop fails.
+
+    A brief stop is not an arrival: the ego must also stay. As in ``yield_wait``, the
+    replay cursor follows the ego, so an ego that edges on past the stop pulls the
+    recording forward to the human's departure. The time the replay spends inside the
+    human's dwell, over the dwell's recorded duration, is the share of the dwell the ego
+    stayed (``wait_ratio``); edging up by less than the replay's search radius still
+    counts as staying. The open-loop reference values compare the final pose with the
     window's end and say nothing here, so they are left out.
     """
     metric = "arrival"
@@ -431,17 +442,44 @@ def _score_arrival_stop(
         }
     )
     details["ego_stop_steps"] = [r0, r1]
+    dwell_s = (h1 - h0) * REC_DT_S
+    entered = np.flatnonzero(inp.rec_idx >= h0)
+    left = np.flatnonzero(inp.rec_idx >= h1)
+    k_in = int(entered[0]) if len(entered) else inp.n_steps
+    k_out = int(left[0]) if len(left) else inp.n_steps
+    waited_s = max(0, k_out - k_in) * inp.dt
+    values.update(
+        {
+            "human_dwell_s": dwell_s,
+            "waited_s": waited_s,
+            "wait_ratio": waited_s / dwell_s,
+            "min_wait_ratio": ARRIVAL_MIN_WAIT_RATIO,
+        }
+    )
+    details["step_left_dwell"] = k_out if len(left) else None
     near = values["stop_distance_m"] <= p.position_tolerance_m
     heading_ok = heading_err <= p.heading_tolerance_deg
+    stayed = values["wait_ratio"] >= ARRIVAL_MIN_WAIT_RATIO
     details["position_within_tolerance"] = near
     details["heading_within_tolerance"] = heading_ok
+    details["stayed"] = stayed
     if not near:
         reason = "ego stopped away from the arrival point"
     elif not heading_ok:
         reason = "heading off at the arrival point"
+    elif not stayed and not len(left):
+        return ScenarioResult(
+            metric,
+            None,
+            values,
+            details,
+            reason=f"trace ended ({inp.terminated}) inside the human's dwell before the ego stayed long enough",
+        )
+    elif not stayed:
+        reason = "ego left the bus stop before staying long enough"
     else:
         reason = ""
-    return ScenarioResult(metric, near and heading_ok, values, details, reason)
+    return ScenarioResult(metric, near and heading_ok and stayed, values, details, reason)
 
 
 def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioResult:

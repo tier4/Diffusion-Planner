@@ -50,7 +50,15 @@ _LOGGED_SUMMARY_KEYS = ("success_rate_percent", "n_anchors", "n_scored", "n_not_
 # Value keys that echo a metric parameter (the same number on every row), so their mean is
 # not a measurement; kept in ``scenario_summary.json`` but not logged.
 _PARAMETER_VALUE_KEYS = frozenset(
-    {"threshold_m", "tolerance_m", "horizon_s", "reach_m", "position_tolerance_m"}
+    {
+        "threshold_m",
+        "tolerance_m",
+        "horizon_s",
+        "reach_m",
+        "position_tolerance_m",
+        "min_wait_ratio",
+        "heading_tolerance_deg",
+    }
 )
 
 
