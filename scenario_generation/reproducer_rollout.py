@@ -58,6 +58,15 @@ DT = 0.1
 # Pose mode also requires the reproducer to be in ``repeat`` (Autoware-aligned); clock
 # mode is speed-only because bag frames always advance by wall time (no ``repeat``).
 STUCK_SPEED_MPS = 0.5
+# Half window (steps) for the speed of an ego placed directly on plan poses (perfect
+# tracking): the forward net displacement from this many steps back (realized) to this many
+# steps ahead on the cached plan, not the last step's hop. A stopped plan's early points zigzag
+# a few cm back and forth in a fixed per-index pattern, so the one-step hop reads 0.3-1.0 m/s
+# at a standstill (and +-25 m/s^2 accel while moving); fed back as the ego's speed it makes the
+# model keep creeping forward. Right after a replan the 8-step window holds each index of the
+# default ``replan_interval=8`` plan once, so the pattern cancels; centering it on the ego
+# avoids the ~0.4 s lag (late braking) of a trailing window.
+PERFECT_SPEED_HALF_WINDOW_STEPS = 4
 # Falling-edge debounce for ``*_count`` metrics: once an event starts, fewer than this many
 # consecutive False steps do not end it (threshold flicker does not re-count).
 EVENT_COUNT_CLEAR_FRAMES = 3
@@ -1051,14 +1060,42 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
+def _placed_speed(ego_hist: np.ndarray, new_pose: np.ndarray, ahead_pose: np.ndarray) -> float:
+    """Speed (m/s, >= 0) of an ego placed on ``new_pose``: the forward net displacement along
+    its heading from the realized pose ``PERFECT_SPEED_HALF_WINDOW_STEPS`` steps back
+    (``ego_hist[-1]`` is the pose before this step) to ``ahead_pose``, the cached plan's pose
+    that many steps ahead. Backward motion reads 0: the recorded speed is never negative."""
+    n = min(PERFECT_SPEED_HALF_WINDOW_STEPS, len(ego_hist))
+    dx = float(ahead_pose[0]) - float(ego_hist[-n, 0])
+    dy = float(ahead_pose[1]) - float(ego_hist[-n, 1])
+    h = float(new_pose[2])
+    return max(
+        0.0, (dx * math.cos(h) + dy * math.sin(h)) / ((n + PERFECT_SPEED_HALF_WINDOW_STEPS) * DT)
+    )
+
+
+def _plan_override(plan_world, off: int) -> tuple[np.ndarray, np.ndarray]:
+    """``_advance_step`` override placing the ego on world plan pose ``off``, with the pose
+    ``PERFECT_SPEED_HALF_WINDOW_STEPS`` further along (clamped to the horizon) for its speed."""
+    xy, h = plan_world
+    ahead = min(off + PERFECT_SPEED_HALF_WINDOW_STEPS, len(xy) - 1)
+    return tuple(
+        np.array([float(xy[i, 0]), float(xy[i, 1]), float(h[i])], dtype=np.float64)
+        for i in (off, ahead)
+    )
+
+
 def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
-    ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
-    instead of running the tracker. Used to execute a CACHED plan open-loop between replans:
+    ``override`` = ``(world_pose(3,), ahead_pose(3,))`` places the ego exactly on a given world
+    pose instead of running the tracker; ``ahead_pose`` is the plan's pose
+    ``PERFECT_SPEED_HALF_WINDOW_STEPS`` steps further, for the speed. Used to execute a CACHED plan open-loop between replans:
     PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
     multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
-    applied directly, which is the faithful "perfect tracking" of the cached plan.
+    applied directly, which is the faithful "perfect tracking" of the cached plan. The speed
+    is the net displacement over a window centered on the ego (``_placed_speed``), not this
+    step's hop.
 
     ``tracked`` = ``(new_pose(3,), new_speed)`` from a BATCHED tracker solve
     (``mpc_tracker_batched.track_many``): the caller already ran the tracker for
@@ -1077,7 +1114,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             steering = float(getattr(s.tracker, "last_steering", 0.0))
         elif override is not None:
             new_pose = np.asarray(override[0], dtype=np.float64)
-            new_speed = float(override[1])
+            new_speed = _placed_speed(s.ego_hist, new_pose, override[1])
             dh = (float(new_pose[2]) - float(s.live_pose[2]) + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = float(dh / DT)
             steering = 0.0
@@ -2253,13 +2290,7 @@ def render_segment(
             else:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
-                tx, ty, th = (
-                    float(plan_world[0][off, 0]),
-                    float(plan_world[0][off, 1]),
-                    float(plan_world[1][off]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                override = _plan_override(plan_world, off)
                 pred_cur = _world_plan_to_ego(
                     plan_world[0][off:],
                     plan_world[1][off:],
@@ -2277,13 +2308,7 @@ def render_segment(
             # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
             # override path implements). Every step then lands on the predicted polyline point.
             if tracker_mode == "perfect" and override is None:
-                tx, ty, th = (
-                    float(plan_world[0][0, 0]),
-                    float(plan_world[0][0, 1]),
-                    float(plan_world[1][0]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                override = _plan_override(plan_world, 0)
             if (
                 draw_every is not None
                 and (window is None or (window[0] <= k <= window[1]))
