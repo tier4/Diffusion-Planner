@@ -8,6 +8,9 @@ from torch.distributed import init_process_group
 
 from diffusion_planner.utils.dist_init import dist_init_file_path
 
+# Long enough for a rank to wait out an evaluation that only rank 0 runs.
+DDP_TIMEOUT = timedelta(seconds=10000)
+
 
 def ddp_setup_universal(verbose=False, args=None):
     if args.ddp == False:
@@ -48,7 +51,7 @@ def ddp_setup_universal(verbose=False, args=None):
         backend=dist_backend,
         world_size=world_size,
         rank=rank,
-        timeout=timedelta(seconds=10000),
+        timeout=DDP_TIMEOUT,
     )
     torch.distributed.barrier()
     if verbose:
