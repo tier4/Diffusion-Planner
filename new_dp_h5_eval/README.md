@@ -54,8 +54,10 @@ windows of one shard are separate routes. Optional `anchors`,
 [ML-Planner #44](https://github.com/tier4/ML-Planner/pull/44) generates v5
 route shards with `scripts/dataset/create_h5_dataset.py`. Dataset release
 tooling supplies the grouped evaluation manifest; this package only reads it.
-The evaluator rejects gaps, non-0.1 s frame intervals, and v5 source poses
-not in the `map` frame.
+The evaluator requires a declared 0.1 s frame interval and strictly increasing
+timestamps. Source odometry timestamp jitter is accepted: adjacent frames must
+be less than 0.2 s apart. This rejects obvious gaps, but does not guarantee
+detection of every skipped frame. Version 5 source poses must be in the `map` frame.
 
 ```bash
 PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.run_all_groups_closed_loop \

@@ -12,12 +12,12 @@ from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
 from scenario_generation.route_timeline import RouteTimeline
 
 
-def _write_route(path, *, times=None, interval=0.1, frame="map", qw=1.0):
+def _write_route(path, *, times=None, interval=0.1, frame="map", qw=1.0, version=5):
     times = times if times is not None else [1_000_000_000 + i * 100_000_000 for i in range(4)]
     count = len(times)
     with h5py.File(path, "w") as file:
         file.attrs["format"] = H5_FORMAT
-        file.attrs["format_version"] = 5
+        file.attrs["format_version"] = version
         file.attrs["num_frames"] = count
         file.attrs["frame_interval_s"] = interval
         file.attrs["pose_frame_id"] = frame
@@ -30,6 +30,11 @@ def _write_route(path, *, times=None, interval=0.1, frame="map", qw=1.0):
             frames.create_dataset(name, data=np.zeros(shape, dtype=np.float32))
         metadata = file.create_group("metadata")
         metadata.create_dataset("frame_time_ns", data=times)
+        if version == 4:
+            metadata.create_dataset("ego_x", data=np.arange(count, dtype=np.float64))
+            metadata.create_dataset("ego_y", data=np.zeros(count))
+            metadata.create_dataset("ego_yaw", data=np.zeros(count))
+            return
         for name, values in {
             "x": np.arange(count, dtype=np.float64),
             "y": np.zeros(count),
@@ -72,7 +77,6 @@ def test_manifest_distinguishes_windows_and_passes_selection_metadata(tmp_path):
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
-        ({"times": [1_000_000_000, 1_100_000_000, 3_100_000_000]}, "non-contiguous"),
         ({"interval": 0.5}, "0.1 s frame interval"),
         ({"frame": "odom"}, "map frame"),
         ({"qw": 1e-8}, "invalid closed-loop v5 pose"),
@@ -83,6 +87,49 @@ def test_rejects_invalid_closed_loop_contract(tmp_path, changes, message):
     _write_route(shard, **changes)
     with pytest.raises(ValueError, match=message):
         NativeH5RouteTimeline(shard)
+
+
+@pytest.mark.parametrize("version", [4, 5])
+@pytest.mark.parametrize(
+    "deltas_ns",
+    [
+        [54_000_000, 146_000_000, 100_000_000],
+        [1, 199_999_999, 190_000_000],
+        [],
+    ],
+)
+def test_accepts_jittered_timestamps(tmp_path, version, deltas_ns):
+    times = 1_000_000_000 + np.cumsum([0, *deltas_ns], dtype=np.int64)
+    shard = tmp_path / "frames.h5"
+    _write_route(shard, version=version, times=times)
+    timeline = NativeH5RouteTimeline(shard)
+    try:
+        np.testing.assert_array_equal(timeline.frame_times_ns, times)
+        assert np.isfinite(timeline.speeds).all()
+    finally:
+        timeline.close()
+
+
+@pytest.mark.parametrize("version", [4, 5])
+@pytest.mark.parametrize(
+    ("delta_ns", "message"),
+    [
+        (0, "non-increasing"),
+        (-1, "non-increasing"),
+        (200_000_000, "frame gap"),
+        (2_000_000_000, "frame gap"),
+    ],
+)
+def test_rejects_non_increasing_timestamps_and_obvious_gaps(tmp_path, version, delta_ns, message):
+    shard = tmp_path / "frames.h5"
+    _write_route(
+        shard, version=version, times=[1_000_000_000, 1_100_000_000, 1_100_000_000 + delta_ns]
+    )
+    with pytest.raises(ValueError, match=message):
+        NativeH5RouteTimeline(shard)
+    # Validation applies to the selected window, not gaps elsewhere in the shard.
+    timeline = NativeH5RouteTimeline(shard, 0, 2)
+    timeline.close()
 
 
 def test_h5_and_npz_timeline_match_on_two_windows(tmp_path):

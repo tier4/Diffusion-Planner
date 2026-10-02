@@ -88,10 +88,14 @@ class NativeH5RouteTimeline(RouteTimeline):
             interval = float(self._h5.attrs.get("frame_interval_s", float("nan")))
             if not np.isfinite(interval) or not np.isclose(interval, DT, atol=1e-3):
                 raise ValueError(f"closed-loop H5 must have 0.1 s frame interval: {self.h5_path}")
-            if len(self.frame_times_ns) > 1 and not np.all(
-                np.abs(np.diff(self.frame_times_ns) - round(DT * 1e9)) <= 1_000_000
-            ):
-                raise ValueError(f"non-contiguous 0.1 s closed-loop frames in {self.h5_path}")
+            frame_deltas_ns = np.diff(self.frame_times_ns)
+            if np.any(frame_deltas_ns <= 0):
+                raise ValueError(f"non-increasing frame times in {self.h5_path}")
+            # Frame times use source odometry stamps, which jitter around the
+            # 0.1 s sampling grid. Only reject obvious gaps of at least 0.2 s;
+            # this deliberately does not detect every possible skipped frame.
+            if np.any(frame_deltas_ns >= round(2 * DT * 1e9)):
+                raise ValueError(f"closed-loop frame gap of at least 0.2 s in {self.h5_path}")
             if format_version == 4:
                 self.poses = np.column_stack(
                     [
