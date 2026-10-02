@@ -36,6 +36,13 @@ def test_signed_diff_metrics_are_one_sided():
     assert brake.tolist() == [0.0, 0.0] and accel.tolist() == [0.5, 0.0]
 
 
+def test_strong_brake_uses_scored_acceleration_and_breaks_on_snap():
+    accels = [None, -4.0, -4.0, None, -4.0, -4.0, 0.0]
+    rows = [{"speed": 10.0, "brake_accel_mps2": accel} for accel in accels]
+    risk, *_ = _risk_and_ticks(rows, "strong_brake", 0.5)
+    assert risk.tolist() == [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
+
+
 def _write_rollout(png_dir: Path, rows: list[dict]) -> None:
     png_dir.mkdir(parents=True, exist_ok=True)
     with (png_dir / "rollout.jsonl").open("w") as f:
