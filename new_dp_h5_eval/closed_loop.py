@@ -28,8 +28,9 @@ from scenario_generation.closed_loop_evaluation import (
     RolloutParams,
 )
 from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import render_segment
+from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
+from scenario_generation.transforms import yaw_from_quat
 
 from .model import (
     NewDpOnnxRunner,
@@ -37,7 +38,7 @@ from .model import (
     legacy_feedback_turn_logits,
     seeded_initial_noise,
 )
-from .schema import H5_FORMAT, H5_FORMAT_VERSION, MODEL_INPUT_NAMES
+from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 
 
 class NativeH5RouteTimeline(RouteTimeline):
@@ -57,10 +58,15 @@ class NativeH5RouteTimeline(RouteTimeline):
         try:
             if self._h5.attrs.get("format") != H5_FORMAT:
                 raise ValueError(f"unexpected H5 format: {self.h5_path}")
-            if int(self._h5.attrs.get("format_version", -1)) != H5_FORMAT_VERSION:
+            if int(self._h5.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
                 raise ValueError(f"unsupported H5 format version: {self.h5_path}")
             metadata = self._h5["metadata"]
-            required = {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
+            format_version = int(self._h5.attrs["format_version"])
+            required = (
+                {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
+                if format_version == 4
+                else {"frame_time_ns", "x", "y", "z", "qx", "qy", "qz", "qw"}
+            )
             missing = required.difference(metadata.keys())
             if missing:
                 raise ValueError(
@@ -79,13 +85,43 @@ class NativeH5RouteTimeline(RouteTimeline):
             self._rows = np.arange(start, stop, dtype=np.int64)
             self.frame_indices = self._rows.copy()
             self.frame_times_ns = np.asarray(metadata["frame_time_ns"][start:stop], dtype=np.int64)
-            self.poses = np.column_stack(
-                [
-                    metadata["ego_x"][start:stop],
-                    metadata["ego_y"][start:stop],
-                    metadata["ego_yaw"][start:stop],
-                ]
-            ).astype(np.float64)
+            interval = float(self._h5.attrs.get("frame_interval_s", float("nan")))
+            if not np.isfinite(interval) or not np.isclose(interval, DT, atol=1e-3):
+                raise ValueError(f"closed-loop H5 must have 0.1 s frame interval: {self.h5_path}")
+            frame_deltas_ns = np.diff(self.frame_times_ns)
+            if np.any(frame_deltas_ns <= 0):
+                raise ValueError(f"non-increasing frame times in {self.h5_path}")
+            # Frame times use source odometry stamps, which jitter around the
+            # 0.1 s sampling grid. Only reject obvious gaps of at least 0.2 s;
+            # this deliberately does not detect every possible skipped frame.
+            if np.any(frame_deltas_ns >= round(2 * DT * 1e9)):
+                raise ValueError(f"closed-loop frame gap of at least 0.2 s in {self.h5_path}")
+            if format_version == 4:
+                self.poses = np.column_stack(
+                    [
+                        metadata["ego_x"][start:stop],
+                        metadata["ego_y"][start:stop],
+                        metadata["ego_yaw"][start:stop],
+                    ]
+                ).astype(np.float64)
+            else:
+                pose_frame_id = self._h5.attrs.get("pose_frame_id", "")
+                if pose_frame_id != "map":
+                    raise ValueError(
+                        f"closed-loop v5 pose must be in map frame, got {pose_frame_id!r}: "
+                        f"{self.h5_path}"
+                    )
+                x, y, z, qx, qy, qz, qw = (
+                    np.asarray(metadata[name][start:stop], dtype=np.float64)
+                    for name in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                )
+                quaternion_norm_sq = qx * qx + qy * qy + qz * qz + qw * qw
+                if not np.isfinite(z).all() or not np.all(
+                    np.isfinite(quaternion_norm_sq) & (np.abs(quaternion_norm_sq - 1.0) < 2e-3)
+                ):
+                    raise ValueError(f"invalid closed-loop v5 pose in {self.h5_path}")
+                yaw = np.array([yaw_from_quat(*quaternion) for quaternion in zip(qx, qy, qz, qw)])
+                self.poses = np.column_stack([x, y, yaw])
             if not np.isfinite(self.poses).all():
                 raise ValueError(f"non-finite closed-loop poses in {self.h5_path}")
         except BaseException:
@@ -285,7 +321,15 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                         title=f"{job.route_key} [{start},{end}]",
                     )
                 self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
-                row = {"route": job.route_key, **metrics}
+                row = {
+                    "route": job.route_key,
+                    **{
+                        key: route[key]
+                        for key in ("anchors", "segment_start_ns", "segment_end_ns")
+                        if key in route
+                    },
+                    **metrics,
+                }
                 if self.config.pass_condition is not None:
                     row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
                 if segments_file is not None:

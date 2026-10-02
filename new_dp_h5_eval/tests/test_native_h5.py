@@ -4,7 +4,9 @@ import h5py
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
+from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
 from new_dp_h5_eval.dataset import H5FrameIndex
 from new_dp_h5_eval.metric_compat import legacy_route_lanes
 from new_dp_h5_eval.model import (
@@ -13,6 +15,7 @@ from new_dp_h5_eval.model import (
     seeded_initial_noise,
 )
 from new_dp_h5_eval.open_loop import metric_view
+from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
 from new_dp_h5_eval.transforms import recenter_frame_to_pose
 from scenario_generation.reproducer_rollout import _ego_state_from_frame
 
@@ -122,3 +125,81 @@ def test_sampler_contract_helpers_are_deterministic_and_preserve_turn_semantics(
     np.testing.assert_array_equal(legacy.argmax(axis=1), [3, 3])
     np.testing.assert_array_equal(legacy[:, 1:4], logits)
     assert np.all(legacy[:, (0, 4)] < -1e8)
+
+
+def test_route_timeline_accepts_v4_and_v5_pose(tmp_path):
+    """The same planar route is recovered from either published pose contract."""
+    for version in (4, 5):
+        shard = tmp_path / f"route_v{version}.h5"
+        yaw = np.array([0.0, np.pi / 2], dtype=np.float64)
+        with h5py.File(shard, "w") as file:
+            file.attrs["format"] = H5_FORMAT
+            file.attrs["format_version"] = version
+            file.attrs["num_frames"] = 2
+            file.attrs["frame_interval_s"] = 0.1
+            if version == 5:
+                file.attrs["pose_frame_id"] = "map"
+            frames = file.create_group("frames")
+            for name in MODEL_INPUT_NAMES:
+                shape = {
+                    "ego_agent_past": (2, 31, 6),
+                    "neighbor_agents_past": (2, 320, 31, 4),
+                    "agent_shape": (2, 320, 2),
+                    "agent_label": (2, 320, 3),
+                }.get(name, (2, 1))
+                frames.create_dataset(name, data=np.zeros(shape, np.float32))
+            metadata = file.create_group("metadata")
+            metadata.create_dataset("frame_time_ns", data=[1_000_000_000, 1_100_000_000])
+            if version == 4:
+                metadata.create_dataset("ego_x", data=[1.0, 2.0])
+                metadata.create_dataset("ego_y", data=[3.0, 3.0])
+                metadata.create_dataset("ego_yaw", data=yaw)
+            else:
+                metadata.create_dataset("x", data=[1.0, 2.0])
+                metadata.create_dataset("y", data=[3.0, 3.0])
+                metadata.create_dataset("z", data=[4.0, 5.0])
+                metadata.create_dataset("qx", data=[0.0, 0.0])
+                metadata.create_dataset("qy", data=[0.0, 0.0])
+                metadata.create_dataset("qz", data=np.sin(yaw / 2))
+                metadata.create_dataset("qw", data=np.cos(yaw / 2))
+        timeline = NativeH5RouteTimeline(shard)
+        try:
+            np.testing.assert_allclose(timeline.poses, [[1.0, 3.0, 0.0], [2.0, 3.0, np.pi / 2]])
+        finally:
+            timeline.close()
+        index = tmp_path / f"index_v{version}.parquet"
+        pq.write_table(
+            pa.Table.from_pylist(
+                [{"h5_path": shard.name, "frame_index": 0, "frame_time_ns": 1_000_000_000}]
+            ),
+            index,
+        )
+        with H5FrameIndex(index) as frames:
+            assert frames.frame(0)["ego_agent_past"].shape == (31, 6)
+
+
+def test_route_timeline_rejects_invalid_v5_quaternion(tmp_path):
+    shard = tmp_path / "invalid_v5.h5"
+    with h5py.File(shard, "w") as file:
+        file.attrs["format"] = H5_FORMAT
+        file.attrs["format_version"] = 5
+        file.attrs["num_frames"] = 1
+        file.attrs["frame_interval_s"] = 0.1
+        file.attrs["pose_frame_id"] = "map"
+        frames = file.create_group("frames")
+        for name in MODEL_INPUT_NAMES:
+            frames.create_dataset(name, data=np.zeros((1, 1), np.float32))
+        metadata = file.create_group("metadata")
+        for name, value in {
+            "frame_time_ns": [1_000_000_000],
+            "x": [1.0],
+            "y": [2.0],
+            "z": [3.0],
+            "qx": [0.0],
+            "qy": [0.0],
+            "qz": [0.0],
+            "qw": [0.0],
+        }.items():
+            metadata.create_dataset(name, data=value)
+    with pytest.raises(ValueError, match="invalid closed-loop v5 pose"):
+        NativeH5RouteTimeline(shard)
