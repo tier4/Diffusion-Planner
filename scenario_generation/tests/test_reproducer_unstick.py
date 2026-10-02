@@ -457,7 +457,7 @@ def test_event_onset_count_gates_on_the_onset_step():
 
 
 def test_finalize_strong_brake_steps_and_count(tmp_path):
-    """``strong_brake.steps`` needs three consecutive over-threshold frames;
+    """``strong_brake.steps`` needs two consecutive over-threshold frames;
     ``strong_brake.count`` is the number of discrete braking events (debounced rising edges)."""
     from scenario_generation.reproducer_rollout import _finalize
 
@@ -477,12 +477,12 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
         strong_brake_mps2=-2.5,
     )
     # Four raw clear frames keep an event active; five end it.
-    scores = [-5.0] * 4 + [0.0] * 4 + [-5.0] * 3 + [0.0] * 5 + [-5.0] * 3
+    scores = [-5.0] + [0.0] * 5 + [-5.0] * 4 + [0.0] * 4 + [-5.0] * 3 + [0.0] * 5 + [-5.0] * 3
     s.k = len(scores)
     s.accels[: s.k] = scores
     metrics = _finalize(s)
     brake = metrics["strong_brake"]
-    assert brake["steps"] == 4
+    assert brake["steps"] == 7
     assert brake["count"] == 2
     assert brake["strongest_mps2"] == pytest.approx(-5.0)
     assert set(brake) == {"thresh_mps2", "strongest_mps2", "steps", "count"}

@@ -1354,7 +1354,7 @@ def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
     mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
-        # Strongest over-threshold accel after the 3-frame consecutive mask
+        # Strongest over-threshold accel after the 2-frame consecutive mask
         # (single-frame tracker/replan spikes are excluded).
         "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
         "steps": int(mask.sum()),

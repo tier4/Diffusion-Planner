@@ -12,19 +12,19 @@ def strong_brake_mask(
 ) -> np.ndarray:
     """Vectorized strong-brake flag over a 1-D accel series.
 
-    A step counts after three consecutive frames satisfy ``accel <= thresh``.
+    A step counts after two consecutive frames satisfy ``accel <= thresh``.
     """
     values = np.asarray(accels, dtype=np.float64)
     raw = np.isfinite(values) & (values <= float(thresh_mps2))
     if raw.size == 0:
         return raw
     out = np.zeros_like(raw, dtype=bool)
-    out[2:] = raw[:-2] & raw[1:-1] & raw[2:]
+    out[1:] = raw[:-1] & raw[1:]
     return out
 
 
 def strong_brake_count(accels: np.ndarray, *, thresh_mps2: float = -2.5) -> int:
-    """Confirm after three crossings; end after five raw clear ticks (10 Hz)."""
+    """Confirm after two crossings; end after five raw clear ticks (10 Hz)."""
     count = pending = clear = 0
     active = False
     for value in accels:
@@ -35,7 +35,7 @@ def strong_brake_count(accels: np.ndarray, *, thresh_mps2: float = -2.5) -> int:
             clear = 0
             if not active:
                 pending += 1
-                if pending == 3:
+                if pending == 2:
                     count += 1
                     active = True
         else:
