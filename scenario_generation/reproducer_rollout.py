@@ -43,6 +43,7 @@ from scenario_generation.metrics import (
     score_road_border_step,
     strong_brake_mask,
 )
+from scenario_generation.metrics.strong_brake import strong_brake_count
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
@@ -458,10 +459,10 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Per-step realized tangential accel (m/s^2); a step is a "strong brake" when it drops
-    # at or below ``strong_brake_mps2`` (negative). Allocated by ``_seed_state`` (like
-    # ``clearances``); stays None for manually-built states that never step.
+    # Per-step acceleration of median-then-EMA executed speed for strong braking.
     accels: np.ndarray | None = None
+    brake_ema_speed: float | None = None
+    brake_speed_history: tuple[float, float] | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -706,6 +707,8 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
+        brake_ema_speed=float(dyn.speed),
+        brake_speed_history=(float(dyn.speed), float(dyn.speed)),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         gt_dvs=np.full(cap, np.nan, dtype=np.float32),
         gt_das=np.full(cap, np.nan, dtype=np.float32),
@@ -1068,6 +1071,11 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
     """
     from scenario_generation.mpc_tracker import postprocess_reference
 
+    was_warmup = s.k < s.warmup_steps
+    snaps_before = getattr(s, "snap_count", 0)
+    prev_ema_speed = getattr(s, "brake_ema_speed", None)
+    if prev_ema_speed is None:
+        prev_ema_speed = float(s.dyn.speed)
     with timers("advance"):
         if s.k < s.warmup_steps:
             tgt = min(idx + 1, len(s.tl) - 1)
@@ -1114,10 +1122,6 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
         else:
             s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
         s.sim_time += DT
-        # Record this step's realized accel (aligned with clearances[k], written pre-increment)
-        # for the strong-brake metric; guard states built without an accels buffer.
-        if s.accels is not None and s.k < s.accels.shape[0]:
-            s.accels[s.k] = s.dyn.accel
         s.k += 1
 
         # Unstick (two-stage): if the ego has been STUCK for too long, FIRST widen the
@@ -1190,6 +1194,23 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.ego_stuck = 0
                 s.stuck = 0
                 s.snap_count += 1
+
+        if was_warmup or getattr(s, "snap_count", 0) != snaps_before:
+            s.brake_ema_speed = float(s.dyn.speed)
+            s.brake_speed_history = (float(s.dyn.speed), float(s.dyn.speed))
+            brake_accel = np.nan
+        else:
+            old_speeds = getattr(s, "brake_speed_history", None) or (
+                float(prev_speed),
+                float(prev_speed),
+            )
+            current_speed = float(s.dyn.speed)
+            median_speed = sorted((*old_speeds, current_speed))[1]
+            s.brake_speed_history = (old_speeds[1], current_speed)
+            s.brake_ema_speed = 0.3 * median_speed + 0.7 * prev_ema_speed
+            brake_accel = (s.brake_ema_speed - prev_ema_speed) / DT
+        if s.accels is not None and s.k - 1 < len(s.accels):
+            s.accels[s.k - 1] = brake_accel
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
@@ -1329,7 +1350,7 @@ def clearance_family_block(
 
 
 def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
-    """The ``strong_brake`` segment-row block from a realized-acceleration series."""
+    """The ``strong_brake`` block from median-then-EMA executed-speed acceleration."""
     mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
@@ -1337,7 +1358,7 @@ def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
         # (single-frame tracker/replan spikes are excluded).
         "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
         "steps": int(mask.sum()),
-        "count": _event_count(mask),
+        "count": strong_brake_count(accels, thresh_mps2=float(thresh_mps2)),
     }
 
 
@@ -2008,7 +2029,7 @@ def render_segment(
     itself), ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame carries no
     lane geometry), and ``red_light_violation`` alongside the ego pose — see
     :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
-    (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
+    (which uses ``brake_accel_mps2`` for the "strong_brake" colormap).
 
     ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
     ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
@@ -2174,60 +2195,55 @@ def render_segment(
             # trajectory_colormap.py to color the rendered path by risk.
             _score_into(s, neighbors_live, device, timers, np_dict)
 
-            # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
-            # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
-            dbg.write(
-                json.dumps(
-                    {
-                        "k": k,
-                        "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
-                        "yaw": round(float(s.live_pose[2]), 4),
-                        "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
-                        "speed": round(float(s.dyn.speed), 3),
-                        "rec_frame_id": _frame_id(tl, idx),
-                        "rec_idx": int(idx),
-                        "max_idx_reached": int(s.cursor.max_idx_reached),
-                        "stuck": int(s.stuck),
-                        "ego_stuck": int(s.ego_stuck),
-                        # Cursor's own state (normal/repeat) + the rollout's escalation counts
-                        # (an expand/teleport this tick shows as a *_count delta on the next line).
-                        "state": s.cursor.state,
-                        "state_run_steps": int(s.cursor.state_run_steps),
-                        "expand_count": int(s.expand_count),
-                        "snap_count": int(s.snap_count),
-                        "clearance_m": round(float(s.clearances[k]), 4)
-                        if np.isfinite(s.clearances[k])
-                        else None,
-                        "collision": bool(s.collisions[k]),
-                        "collision_rear": bool(s.rear_collisions[k]),
-                        "rb_dist_m": round(float(s.rb_dists[k]), 4)
-                        if np.isfinite(s.rb_dists[k])
-                        else None,
-                        "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
-                        if np.isfinite(s.centerline_devs[k])
-                        else None,
-                        "red_light_violation": bool(s.red_light[k]),
-                        "gt_deviation_m": round(gt_deviation_m, 3),
-                        "gt_speed_diff_mps": round(gt_dv, 3) if gt_dv is not None else None,
-                        "gt_accel_diff_mps2": round(gt_da, 3) if gt_da is not None else None,
-                        # Resolved closed-loop turn indicator going into this tick, and the
-                        # recorded GT at the same frame -- same values (and same read) the
-                        # segment-level turn_indicator block and the PNG renderer use, so a
-                        # transition/false-positive can be reconstructed post hoc from the trace.
-                        "turn_indicator_pred": int(s.last_turn_indicator),
-                        "turn_indicator_gt": int(
-                            np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
-                        ),
-                        # collision AND off the recorded GT path by > deviation_collision_thresh_m
-                        # (see ``deviation_collision_block``); same per-step definition the
-                        # segment-level "deviation_collision" metric rolls up from.
-                        "deviation_collision": bool(
-                            s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
-                        ),
-                    }
-                )
-                + "\n"
-            )
+            # Capture the pre-step pose used for scoring; write after advancing so this row
+            # also carries the exact filtered acceleration scored at step k.
+            trace_row = {
+                "k": k,
+                "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+                "yaw": round(float(s.live_pose[2]), 4),
+                "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+                "speed": round(float(s.dyn.speed), 3),
+                "rec_frame_id": _frame_id(tl, idx),
+                "rec_idx": int(idx),
+                "max_idx_reached": int(s.cursor.max_idx_reached),
+                "stuck": int(s.stuck),
+                "ego_stuck": int(s.ego_stuck),
+                # Cursor's own state (normal/repeat) + the rollout's escalation counts
+                # (an expand/teleport this tick shows as a *_count delta on the next line).
+                "state": s.cursor.state,
+                "state_run_steps": int(s.cursor.state_run_steps),
+                "expand_count": int(s.expand_count),
+                "snap_count": int(s.snap_count),
+                "clearance_m": round(float(s.clearances[k]), 4)
+                if np.isfinite(s.clearances[k])
+                else None,
+                "collision": bool(s.collisions[k]),
+                "collision_rear": bool(s.rear_collisions[k]),
+                "rb_dist_m": round(float(s.rb_dists[k]), 4)
+                if np.isfinite(s.rb_dists[k])
+                else None,
+                "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
+                if np.isfinite(s.centerline_devs[k])
+                else None,
+                "red_light_violation": bool(s.red_light[k]),
+                "gt_deviation_m": round(gt_deviation_m, 3),
+                "gt_speed_diff_mps": round(gt_dv, 3) if gt_dv is not None else None,
+                "gt_accel_diff_mps2": round(gt_da, 3) if gt_da is not None else None,
+                # Resolved closed-loop turn indicator going into this tick, and the
+                # recorded GT at the same frame -- same values (and same read) the
+                # segment-level turn_indicator block and the PNG renderer use, so a
+                # transition/false-positive can be reconstructed post hoc from the trace.
+                "turn_indicator_pred": int(s.last_turn_indicator),
+                "turn_indicator_gt": int(
+                    np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
+                ),
+                # collision AND off the recorded GT path by > deviation_collision_thresh_m
+                # (see ``deviation_collision_block``); same per-step definition the
+                # segment-level "deviation_collision" metric rolls up from.
+                "deviation_collision": bool(
+                    s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
+                ),
+            }
             # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
             # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
             # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
@@ -2331,6 +2347,9 @@ def render_segment(
                     )
             snaps_before = s.snap_count
             _advance_step(s, pred_cur, idx, device, timers, override=override)
+            brake_accel = float(s.accels[k])
+            trace_row["brake_accel_mps2"] = brake_accel if np.isfinite(brake_accel) else None
+            dbg.write(json.dumps(trace_row) + "\n")
             if s.snap_count > snaps_before:
                 # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
                 # world location, so executing it next step would drag the ego right back. Invalidate

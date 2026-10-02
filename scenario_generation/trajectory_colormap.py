@@ -195,16 +195,22 @@ def _risk_and_ticks(
         )
         return risk, [0.0, 1.0], ["no violation", "red light violation"]
     if metric == "strong_brake":
-        # accel isn't logged per-step directly -- derive it the same way reproducer_rollout
-        # does (accel = d(speed)/DT between consecutive steps), then reapply the same
-        # two-consecutive-frame rule as scenario_generation.metrics.strong_brake.strong_brake_mask
-        # (inlined rather than imported -- that module drags in scenario_generation.metrics'
-        # package __init__, which pulls in torch/diffusion_planner.model transitively, and this
-        # module stays import-light for wandb_closed_loop_workspace.py's standalone CLI).
-        speeds = np.array([r.get("speed", 0.0) for r in rows], dtype=np.float64)
-        accels = np.diff(speeds) / _DT if speeds.size > 1 else np.zeros(0, dtype=np.float64)
-        accels = np.append(accels, accels[-1] if accels.size else 0.0)  # align length with rows
-        raw = accels <= float(strong_brake_mps2)
+        # New reproducer traces carry the exact median/EMA acceleration used by the
+        # segment metric, including None on warmup and snap steps. Older traces retain
+        # their original raw-speed rendering behavior.
+        if all("brake_accel_mps2" in r for r in rows):
+            accels = np.array(
+                [
+                    r["brake_accel_mps2"] if r["brake_accel_mps2"] is not None else np.nan
+                    for r in rows
+                ],
+                dtype=np.float64,
+            )
+        else:
+            speeds = np.array([r.get("speed", 0.0) for r in rows], dtype=np.float64)
+            accels = np.diff(speeds) / _DT if speeds.size > 1 else np.zeros(0, dtype=np.float64)
+            accels = np.append(accels, accels[-1] if accels.size else 0.0)
+        raw = np.isfinite(accels) & (accels <= float(strong_brake_mps2))
         risk = np.zeros_like(raw, dtype=np.float64)
         risk[1:] = (raw[:-1] & raw[1:]).astype(np.float64)
         return (
