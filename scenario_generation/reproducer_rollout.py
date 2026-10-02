@@ -459,9 +459,10 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Per-step acceleration of EMA-smoothed executed speed for the strong-brake metric.
+    # Per-step acceleration of median-then-EMA executed speed for strong braking.
     accels: np.ndarray | None = None
     brake_ema_speed: float | None = None
+    brake_speed_history: tuple[float, float] | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -707,6 +708,7 @@ def _seed_state(
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
         brake_ema_speed=float(dyn.speed),
+        brake_speed_history=(float(dyn.speed), float(dyn.speed)),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         gt_dvs=np.full(cap, np.nan, dtype=np.float32),
         gt_das=np.full(cap, np.nan, dtype=np.float32),
@@ -1195,9 +1197,17 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
 
         if was_warmup or getattr(s, "snap_count", 0) != snaps_before:
             s.brake_ema_speed = float(s.dyn.speed)
+            s.brake_speed_history = (float(s.dyn.speed), float(s.dyn.speed))
             brake_accel = np.nan
         else:
-            s.brake_ema_speed = 0.3 * float(s.dyn.speed) + 0.7 * prev_ema_speed
+            old_speeds = getattr(s, "brake_speed_history", None) or (
+                float(prev_speed),
+                float(prev_speed),
+            )
+            current_speed = float(s.dyn.speed)
+            median_speed = sorted((*old_speeds, current_speed))[1]
+            s.brake_speed_history = (old_speeds[1], current_speed)
+            s.brake_ema_speed = 0.3 * median_speed + 0.7 * prev_ema_speed
             brake_accel = (s.brake_ema_speed - prev_ema_speed) / DT
         if s.accels is not None and s.k - 1 < len(s.accels):
             s.accels[s.k - 1] = brake_accel
@@ -1340,7 +1350,7 @@ def clearance_family_block(
 
 
 def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
-    """The ``strong_brake`` block from EMA-smoothed executed-speed acceleration."""
+    """The ``strong_brake`` block from median-then-EMA executed-speed acceleration."""
     mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
