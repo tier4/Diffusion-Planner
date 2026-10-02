@@ -85,6 +85,10 @@ TEMPORAL_STOP_TOLERANCE_M = 0.5
 # Closed loop only: the share of the human's dwell at the bus stop the ego must stay
 # before the replay leaves it (the same rule and value as ``progress.YIELD_MIN_WAIT_RATIO``).
 ARRIVAL_MIN_WAIT_RATIO = 0.8
+# Closed loop only: the share of the human's red-light wait the ego must wait before the
+# replay leaves it (the same rule and value as ``ARRIVAL_MIN_WAIT_RATIO``). Not applied to
+# temporal_stop, whose stop the human holds for about a second.
+TRAFFIC_LIGHT_MIN_WAIT_RATIO = 0.8
 # Labels whose stop is at a stop line (vse ``stop_line_classifier``): they are judged by
 # the ego's front against that line when the human's stop frame has one.
 STOP_LINE_LABELS = ("traffic_light_stop", "temporal_stop")
@@ -283,6 +287,11 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     once it passed the limit, with the overshoot measured at its first stop after it,
     or its furthest point if it never stops.
 
+    traffic_light_stop must also wait out the red: the replay has to stay inside the
+    human's stop for ``TRAFFIC_LIGHT_MIN_WAIT_RATIO`` of its duration (``wait_ratio``, as
+    in ``yield_wait``). An ego that edges on past the human's stop pulls the replay to
+    the green, so it can stay short of the line yet never wait for the light.
+
     Not scored: the human never stops after the anchor; or the trace ends (goal,
     max_steps, abort) before the ego either stops or passes the limit. The latter is
     the common case when the recording ends with the human still stopped: the goal is
@@ -370,7 +379,42 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     )
     details["ego_stop_steps"] = None if r0 is None else [r0, r1]
     details["first_step_past_limit"] = k_cross
-    return ScenarioResult(metric, passed, values, details)
+    if inp.label != "traffic_light_stop" or not passed:
+        return ScenarioResult(metric, passed, values, details)
+    # A red light is also a wait: an ego that edges on past the human's stop pulls the
+    # replay forward to the green, so the line alone is not crossed under red.
+    wait_s = (h1 - h0) * REC_DT_S
+    entered = np.flatnonzero(inp.rec_idx >= h0)
+    left = np.flatnonzero(inp.rec_idx >= h1)
+    k_in = int(entered[0]) if len(entered) else inp.n_steps
+    k_out = int(left[0]) if len(left) else inp.n_steps
+    waited_s = max(0, k_out - k_in) * inp.dt
+    values.update(
+        {
+            "human_wait_s": wait_s,
+            "waited_s": waited_s,
+            "wait_ratio": waited_s / wait_s,
+            "min_wait_ratio": TRAFFIC_LIGHT_MIN_WAIT_RATIO,
+        }
+    )
+    details["step_left_wait"] = k_out if len(left) else None
+    if values["wait_ratio"] >= TRAFFIC_LIGHT_MIN_WAIT_RATIO:
+        return ScenarioResult(metric, True, values, details)
+    if not len(left):
+        return ScenarioResult(
+            metric,
+            None,
+            values,
+            details,
+            reason=f"trace ended ({inp.terminated}) inside the human's wait before the ego waited long enough",
+        )
+    return ScenarioResult(
+        metric,
+        False,
+        values,
+        details,
+        reason="replay left the red light before the ego waited long enough",
+    )
 
 
 def _score_arrival_stop(

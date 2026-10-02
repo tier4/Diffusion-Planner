@@ -395,3 +395,25 @@ def test_extended_arrival_needs_the_ego_to_stay_for_the_humans_dwell():
     assert r.passed is False
     assert r.values["wait_ratio"] == pytest.approx(1.0 / 3.0, abs=0.05)
     assert r.reason == "ego left the bus stop before staying long enough"
+
+
+def test_traffic_light_stop_also_needs_the_red_waited_out():
+    # The human waits over frames 50..150 (window end). The ego stops at the human's stop;
+    # in one run the replay plays the wait out, in the other it jumps past the wait (and to
+    # the window's departure frames) after 2 s, as when the ego edges on.
+    human = _profile(50, 60, 40)  # waits over frames 50..110, then departs
+    ok = _stop_input(_profile(50, 100), human)
+    r = registry.score(ok)
+    assert r.passed is True and r.values["wait_ratio"] >= 0.8
+    jumped = np.r_[np.arange(70), np.arange(111, 111 + 80)]
+    early = _stop_input(_profile(50, 100), human, rec_idx=np.minimum(jumped, 149)[:150])
+    r = registry.score(early)
+    assert r.passed is False
+    assert r.reason == "replay left the red light before the ego waited long enough"
+    assert r.values["overshoot_m"] == pytest.approx(0.0)
+    temporal = registry.score(
+        _stop_input(
+            _profile(50, 100), human, label="temporal_stop", rec_idx=np.minimum(jumped, 149)[:150]
+        )
+    )
+    assert temporal.passed is True and "wait_ratio" not in temporal.values
