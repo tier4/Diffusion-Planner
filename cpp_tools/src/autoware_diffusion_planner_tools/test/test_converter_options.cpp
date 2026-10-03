@@ -202,3 +202,23 @@ TEST(ValidateOptionsTest, NegativeGreenStopLeadLateralReturnsError)
   opts.green_stop_lead_lat_m = -0.1f;
   EXPECT_TRUE(validate_options(opts).has_value());
 }
+
+TEST(ValidateOptionsTest, SelectedExportRequiresUnboundedPerFrameMode)
+{
+  auto opts = make_default_opts();
+  EXPECT_TRUE(opts.timestamps.empty());
+  opts.timestamps = "requests.json";
+  opts.step = 1;
+  EXPECT_FALSE(validate_options(opts).has_value());
+  opts.pack_sequence = true;
+  EXPECT_TRUE(validate_options(opts).has_value());
+  opts.pack_sequence = false;
+  opts.sidecar_only = true;
+  EXPECT_TRUE(validate_options(opts).has_value());
+  opts.sidecar_only = false;
+  opts.limit = 10;
+  EXPECT_TRUE(validate_options(opts).has_value());
+  opts.limit = -1;
+  opts.use_interpolation = false;
+  EXPECT_FALSE(validate_options(opts).has_value());
+}

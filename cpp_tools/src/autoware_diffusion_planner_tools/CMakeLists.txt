@@ -43,6 +43,7 @@ ament_auto_add_executable(data_converter
   src/data_converter.cpp
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
+  src/conversion/selected_frames.cpp
   src/conversion/override_segments.cpp
   src/io/frame_writer.cpp
   src/io/bag_metadata.cpp
@@ -64,6 +65,7 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
   src/parse_rosbag_for_directory_with_map_version.cpp
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
+  src/conversion/selected_frames.cpp
   src/conversion/override_segments.cpp
   src/io/frame_writer.cpp
   src/io/bag_metadata.cpp
@@ -109,6 +111,29 @@ ament_auto_package(
 # --- GoogleTest for unit tests ---
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_selected_frames
+    test/test_selected_frames.cpp
+    src/cli/converter_options.cpp
+    src/conversion/selected_frames.cpp
+    src/processing/frame_processor.cpp
+    src/processing/sequence_builder.cpp
+    src/processing/ego_sequence.cpp
+    src/processing/neighbor_processor.cpp
+    src/processing/frame_skip_decision.cpp
+    src/io/frame_writer.cpp
+    src/io/npz_frame_writer.cpp
+    src/io/bag_metadata.cpp
+    src/utils/cnpy.cpp
+  )
+  if(TARGET test_selected_frames)
+    target_include_directories(test_selected_frames PRIVATE include src)
+    ament_target_dependencies(test_selected_frames SYSTEM
+      autoware_diffusion_planner nav_msgs autoware_perception_msgs
+      autoware_planning_msgs autoware_vehicle_msgs geometry_msgs
+    )
+    target_link_libraries(test_selected_frames ZLIB::ZLIB CLI11::CLI11)
+  endif()
 
   # Existing test
   ament_add_gtest(test_timestamp_stats test/test_timestamp_stats.cpp)

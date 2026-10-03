@@ -97,5 +97,10 @@ int main(int argc, char ** argv)
     return 1;
   }
 
-  return run_data_converter(paths, converter);
+  try {
+    return run_data_converter(paths, converter);
+  } catch (const std::exception & error) {
+    std::cerr << error.what() << std::endl;
+    return 1;
+  }
 }

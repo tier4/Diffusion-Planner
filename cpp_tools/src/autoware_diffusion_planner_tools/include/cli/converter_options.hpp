@@ -26,6 +26,9 @@ class App;
 
 struct ConverterOptions
 {
+  // Optional JSON array of exact 10 Hz request timestamps (integer nanoseconds).
+  // Selects the independent validation export path; empty preserves training behavior.
+  std::string timestamps;
   int64_t step;
   int64_t limit;
   int64_t min_frames;

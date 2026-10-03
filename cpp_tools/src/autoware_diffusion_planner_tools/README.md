@@ -106,7 +106,52 @@ Set `--map_version_source` to `log_file_info` to read `area_map_version_id` from
 `log_file_info.json`, or `metadata` to read it from `metadata.yaml`. The default is
 `log_file_info`, matching `ros_scripts/parse_rosbag_for_directory_with_map_version.py`.
 
-### Converter options
+### Selected-timestamp validation export
+
+The single-bag `data_converter` also accepts `--timestamps requests.json`, a
+nonempty, strictly increasing JSON array of integer nanosecond timestamps:
+
+```bash
+data_converter BAG MAP OUTPUT --timestamps requests.json --step=1 \
+  --ego_wheel_base 4.0 --ego_length 7.0 --ego_width 2.0
+```
+
+Use the actual vehicle dimensions. Requests must be on the native 10 Hz clock
+(the maximum first receive timestamp of odometry, acceleration, objects, turn
+indicators and route, plus multiples of 100 ms). Off-grid requests are reported,
+never moved to a nearby frame. The caller owns scenario selection and intervals;
+the converter does not read an evaluation registry.
+
+This path loads the bag once and shares `create_frame_tensors` and NPZ writers
+with normal training conversion. Context comes from the full bag, across route
+boundaries. It does not apply minimum-route filters, the route-prefix skip,
+near-goal termination or training skip filters. Route assignment and each route's
+stopped-end goal correction are shared with training. The native route clock uses
+bag receive timestamps; it is not replaced with another header-time route lookup.
+The output remains native legacy NPZ (not ML-Planner tensors repackaged as NPZ).
+
+The native builder requires 30 preceding ticks. Future handling also follows the
+native builder: if the full-bag context ends with absolute longitudinal speed below
+0.5 m/s, the last pose may be held beyond that end; otherwise future coverage is
+required. This does not pad missing frames inside the segment. Each route keeps its
+own goal, not the final goal of the whole bag. No selected-only 100 ms freshness
+check or history/future-window scan is applied. The training path's 500 ms skip
+rule is unchanged and is not a hard rejection in validation export.
+Native resampling, traffic and object preprocessing are unchanged, including the
+5-second traffic-light TTL. Availability and tensors can differ from H5.
+
+Only requested usable frames are written under `selected/`, with normal NPZ and
+JSON sidecars. `requests.json` records every requested timestamp, success path and
+actual odometry timestamp, or an explicit unavailability reason. Sidecars mark
+successful validation frames accepted; training skip filters were not evaluated.
+Exit status is 0 for all requests available, 2 for partial/no availability, and 1
+for invalid input or a fatal conversion error. Use a fresh output directory.
+`--pack_sequence`, `--sidecar_only`, message limits and subsampling cannot be
+combined with this mode. The native `--interpolation` option remains available;
+its default is unchanged. Without `--timestamps`, the
+existing training conversion behavior is unchanged.
+
+### Training converter options
 
 Both converter commands accept these options:
 
