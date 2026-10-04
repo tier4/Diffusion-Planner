@@ -2165,11 +2165,12 @@ def render_segment(
             if s.gt_devs is not None:
                 s.gt_devs[k] = gt_deviation_m
             gt_va = _gt_speed_accel(tl, gt_dev)
-            gt_dv = gt_da = None
+            gt_dv = gt_da = gt_a = None
             if gt_va is not None and s.gt_dvs is not None:
                 # Pre-step pair: dyn.speed is this tick's speed, dyn.accel the accel that produced it.
                 gt_dv = float(s.dyn.speed) - gt_va[0]
                 gt_da = float(s.dyn.accel) - gt_va[1]
+                gt_a = gt_va[1]
                 s.gt_dvs[k], s.gt_das[k] = gt_dv, gt_da
                 if s.gt_as is not None:
                     s.gt_as[k] = gt_va[1]
@@ -2243,6 +2244,8 @@ def render_segment(
                         "gt_deviation_m": round(gt_deviation_m, 3),
                         "gt_speed_diff_mps": round(gt_dv, 3) if gt_dv is not None else None,
                         "gt_accel_diff_mps2": round(gt_da, 3) if gt_da is not None else None,
+                        # Recorded accel; with the diff it gives live accel for the 2x2 cells.
+                        "gt_accel_mps2": round(gt_a, 3) if gt_a is not None else None,
                         # Resolved closed-loop turn indicator going into this tick, and the
                         # recorded GT at the same frame -- same values (and same read) the
                         # segment-level turn_indicator block and the PNG renderer use, so a
