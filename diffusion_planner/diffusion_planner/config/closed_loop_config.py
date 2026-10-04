@@ -207,6 +207,10 @@ class ClosedLoopConfig:
             "speed_fast",
             "brake_excess",
             "accel_excess",
+            "accel_gtacc_liveacc",
+            "accel_gtacc_livebrk",
+            "accel_gtbrk_liveacc",
+            "accel_gtbrk_livebrk",
         ]
     )
 
