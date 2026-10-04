@@ -532,6 +532,9 @@ class _SegState:
     # segment (see ``gt_speed_block``); NaN where no valid GT segment. None for manually-built states.
     gt_dvs: np.ndarray | None = None
     gt_das: np.ndarray | None = None
+    # Per-step recorded ego accel (m/s^2) at the same GT segment; with ``gt_das`` it gives the
+    # live accel for the 2x2 sign split in ``gt_speed_block``. NaN where no valid GT segment.
+    gt_as: np.ndarray | None = None
     # A collision counts as "deviation collision" when the live ego was more than this far
     # off the recorded GT path at the same step (see ``deviation_collision_block``).
     deviation_collision_thresh_m: float = 2.0
@@ -709,6 +712,7 @@ def _seed_state(
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         gt_dvs=np.full(cap, np.nan, dtype=np.float32),
         gt_das=np.full(cap, np.nan, dtype=np.float32),
+        gt_as=np.full(cap, np.nan, dtype=np.float32),
         centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
@@ -983,7 +987,12 @@ def _sparse_hist(vals: np.ndarray) -> dict[str, int]:
     return {str(int(b)): int(c) for b, c in zip(bins, counts)}
 
 
-def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
+# 2x2 accel-diff cells: (recorded accel sign) x (live accel sign). "brk" = accel < 0, "acc" =
+# accel >= 0 (cruising counts as not braking). Each cell holds |live - recorded accel|.
+GT_ACCEL_QUADS = ("gtacc_liveacc", "gtacc_livebrk", "gtbrk_liveacc", "gtbrk_livebrk")
+
+
+def gt_speed_block(dvs: np.ndarray, das: np.ndarray, gt_as: np.ndarray | None = None) -> dict:
     """The ``gt_speed`` segment-row block: live minus recorded ego speed / accel, measured at
     the recorded segment nearest the live ego (same window/yaw gate as ``mean_gt_deviation_m``).
 
@@ -992,6 +1001,12 @@ def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
     late start), ``fast`` the reverse; ``brake`` = recorded accel minus live accel when
     positive (braking harder than the recorded drive), ``accel`` the reverse. NaN steps
     (no valid GT segment) are dropped. ``*_hist`` are sparse bin-index -> count histograms.
+
+    The brake/accel split above cannot tell "recorded accelerates, live only weakly" from
+    "recorded cruises, live brakes hard". When ``gt_as`` (recorded accel) is given, ``quad``
+    additionally buckets every step by (recorded accel sign x live accel sign) and keeps
+    ``n`` / ``sum`` / ``max`` / ``hist`` of ``|live - recorded accel|`` per cell, e.g.
+    ``gtacc_livebrk`` = live brakes where the recorded drive did not.
     """
     ok = np.isfinite(dvs) & np.isfinite(das)
     dv, da = dvs[ok].astype(np.float64), das[ok].astype(np.float64)
@@ -1002,6 +1017,21 @@ def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
         block[f"{name}_sum"] = float(pos.sum())
         block[f"{name}_max"] = float(pos.max()) if pos.size else 0.0
         block[f"{name}_hist"] = _sparse_hist(pos)
+    if gt_as is not None:
+        ga = np.asarray(gt_as, dtype=np.float64)[: len(dvs)][ok]
+        live = ga + da
+        absda = np.abs(da)
+        quad: dict = {}
+        for gname, gmask in (("gtacc", ga >= 0.0), ("gtbrk", ga < 0.0)):
+            for lname, lmask in (("liveacc", live >= 0.0), ("livebrk", live < 0.0)):
+                x = absda[gmask & lmask]
+                quad[f"{gname}_{lname}"] = {
+                    "n": int(x.size),
+                    "sum": float(x.sum()),
+                    "max": float(x.max()) if x.size else 0.0,
+                    "hist": _sparse_hist(x),
+                }
+        block["quad"] = quad
     return block
 
 
@@ -1455,6 +1485,7 @@ def _finalize(s: _SegState) -> dict:
         "gt_speed": gt_speed_block(
             s.gt_dvs[: s.k] if s.gt_dvs is not None else np.zeros(0, dtype=np.float32),
             s.gt_das[: s.k] if s.gt_das is not None else np.zeros(0, dtype=np.float32),
+            s.gt_as[: s.k] if s.gt_as is not None else None,
         ),
         "turn_indicator": turn_indicator_block(
             s.turn_indicator_transition_correct,
@@ -2140,6 +2171,8 @@ def render_segment(
                 gt_dv = float(s.dyn.speed) - gt_va[0]
                 gt_da = float(s.dyn.accel) - gt_va[1]
                 s.gt_dvs[k], s.gt_das[k] = gt_dv, gt_da
+                if s.gt_as is not None:
+                    s.gt_as[k] = gt_va[1]
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
                 deviation_streak += 1
             else:
