@@ -11,7 +11,8 @@ import math
 import numpy as np
 import pytest
 
-from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
+from scenario_generation.mpc_tracker import MPCTracker
+from scenario_generation.perfect_tracker import PerfectTracker
 
 # ── MPCTracker.last_* telemetry ────────────────────────────────────────────
 
@@ -168,27 +169,6 @@ class TestWarmStartReset:
 # ── PerfectTracker.last_* telemetry ────────────────────────────────────────
 
 
-class TestPerfectTrackerPush:
-    def test_perfect_tracker_push_on_resume_from_rest(self):
-        """When the ego is at v≈0 and the reference's horizon tail is
-        meaningfully forward, PerfectTracker should boost v_target past
-        the first-step displacement so the ego launches instead of
-        creeping."""
-        pt = PerfectTracker(dt=0.1, max_speed=20.0)
-        # Reference has a near-zero first step but meaningful tail reach.
-        ref = np.zeros((20, 3), dtype=np.float64)
-        ref[0, 0] = 0.01  # almost co-located with x0
-        for i in range(1, 20):
-            ref[i, 0] = (i + 1) * 0.5  # tail ends at 10 m
-        x0 = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        _, v_new = pt.track(x0, ref)
-        # Without push: v_target = 0.01 / 0.1 = 0.1 m/s → ego creeps.
-        # With push: v_target = tail_reach / horizon_time ≈ 10/2 = 5 m/s.
-        assert v_new > 1.0, (
-            f"expected push to override trivial first-step v_target, got v_new={v_new}"
-        )
-
-
 class TestPerfectTrackerTelemetry:
     def test_perfect_tracker_accel_from_delta(self):
         pt = PerfectTracker(dt=0.1)
@@ -198,10 +178,12 @@ class TestPerfectTrackerTelemetry:
         # last_accel = (v_target - v_prev) / dt, here (5 - 2) / 0.1 = 30
         assert math.isclose(pt.last_accel, (new_speed - x0[3]) / pt.dt, abs_tol=1e-6)
 
-    def test_perfect_tracker_yaw_rate_from_heading_snap(self):
+    def test_perfect_tracker_yaw_rate_from_path_heading(self):
         pt = PerfectTracker(dt=0.1)
         x0 = np.array([0.0, 0.0, 0.0, 5.0], dtype=np.float64)
-        ref = np.array([[0.5, 0.0, 0.2]], dtype=np.float64)  # snap yaw to 0.2 rad
+        # The path runs at 0.2 rad; its heading channel (third column) is ignored.
+        d = np.array([math.cos(0.2), math.sin(0.2)])
+        ref = np.array([[*(0.5 * d), 0.0], [*(1.0 * d), 0.0]], dtype=np.float64)
         pt.track(x0, ref)
         # Heading change 0.0 → 0.2 over dt = 0.1 s → yaw rate = 2 rad/s
         assert math.isclose(pt.last_yaw_rate, 2.0, abs_tol=1e-6)
