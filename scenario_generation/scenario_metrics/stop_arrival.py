@@ -279,6 +279,56 @@ def _ol_stop_values(inp: ClosedLoopScenarioInput, p: StopParams) -> dict[str, fl
     }
 
 
+def red_hold_values(inp: ClosedLoopScenarioInput) -> dict[str, float] | None:
+    """Where the ego held while the human waited at the red before ``anchor_frame``.
+
+    For traffic_light_go, whose anchor is the light turning green. The human's wait is
+    the last sustained stop of the recording that starts before the anchor; the stop
+    line is the one the human stopped for (``_stop_line_arc``), compared with the ego's
+    front. Without a stop line the human's stop is the reference, compared with the
+    ego's rear axle. Over the sim steps from the replay entering the human's stop to
+    ``anchor_step``:
+
+    - ``furthest_past_line_m``: the furthest the ego got, past the reference;
+    - ``first_stop_past_line_m``: where its first sustained stop was, past the reference
+      (NaN without a stop);
+    - ``hold_creep_m``: how far it moved on from that stop (NaN without a stop).
+
+    None when the human did not stop before the anchor, the replay never reached the
+    human's stop, or the anchor was never replayed.
+    """
+    p = StopParams(tolerance_m=0.0)
+    k_anchor = inp.anchor_step
+    human = [r for r in _stop_runs(inp.rec_speed, REC_DT_S, p) if r[0] < inp.anchor_frame]
+    if k_anchor is None or not human:
+        return None
+    h0, h1 = human[-1]
+    entered = np.flatnonzero(inp.rec_idx >= h0)
+    if not len(entered) or entered[0] > k_anchor:
+        return None
+    k0 = int(entered[0])
+    path = _extended_path(inp)
+    human_s = float(np.median(project_onto_path(inp.rec_xy[h0:h1], path)[0]))
+    line = _stop_line_arc(inp, (h0 + h1) // 2, human_s)
+    ref = line[0] - line[1] if line is not None else human_s
+    ego_s = np.maximum.accumulate(project_onto_path(inp.ego_xy, path)[0])
+    values = {
+        "stop_line_found": float(line is not None),
+        "furthest_past_line_m": float(ego_s[k0 : k_anchor + 1].max()) - ref,
+        "first_stop_past_line_m": np.nan,
+        "hold_creep_m": np.nan,
+    }
+    live = [
+        r for r in _stop_runs(_ego_stop_speed(inp, p), inp.dt, p) if r[1] > k0 and r[0] <= k_anchor
+    ]
+    first = _first_stop_steps(live, k0, inp.dt, p)
+    if first is not None:
+        first_s = float(np.median(ego_s[first]))
+        values["first_stop_past_line_m"] = first_s - ref
+        values["hold_creep_m"] = _hold_creep_m(ego_s, first, np.arange(k0, k_anchor + 1), first_s)
+    return values
+
+
 def _no_anchor(metric: str, inp: ClosedLoopScenarioInput) -> ScenarioResult:
     return ScenarioResult(
         metric,

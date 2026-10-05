@@ -58,6 +58,7 @@ _PARAMETER_VALUE_KEYS = frozenset(
         "position_tolerance_m",
         "min_wait_ratio",
         "heading_tolerance_deg",
+        "stop_line_tolerance_m",
     }
 )
 
