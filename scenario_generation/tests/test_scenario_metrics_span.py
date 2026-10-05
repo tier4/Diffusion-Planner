@@ -123,6 +123,33 @@ def test_lane_change_finishing_after_8_s_is_scored_only_with_its_span():
     assert spanned.values["gt_lateral_shift_m"] == pytest.approx(3.5, abs=1e-6)
 
 
+@pytest.mark.parametrize(("delay_s", "passed"), [(1.0, True), (4.0, False)])
+def test_lane_change_gets_a_grace_past_the_humans_settling(delay_s, passed):
+    n = 300
+    rec_xy, rec_yaw = straight_path(n, 5.0)
+    ego_xy = rec_xy.copy()
+    # The human moves 3.5 m sideways from 9 s to 12 s after the anchor; the ego the same,
+    # ``delay_s`` later.
+    t = (np.arange(n) - ANCHOR) * DT
+    rec_xy[:, 1] = 3.5 * np.clip((t - 9.0) / 3.0, 0.0, 1.0)
+    ego_xy[:, 1] = 3.5 * np.clip((t - 9.0 - delay_s) / 3.0, 0.0, 1.0)
+    frames = {
+        ANCHOR: {"lanes": np.stack([_lane(0.0), _lane(3.5)]), "route_lanes": _lane(0.0)[None]}
+    }
+    inp = make_input(
+        label="lane_change",
+        ego_xy=ego_xy,
+        ego_yaw=rec_yaw,
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=ANCHOR,
+        frames=frames,
+    )
+    r = score(_with_span(inp, ANCHOR, ANCHOR + 120))
+    assert r.passed is passed
+    assert r.details["end_frame"] == ANCHOR + 120 + round(geometry.LANE_CHANGE_GRACE_S / DT)
+
+
 def test_object_avoidance_collision_after_8_s_counts_inside_the_span():
     n = 300
     rec_xy, rec_yaw = straight_path(n, 5.0)

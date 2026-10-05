@@ -73,6 +73,10 @@ OBJECT_AVOIDANCE_HORIZON_S = 8.0
 OBJECT_AVOIDANCE_MIN_CLEARANCE_M = 0.5
 # planner_metrics/lane_change.py::_SOURCE_PATH_MARGIN_M.
 LANE_CHANGE_SOURCE_PATH_MARGIN_M = 20.0
+# New in closed loop: how much recorded drive past the human's settling the ego gets to
+# finish its lane change. Human labels failed only lane changes that came clearly late;
+# 2 s matched them best (0.85 agreement, against 0.75 with no grace).
+LANE_CHANGE_GRACE_S = 2.0
 # New in closed loop (no open-loop threshold). 1.0 m is lane_change's default minimum
 # lateral shift: a smaller deviation cannot have put the ego in another lane.
 MAX_LATERAL_ERROR_M = 1.0
@@ -143,15 +147,18 @@ def _window(
     horizon_s: float,
     *,
     min_progress_ratio: float = MIN_PROGRESS_RATIO,
+    extend_s: float = 0.0,
 ) -> _Window | None:
     """Scored steps over the anchor's span, else ``horizon_s`` of recorded drive after the
-    anchor; None if the live ego never reached the stretch's start."""
+    anchor, either stretched by ``extend_s`` of recorded drive; None if the live ego
+    never reached the stretch's start."""
     span = _span(inp)
     if span is None:
         start_frame = inp.anchor_frame
         end_frame = min(inp.anchor_frame + int(round(horizon_s / _REC_DT_S)), inp.n_frames - 1)
     else:
         start_frame, end_frame = span
+    end_frame = min(end_frame + int(round(extend_s / _REC_DT_S)), inp.n_frames - 1)
     reached = np.flatnonzero(inp.rec_idx >= start_frame)
     if not len(reached) or (span is None and inp.anchor_step is None):
         return None
@@ -300,11 +307,15 @@ def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
     Unlike open loop -- which counts them as failures -- a window whose human drove no
     lane change, or whose source lane is not heading-aligned, is not applicable. No
     progress check: as in open loop, a slow ego still gets credit for its lateral move.
+
+    The stretch runs ``LANE_CHANGE_GRACE_S`` of recorded drive past the span's end (the
+    human settled in the new lane), so a lane change a little later than the human's
+    still passes; one that has not finished by then is late.
     """
     metric = "lane_change"
     params = open_loop_parameters("lane_change", config)
     min_lateral_shift_m = float(params["minimum_lateral_shift_m"])
-    w = _window(inp, float(params["horizon_seconds"]))
+    w = _window(inp, float(params["horizon_seconds"]), extend_s=LANE_CHANGE_GRACE_S)
     if w is None:
         return _not_reached(metric)
     frame = inp.load_frame(w.start_frame)
