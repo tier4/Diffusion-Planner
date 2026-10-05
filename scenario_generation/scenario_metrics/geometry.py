@@ -68,6 +68,9 @@ _REC_DT_S = 0.1  # one recorded frame per 0.1 s (see base)
 
 # object_avoidance has no open-loop horizon field; open loop scores the whole 8 s prediction.
 OBJECT_AVOIDANCE_HORIZON_S = 8.0
+# New in closed loop: the closest the ego may pass a neighbor without a collision.
+# Human labels failed passes at 0.06-0.45 m and accepted 0.53 m and up.
+OBJECT_AVOIDANCE_MIN_CLEARANCE_M = 0.5
 # planner_metrics/lane_change.py::_SOURCE_PATH_MARGIN_M.
 LANE_CHANGE_SOURCE_PATH_MARGIN_M = 20.0
 # New in closed loop (no open-loop threshold). 1.0 m is lane_change's default minimum
@@ -393,13 +396,15 @@ def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
 
 @register("object_avoidance")
 def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
-    """No collision after the anchor, and the ego actually got past the obstacle.
+    """No collision after the anchor, a wide enough berth, and the ego actually got past
+    the obstacle.
 
     Mirrors ``planner_metrics/object_avoidance.py`` (collision = OBB clearance <= 0
     against any neighbor, no actor-type filter) on the rollout's own per-step
-    collision/clearance, plus the anti-stall progress check: stopping short of the
-    obstacle forever would otherwise "avoid" it. As in open loop, a window with no
-    neighbor at all is not applicable.
+    collision/clearance, plus two closed-loop checks: the minimum clearance must reach
+    ``OBJECT_AVOIDANCE_MIN_CLEARANCE_M`` (a scrape-by is not an avoidance), and the
+    anti-stall progress check: stopping short of the obstacle forever would otherwise
+    "avoid" it. As in open loop, a window with no neighbor at all is not applicable.
     """
     metric = "object_avoidance"
     w = _window(inp, OBJECT_AVOIDANCE_HORIZON_S)
@@ -410,6 +415,7 @@ def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> Scenari
     values = {
         "collision": float(collided),
         "min_clearance_m": float(clearance.min()),
+        "min_clearance_threshold_m": OBJECT_AVOIDANCE_MIN_CLEARANCE_M,
         **w.values(inp.dt),
     }
     details = _base_details(inp, w)
@@ -417,15 +423,18 @@ def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> Scenari
         return ScenarioResult(metric, None, values, details, "no neighbor after the anchor")
     covered = w.covered
     details["covered"] = covered
+    wide = bool(clearance.min() >= OBJECT_AVOIDANCE_MIN_CLEARANCE_M)
     if collided:
         first = int(w.steps[np.flatnonzero(inp.collision[w.steps] | (clearance <= 0.0))[0]])
         details["first_collision_step"] = first
         reason = "collision after the anchor"
+    elif not wide:
+        reason = f"passed a neighbor closer than {OBJECT_AVOIDANCE_MIN_CLEARANCE_M} m"
     elif not covered:
         reason = "ego did not get past the recorded stretch"
     else:
         reason = ""
-    return ScenarioResult(metric, not collided and covered, values, details, reason)
+    return ScenarioResult(metric, not collided and wide and covered, values, details, reason)
 
 
 def _route_lane_lateral(

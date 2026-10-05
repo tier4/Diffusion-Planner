@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from scenario_generation.scenario_metrics import geometry  # noqa: F401  (registers the scorers)
+from scenario_generation.scenario_metrics.geometry import OBJECT_AVOIDANCE_MIN_CLEARANCE_M
 from scenario_generation.scenario_metrics.registry import score
 from scenario_generation.scenario_metrics.testing import make_input, straight_path
 
@@ -326,6 +327,18 @@ def test_object_avoidance_collision_fails():
     assert (
         _avoidance(xy, yaw, xy, yaw, clearance_m=np.full(200, 1.2), collision=early).passed is True
     )
+
+
+def test_object_avoidance_passing_too_close_fails():
+    xy, yaw = straight_path(200, 5.0)
+    clearance = np.full(200, 1.2)
+    clearance[ANCHOR + 30] = 0.3
+    r = _avoidance(xy, yaw, xy, yaw, clearance_m=clearance)
+    assert r.passed is False and r.values["collision"] == 0.0
+    assert r.reason == f"passed a neighbor closer than {OBJECT_AVOIDANCE_MIN_CLEARANCE_M} m"
+    # Exactly at the threshold is wide enough.
+    clearance[ANCHOR + 30] = OBJECT_AVOIDANCE_MIN_CLEARANCE_M
+    assert _avoidance(xy, yaw, xy, yaw, clearance_m=clearance).passed is True
 
 
 def test_object_avoidance_by_stopping_forever_fails():
