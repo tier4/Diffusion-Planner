@@ -83,6 +83,12 @@ PATH_EXTENSION_M = 200.0
 # tolerance. Human labels failed stops 0.24 m past the line and up; 0.15 m leaves room
 # for pose noise only.
 TEMPORAL_STOP_TOLERANCE_M = 0.15
+# Closed loop only: the shortest ego stop that counts as a temporal stop. Human labels
+# called a 0.5 s stop a rolling stop (a fail), so ``sustained_stop_s`` alone is too short.
+# Measured as the sustained-stop run itself, which the net-displacement window of
+# ``_ego_stop_speed`` makes about 0.3 s shorter than the time spent at rest. Once the ego
+# has held such a stop, it is free to move on (see ``score_stop``).
+TEMPORAL_STOP_MIN_HOLD_S = 1.0
 # Closed loop only: the share of the human's dwell at the bus stop the ego must stay
 # before the replay leaves it.
 ARRIVAL_MIN_WAIT_RATIO = 0.8
@@ -288,6 +294,13 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     once it passed the limit, with the overshoot measured at its first stop after it,
     or its furthest point if it never stops.
 
+    temporal_stop asks only for a full stop at the line before moving on: an ego stop
+    counts only once it lasts ``TEMPORAL_STOP_MIN_HOLD_S`` (a shorter one is a rolling
+    stop), and the furthest point is taken up to the end of the ego's first such stop
+    instead of the human's departure. Moving on after the ego left that stop is its
+    departure, not overshoot, even while the human still holds (the human holds about a
+    second, and the replay fast-forwards once the ego is ahead).
+
     traffic_light_stop must also wait out the red: the replay has to stay inside the
     human's stop for ``TRAFFIC_LIGHT_MIN_WAIT_RATIO`` of its duration (``wait_ratio``, as
     in ``yield_wait``). An ego that edges on past the human's stop pulls the replay to
@@ -338,6 +351,9 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     limit = ref_s + p.tolerance_m
 
     live = [r for r in _stop_runs(_ego_stop_speed(inp, p), inp.dt, p) if r[1] > k0]
+    if inp.label == "temporal_stop":
+        min_hold = max(1, round(TEMPORAL_STOP_MIN_HOLD_S / inp.dt))
+        live = [r for r in live if r[1] - r[0] >= min_hold]
     beyond = np.flatnonzero(s_ego[k0:] > limit)
     k_cross = k0 + int(beyond[0]) if len(beyond) else None
     values["max_s_after_anchor_m"] = float(s_ego[k0:].max())
@@ -346,6 +362,9 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     held = [r for r in live if len(holding) and r[0] <= holding[-1]]
     if held:
         r0, r1 = held[0]
+        if inp.label == "temporal_stop":
+            # Up to the end of the ego's first held stop: what follows is its departure.
+            holding = holding[holding < r1]
         stop_s = float(s_ego[holding].max())
         passed, stopped = stop_s <= limit, True
     elif k_cross is not None:

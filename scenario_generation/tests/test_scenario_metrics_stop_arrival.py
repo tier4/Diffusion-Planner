@@ -4,6 +4,7 @@ import pytest
 from scenario_generation.scenario_metrics import registry
 from scenario_generation.scenario_metrics.stop_arrival import (
     GOAL_REACH_M,
+    TEMPORAL_STOP_MIN_HOLD_S,
     TEMPORAL_STOP_TOLERANCE_M,
 )
 from scenario_generation.scenario_metrics.testing import (
@@ -233,6 +234,37 @@ def test_temporal_stop_is_a_stop_with_the_closed_loop_tolerance():
     assert rolled_through.values["overshoot_m"] == pytest.approx(3.0)
     held = registry.score(_stop_input(_profile(50, 20, 80), human, label="temporal_stop"))
     assert held.passed is True
+
+
+def test_temporal_stop_rolling_stop_fails():
+    # The ego rests 0.8 s at the line (a 0.5 s sustained stop) and moves on as the human
+    # departs: a stop by ``sustained_stop_s`` and never past the line while the human
+    # holds, yet too short to be a temporal stop.
+    human = _profile(50, 8, 92)
+    ego = np.r_[np.full(50, 5.0), np.zeros(8), np.full(92, 2.0)]
+    r = registry.score(_stop_input(ego, human, label="temporal_stop"))
+    assert r.passed is False and r.values["ego_sustained_stop"] == 0.0
+    # The same rest is enough for obstacle_stop, which keeps the 0.5 s rule.
+    assert registry.score(_stop_input(ego, human, label="obstacle_stop")).passed is True
+
+
+def test_temporal_stop_held_at_the_line_then_departing_passes():
+    # The human holds 4 s; the ego rests 1.9 s at the line (a 1.5 s sustained stop) and
+    # departs while the human still holds. Its departure is not overshoot.
+    human = _profile(50, 40, 60)
+    ego = _profile(50, 19, 81)
+    r = registry.score(_stop_input(ego, human, label="temporal_stop"))
+    stop = r.details["ego_stop_steps"]
+    assert stop[1] - stop[0] == 15 and 1.5 > TEMPORAL_STOP_MIN_HOLD_S
+    assert r.passed is True and r.values["overshoot_m"] == pytest.approx(0.0)
+    # traffic_light_stop still judges the furthest point while the human holds.
+    assert registry.score(_stop_input(ego, human)).passed is False
+
+
+def test_temporal_stop_held_past_the_line_fails():
+    human = _profile(50, 40, 60)
+    r = registry.score(_stop_input(_profile(53, 20, 77), human, label="temporal_stop"))
+    assert r.passed is False and r.values["overshoot_m"] == pytest.approx(1.5)
 
 
 def _extended_arrival(ego_speeds, terminated="goal"):
