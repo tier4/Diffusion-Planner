@@ -39,8 +39,8 @@ if(rosbag2_storage_VERSION VERSION_GREATER_EQUAL "0.26.0")
   add_compile_definitions(ROSBAG2_QOS_PROFILES_AS_VECTOR)
 endif()
 
-ament_auto_add_executable(data_converter
-  src/data_converter.cpp
+# Internal implementation shared by both CLI entry points and integration tests.
+add_library(converter_core STATIC
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
   src/conversion/selected_frames.cpp
@@ -58,30 +58,17 @@ ament_auto_add_executable(data_converter
   src/rosbag/missing_topics.cpp
   src/utils/cnpy.cpp
 )
-target_include_directories(data_converter PRIVATE include src)
-target_link_libraries(data_converter yaml-cpp ZLIB::ZLIB CLI11::CLI11 fmt::fmt)
+target_include_directories(converter_core PUBLIC include src)
+ament_target_dependencies(converter_core SYSTEM ${${PROJECT_NAME}_FOUND_BUILD_DEPENDS})
+target_link_libraries(converter_core yaml-cpp ZLIB::ZLIB CLI11::CLI11 fmt::fmt)
+
+ament_auto_add_executable(data_converter src/data_converter.cpp)
+target_link_libraries(data_converter converter_core)
 
 ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
   src/parse_rosbag_for_directory_with_map_version.cpp
-  src/cli/converter_options.cpp
-  src/conversion/data_converter.cpp
-  src/conversion/selected_frames.cpp
-  src/conversion/override_segments.cpp
-  src/io/frame_writer.cpp
-  src/io/bag_metadata.cpp
-  src/io/npz_frame_writer.cpp
-  src/io/projector_factory.cpp
-  src/processing/ego_sequence.cpp
-  src/processing/frame_processor.cpp
-  src/processing/frame_skip_decision.cpp
-  src/processing/neighbor_processor.cpp
-  src/processing/sequence_builder.cpp
-  src/rosbag/parsed_bag_data.cpp
-  src/rosbag/missing_topics.cpp
-  src/utils/cnpy.cpp
 )
-target_include_directories(parse_rosbag_for_directory_with_map_version PRIVATE include src)
-target_link_libraries(parse_rosbag_for_directory_with_map_version yaml-cpp ZLIB::ZLIB Threads::Threads CLI11::CLI11 fmt::fmt)
+target_link_libraries(parse_rosbag_for_directory_with_map_version converter_core Threads::Threads)
 
 ament_auto_add_executable(override_interval_extractor
   src/override_interval_extractor.cpp
@@ -112,27 +99,9 @@ ament_auto_package(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  ament_add_gtest(test_selected_frames
-    test/test_selected_frames.cpp
-    src/cli/converter_options.cpp
-    src/conversion/selected_frames.cpp
-    src/processing/frame_processor.cpp
-    src/processing/sequence_builder.cpp
-    src/processing/ego_sequence.cpp
-    src/processing/neighbor_processor.cpp
-    src/processing/frame_skip_decision.cpp
-    src/io/frame_writer.cpp
-    src/io/npz_frame_writer.cpp
-    src/io/bag_metadata.cpp
-    src/utils/cnpy.cpp
-  )
+  ament_add_gtest(test_selected_frames test/test_selected_frames.cpp)
   if(TARGET test_selected_frames)
-    target_include_directories(test_selected_frames PRIVATE include src)
-    ament_target_dependencies(test_selected_frames SYSTEM
-      autoware_diffusion_planner nav_msgs autoware_perception_msgs
-      autoware_planning_msgs autoware_vehicle_msgs geometry_msgs
-    )
-    target_link_libraries(test_selected_frames ZLIB::ZLIB CLI11::CLI11)
+    target_link_libraries(test_selected_frames converter_core)
   endif()
 
   # Existing test
