@@ -44,6 +44,7 @@ def make_input(
     terminated: str = "goal",
     frames: dict[int, dict[str, np.ndarray]] | Callable[[int], dict[str, np.ndarray]] | None = None,
     dt: float = 0.1,
+    span_frames: tuple[int, int] | None = None,
 ) -> ClosedLoopScenarioInput:
     """Build an input with sensible defaults.
 
@@ -97,4 +98,5 @@ def make_input(
         if rec_speed is None
         else np.asarray(rec_speed),
         load_frame=load_frame,
+        span_frames=span_frames,
     )

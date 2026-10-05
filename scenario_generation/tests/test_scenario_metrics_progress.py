@@ -4,8 +4,12 @@ import pytest
 from scenario_generation.scenario_metrics import registry
 from scenario_generation.scenario_metrics.progress import (
     CLOSED_LOOP_DEPARTURE_HORIZON_S,
+    WAIT_SPAN_LABELS,
+    YIELD_LABELS,
+    YIELD_MAX_EXCESS_PROGRESS_M,
     departure_progress,
     yield_progress,
+    yield_wait,
 )
 from scenario_generation.scenario_metrics.testing import (
     make_input,
@@ -188,3 +192,94 @@ def test_open_loop_reference_leaves_verdicts_and_values_unchanged():
     xy, yaw = _ego_with_speeds(np.zeros(1))
     r = yield_progress(_input("pedestrian_yield", xy, yaw))
     assert r.passed is None and not any(k.startswith("ol_") for k in r.values)
+
+
+# --- yield_wait: the ego's progress while the replay is inside the human's wait ---
+
+SPAN = (ANCHOR, ANCHOR + 29)  # a 3 s wait
+
+
+def _wait_input(rec_idx, *, label="pedestrian_yield", span=SPAN, terminated="goal", push_m=0.0):
+    """Recording that waits at x = 10 m over ``span``; the ego holds there (or pushes on
+    ``push_m`` past it over the span's steps) while the cursor replays ``rec_idx`` (one
+    entry per sim step)."""
+    speeds = np.full(80, 2.0)
+    speeds[span[0] - 1 : span[1]] = 0.0
+    rec_xy, rec_yaw = speed_profile_path(speeds)
+    k = len(rec_idx)
+    ego_xy = np.repeat(rec_xy[[span[0]]], k, axis=0)
+    rec_idx = np.asarray(rec_idx)
+    in_span = (rec_idx >= span[0]) & (rec_idx <= span[1])
+    ego_xy[in_span, 0] += np.linspace(0.0, push_m, int(in_span.sum()))
+    ego_xy[rec_idx > span[1], 0] += push_m
+    return make_input(
+        label=label,
+        ego_xy=ego_xy,
+        ego_yaw=np.zeros(k),
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=ANCHOR,
+        rec_idx=np.asarray(rec_idx),
+        terminated=terminated,
+        span_frames=span,
+    )
+
+
+def test_span_anchors_are_scored_by_yield_conflict_and_others_by_the_fixed_horizon():
+    for label in YIELD_LABELS:
+        with_span = _wait_input(np.arange(60), label=label)
+        expected = "yield_conflict" if label in WAIT_SPAN_LABELS else "yield_progress"
+        assert registry.score(with_span).metric == expected
+        without = _input(label, *_ego_with_speeds(np.full(40, 0.1)))
+        assert registry.score(without).metric == "yield_progress"
+
+
+def test_waiting_as_long_as_the_human_passes():
+    # The cursor replays the span one frame per step: the ego stayed the human's 3 s.
+    r = yield_wait(_wait_input(np.arange(60)))
+    assert r.passed is True
+    assert r.values["wait_ratio"] == pytest.approx(1.0)
+    assert r.values["human_wait_s"] == pytest.approx(3.0)
+    assert r.details["max_replay_jump_frames"] == 1
+
+
+def test_leaving_the_span_early_without_pushing_on_passes():
+    # Five frames per step: the replay leaves the 3 s span after 0.6 s, but the ego
+    # stays where the human waited.
+    rec_idx = np.r_[np.arange(ANCHOR), np.arange(ANCHOR, 60, 5)]
+    r = yield_wait(_wait_input(rec_idx))
+    assert r.passed is True
+    assert r.values["wait_ratio"] == pytest.approx(0.2)
+    assert r.details["max_replay_jump_frames"] == 5
+
+
+def test_pushing_on_past_the_human_fails():
+    r = yield_wait(_wait_input(np.arange(60), push_m=YIELD_MAX_EXCESS_PROGRESS_M + 0.5))
+    assert r.passed is False
+    assert r.values["excess_progress_m"] == pytest.approx(YIELD_MAX_EXCESS_PROGRESS_M + 0.5)
+    assert r.reason == "ego pushed on past the human while yielding"
+    edged = yield_wait(_wait_input(np.arange(60), push_m=YIELD_MAX_EXCESS_PROGRESS_M - 0.5))
+    assert edged.passed is True
+
+
+def test_trace_ending_inside_the_span_is_scored_only_once_pushed_on():
+    early = yield_wait(_wait_input(np.arange(ANCHOR + 10), terminated="max_steps"))
+    assert early.passed is None
+    assert early.reason == "trace ended (max_steps) inside the span"
+    pushed = yield_wait(_wait_input(np.arange(ANCHOR + 10), terminated="max_steps", push_m=4.0))
+    assert pushed.passed is False
+
+
+def test_span_never_replayed_is_not_applicable():
+    r = yield_wait(_wait_input(np.arange(ANCHOR - 2)))
+    assert r.passed is None
+    assert r.reason == "span never replayed"
+
+
+def test_yield_wait_keeps_the_fixed_horizon_values_for_reference():
+    inp = _wait_input(np.arange(60))
+    r = yield_wait(inp)
+    fixed = yield_progress(inp)
+    for key, value in fixed.values.items():
+        assert r.values[key] == pytest.approx(value)
+    assert r.values["fixed_horizon_passed"] == float(fixed.passed)

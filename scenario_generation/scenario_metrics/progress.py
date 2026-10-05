@@ -2,6 +2,10 @@
 
 Owns labels: departure, traffic_light_go, pedestrian_yield, vehicle_yield.
 
+``pedestrian_yield`` / ``vehicle_yield`` anchors that carry their event span are scored
+by ``yield_wait`` (closed loop only, see its docstring); the fixed-horizon
+``yield_progress`` below scores the rest and is reported alongside.
+
 The open-loop scorers (``planner_metrics/departure.py``, ``planner_metrics/yield_progress.py``)
 read one predicted trajectory; here the same thresholds (read from
 ``ScenarioOpenLoopConfig``, see ``shared_config``) are applied to the ego's *realized*
@@ -41,6 +45,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from scenario_generation.scenario_metrics import conflict
 from scenario_generation.scenario_metrics.base import (
     ClosedLoopScenarioInput,
     ScenarioResult,
@@ -54,11 +59,26 @@ DEPARTURE_LABELS = ("departure", "traffic_light_go")
 # temporal_stop is a stop-line stop, scored by the stop family (``stop_arrival``); open
 # loop still scores it as a yield, so ``yield_progress`` keeps reading its config.
 YIELD_LABELS = ("pedestrian_yield", "vehicle_yield")
+# Yield labels whose event span is the human's wait.
+WAIT_SPAN_LABELS = YIELD_LABELS
+
 # Closed loop only: departure's horizon, longer than open loop's 3 s. A closed-loop ego
 # starts from its own standstill, and human labels passed every departure, including
 # ones that took 3-5 s to gain the 2 m (0.94 agreement at 5 s, against 0.62 at 3 s).
 # traffic_light_go keeps the open-loop horizon.
 CLOSED_LOOP_DEPARTURE_HORIZON_S = 5.0
+
+# Recorded frames are 10 Hz; span lengths are in recorded frames.
+REC_DT_S = 0.1
+# Closed loop only (no open-loop counterpart): how much further than the human the ego
+# may get along the road while the replay is inside the human's wait (``yield_wait``).
+# Human labels passed every yield up to 2.98 m past the human's progress; how long the
+# ego stayed in the span (``wait_ratio``, reported) disagreed with them.
+YIELD_MAX_EXCESS_PROGRESS_M = 3.0
+# Closed loop only: the shortest post-encroachment time to the yielded-to agent that
+# still passes (``yield_conflict``). Human labels accepted every yield down to 0.5 s; this
+# floor is "nearly touching", not a comfort margin.
+YIELD_MIN_PET_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -228,7 +248,6 @@ def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioRes
     )
 
 
-@register(*YIELD_LABELS)
 def yield_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """The ego must not gain more than ``maximum_forward_progress_m`` within the horizon.
 
@@ -272,3 +291,168 @@ def yield_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
         details=details,
         reason=reason,
     )
+
+
+def yield_wait(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
+    """While the replay is inside the human's wait, the ego must not get more than
+    ``YIELD_MAX_EXCESS_PROGRESS_M`` further along the road than the human did.
+
+    The human's wait is the anchor's event span (``inp.span_frames``). The scored steps
+    run from the first step that replays a span frame to the first step past the span;
+    the ego's progress over them (arc along the recorded path) is compared with the
+    human's over the span. Pushing on into the yielded-to agent's path reads as a large
+    excess.
+
+    The replay cursor follows the live ego's position, so an ego that creeps on pulls
+    the recorded scene forward with it and leaves the span early. How long it stayed is
+    reported as ``wait_ratio`` (sim time inside the span over its recorded duration) but
+    is not part of the verdict: human labels accepted yields that left the span well
+    before the human's wait ended, as long as the ego did not push on.
+
+    The fixed-horizon ``yield_progress`` values (``progress_m``, ``reference_progress_m``,
+    ...) are kept for reference; ``fixed_horizon_passed`` is its verdict as 0/1.
+
+    Not scored: the replay never enters the span; or the trace ends inside it before
+    the ego has waited long enough to pass.
+    """
+    assert inp.span_frames is not None
+    metric = "yield_wait"
+    first, last = inp.span_frames
+    span_s = (last + 1 - first) * REC_DT_S
+    values: dict[str, float] = {
+        "human_wait_s": span_s,
+        "max_excess_progress_m": YIELD_MAX_EXCESS_PROGRESS_M,
+    }
+    details: dict = {"span_frames": [first, last], "terminated": inp.terminated}
+    if inp.anchor_step is not None:
+        fixed = yield_progress(inp, config)
+        values.update(fixed.values)
+        if fixed.passed is not None:
+            values["fixed_horizon_passed"] = float(fixed.passed)
+    entered = np.flatnonzero(inp.rec_idx >= first)
+    if not len(entered):
+        return ScenarioResult(metric, None, values, details, reason="span never replayed")
+    k_in = int(entered[0])
+    left = np.flatnonzero(inp.rec_idx > last)
+    k_out = int(left[0]) if len(left) else inp.n_steps
+    waited_s = (k_out - k_in) * inp.dt
+    in_span = inp.rec_idx[k_in:k_out]
+    rec_arc = path_arclength(inp.rec_xy)
+    ego_arc, _ = project_onto_path(inp.ego_xy[k_in : max(k_out, k_in + 1)], inp.rec_xy)
+    values.update(
+        {
+            "wait_ratio": waited_s / span_s,
+            "waited_s": waited_s,
+            "progress_in_span_m": float(ego_arc.max() - ego_arc[0]),
+            "human_progress_in_span_m": float(rec_arc[last] - rec_arc[first]),
+        }
+    )
+    values["excess_progress_m"] = values["progress_in_span_m"] - values["human_progress_in_span_m"]
+    details.update(
+        {
+            "step_entered_span": k_in,
+            "step_left_span": k_out if len(left) else None,
+            # Largest cursor jump inside the span: the replay skipping ahead with the ego.
+            "max_replay_jump_frames": int(np.diff(in_span).max()) if len(in_span) > 1 else 0,
+        }
+    )
+    held = values["excess_progress_m"] <= YIELD_MAX_EXCESS_PROGRESS_M
+    if not len(left) and held:
+        return ScenarioResult(
+            metric,
+            None,
+            values,
+            details,
+            reason=f"trace ended ({inp.terminated}) inside the span",
+        )
+    reason = "" if held else "ego pushed on past the human while yielding"
+    return ScenarioResult(metric, held, values, details, reason)
+
+
+def yield_conflict(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
+    """``yield_wait``, plus the agent yielded to (``conflict``): no such agent -> not
+    applicable; the ego going first or a post-encroachment time under
+    ``YIELD_MIN_PET_S`` -> fail.
+
+    The target is found on the recording: an agent crossing or merging into the
+    recorded ego path near the anchor, active in the human's wait (see ``conflict``).
+    Without one the anchor is likely not a yield -- human labels marked 19 of 22 such
+    pedestrian windows as invalid or unclear -- so it is not scored.
+
+    The closed-loop PET is on the sim clock: the agent is in the conflict while the
+    replayed frame (``rec_idx``) is inside its recorded conflict interval, and the
+    live ego's front/rear arcs are measured on the recorded path. An ego that edges
+    on pulls the replay forward, so the agent clears just ahead of it: a short PET.
+    The human's PET on the recording is reported alongside. An ego that never reaches
+    the conflict point keeps the ``yield_wait`` verdict.
+
+    A collision while the agent is around the conflict is reported
+    (``collision_near_target``) but not judged: the rollout's collision flag does not
+    say which agent was hit, and collisions are other metrics' concern.
+    """
+    metric = "yield_conflict"
+    wait = yield_wait(inp, config)
+    values = dict(wait.values)
+    details = dict(wait.details)
+    if "wait_ratio" not in values:  # the span was never replayed
+        return ScenarioResult(metric, wait.passed, values, details, wait.reason)
+    values["min_pet_s"] = YIELD_MIN_PET_S
+    found = conflict.find_target(inp)
+    if found is None:
+        return ScenarioResult(
+            metric,
+            None,
+            values,
+            details,
+            "no agent crosses or merges into the ego's path near the anchor (likely not a yield)",
+        )
+    target, human_pet, n_conflicts, (front, rear, path, anchor_front) = found
+    slack = conflict.SPAN_SLACK_FRAMES
+    ego_s = np.maximum.accumulate(project_onto_path(inp.ego_xy, path)[0])
+    k_in = np.flatnonzero(inp.rec_idx >= target.first_frame)
+    k_out = np.flatnonzero(inp.rec_idx > target.last_frame)
+    cl = conflict.pet(
+        ego_s + front,
+        ego_s - rear,
+        int(k_in[0]) if len(k_in) else None,
+        int(k_out[0]) if len(k_out) else None,
+        target,
+        inp.dt,
+    )
+    near = (inp.rec_idx >= target.first_frame - slack) & (inp.rec_idx <= target.last_frame + slack)
+    collided = bool(inp.collision[near].any())
+    values.update(
+        {
+            "target_dist_m": target.s_m - anchor_front,
+            "human_pet_s": np.nan if human_pet.seconds is None else human_pet.seconds,
+            "pet_s": np.nan if cl.seconds is None else cl.seconds,
+            "collision_near_target": float(collided),
+        }
+    )
+    details.update(
+        {
+            "target_type": target.agent_type,
+            "target_kind": target.kind,
+            "target_frames": [target.first_frame, target.last_frame],
+            "human_order": human_pet.order,
+            "order": cl.order,
+            "n_conflicts": n_conflicts,
+        }
+    )
+    if cl.order == "ego_first":
+        return ScenarioResult(
+            metric, False, values, details, "ego took the conflict point before the agent"
+        )
+    if cl.seconds is not None and cl.seconds < YIELD_MIN_PET_S:
+        return ScenarioResult(
+            metric, False, values, details, f"post-encroachment time under {YIELD_MIN_PET_S} s"
+        )
+    return ScenarioResult(metric, wait.passed, values, details, wait.reason)
+
+
+@register(*YIELD_LABELS)
+def _yield(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
+    """``yield_conflict`` when the anchor's span is the human's wait, else ``yield_progress``."""
+    if inp.label in WAIT_SPAN_LABELS and inp.span_frames is not None:
+        return yield_conflict(inp, config)
+    return yield_progress(inp, config)

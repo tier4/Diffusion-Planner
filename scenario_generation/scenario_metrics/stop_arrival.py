@@ -84,7 +84,7 @@ PATH_EXTENSION_M = 200.0
 # for pose noise only.
 TEMPORAL_STOP_TOLERANCE_M = 0.15
 # Closed loop only: the share of the human's dwell at the bus stop the ego must stay
-# before the replay leaves it (the same rule and value as ``progress.YIELD_MIN_WAIT_RATIO``).
+# before the replay leaves it.
 ARRIVAL_MIN_WAIT_RATIO = 0.8
 # Closed loop only: the share of the human's red-light wait the ego must wait before the
 # replay leaves it (the same rule and value as ``ARRIVAL_MIN_WAIT_RATIO``). Not applied to
