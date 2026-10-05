@@ -236,17 +236,17 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_traffic_light_go_minimum_displacement_m=getattr(
                     config_obj, "scenario_traffic_light_go_minimum_displacement_m", 2.0
                 ),
-                scenario_pedestrian_yield_horizon_seconds=getattr(
-                    config_obj, "scenario_pedestrian_yield_horizon_seconds", 3.0
+                scenario_pedestrian_yield_minimum_pet_seconds=getattr(
+                    config_obj, "scenario_pedestrian_yield_minimum_pet_seconds", 0.5
                 ),
-                scenario_pedestrian_yield_maximum_forward_progress_m=getattr(
-                    config_obj, "scenario_pedestrian_yield_maximum_forward_progress_m", 0.5
+                scenario_pedestrian_yield_maximum_conflict_distance_m=getattr(
+                    config_obj, "scenario_pedestrian_yield_maximum_conflict_distance_m", 20.0
                 ),
-                scenario_vehicle_yield_horizon_seconds=getattr(
-                    config_obj, "scenario_vehicle_yield_horizon_seconds", 3.0
+                scenario_vehicle_yield_minimum_pet_seconds=getattr(
+                    config_obj, "scenario_vehicle_yield_minimum_pet_seconds", 0.5
                 ),
-                scenario_vehicle_yield_maximum_forward_progress_m=getattr(
-                    config_obj, "scenario_vehicle_yield_maximum_forward_progress_m", 0.5
+                scenario_vehicle_yield_maximum_conflict_distance_m=getattr(
+                    config_obj, "scenario_vehicle_yield_maximum_conflict_distance_m", 20.0
                 ),
                 scenario_temporal_stop_horizon_seconds=getattr(
                     config_obj, "scenario_temporal_stop_horizon_seconds", 3.0

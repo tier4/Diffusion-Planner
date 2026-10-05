@@ -31,10 +31,12 @@ class ScenarioOpenLoopConfig:
     scenario_departure_minimum_displacement_m: float = 2.0
     scenario_traffic_light_go_horizon_seconds: float = 3.0
     scenario_traffic_light_go_minimum_displacement_m: float = 2.0
-    scenario_pedestrian_yield_horizon_seconds: float = 3.0
-    scenario_pedestrian_yield_maximum_forward_progress_m: float = 0.5
-    scenario_vehicle_yield_horizon_seconds: float = 3.0
-    scenario_vehicle_yield_maximum_forward_progress_m: float = 0.5
+    # Yields are scored at decision frames (``planner_metrics/yield_conflict.py``): the
+    # yielded-to agent is still in the ego's way and clears shortly after.
+    scenario_pedestrian_yield_minimum_pet_seconds: float = 0.5
+    scenario_pedestrian_yield_maximum_conflict_distance_m: float = 20.0
+    scenario_vehicle_yield_minimum_pet_seconds: float = 0.5
+    scenario_vehicle_yield_maximum_conflict_distance_m: float = 20.0
     scenario_temporal_stop_horizon_seconds: float = 3.0
     scenario_temporal_stop_maximum_forward_progress_m: float = 0.5
     scenario_obstacle_stop_tolerance_m: float = 0.5
