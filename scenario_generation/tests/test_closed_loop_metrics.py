@@ -11,7 +11,7 @@ from scenario_generation.closed_loop_eval import aggregate, metrics_for_json
 from scenario_generation.metrics.ego_traj import ego_traj_ego_frame
 from scenario_generation.metrics.red_light import score_red_light_step
 from scenario_generation.metrics.road_border import score_road_border_step
-from scenario_generation.metrics.strong_brake import strong_brake_mask
+from scenario_generation.metrics.strong_brake import strong_brake_count, strong_brake_mask
 from scenario_generation.reproducer_rollout import (
     _clearance_stats,
     _event_count,
@@ -273,13 +273,21 @@ def test_road_border_step_is_zero_when_border_intersects_ego():
 
 
 def test_strong_brake_mask():
-    # Isolated spike (-5) does not count; only the 2nd frame of a consecutive pair does.
+    # Isolated spikes do not count; the second consecutive frame does.
     # Uses an explicit thresh (not the default) so the fixture values stay readable.
     mask = strong_brake_mask(
-        np.array([0.0, -5.0, -4.0, -3.9, -6.0, -5.0], dtype=np.float32),
+        np.array([0.0, -5.0, -4.0, -4.1, -3.9, -6.0, -5.0], dtype=np.float32),
         thresh_mps2=-4.0,
     )
-    assert mask.tolist() == [False, False, True, False, False, True]
+    assert mask.tolist() == [False, False, True, True, False, False, True]
+    assert strong_brake_mask(np.array([-5.0, np.nan, -5.0, -5.0])).tolist() == [
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert strong_brake_count(np.array([-5.0, np.nan, -5.0])) == 0
+    assert strong_brake_count(np.array([-5.0, -5.0, np.nan, -5.0, -5.0])) == 2
 
 
 def _segment_row(**overrides) -> dict:
