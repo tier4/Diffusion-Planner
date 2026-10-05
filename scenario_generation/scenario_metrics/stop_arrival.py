@@ -80,8 +80,9 @@ REC_DT_S = 0.1
 # endpoint) would clamp any overshoot to zero.
 PATH_EXTENSION_M = 200.0
 # Closed loop only: open loop scores temporal_stop as a yield, so its config has no stop
-# tolerance. The same 0.5 m as the open-loop red-light and obstacle stops.
-TEMPORAL_STOP_TOLERANCE_M = 0.5
+# tolerance. Human labels failed stops 0.24 m past the line and up; 0.15 m leaves room
+# for pose noise only.
+TEMPORAL_STOP_TOLERANCE_M = 0.15
 # Closed loop only: the share of the human's dwell at the bus stop the ego must stay
 # before the replay leaves it (the same rule and value as ``progress.YIELD_MIN_WAIT_RATIO``).
 ARRIVAL_MIN_WAIT_RATIO = 0.8

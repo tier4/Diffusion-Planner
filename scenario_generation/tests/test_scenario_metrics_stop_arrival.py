@@ -224,7 +224,7 @@ def test_open_loop_arrival_reference_uses_the_final_pose():
 
 
 def test_temporal_stop_is_a_stop_with_the_closed_loop_tolerance():
-    # The human stops at the line and moves on: a stop past the 0.5 m tolerance fails
+    # The human stops at the line and moves on: a stop past the tolerance fails
     # even though the trace ends well past the stop line.
     human = _profile(50, 20, 80)
     rolled_through = registry.score(_stop_input(_profile(56, 20, 74), human, label="temporal_stop"))
