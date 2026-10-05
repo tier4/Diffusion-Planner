@@ -29,6 +29,14 @@ ends before that:
 - otherwise the available steps are scored and ``horizon_truncated`` is recorded (no
   step after the anchor at all -> not applicable).
 
+The replay is position-keyed, so an ego that creeps forward while it should wait pulls
+the recorded scene forward and reaches the anchor early. ``replay_ahead_s`` (reported for
+both labels) is the recorded time to the anchor minus the sim time to it
+(``anchor_frame * REC_DT_S - anchor_step * dt``; positive = early). traffic_light_go
+fails when it exceeds ``TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S``, whatever the progress
+afterwards: the ego crept on red, and the fast-forwarded replay shows it green, so the
+rollout's red-light check cannot catch it.
+
 Open-loop reference values (``ol_*``, reported only, never part of the verdict): the
 open-loop quantity measured on the same realized steps (``anchor_step`` + 1 .. the horizon
 or the trace's end), with the ego pose at ``anchor_step`` standing in for the open-loop
@@ -70,6 +78,11 @@ CLOSED_LOOP_DEPARTURE_HORIZON_S = 5.0
 
 # Recorded frames are 10 Hz; span lengths are in recorded frames.
 REC_DT_S = 0.1
+# Closed loop only (open loop has no replay to fast-forward): how much earlier than the
+# human a traffic_light_go ego may reach the anchor (the light turning green). Human labels
+# failed windows where the ego crept on red, which no other value separated; failing past
+# 1 s raised agreement with them from 0.68 to 0.76.
+TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S = 1.0
 # Closed loop only (no open-loop counterpart): how much further than the human the ego
 # may get along the road while the replay is inside the human's wait (``yield_wait``).
 # Human labels passed every yield up to 2.98 m past the human's progress; how long the
@@ -207,6 +220,8 @@ def _yield_goal_verdict(
 def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResult:
     """The ego must gain ``minimum_progress_m`` along the recorded path within the horizon.
 
+    traffic_light_go also fails, before the progress check, when the ego reached the anchor
+    more than ``TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S`` before the human (``replay_ahead_s``).
     Anchor never reached -> not applicable, even on goal: the ego never saw the scene it
     should depart from, so reaching the end says nothing about departing from it.
     """
@@ -228,12 +243,22 @@ def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioRes
         "threshold_m": params.minimum_progress_m,
         "horizon_s": params.horizon_s,
         "reference_progress_m": p.reference_m,
+        # Rounded so that whole-frame differences compare exactly against the tolerance.
+        "replay_ahead_s": round(inp.anchor_frame * REC_DT_S - inp.anchor_step * inp.dt, 6),
     }
+    if inp.label == "traffic_light_go":
+        values["max_replay_ahead_s"] = TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S
     if p.available_steps:
         values["ol_max_displacement_m"] = p.ol_max_displacement_m
         values["ol_passed"] = float(p.ol_max_displacement_m >= params.minimum_progress_m)
     reason = ""
-    if not departed and p.truncated and inp.terminated == "goal":
+    if (
+        inp.label == "traffic_light_go"
+        and values["replay_ahead_s"] > TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S
+    ):
+        departed = False
+        reason = "ego reached the green early: crept on red and fast-forwarded the replay"
+    elif not departed and p.truncated and inp.terminated == "goal":
         departed, reason = True, "goal reached before the horizon ended"
     elif not departed and p.truncated:
         reason = f"trace ended ({inp.terminated}) before the horizon; scored on {p.available_steps} steps"

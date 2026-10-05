@@ -4,6 +4,7 @@ import pytest
 from scenario_generation.scenario_metrics import registry
 from scenario_generation.scenario_metrics.progress import (
     CLOSED_LOOP_DEPARTURE_HORIZON_S,
+    TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S,
     WAIT_SPAN_LABELS,
     YIELD_LABELS,
     YIELD_MAX_EXCESS_PROGRESS_M,
@@ -180,7 +181,12 @@ def test_open_loop_reference_leaves_verdicts_and_values_unchanged():
     existing = {"progress_m", "threshold_m", "horizon_s", "reference_progress_m"}
     dep = departure_progress(_input("traffic_light_go", *_ego_with_speeds(np.full(40, 1.0))))
     assert dep.passed is True and dep.values["progress_m"] == pytest.approx(3.0)
-    assert set(dep.values) == existing | {"ol_max_displacement_m", "ol_passed"}
+    assert set(dep.values) == existing | {
+        "replay_ahead_s",
+        "max_replay_ahead_s",
+        "ol_max_displacement_m",
+        "ol_passed",
+    }
     # Straight along the path, the two definitions agree.
     assert dep.values["ol_max_displacement_m"] == pytest.approx(3.0)
     held = yield_progress(_input("pedestrian_yield", *_ego_with_speeds(np.full(40, 0.1))))
@@ -192,6 +198,59 @@ def test_open_loop_reference_leaves_verdicts_and_values_unchanged():
     xy, yaw = _ego_with_speeds(np.zeros(1))
     r = yield_progress(_input("pedestrian_yield", xy, yaw))
     assert r.passed is None and not any(k.startswith("ol_") for k in r.values)
+
+
+EARLY_ANCHOR = 30
+
+
+def _early_input(label: str, ahead_frames: int, speeds: np.ndarray):
+    """The cursor runs ``ahead_frames`` ahead of the sim (the ego crept), so the anchor
+    frame ``EARLY_ANCHOR`` replays ``ahead_frames`` steps early; the ego then follows
+    ``speeds``."""
+    xy, yaw = speed_profile_path(np.concatenate([np.zeros(EARLY_ANCHOR - ahead_frames), speeds]))
+    rec_xy, rec_yaw = straight_path(100, 2.0)
+    return make_input(
+        label=label,
+        ego_xy=xy,
+        ego_yaw=yaw,
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=EARLY_ANCHOR,
+        rec_idx=np.minimum(np.arange(len(xy)) + ahead_frames, 99),
+        terminated="max_steps",
+    )
+
+
+def test_traffic_light_go_fails_when_the_ego_reached_the_green_early():
+    # Anchor replayed 2 s early, then a clean departure: still a creep on red.
+    inp = _early_input("traffic_light_go", 20, np.full(60, 1.0))
+    assert inp.anchor_step == EARLY_ANCHOR - 20
+    r = departure_progress(inp)
+    assert r.passed is False and "early" in r.reason
+    assert r.values["replay_ahead_s"] == pytest.approx(2.0)
+    assert r.values["max_replay_ahead_s"] == TRAFFIC_LIGHT_GO_MAX_REPLAY_AHEAD_S
+    assert r.values["progress_m"] >= r.values["threshold_m"]
+    # departure scores the same input on progress alone.
+    dep = departure_progress(_early_input("departure", 20, np.full(60, 1.0)))
+    assert dep.passed is True
+    assert dep.values["replay_ahead_s"] == pytest.approx(2.0)
+    assert "max_replay_ahead_s" not in dep.values
+
+
+def test_traffic_light_go_within_the_tolerance_passes():
+    on_time = departure_progress(_input("traffic_light_go", *_ego_with_speeds(np.full(40, 1.0))))
+    assert on_time.passed is True and on_time.values["replay_ahead_s"] == pytest.approx(0.0)
+    # Exactly at the tolerance still passes (no float residue from frame * 0.1).
+    near = departure_progress(_early_input("traffic_light_go", 10, np.full(50, 1.0)))
+    assert near.passed is True and near.values["replay_ahead_s"] == 1.0
+    over = departure_progress(_early_input("traffic_light_go", 11, np.full(50, 1.0)))
+    assert over.passed is False and over.values["replay_ahead_s"] == pytest.approx(1.1)
+
+
+def test_early_anchor_never_replayed_stays_not_applicable():
+    xy, yaw = straight_path(ANCHOR - 2, 0.0)
+    r = departure_progress(_input("traffic_light_go", xy, yaw))
+    assert r.passed is None and "replay_ahead_s" not in r.values
 
 
 # --- yield_wait: the ego's progress while the replay is inside the human's wait ---
