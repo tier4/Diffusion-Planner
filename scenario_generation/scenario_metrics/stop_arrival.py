@@ -157,6 +157,27 @@ def _stop_runs(speed: np.ndarray, dt: float, p: StopParams) -> list[tuple[int, i
     return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]) if b - a >= width]
 
 
+def _first_stop_steps(
+    live: list[tuple[int, int]], k0: int, dt: float, p: StopParams
+) -> np.ndarray | None:
+    """Steps of the first ``sustained_stop_s`` of the ego's first stop at/after ``k0``.
+
+    The window that makes it a stop: where the ego came to rest, before any creep that
+    the speed threshold still calls stopped. None without a stop.
+    """
+    if not live:
+        return None
+    start = max(live[0][0], k0)
+    end = min(live[0][1], start + round(p.sustained_stop_s / dt))
+    return np.arange(start, max(start + 1, end))
+
+
+def _hold_creep_m(s_ego: np.ndarray, first: np.ndarray, judged: np.ndarray, first_s: float):
+    """Furthest arc over the ``judged`` steps from the first stop on, minus that stop."""
+    later = judged[judged >= first[0]]
+    return float(s_ego[later].max()) - first_s if len(later) else np.nan
+
+
 def _front_offset_m(frame: dict) -> float | None:
     """Rear axle (the pose) to the front face: ``(wheelbase + length) / 2``, as the
     evaluator's box (centre half a wheelbase ahead of the axle)."""
@@ -310,6 +331,21 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     max_steps, abort) before the ego either stops or passes the limit. The latter is
     the common case when the recording ends with the human still stopped: the goal is
     then the stop point and the rollout ends ``GOAL_REACH_M`` short of it, still moving.
+
+    Reported only, splitting the judged position into reacting and holding:
+
+    - ``first_stop_overshoot_m``: the ego's first stop at/after the anchor (median arc
+      over its first ``sustained_stop_s``; for temporal_stop a held stop, see above)
+      minus the reference, signed (negative short of it); NaN if the ego never stops.
+      Reacting to the scene: comparable with open loop.
+    - ``hold_creep_m``: the furthest arc from that stop on over the steps the verdict
+      judges (before the human's departure; for temporal_stop up to the end of the
+      ego's held stop) minus the first stop; NaN without a stop or such a step.
+      Holding: closed loop only, and dominated by the model's creep at standstill,
+      which the position-keyed replay also turns into a skipped wait.
+
+    When a stop while the human holds decides the verdict, ``overshoot_m`` is
+    ``max(0, first_stop_overshoot_m + hold_creep_m)``.
     """
     metric = "stop_overshoot"
     if inp.anchor_step is None:
@@ -360,12 +396,19 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     # Steps whose replayed frame is before the human's departure: the light is still red.
     holding = np.flatnonzero((np.arange(inp.n_steps) >= k0) & (inp.rec_idx < h1))
     held = [r for r in live if len(holding) and r[0] <= holding[-1]]
+    # Steps the furthest point is taken over: for temporal_stop up to the end of the
+    # ego's first held stop, as what follows is its departure.
+    judged = holding[holding < held[0][1]] if held and inp.label == "temporal_stop" else holding
+    first = _first_stop_steps(live, k0, inp.dt, p)
+    if first is None:
+        values["first_stop_overshoot_m"] = values["hold_creep_m"] = np.nan
+    else:
+        first_s = float(np.median(s_ego[first]))
+        values["first_stop_overshoot_m"] = first_s - ref_s
+        values["hold_creep_m"] = _hold_creep_m(s_ego, first, judged, first_s)
     if held:
         r0, r1 = held[0]
-        if inp.label == "temporal_stop":
-            # Up to the end of the ego's first held stop: what follows is its departure.
-            holding = holding[holding < r1]
-        stop_s = float(s_ego[holding].max())
+        stop_s = float(s_ego[judged].max())
         passed, stopped = stop_s <= limit, True
     elif k_cross is not None:
         after = [r for r in live if r[0] >= k_cross]
@@ -456,6 +499,13 @@ def _score_arrival_stop(
     stayed (``wait_ratio``); edging up by less than the replay's search radius still
     counts as staying. The open-loop reference values compare the final pose with the
     window's end and say nothing here, so they are left out.
+
+    Reported only, as for the stop labels (see ``score_stop``): ``first_stop_distance_m``,
+    the distance to the arrival point at the ego's first stop after the anchor (median
+    pose over its first ``sustained_stop_s``; reacting to the scene, comparable with
+    open loop), and ``hold_creep_m``, the furthest arc from that stop on while the replay
+    is before the human's departure, minus the first stop (holding: closed loop only,
+    dominated by the model's creep). Both NaN without a stop.
     """
     metric = "arrival"
     k0 = inp.anchor_step
@@ -478,6 +528,15 @@ def _score_arrival_stop(
     live = [
         r for r in _stop_runs(_ego_stop_speed(inp, _STOP_RULE), inp.dt, _STOP_RULE) if r[1] > k0
     ]
+    first = _first_stop_steps(live, k0, inp.dt, _STOP_RULE)
+    if first is None:
+        values["first_stop_distance_m"] = values["hold_creep_m"] = np.nan
+    else:
+        dwelling = np.flatnonzero((np.arange(inp.n_steps) >= k0) & (inp.rec_idx < h1))
+        first_xy = np.median(inp.ego_xy[first], axis=0)
+        first_s = float(np.median(s_ego[first]))
+        values["first_stop_distance_m"] = float(np.linalg.norm(first_xy - inp.rec_xy[i_arr]))
+        values["hold_creep_m"] = _hold_creep_m(s_ego, first, dwelling, first_s)
     if not live:
         if (
             inp.terminated != "goal"
