@@ -147,6 +147,48 @@ def test_simple_turn_anchor_never_reached_is_not_applicable():
     assert r.passed is None and r.reason == "anchor never reached"
 
 
+def _steps(k: int, n: int = 200) -> np.ndarray:
+    flags = np.zeros(n, dtype=bool)
+    flags[k] = True
+    return flags
+
+
+def _turn(**kw):
+    rec_xy, rec_yaw = _turn_path(200)
+    return score(
+        make_input(
+            label="simple_turn",
+            ego_xy=rec_xy,
+            ego_yaw=rec_yaw,
+            rec_xy=rec_xy,
+            rec_yaw=rec_yaw,
+            anchor_frame=ANCHOR,
+            **kw,
+        )
+    )
+
+
+def test_simple_turn_collision_during_the_turn_fails():
+    r = _turn(collision=_steps(ANCHOR + 30))
+    assert r.passed is False and r.reason == "collision during the turn"
+    assert r.values["collision"] == 1.0 and r.details["first_collision_step"] == ANCHOR + 30
+    # OBB contact without the flag counts too.
+    clearance = np.full(200, 2.0)
+    clearance[ANCHOR + 30] = 0.0
+    r = _turn(clearance_m=clearance)
+    assert r.passed is False and r.reason == "collision during the turn"
+
+
+def test_simple_turn_collision_outside_the_scored_steps_or_rear_ended_passes():
+    before = _turn(collision=_steps(ANCHOR - 5))
+    assert before.passed is True and before.values["collision"] == 0.0
+    after = _turn(collision=_steps(199))
+    assert after.details["last_step"] < 199
+    assert after.passed is True and after.values["collision"] == 0.0
+    rear = _turn(collision=_steps(ANCHOR + 30), collision_rear=_steps(ANCHOR + 30))
+    assert rear.passed is True and rear.values["collision"] == 0.0
+
+
 # ---------------------------------------------------------------- centerline
 
 
@@ -212,7 +254,7 @@ def _lane_change_path(n: int, shift: float, speed: float = 10.0) -> tuple[np.nda
     return xy, yaw
 
 
-def _lane_change(ego_shift: float, rec_shift: float = -3.5):
+def _lane_change(ego_shift: float, rec_shift: float = -3.5, **kw):
     rec_xy, rec_yaw = _lane_change_path(200, rec_shift)
     ego_xy, ego_yaw = _lane_change_path(200, ego_shift)
     # Lanes are ego-centric at the anchor's recorded pose (x = ANCHOR m along the road).
@@ -226,6 +268,7 @@ def _lane_change(ego_shift: float, rec_shift: float = -3.5):
             rec_yaw=rec_yaw,
             anchor_frame=ANCHOR,
             frames=frames,
+            **kw,
         )
     )
 
@@ -271,9 +314,30 @@ def test_lane_change_not_completed_before_the_trace_ends_fails():
     assert r.passed is False and r.values["left_source_lane"] == 0.0
 
 
+def test_lane_change_collision_during_the_lane_change_fails():
+    r = _lane_change(-3.5, collision=_steps(ANCHOR + 30))
+    assert r.passed is False and r.reason == "collision during the lane change"
+    assert r.values["collision"] == 1.0 and r.details["first_collision_step"] == ANCHOR + 30
+    # Collision takes precedence over the lateral reasons.
+    stay = _lane_change(0.0, collision=_steps(ANCHOR + 30))
+    assert stay.passed is False and stay.reason == "collision during the lane change"
+
+
+def test_lane_change_collision_outside_the_scored_steps_or_rear_ended_passes():
+    before = _lane_change(-3.5, collision=_steps(ANCHOR - 5))
+    assert before.passed is True and before.values["collision"] == 0.0
+    after = _lane_change(-3.5, collision=_steps(199))
+    assert after.details["last_step"] < 199
+    assert after.passed is True and after.values["collision"] == 0.0
+    rear = _lane_change(-3.5, collision=_steps(ANCHOR + 30), collision_rear=_steps(ANCHOR + 30))
+    assert rear.passed is True and rear.values["collision"] == 0.0
+
+
 def test_lane_change_without_a_recorded_lane_change_is_not_applicable():
     r = _lane_change(0.0, rec_shift=0.0)
     assert r.passed is None and r.details["gt_lane_change_detected"] is False
+    hit = _lane_change(0.0, rec_shift=0.0, collision=_steps(ANCHOR + 30))
+    assert hit.passed is None
 
 
 def test_lane_change_anchor_never_reached_is_not_applicable():

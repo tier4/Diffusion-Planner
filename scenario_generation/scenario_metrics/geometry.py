@@ -17,6 +17,11 @@ at the anchor has near-zero lateral error and no collision. ``simple_turn``,
 ``centerline`` and ``object_avoidance`` therefore also require the ego to cover
 ``MIN_PROGRESS_RATIO`` of the human's arc length over the stretch.
 
+Collisions. ``lane_change`` and ``simple_turn`` also fail when the ego collides during the
+scored steps (the rollout's ``collision`` flag or OBB clearance <= 0, as in
+``object_avoidance``). Steps the rollout marks ``collision_rear`` are not counted: the
+replayed agents do not react, so a rear-end hit is the replay's, not the ego's.
+
 Open-loop ``simple_turn``/``centerline`` report errors only, with no pass line;
 ``MAX_LATERAL_ERROR_M`` is new here, and the raw errors are kept in ``values`` so
 another threshold can be applied offline.
@@ -210,10 +215,24 @@ def _base_details(inp: ClosedLoopScenarioInput, w: _Window) -> dict:
     }
 
 
+def _ego_collisions(inp: ClosedLoopScenarioInput, w: _Window) -> np.ndarray:
+    """Per scored step: the ego collided (flag or OBB clearance <= 0), rear-end hits by
+    the non-reactive replay (``collision_rear``) excluded."""
+    hit = inp.collision[w.steps] | (inp.clearance_m[w.steps] <= 0.0)
+    if inp.collision_rear is not None:
+        hit &= ~inp.collision_rear[w.steps]
+    return hit
+
+
 def _lateral_result(
-    metric: str, inp: ClosedLoopScenarioInput, w: _Window, components: dict[str, torch.Tensor]
+    metric: str,
+    inp: ClosedLoopScenarioInput,
+    w: _Window,
+    components: dict[str, torch.Tensor],
+    collision_reason: str | None = None,
 ) -> ScenarioResult:
-    """Shared verdict of the two lateral-deviation labels."""
+    """Shared verdict of the two lateral-deviation labels; with ``collision_reason``, an
+    ego collision during the scored steps also fails, under that reason."""
     lateral = components["lateral_error_m"][0].numpy()
     longitudinal = components["longitudinal_error_m"][0].numpy()
     values = {
@@ -224,8 +243,18 @@ def _lateral_result(
         **w.values(inp.dt),
     }
     covered = w.covered
+    details = {**_base_details(inp, w), "covered": covered}
+    collided = False
+    if collision_reason is not None:
+        hits = _ego_collisions(inp, w)
+        collided = bool(hits.any())
+        values["collision"] = float(collided)
+        if collided:
+            details["first_collision_step"] = int(w.steps[np.flatnonzero(hits)[0]])
     within = values["max_lateral_error_m"] <= MAX_LATERAL_ERROR_M
-    if not covered:
+    if collided:
+        reason = collision_reason
+    elif not covered:
         reason = "ego did not cover the recorded stretch"
     elif not within:
         reason = f"lateral error above {MAX_LATERAL_ERROR_M} m"
@@ -233,9 +262,9 @@ def _lateral_result(
         reason = ""
     return ScenarioResult(
         metric=metric,
-        passed=covered and within,
+        passed=covered and within and not collided,
         values=values,
-        details={**_base_details(inp, w), "covered": covered},
+        details=details,
         reason=reason,
     )
 
@@ -246,7 +275,8 @@ def score_simple_turn(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
 
     Mirrors ``planner_metrics/gt_lateral_deviation.py`` (the open-loop ``simple_turn``
     scorer) with the recorded stretch after the anchor as the GT path, both expressed
-    in the anchor frame so the torch helper runs unchanged.
+    in the anchor frame so the torch helper runs unchanged. An ego collision during the
+    scored steps fails the turn (see the module docstring).
     """
     metric = "gt_lateral_deviation"
     w = _window(inp, _horizon_s("simple_turn", config))
@@ -264,7 +294,7 @@ def score_simple_turn(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
     components = compute_gt_lateral_deviation_batch(
         torch.from_numpy(ego)[None], {"ego_agent_future": torch.from_numpy(gt)[None]}
     )
-    return _lateral_result(metric, inp, w, components)
+    return _lateral_result(metric, inp, w, components, "collision during the turn")
 
 
 @register("centerline")
@@ -310,7 +340,8 @@ def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
 
     The stretch runs ``LANE_CHANGE_GRACE_S`` of recorded drive past the span's end (the
     human settled in the new lane), so a lane change a little later than the human's
-    still passes; one that has not finished by then is late.
+    still passes; one that has not finished by then is late. An ego collision during the
+    scored steps fails the lane change (see the module docstring).
     """
     metric = "lane_change"
     params = open_loop_parameters("lane_change", config)
@@ -396,13 +427,19 @@ def score_lane_change(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
         return ScenarioResult(
             metric, None, values, details, "recorded ego performed no lane change after the anchor"
         )
-    if not crossed:
+    hits = _ego_collisions(inp, w)
+    collided = bool(hits.any())
+    values["collision"] = float(collided)
+    if collided:
+        details["first_collision_step"] = int(w.steps[np.flatnonzero(hits)[0]])
+        reason = "collision during the lane change"
+    elif not crossed:
         reason = "did not leave the source lane towards the recorded side"
     elif not reached:
         reason = "ended outside the recorded target lane"
     else:
         reason = ""
-    return ScenarioResult(metric, crossed and reached, values, details, reason)
+    return ScenarioResult(metric, crossed and reached and not collided, values, details, reason)
 
 
 @register("object_avoidance")

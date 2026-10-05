@@ -70,6 +70,9 @@ class ClosedLoopScenarioInput:
     # (K,) ego-to-road-border distance per step (the rollout's ``rb_dist_m``; nan where
     # the frame had no border), or None when the trace does not log it.
     road_border_m: np.ndarray | None = None
+    # (K,) bool, the collision touches the ego box's rear edge (the replayed agent ran
+    # into the ego; a subset of ``collision``), or None when the trace does not log it.
+    collision_rear: np.ndarray | None = None
 
     @property
     def n_steps(self) -> int:

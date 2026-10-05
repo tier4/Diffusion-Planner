@@ -110,6 +110,7 @@ def load_input_from_timeline(
     clearance = np.array(
         [float("inf") if s.get("clearance_m") is None else float(s["clearance_m"]) for s in steps]
     )
+    collision_rear = np.array([bool(s.get("collision_rear", False)) for s in steps])
     red = np.array([bool(s.get("red_light_violation", False)) for s in steps])
     road_border = None
     if any("rb_dist_m" in s for s in steps):
@@ -138,4 +139,5 @@ def load_input_from_timeline(
         load_frame=timeline.npz if load_frame is None else load_frame,
         span_frames=None if span_frames is None else (int(span_frames[0]), int(span_frames[1])),
         road_border_m=road_border,
+        collision_rear=collision_rear,
     )
