@@ -54,6 +54,11 @@ DEPARTURE_LABELS = ("departure", "traffic_light_go")
 # temporal_stop is a stop-line stop, scored by the stop family (``stop_arrival``); open
 # loop still scores it as a yield, so ``yield_progress`` keeps reading its config.
 YIELD_LABELS = ("pedestrian_yield", "vehicle_yield")
+# Closed loop only: departure's horizon, longer than open loop's 3 s. A closed-loop ego
+# starts from its own standstill, and human labels passed every departure, including
+# ones that took 3-5 s to gain the 2 m (0.94 agreement at 5 s, against 0.62 at 3 s).
+# traffic_light_go keeps the open-loop horizon.
+CLOSED_LOOP_DEPARTURE_HORIZON_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -63,10 +68,15 @@ class DepartureParams:
 
     @classmethod
     def from_config(cls, label: str, config=None) -> DepartureParams:
-        """Both from the open-loop config (``scenario_<label>_*``, see ``shared_config``)."""
+        """From the open-loop config (``scenario_<label>_*``, see ``shared_config``),
+        except departure's horizon (``CLOSED_LOOP_DEPARTURE_HORIZON_S``)."""
         p = open_loop_parameters(label, config)
         return cls(
-            horizon_s=float(p["horizon_seconds"]),
+            horizon_s=(
+                CLOSED_LOOP_DEPARTURE_HORIZON_S
+                if label == "departure"
+                else float(p["horizon_seconds"])
+            ),
             # Open loop's displacement threshold, measured here as arc length gained.
             minimum_progress_m=float(p["minimum_displacement_m"]),
         )

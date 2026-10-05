@@ -23,8 +23,9 @@ def _config(**overrides) -> ScenarioOpenLoopConfig:
 
 
 def test_defaults_match_the_former_closed_loop_constants():
-    for label in ("departure", "traffic_light_go"):
-        assert DepartureParams.from_config(label) == DepartureParams(3.0, 2.0)
+    assert DepartureParams.from_config("traffic_light_go") == DepartureParams(3.0, 2.0)
+    # departure's horizon is closed loop's own (CLOSED_LOOP_DEPARTURE_HORIZON_S).
+    assert DepartureParams.from_config("departure") == DepartureParams(5.0, 2.0)
     for label in ("pedestrian_yield", "vehicle_yield", "temporal_stop"):
         assert YieldParams.from_config(label) == YieldParams(3.0, 0.5)
     for label in ("traffic_light_stop", "obstacle_stop"):

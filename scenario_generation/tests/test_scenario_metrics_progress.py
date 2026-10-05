@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 
 from scenario_generation.scenario_metrics import registry
-from scenario_generation.scenario_metrics.progress import departure_progress, yield_progress
+from scenario_generation.scenario_metrics.progress import (
+    CLOSED_LOOP_DEPARTURE_HORIZON_S,
+    departure_progress,
+    yield_progress,
+)
 from scenario_generation.scenario_metrics.testing import (
     make_input,
     speed_profile_path,
@@ -38,7 +42,7 @@ def test_labels_are_registered(label):
 
 
 def test_departure_pass_and_fail():
-    ok = departure_progress(_input("departure", *_ego_with_speeds(np.full(40, 1.0))))
+    ok = departure_progress(_input("traffic_light_go", *_ego_with_speeds(np.full(40, 1.0))))
     assert ok.passed is True
     assert ok.values["progress_m"] == pytest.approx(3.0)
     assert ok.details["time_to_threshold_s"] == pytest.approx(2.0)
@@ -46,6 +50,15 @@ def test_departure_pass_and_fail():
     assert slow.passed is False
     assert slow.values["progress_m"] == pytest.approx(1.5)
     assert slow.details["time_to_threshold_s"] is None
+
+
+def test_departure_gets_the_closed_loop_horizon():
+    # 0.5 m/s gains 1.5 m in 3 s but 2.5 m in 5 s.
+    xy, yaw = _ego_with_speeds(np.full(60, 0.5))
+    departure = departure_progress(_input("departure", xy, yaw))
+    assert departure.passed is True
+    assert departure.values["horizon_s"] == CLOSED_LOOP_DEPARTURE_HORIZON_S
+    assert departure_progress(_input("traffic_light_go", xy, yaw)).passed is False
 
 
 def test_yield_pass_and_fail():
@@ -132,7 +145,7 @@ def test_progress_is_measured_along_the_path_not_euclidean():
 
 
 def test_reference_progress_is_the_humans():
-    r = departure_progress(_input("departure", *_ego_with_speeds(np.full(40, 1.0))))
+    r = departure_progress(_input("traffic_light_go", *_ego_with_speeds(np.full(40, 1.0))))
     assert r.values["reference_progress_m"] == pytest.approx(2.0 * 3.0)
 
 
@@ -161,7 +174,7 @@ def test_open_loop_reference_forward_is_along_the_anchor_heading():
 
 def test_open_loop_reference_leaves_verdicts_and_values_unchanged():
     existing = {"progress_m", "threshold_m", "horizon_s", "reference_progress_m"}
-    dep = departure_progress(_input("departure", *_ego_with_speeds(np.full(40, 1.0))))
+    dep = departure_progress(_input("traffic_light_go", *_ego_with_speeds(np.full(40, 1.0))))
     assert dep.passed is True and dep.values["progress_m"] == pytest.approx(3.0)
     assert set(dep.values) == existing | {"ol_max_displacement_m", "ol_passed"}
     # Straight along the path, the two definitions agree.
