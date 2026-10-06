@@ -34,9 +34,11 @@ red: it fails, whatever the progress afterwards, when its front got past the sto
 (``stop_arrival.red_hold_values``: the furthest point from the replay entering the
 human's stop to the anchor). The replay is position-keyed, so an ego creeping on the red
 pulls the scene to the green, and the rollout's red-light check never sees it red.
-``replay_ahead_s`` (reported for both labels) is how much earlier than the human the ego
-reached the anchor (``anchor_frame * REC_DT_S - anchor_step * dt``; positive = the
-replay was fast-forwarded).
+When a vehicle stood between the human and that line, the human was queued, not stopped
+by the line, and the window is not scored (the replay pulls the lead vehicle on with a
+creeping ego). ``replay_ahead_s`` (reported for both labels) is how much earlier than the
+human the ego reached the anchor (``anchor_frame * REC_DT_S - anchor_step * dt``;
+positive = the replay was fast-forwarded).
 
 Open-loop reference values (``ol_*``, reported only, never part of the verdict): the
 open-loop quantity measured on the same realized steps (``anchor_step`` + 1 .. the horizon
@@ -223,7 +225,9 @@ def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioRes
     """The ego must gain ``minimum_progress_m`` along the recorded path within the horizon.
 
     traffic_light_go also fails, before the progress check, when the ego's front got past
-    the stop line while the human waited at the red (``red_hold_values``).
+    the stop line while the human waited at the red (``red_hold_values``), and is not
+    applicable (values kept) when the human was not at the head of the queue there
+    (``queued``, see ``stop_arrival.queue_values``).
     Anchor never reached -> not applicable, even on goal: the ego never saw the scene it
     should depart from, so reaching the end says nothing about departing from it.
     """
@@ -256,7 +260,9 @@ def departure_progress(inp: ClosedLoopScenarioInput, config=None) -> ScenarioRes
         values["ol_max_displacement_m"] = p.ol_max_displacement_m
         values["ol_passed"] = float(p.ol_max_displacement_m >= params.minimum_progress_m)
     reason = ""
-    if red is not None and red["furthest_past_line_m"] > TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M:
+    if red is not None and red.get("queued") == 1.0:
+        departed, reason = None, stop_arrival.QUEUED_REASON
+    elif red is not None and red["furthest_past_line_m"] > TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M:
         departed = False
         reason = "ego passed the stop line on red"
     elif not departed and p.truncated and inp.terminated == "goal":

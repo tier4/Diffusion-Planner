@@ -12,6 +12,7 @@ from scenario_generation.scenario_metrics.progress import (
     yield_progress,
     yield_wait,
 )
+from scenario_generation.scenario_metrics.stop_arrival import QUEUED_REASON
 from scenario_generation.scenario_metrics.testing import (
     make_input,
     speed_profile_path,
@@ -203,15 +204,25 @@ RED = (50, 100)  # the human waits at x = 25 m over these frames; the light turn
 LINE_X = 28.5  # stop line, world x: 0.5 m ahead of the human's front (axle + 3 m)
 
 
-def _red_input(ego_speeds, label="traffic_light_go", rec_idx=None):
-    """Human: 5 m/s to x = 25 m, waits at the red over ``RED``, departs at the anchor."""
+def _red_input(ego_speeds, label="traffic_light_go", rec_idx=None, line_x=LINE_X, lead=None):
+    """Human: 5 m/s to x = 25 m, waits at the red over ``RED``, departs at the anchor.
+
+    ``lead``: world xy of a vehicle standing there in every frame (neighbor data).
+    """
     rec_speeds = np.r_[np.full(RED[0], 5.0), np.zeros(RED[1] - RED[0]), np.full(60, 2.0)]
     rec_xy, rec_yaw = speed_profile_path(rec_speeds)
     ego_xy, ego_yaw = speed_profile_path(ego_speeds)
 
     def frame(i):
-        line = np.array([[[LINE_X - rec_xy[i, 0], -2.0], [LINE_X - rec_xy[i, 0], 2.0]]])
-        return {"stop_lines": line, "ego_shape": np.array([2.0, 4.0, 2.0])}
+        line = np.array([[[line_x - rec_xy[i, 0], -2.0], [line_x - rec_xy[i, 0], 2.0]]])
+        out = {"stop_lines": line, "ego_shape": np.array([2.0, 4.0, 2.0])}
+        if lead is not None:
+            past = np.zeros((1, 31, 4))
+            past[0, :, :2] = np.asarray(lead) - rec_xy[i]
+            past[0, :, 2] = 1.0
+            out["neighbor_agents_past"] = past
+            out["agent_label"] = np.array([[1.0, 0.0, 0.0]])
+        return out
 
     return make_input(
         label=label,
@@ -261,6 +272,26 @@ def test_traffic_light_go_edging_onto_the_line_passes():
     r = departure_progress(_red_input(_ego_speeds(creep_m=0.9)))
     assert r.values["furthest_past_line_m"] == pytest.approx(0.4, abs=0.05)
     assert TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M == 0.5 and r.passed is True
+
+
+def test_traffic_light_go_behind_a_queued_vehicle_is_not_scored():
+    # Line at x = 35 m, 7 m ahead of the human's front; a car waits at x = 31.5 m.
+    r = departure_progress(_red_input(_ego_speeds(creep_m=1.5), line_x=35.0, lead=(31.5, 0.3)))
+    assert r.passed is None and r.reason == QUEUED_REASON
+    assert r.values["queued"] == 1.0
+    assert r.values["human_front_to_line_m"] == pytest.approx(7.0)
+    assert "furthest_past_line_m" in r.values and "progress_m" in r.values
+
+
+def test_traffic_light_go_queue_ignores_the_next_lane():
+    # The same scene with the car one lane over: scored against the line as without it.
+    alone = departure_progress(_red_input(_ego_speeds(creep_m=1.5), line_x=35.0))
+    r = departure_progress(_red_input(_ego_speeds(creep_m=1.5), line_x=35.0, lead=(31.5, 3.0)))
+    assert "queued" not in alone.values and r.values["queued"] == 0.0
+    assert r.passed is alone.passed is True and r.reason == alone.reason
+    # A queue check never turns a line failure into a pass.
+    fail = departure_progress(_red_input(_ego_speeds(creep_m=1.5), lead=(31.5, 3.0)))
+    assert fail.passed is False and fail.reason == "ego passed the stop line on red"
 
 
 def test_departure_is_not_judged_by_the_red():

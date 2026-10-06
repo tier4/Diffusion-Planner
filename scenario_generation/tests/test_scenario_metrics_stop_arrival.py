@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -5,6 +7,7 @@ from scenario_generation.scenario_metrics import registry
 from scenario_generation.scenario_metrics.stop_arrival import (
     GOAL_REACH_M,
     HOLD_CREEP_MARGIN_M,
+    QUEUED_REASON,
     TEMPORAL_STOP_MIN_HOLD_S,
     TEMPORAL_STOP_TOLERANCE_M,
 )
@@ -442,6 +445,40 @@ def test_without_a_stop_line_the_human_stop_is_the_reference():
         )
     )
     assert obstacle.details["stop_reference"] == "human_stop"  # not a stop-line label
+
+
+def _queue_input(line_x_ahead: float, lead_xy: tuple[float, float], lead_speed: float = 0.0):
+    """``_line_input`` with one vehicle at ``lead_xy`` (relative to the human's stop pose)
+    in the stop frame, moving along +x at ``lead_speed``."""
+    inp = _line_input(line_x_ahead)
+    frame = _line_frames(line_x_ahead)[99]
+    t = np.arange(-30, 1) * 0.1
+    past = np.zeros((2, 31, 4))
+    past[0, :, 0] = lead_xy[0] + lead_speed * t
+    past[0, :, 1] = lead_xy[1]
+    past[0, :, 2] = 1.0
+    frame["neighbor_agents_past"] = past
+    frame["agent_label"] = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    return dataclasses.replace(inp, load_frame=lambda i: {99: frame}[i])
+
+
+def test_traffic_light_stop_behind_a_queued_vehicle_is_not_scored():
+    # Line 9 m ahead of the axle (6 m ahead of the human's front), a car stopped 6.5 m
+    # ahead in the lane: the human stopped behind it, not at the line.
+    r = registry.score(_queue_input(9.0, (6.5, 0.2)))
+    assert r.passed is None and r.reason == QUEUED_REASON
+    assert r.values["queued"] == 1.0
+    assert r.values["human_front_to_line_m"] == pytest.approx(6.0)
+    assert "first_stop_overshoot_m" in r.values  # the values are kept
+
+
+def test_traffic_light_stop_queue_ignores_the_next_lane_and_moving_vehicles():
+    line_only = registry.score(_line_input(9.0))
+    assert "queued" not in line_only.values  # no neighbor data, no check
+    for lead_xy, speed in (((6.5, -3.0), 0.0), ((6.5, 0.0), 5.0)):
+        r = registry.score(_queue_input(9.0, lead_xy, speed))
+        assert r.values["queued"] == 0.0
+        assert r.passed == line_only.passed and r.reason == line_only.reason
 
 
 def test_extended_arrival_reports_the_share_of_the_dwell_the_ego_stayed():

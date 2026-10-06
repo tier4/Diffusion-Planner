@@ -70,6 +70,7 @@ from scenario_generation.scenario_metrics.base import (
     project_onto_path,
     wrap_angle,
 )
+from scenario_generation.scenario_metrics.conflict import _agent_attrs
 from scenario_generation.scenario_metrics.geometry import _to_local
 from scenario_generation.scenario_metrics.registry import register
 from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
@@ -116,6 +117,18 @@ STOP_LINE_SEARCH_AHEAD_M = 10.0
 # Length of the open-loop GT future / prediction ``stop_overshoot`` reads; the interval
 # of the ``ol_*`` stop values.
 OL_STOP_HORIZON_S = 8.0
+# A vehicle stands before the stop line the human stopped for (the human was queued, see
+# ``queue_values``) when, at the human's stop frame, its centre is within this lateral
+# offset of the recorded path (a lane is ~3 m wide, so the next lane stays out) ...
+QUEUE_CORRIDOR_M = 1.5
+# ... between the human's front and this far past the stop line (a lead vehicle stopped
+# with its front over the line) ...
+QUEUE_PAST_LINE_M = 2.0
+# ... and nearly stopped: net speed over the last ``QUEUE_SPEED_WINDOW_S`` of its past
+# track at most this (speed is ignored when that part of the track is missing).
+QUEUE_MAX_SPEED_MPS = 1.0
+QUEUE_SPEED_WINDOW_S = 0.5
+QUEUED_REASON = "human was not at the head of the queue (a vehicle stood before the stop line)"
 
 
 @dataclass(frozen=True)
@@ -230,6 +243,57 @@ def _stop_line_arc(
         if -STOP_LINE_SEARCH_BEHIND_M <= s_cross - human_front_s <= STOP_LINE_SEARCH_AHEAD_M:
             crossings.append(float(s_cross))
     return (min(crossings), front) if crossings else None
+
+
+def _lead_vehicle_before_line(
+    inp: ClosedLoopScenarioInput, frame_idx: int, human_front_s: float, line_s: float
+) -> bool | None:
+    """Whether a vehicle stood between the human's front and the stop line at ``frame_idx``.
+
+    Reads the frame's ``neighbor_agents_past[:, -1]`` (ego-centric at that frame, taken to
+    the world frame): a vehicle (``agent_label`` index 0; legacy columns 8:11) whose centre
+    is within ``QUEUE_CORRIDOR_M`` of the recorded path, with its arc after
+    ``human_front_s`` and at most ``line_s + QUEUE_PAST_LINE_M``, and nearly stopped
+    (``QUEUE_MAX_SPEED_MPS``). None when the frame has no neighbor data.
+    """
+    try:
+        frame = inp.load_frame(frame_idx)
+    except KeyError:  # frame not available
+        return None
+    if frame.get("neighbor_agents_past") is None:
+        return None
+    past, types, _ = _agent_attrs(frame)
+    w = max(1, round(QUEUE_SPEED_WINDOW_S / REC_DT_S))
+    for i in np.flatnonzero((np.abs(past[:, -1]).sum(axis=1) > 0) & (types == 0)):
+        arc, lat = project_onto_path(inp.to_world(past[i, -1], frame_idx), _extended_path(inp))
+        if (
+            abs(lat[0]) > QUEUE_CORRIDOR_M
+            or not human_front_s < arc[0] <= line_s + QUEUE_PAST_LINE_M
+        ):
+            continue
+        if past.shape[1] > w and np.abs(past[i, -1 - w]).sum() > 0:
+            speed = np.linalg.norm(past[i, -1] - past[i, -1 - w]) / (w * REC_DT_S)
+            if speed > QUEUE_MAX_SPEED_MPS:
+                continue
+        return True
+    return False
+
+
+def queue_values(
+    inp: ClosedLoopScenarioInput, frame_idx: int, human_front_s: float, line_s: float
+) -> dict[str, float]:
+    """``human_front_to_line_m`` (the gap from the human's front to the stop line) and
+    ``queued`` (1.0 if a vehicle stood in it, ``_lead_vehicle_before_line``; absent
+    without neighbor data).
+
+    A queued human did not stop for the line, and the position-keyed replay pulls the
+    lead vehicle on with an ego that creeps, so the line says nothing about the ego.
+    """
+    values = {"human_front_to_line_m": line_s - human_front_s}
+    lead = _lead_vehicle_before_line(inp, frame_idx, human_front_s, line_s)
+    if lead is not None:
+        values["queued"] = float(lead)
+    return values
 
 
 def _net_speed(xy: np.ndarray, dt: float, window_s: float) -> np.ndarray:
@@ -350,6 +414,9 @@ def red_hold_values(inp: ClosedLoopScenarioInput) -> dict[str, float] | None:
       (NaN without a stop);
     - ``hold_creep_m``: how far it moved on from that stop (NaN without a stop).
 
+    With a stop line, also ``queue_values`` at the human's stop frame (``queued``,
+    ``human_front_to_line_m``).
+
     None when the human did not stop before the anchor, the replay never reached the
     human's stop, or the anchor was never replayed.
     """
@@ -374,6 +441,8 @@ def red_hold_values(inp: ClosedLoopScenarioInput) -> dict[str, float] | None:
         "first_stop_past_line_m": np.nan,
         "hold_creep_m": np.nan,
     }
+    if line is not None:
+        values.update(queue_values(inp, (h0 + h1) // 2, human_s + line[1], line[0]))
     live = [
         r for r in _stop_runs(_ego_stop_speed(inp, p), inp.dt, p) if r[1] > k0 and r[0] <= k_anchor
     ]
@@ -435,6 +504,10 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     is the share of the human's wait the replay spent inside it (``wait_ratio``; an ego
     that edges on pulls the replay to the green).
 
+    traffic_light_stop is not scored either when the human was not at the head of the
+    queue (``queue_values``: a vehicle stood between its front and the stop line); the
+    values are kept, with ``queued`` and ``human_front_to_line_m``.
+
     Not scored: the human never stops after the anchor; or the trace ends (goal,
     max_steps, abort) before the ego either stops or passes the limit. The latter is
     the common case when the recording ends with the human still stopped: the goal is
@@ -490,6 +563,8 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
         values["stop_line_s_m"] = line_s
         values["human_front_past_line_m"] = human_s + front - line_s
         details["stop_reference"] = "stop_line"
+        if inp.label == "traffic_light_stop":
+            values.update(queue_values(inp, (h0 + h1 - 1) // 2, human_s + front, line_s))
     else:
         ref_s = human_s
         details["stop_reference"] = "human_stop"
@@ -553,12 +628,14 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
         values["final_s_m"] = float(s_ego[-1])
         values["final_speed_mps"] = float(inp.ego_speed[-1])
         values["shortfall_to_human_stop_m"] = human_s - float(s_ego[-1])
-        return ScenarioResult(
-            metric,
-            None,
-            values,
-            details,
-            reason=f"trace ended ({inp.terminated}) before the ego stopped or passed the human stop",
+        return _unless_queued(
+            ScenarioResult(
+                metric,
+                None,
+                values,
+                details,
+                reason=f"trace ended ({inp.terminated}) before the ego stopped or passed the human stop",
+            )
         )
     values.update(
         {
@@ -572,7 +649,14 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     )
     details["ego_stop_steps"] = None if r0 is None else [r0, r1]
     details["first_step_past_limit"] = k_cross
-    return ScenarioResult(metric, passed, values, details, reason)
+    return _unless_queued(ScenarioResult(metric, passed, values, details, reason))
+
+
+def _unless_queued(r: ScenarioResult) -> ScenarioResult:
+    """Not applicable (all values kept) when the human was queued (``queue_values``)."""
+    if r.values.get("queued") == 1.0:
+        return ScenarioResult(r.metric, None, r.values, r.details, QUEUED_REASON)
+    return r
 
 
 def _score_arrival_stop(
