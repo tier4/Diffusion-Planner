@@ -193,6 +193,8 @@ def _lane_follow(offset=0.0, n=250, stall_after=None, road_border=None, span=(0,
         rec_yaw=rec_yaw,
         anchor_frame=0,
         frames=frames,
+        # A stalled ego never reaches the window's goal.
+        terminated="goal" if stall_after is None else "max_steps",
     )
     rb = None if road_border is None else np.asarray(road_border, dtype=np.float64)
     return dataclasses.replace(inp, span_frames=span, road_border_m=rb), loaded

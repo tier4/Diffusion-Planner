@@ -2,7 +2,10 @@ import numpy as np
 import pytest
 
 from scenario_generation.scenario_metrics import geometry  # noqa: F401  (registers the scorers)
-from scenario_generation.scenario_metrics.geometry import OBJECT_AVOIDANCE_MIN_CLEARANCE_M
+from scenario_generation.scenario_metrics.geometry import (
+    MIN_PROGRESS_RATIO,
+    OBJECT_AVOIDANCE_MIN_CLEARANCE_M,
+)
 from scenario_generation.scenario_metrics.registry import score
 from scenario_generation.scenario_metrics.testing import make_input, straight_path
 
@@ -93,9 +96,30 @@ def test_simple_turn_stalling_at_the_anchor_fails():
             rec_xy=rec_xy,
             rec_yaw=rec_yaw,
             anchor_frame=ANCHOR,
+            terminated="max_steps",  # a stalled ego never reaches the window's goal
         )
     )
     assert r.passed is False and "cover" in r.reason
+
+
+def test_simple_turn_ending_on_the_goal_short_of_the_ratio_is_covered():
+    # The goal radius ends the trace 5 m short of the human's arc: still driven to the end.
+    rec_xy, rec_yaw = _turn_path(200)
+    # The scored stretch is 8 s (80 frames at 5 m/s, 40 m) after the anchor; stop 5 m short.
+    end = ANCHOR + 80 - 10
+    kw = dict(rec_xy=rec_xy, rec_yaw=rec_yaw, anchor_frame=ANCHOR)
+    r = score(make_input(label="simple_turn", ego_xy=rec_xy[:end], ego_yaw=rec_yaw[:end], **kw))
+    assert r.values["progress_ratio"] < MIN_PROGRESS_RATIO and r.passed is True
+    stopped = score(
+        make_input(
+            label="simple_turn",
+            ego_xy=rec_xy[:end],
+            ego_yaw=rec_yaw[:end],
+            terminated="max_steps",
+            **kw,
+        )
+    )
+    assert stopped.passed is False and "cover" in stopped.reason
     assert r.values["max_lateral_error_m"] < 1e-6  # the stall would otherwise look perfect
 
 

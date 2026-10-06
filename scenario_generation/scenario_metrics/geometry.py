@@ -15,7 +15,9 @@ has, and the progress check below says whether that covered the stretch.
 A closed-loop ego can also *stall*, which a prediction cannot: an ego that stops
 at the anchor has near-zero lateral error and no collision. ``simple_turn``,
 ``centerline`` and ``object_avoidance`` therefore also require the ego to cover
-``MIN_PROGRESS_RATIO`` of the human's arc length over the stretch.
+``MIN_PROGRESS_RATIO`` of the human's arc length over the stretch, or to have ended the
+trace on the window's goal (within 5 m of its last recorded pose): the goal radius stops
+the rollout short of the human's arc, so a turn the ego drove to the end read 0.82-0.90.
 
 Collisions. ``lane_change`` and ``simple_turn`` also fail when the ego collides during the
 scored steps (the rollout's ``collision`` flag or OBB clearance <= 0, as in
@@ -132,8 +134,8 @@ class _Window:
     reached_end: bool  # the cursor reached end_frame
     ego_progress_m: float  # furthest arc length of the scored steps along path_xy
     rec_progress_m: float  # the human's arc length over path_xy
-    # The trace ended inside the stretch on the window's own goal (within 5 m of the
-    # window's last recorded pose), which can fall short of the ratio on a clipped stretch.
+    # The trace ended on the window's own goal (within 5 m of the window's last recorded
+    # pose): the ego got to the end, though the goal radius can leave it short of the ratio.
     goal_inside: bool
     min_progress_ratio: float = MIN_PROGRESS_RATIO
 
@@ -203,7 +205,7 @@ def _window(
         reached_end=bool(len(hit)),
         ego_progress_m=float(arc.max()),
         rec_progress_m=float(path_arclength(path)[-1]),
-        goal_inside=inp.terminated == "goal" and not len(hit),
+        goal_inside=inp.terminated == "goal",
         min_progress_ratio=min_progress_ratio,
     )
 
