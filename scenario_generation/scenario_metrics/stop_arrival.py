@@ -522,7 +522,9 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     TRAFFIC_LIGHT_MIN_STOP_S, human_wait_s)``, as a sustained-stop run) with the ego no more
     than ``STOP_FOR_LINE_MAX_SHORT_M`` short of the reference; a brief stop, or one behind
     a lead vehicle, is skipped. An ego that passes the limit without such a stop fails
-    ("passed the stop line without stopping at it"). Creeping on
+    ("passed the stop line without stopping at it") if it does so while the light is
+    still red (the replayed frame before the human's departure, ``crossed_on_red``); one
+    that waits further back through the red and crosses only after it passes. Creeping on
     while the red lasts is holding, reported as ``hold_passed`` (see the module doc), as
     is the share of the human's wait the replay spent inside it (``wait_ratio``; an ego
     that edges on pulls the replay to the green).
@@ -636,7 +638,11 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
         values["first_stop_overshoot_m"] = first_s - ref_s
         values["hold_creep_m"] = _hold_creep_m(s_ego, first, judged, first_s)
     reason = ""
+    # The light is still red while the replay is inside the human's stop.
+    crossed_on_red = k_cross is not None and bool(inp.rec_idx[k_cross] < h1)
     if inp.label == "traffic_light_stop":
+        if k_cross is not None:
+            values["crossed_on_red"] = float(crossed_on_red)
         values["first_stop_duration_s"] = (live[0][1] - live[0][0]) * inp.dt if live else np.nan
         values.update(_hold_values(inp, values["hold_creep_m"]))
     if inp.label == "traffic_light_stop" and first is not None:
@@ -647,7 +653,9 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     elif inp.label == "traffic_light_stop" and k_cross is not None:
         r0 = r1 = None
         stop_s, stopped = values["max_s_after_anchor_m"], False
-        passed, reason = False, "ego passed the stop line without stopping at it"
+        # Waiting further back through the red and driving on at the green is lawful.
+        passed = not crossed_on_red
+        reason = "" if passed else "ego passed the stop line without stopping at it"
     elif held and inp.label != "traffic_light_stop":
         r0, r1 = held[0]
         stop_s = float(s_ego[judged].max())

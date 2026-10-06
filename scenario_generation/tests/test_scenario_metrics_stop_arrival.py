@@ -663,6 +663,31 @@ def test_traffic_light_brief_stop_far_before_the_line_then_through_fails():
     assert r.details["ego_stop_steps"] is None
 
 
+def test_traffic_light_stop_waiting_far_back_through_the_red_then_on_passes():
+    # The human waits over frames 50..110. The ego waits 8 m short of the line (too far
+    # back to be a stop for it) until the light turns green, then drives through.
+    assert 8.0 > STOP_FOR_LINE_MAX_SHORT_M
+    human = _profile(50, 60, 40)
+    ego = np.r_[np.full(34, 5.0), np.zeros(80), np.full(36, 5.0)]
+    r = registry.score(_stop_input(ego, human))
+    assert r.passed is True and r.reason == ""
+    assert r.values["crossed_on_red"] == 0.0
+    assert np.isnan(r.values["first_stop_overshoot_m"])
+    assert r.details["first_step_past_limit"] > 110
+    assert "human_hold_creep_m" in r.values
+
+
+def test_traffic_light_stop_brief_stop_far_back_then_through_on_red_fails():
+    # A 0.5 s stop 10 m short, then through the line while the human still waits.
+    human = _profile(50, 60, 40)
+    ego = np.r_[np.full(30, 5.0), np.zeros(_rest_steps(0.5)), np.full(111, 5.0)]
+    r = registry.score(_stop_input(ego, human))
+    assert r.passed is False
+    assert r.reason == "ego passed the stop line without stopping at it"
+    assert r.values["crossed_on_red"] == 1.0
+    assert r.details["first_step_past_limit"] < 110
+
+
 def test_traffic_light_stop_held_long_enough_just_before_the_line_passes():
     # A 1.5 s stop with the front 0.3 m short of the line, then on as the light holds.
     ego_xy, ego_yaw = speed_profile_path(
