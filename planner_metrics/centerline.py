@@ -14,6 +14,17 @@ _PREDICTION_TIMESTEP_SECONDS = 0.1
 _CENTERLINE_SEGMENT_MIN_LENGTH = 1e-6
 
 
+def _centerline_segments(lanes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    centerlines = lanes[..., :2]
+    valid_segments = _valid_segment_mask(lanes)
+    if not valid_segments.any():
+        raise ValueError("centerline metric found no valid route-centerline segments")
+    return (
+        centerlines[:, :-1][valid_segments],
+        centerlines[:, 1:][valid_segments],
+    )
+
+
 def _valid_segment_mask(lanes: torch.Tensor) -> torch.Tensor:
     if lanes.ndim != 3 or lanes.shape[-1] < 4:
         raise ValueError(f"lanes must have shape (S, P, D>=4), got {tuple(lanes.shape)}")
@@ -26,17 +37,6 @@ def _valid_segment_mask(lanes: torch.Tensor) -> torch.Tensor:
 
 def has_centerline_segments(lanes: torch.Tensor) -> bool:
     return bool(_valid_segment_mask(lanes).any())
-
-
-def _centerline_segments(lanes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    centerlines = lanes[..., :2]
-    valid_segments = _valid_segment_mask(lanes)
-    if not valid_segments.any():
-        raise ValueError("centerline metric found no valid route-centerline segments")
-    return (
-        centerlines[:, :-1][valid_segments],
-        centerlines[:, 1:][valid_segments],
-    )
 
 
 @torch.no_grad()
