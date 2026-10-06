@@ -62,6 +62,11 @@ from planner_metrics.centerline import compute_centerline_error_components_batch
 from planner_metrics.gt_lateral_deviation import compute_gt_lateral_deviation_batch
 from planner_metrics.lane_change import lane_change_decision
 from planner_metrics.source_lane import reconstruct_source_lane
+from scenario_generation.scenario_metrics.avoidance import (
+    find_avoid_target,
+    obb_clearance,
+    to_pose_frame,
+)
 from scenario_generation.scenario_metrics.base import (
     ClosedLoopScenarioInput,
     ScenarioResult,
@@ -656,6 +661,15 @@ def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> Scenari
     ``OBJECT_AVOIDANCE_MIN_CLEARANCE_M`` (a scrape-by is not an avoidance), and the
     anti-stall progress check: stopping short of the obstacle forever would otherwise
     "avoid" it. As in open loop, a window with no neighbor at all is not applicable.
+
+    Reported only, not part of the verdict (see ``_avoidance_report``): the clearance to
+    the object being avoided (``target_clearance_m``, the human's ``human_target_clearance_m``)
+    and how much longer than the human the ego took over the stretch (``time_ratio``).
+    The verdict keeps the clearance to everyone -- a scrape against any neighbor is a
+    failure -- while the target-relative clearance tells which neighbor a failure was
+    about and lines up with open loop's view of the same obstacle. Stalling in front of
+    the obstacle is not judged here (only the progress check above): ``time_ratio`` is
+    there to diagnose it and to compare with open loop.
     """
     metric = "object_avoidance"
     w = _window(inp, OBJECT_AVOIDANCE_HORIZON_S)
@@ -670,6 +684,7 @@ def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> Scenari
         **w.values(inp.dt),
     }
     details = _base_details(inp, w)
+    _avoidance_report(inp, w, values, details)
     if not np.isfinite(clearance).any():
         return ScenarioResult(metric, None, values, details, "no neighbor after the anchor")
     covered = w.covered
@@ -686,6 +701,66 @@ def score_object_avoidance(inp: ClosedLoopScenarioInput, config=None) -> Scenari
     else:
         reason = ""
     return ScenarioResult(metric, not collided and wide and covered, values, details, reason)
+
+
+def _avoidance_report(inp: ClosedLoopScenarioInput, w: _Window, values: dict, details: dict):
+    """Add object_avoidance's reported-only values (the verdict does not read them).
+
+    - ``ego_time_s`` / ``human_time_s`` / ``time_ratio``: sim time of the scored steps
+      (``len(steps) * dt``) over the human's recorded time for the same stretch
+      (``(end_frame - start_frame + 1) * 0.1 s``). A trace that ended before the stretch's
+      end gives a lower bound (see ``reached_end``).
+    - ``target_found``: the avoided agent was identified from the recording
+      (``avoidance.find_avoid_target``, over the stretch's recorded frames). When found,
+      ``target_clearance_m`` is the ego footprint's minimum OBB clearance to it over the
+      scored steps (the target's box at the replayed frame, as the rollout measures every
+      neighbor; omitted if the target was in none of the replayed frames) and
+      ``human_target_clearance_m`` the human's over the stretch; ``target_stopped`` /
+      ``target_overtaken`` and the type go along. Nothing else is written without one.
+    """
+    ego_time = len(w.steps) * inp.dt
+    human_time = (w.end_frame - w.start_frame + 1) * _REC_DT_S
+    values.update(
+        {"ego_time_s": ego_time, "human_time_s": human_time, "time_ratio": ego_time / human_time}
+    )
+    values["target_found"] = 0.0
+    try:
+        shape = inp.load_frame(w.start_frame).get("ego_shape")
+    except KeyError:
+        shape = None
+    if shape is None:
+        return
+    shape = np.asarray(shape, dtype=np.float64).reshape(-1)[:3]
+    frames = np.clip(inp.rec_idx[w.steps], 0, inp.n_frames - 1)
+    until = max(int(frames.max()), w.end_frame)
+    target = find_avoid_target(inp, w.start_frame, w.end_frame, shape, until)
+    if target is None:
+        return
+    values.update(
+        {
+            "target_found": 1.0,
+            "human_target_clearance_m": target.human_clearance_m,
+            "target_stopped": float(target.stopped),
+            "target_overtaken": float(target.overtaken),
+        }
+    )
+    details["target_type"] = target.agent_type
+    seen = [j for j, f in enumerate(frames) if int(f) in target.boxes]
+    if not seen:
+        return
+    local = np.concatenate(
+        [
+            to_pose_frame(
+                target.boxes[int(frames[j])],
+                *inp.ego_xy[w.steps[j]],
+                inp.ego_yaw[w.steps[j]],
+            )
+            for j in seen
+        ]
+    )
+    clearance = obb_clearance(local, shape)
+    values["target_clearance_m"] = float(clearance.min())
+    details["target_min_step"] = int(w.steps[seen[int(clearance.argmin())]])
 
 
 def _route_lane_lateral(

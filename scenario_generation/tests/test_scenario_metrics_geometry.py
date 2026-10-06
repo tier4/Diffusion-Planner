@@ -522,3 +522,112 @@ def test_object_avoidance_without_neighbors_is_not_applicable():
     xy, yaw = straight_path(200, 5.0)
     assert _avoidance(xy, yaw, xy, yaw).passed is None
     assert _avoidance(xy[:5], yaw[:5], xy, yaw).passed is None
+
+
+# Reported-only values: the avoided object and the time ratio.
+_EGO_SHAPE = np.array([2.8, 4.9, 1.9])  # wheelbase, length, width (rear-axle pose)
+_OBSTACLE_X = 55.0
+
+
+def _swerve_path(peak: float, n: int = 200, speed: float = 5.0) -> tuple[np.ndarray, np.ndarray]:
+    """Along +x at ``speed``, out to ``y = peak`` over x 30..45, held to x 65, back by x 80."""
+    x = np.arange(n) * speed * DT
+    up = np.clip((x - 30.0) / 15.0, 0.0, 1.0)
+    down = np.clip((x - 65.0) / 15.0, 0.0, 1.0)
+    y = peak * (3 * up**2 - 2 * up**3) * (1.0 - (3 * down**2 - 2 * down**3))
+    return np.stack([x, y], axis=1), np.arctan2(np.gradient(y), np.gradient(x))
+
+
+def _world_to_frame(xy: np.ndarray, pose_xy: np.ndarray, yaw: float) -> np.ndarray:
+    c, s = np.cos(yaw), np.sin(yaw)
+    d = xy - pose_xy
+    return np.stack([d[..., 0] * c + d[..., 1] * s, -d[..., 0] * s + d[..., 1] * c], axis=-1)
+
+
+def _agent_frames(rec_xy, rec_yaw, agents):
+    """Native-layout frames with ``agents`` = [(world xy at frame 0, speed along +x, type
+    index)] and one straight route lane along y = 0."""
+
+    def load(i: int) -> dict[str, np.ndarray]:
+        pose, yaw = rec_xy[i], rec_yaw[i]
+        past = np.zeros((len(agents), 21, 4))
+        label = np.zeros((len(agents), 3))
+        for a, (start, speed, typ) in enumerate(agents):
+            t = (i - 20 + np.arange(21)) * DT
+            world = np.stack([start[0] + speed * t, np.full(21, start[1])], axis=1)
+            past[a, :, :2] = _world_to_frame(world, pose, yaw)
+            past[a, :, 2], past[a, :, 3] = np.cos(-yaw), np.sin(-yaw)
+            label[a, typ] = 1.0
+        lane = np.stack([np.linspace(-50.0, 250.0, 20), np.zeros(20)], axis=1)
+        return {
+            "neighbor_agents_past": past,
+            "agent_shape": np.tile([2.0, 4.5], (len(agents), 1)),
+            "agent_label": label,
+            "route_lanes": _world_to_frame(lane, pose, yaw)[None],
+            "ego_shape": _EGO_SHAPE,
+        }
+
+    return load
+
+
+def _avoid_scene(ego_peak: float, agents):
+    """The human swerves 3 m left around x 45..65; the ego swerves ``ego_peak``."""
+    rec_xy, rec_yaw = _swerve_path(3.0)
+    ego_xy, ego_yaw = _swerve_path(ego_peak)
+    return make_input(
+        label="object_avoidance",
+        ego_xy=ego_xy,
+        ego_yaw=ego_yaw,
+        rec_xy=rec_xy,
+        rec_yaw=rec_yaw,
+        anchor_frame=40,
+        span_frames=(40, 180),
+        clearance_m=np.full(len(ego_xy), 1.2),
+        frames=_agent_frames(rec_xy, rec_yaw, agents),
+    )
+
+
+def test_object_avoidance_reports_the_clearance_to_the_stopped_vehicle_swerved_around():
+    stopped = (np.array([_OBSTACLE_X, 0.0]), 0.0, 0)
+    moving_aside = (np.array([0.0, -12.0]), 5.0, 0)  # moving, outside the band
+    r = score(_avoid_scene(2.5, [moving_aside, stopped]))
+    # The verdict still reads the rollout's clearance to everyone (1.2 m here).
+    assert r.passed is True and r.values["min_clearance_m"] == pytest.approx(1.2)
+    assert r.values["target_found"] == 1.0 and r.details["target_type"] == "vehicle"
+    assert r.values["target_stopped"] == 1.0 and r.values["target_overtaken"] == 1.0
+    # Side by side: the human's right edge at 3.0 - 0.95, the obstacle's left edge at 1.0.
+    assert r.values["human_target_clearance_m"] == pytest.approx(1.05, abs=1e-3)
+    assert r.values["target_clearance_m"] == pytest.approx(0.55, abs=1e-3)
+
+
+def test_object_avoidance_without_a_target_omits_the_target_values():
+    # A vehicle moving at the human's speed in the band is traffic, not an obstacle.
+    moving = (np.array([_OBSTACLE_X, 0.0]), 5.0, 0)
+    for agents in ([moving], []):
+        r = score(_avoid_scene(2.5, agents))
+        assert r.passed is True and r.values["target_found"] == 0.0
+        assert "target_clearance_m" not in r.values
+        assert "human_target_clearance_m" not in r.values
+    # Without recorded frames the target is not looked for.
+    xy, yaw = straight_path(200, 5.0)
+    r = _avoidance(xy, yaw, xy, yaw, clearance_m=np.full(200, 1.2))
+    assert r.passed is True and r.values["target_found"] == 0.0
+
+
+def test_object_avoidance_time_ratio_of_an_ego_twice_as_slow_is_two():
+    rec_xy, rec_yaw = straight_path(200, 5.0)
+    ego_xy, ego_yaw = straight_path(400, 2.5)
+    r = _avoidance(
+        ego_xy,
+        ego_yaw,
+        rec_xy,
+        rec_yaw,
+        rec_idx=np.minimum(np.arange(400) // 2, 199),
+        clearance_m=np.full(400, 1.2),
+    )
+    assert r.passed is True
+    assert r.values["human_time_s"] == pytest.approx(8.1)
+    assert r.values["time_ratio"] == pytest.approx(2.0, rel=0.02)
+    xy, yaw = straight_path(200, 5.0)
+    same = _avoidance(xy, yaw, xy, yaw, clearance_m=np.full(200, 1.2))
+    assert same.values["time_ratio"] == pytest.approx(1.0)
