@@ -32,6 +32,7 @@ import torch
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
+from scenario_generation.ml_planner_inputs import MlPlannerOnnx
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
@@ -393,7 +394,9 @@ def run_scenario_sim_rollout(
 
     ``model`` / ``model_args`` follow the ``run_closed_loop_eval`` contract
     (``model(data) -> (_, outputs)`` with ``outputs["prediction"]``; ``model_args`` provides
-    ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). ``builder`` lets
+    ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). An
+    :class:`MlPlannerOnnx` takes no ``model_args``: its inputs come from the simulator's
+    ``MlPlannerObserver``. ``builder`` lets
     a caller that outlives one scenario reuse a parsed map, which is per-map work a
     per-scenario process would otherwise pay per scenario.
     """
@@ -489,6 +492,10 @@ def run_scenario_sim_rollout(
                 runner, builder, osc_path, cfg, verbose
             )
         goal_xy = goal_pose[:2]
+        observer = None
+        if isinstance(model, MlPlannerOnnx):
+            with timers("map_context"):
+                observer = osp.MlPlannerObserver(ego_name, ego_route_ids, list(goal_pose[:3]))
         # Already in the scene's map frame. A polyline because save_step_figure accepts a
         # lanelet id list but does not read it.
         route_polylines = (
@@ -526,15 +533,20 @@ def run_scenario_sim_rollout(
                     ego_name,
                     np.fromiter(ti_hist, dtype=np.int32, count=_HISTORY_LEN),
                 )
+                if observer is not None:
+                    observer.observe(ti_report)
 
             # Replan every ``replan_interval`` ticks; consume the cached plan in between.
             if cached_plan_ego is None or step % cfg.replan_interval == 0:
                 # The first inference is cold (lazy allocation, kernel autotuning), so it is
                 # timed as its own stage and kept out of the steady-state ms/call.
                 with timers("predict_cold" if cached_plan_ego is None else "predict"):
-                    cached_plan_ego, ti_model = _predict_ego_plan(
-                        model, model_args, scene, device, ego_name
-                    )
+                    if observer is not None:
+                        cached_plan_ego, ti_model = model.predict(observer.inputs())
+                    else:
+                        cached_plan_ego, ti_model = _predict_ego_plan(
+                            model, model_args, scene, device, ego_name
+                        )
                 ti_report = resolve_keep_turn_indicator(ti_model, ti_report)
 
                 with timers("sim_set_traj"):

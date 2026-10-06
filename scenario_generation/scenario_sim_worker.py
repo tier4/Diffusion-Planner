@@ -20,6 +20,7 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
+from scenario_generation.ml_planner_inputs import MlPlannerOnnx
 from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
 
@@ -36,7 +37,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--row_out", required=True, help="write the metrics row JSON here")
     p.add_argument("--device", default="cpu")
-    p.add_argument("--model_path", required=True, help="torch .pth checkpoint")
+    p.add_argument(
+        "--model_path",
+        required=True,
+        help="torch .pth checkpoint, or an ML Planner sampler .onnx",
+    )
     p.add_argument(
         "--replan_interval",
         type=int,
@@ -64,7 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     timers = Timers()
     t_proc = time.perf_counter()
     with timers("model_load"):
-        model, model_args = load_model(a.model_path, a.device)
+        if a.model_path.endswith(".onnx"):
+            model, model_args = MlPlannerOnnx(a.model_path, a.device), None
+        else:
+            model, model_args = load_model(a.model_path, a.device)
 
     cfg = RolloutConfig(
         fps=a.fps,
