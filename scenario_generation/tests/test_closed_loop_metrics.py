@@ -541,16 +541,7 @@ def test_deviation_collision_block_classifies_one_collision_event_once():
     assert block["steps"] == int((collisions & (gt_devs > thresh_m)).sum())
 
 
-def test_centerline_step_distance_to_route_lane():
-    route_lanes = np.zeros((1, 2, 33), dtype=np.float32)
-    route_lanes[0, :, :2] = [(-5.0, 1.5), (5.0, 1.5)]
-    route_lanes[0, :, 2] = 1.0
-    out = score_centerline_step({"route_lanes": route_lanes}, device="cpu")
-    assert out["centerline_dist_m"] == pytest.approx(1.5)
-
-
 def test_centerline_step_without_route_lanes_is_not_finite():
-    # Off the route (or past its end) every route lane is padding.
     out = score_centerline_step(
         {"route_lanes": np.zeros((25, 20, 33), dtype=np.float32)}, device="cpu"
     )

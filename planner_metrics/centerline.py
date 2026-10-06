@@ -25,7 +25,6 @@ def _valid_segment_mask(lanes: torch.Tensor) -> torch.Tensor:
 
 
 def has_centerline_segments(lanes: torch.Tensor) -> bool:
-    """Whether ``lanes`` ``(S, P, D>=4)`` holds any segment the centerline metrics can use."""
     return bool(_valid_segment_mask(lanes).any())
 
 
