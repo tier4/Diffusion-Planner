@@ -5,11 +5,14 @@ import pytest
 
 from scenario_generation.scenario_metrics import registry
 from scenario_generation.scenario_metrics.stop_arrival import (
+    ARRIVAL_STOP_SEARCH_M,
     GOAL_REACH_M,
     HOLD_CREEP_MARGIN_M,
     QUEUED_REASON,
+    STOP_FOR_LINE_MAX_SHORT_M,
     TEMPORAL_STOP_MIN_HOLD_S,
     TEMPORAL_STOP_TOLERANCE_M,
+    TRAFFIC_LIGHT_MIN_STOP_S,
 )
 from scenario_generation.scenario_metrics.testing import (
     make_input,
@@ -343,13 +346,14 @@ def test_creeping_past_the_line_after_stopping_passes_and_fails_the_hold():
     assert r.values["hold_passed"] == 0.0
 
 
-def test_a_brief_stop_short_of_the_line_then_rolling_through_passes_and_fails_the_hold():
-    ego = np.r_[np.full(44, 5.0), np.zeros(10), np.full(96, 5.0)]  # stops 3 m short
+def test_a_brief_stop_short_of_the_line_then_rolling_through_fails():
+    # Rests 1 s 3 m short (a 0.6 s sustained stop): a rolling stop, not the first stop.
+    ego = np.r_[np.full(44, 5.0), np.zeros(10), np.full(96, 5.0)]
     r = registry.score(_stop_input(ego))
-    assert r.passed is True
-    assert r.values["first_stop_overshoot_m"] == pytest.approx(-3.0, abs=0.1)
-    assert r.values["hold_creep_m"] > 10.0
-    assert r.values["hold_passed"] == 0.0
+    assert r.passed is False
+    assert r.reason == "ego passed the stop line without stopping at it"
+    assert np.isnan(r.values["first_stop_overshoot_m"])
+    assert r.values["required_stop_s"] == TRAFFIC_LIGHT_MIN_STOP_S
 
 
 def test_traffic_light_stop_holding_behind_the_line_passes_the_hold():
@@ -371,7 +375,7 @@ def test_traffic_light_stop_first_stop_past_the_limit_fails():
 def test_traffic_light_stop_never_stopping_fails_and_has_no_hold_verdict():
     r = registry.score(_stop_input(np.full(150, 5.0), terminated="max_steps"))
     assert r.passed is False
-    assert r.reason == "ego passed the stop limit without stopping"
+    assert r.reason == "ego passed the stop line without stopping at it"
     assert np.isnan(r.values["hold_creep_m"]) and "hold_passed" not in r.values
 
 
@@ -638,3 +642,95 @@ def test_extended_arrival_first_stop_3m_off_fails_even_if_it_moves_up():
     assert r.passed is False and r.reason == "ego stopped away from the arrival point"
     assert r.values["first_stop_distance_m"] == pytest.approx(3.0)
     assert r.values["longitudinal_offset_m"] == pytest.approx(-3.0)
+
+
+# --- which stop is the first stop ------------------------------------------------
+
+
+def _rest_steps(run_s: float) -> int:
+    """Steps at rest giving a sustained-stop run of ``run_s`` (the net-displacement window
+    makes the run 0.4 s shorter than the rest)."""
+    return round(run_s / 0.1) + 4
+
+
+def test_traffic_light_brief_stop_far_before_the_line_then_through_fails():
+    # A 0.5 s stop 10 m short (behind a lead vehicle, and brief), then through the line.
+    ego = np.r_[np.full(30, 5.0), np.zeros(_rest_steps(0.5)), np.full(111, 5.0)]
+    r = registry.score(_stop_input(ego))
+    assert r.passed is False
+    assert r.reason == "ego passed the stop line without stopping at it"
+    assert np.isnan(r.values["first_stop_duration_s"])
+    assert r.details["ego_stop_steps"] is None
+
+
+def test_traffic_light_stop_held_long_enough_just_before_the_line_passes():
+    # A 1.5 s stop with the front 0.3 m short of the line, then on as the light holds.
+    ego_xy, ego_yaw = speed_profile_path(
+        np.r_[np.full(54, 5.0), np.zeros(_rest_steps(1.5)), np.full(77, 5.0)]
+    )
+    # Line 5.3 m ahead of the human's axle (25 m): the front (3 m ahead) is to stop by
+    # 30.3 m, the axle by 27.3 m; the ego's axle stops at 27 m.
+    r = registry.score(
+        make_input(
+            label="traffic_light_stop",
+            ego_xy=ego_xy,
+            ego_yaw=ego_yaw,
+            rec_xy=speed_profile_path(_profile(50, 100))[0],
+            rec_yaw=np.zeros(150),
+            anchor_frame=ANCHOR,
+            frames=_line_frames(5.3),
+        )
+    )
+    assert r.passed is True
+    assert r.values["first_stop_overshoot_m"] == pytest.approx(-0.3)
+    assert r.values["first_stop_duration_s"] == pytest.approx(1.5)
+
+
+def test_traffic_light_stop_brief_stop_counts_when_the_human_barely_stopped():
+    # The human stops 0.6 s (the light turned green on its arrival); a 0.6 s ego stop at
+    # the same point is then enough.
+    human = _profile(50, 6, 94)
+    ego = np.r_[np.full(50, 5.0), np.zeros(_rest_steps(0.6)), np.full(90, 5.0)]
+    r = registry.score(_stop_input(ego, human))
+    assert r.values["human_wait_s"] == pytest.approx(0.6)
+    assert r.values["required_stop_s"] == pytest.approx(0.6)
+    assert r.values["first_stop_duration_s"] == pytest.approx(0.6)
+    assert r.passed is True and r.values["first_stop_overshoot_m"] == pytest.approx(0.0)
+    # Against a long red the same stop is a rolling stop.
+    held = registry.score(_stop_input(ego, _profile(50, 60, 40)))
+    assert held.passed is False
+    assert held.reason == "ego passed the stop line without stopping at it"
+
+
+def test_traffic_light_stop_skips_a_queue_stop_far_before_the_line():
+    # Stops 2 s 8 m short (a queue), moves up and stops 1.5 s at the human's stop.
+    assert 8.0 > STOP_FOR_LINE_MAX_SHORT_M
+    ego = np.r_[
+        np.full(34, 5.0),
+        np.zeros(_rest_steps(2.0)),
+        np.full(16, 5.0),
+        np.zeros(_rest_steps(1.5)),
+        np.full(60, 5.0),
+    ]
+    r = registry.score(_stop_input(ego))
+    assert r.passed is True
+    assert r.values["first_stop_overshoot_m"] == pytest.approx(0.0)
+    assert r.values["first_stop_duration_s"] == pytest.approx(1.5)
+    assert r.details["ego_stop_steps"][0] > 50
+
+
+def test_extended_arrival_skips_a_queue_stop_far_from_the_bus_stop():
+    # Stops 6 m short (a queue), then pulls up and stops at the bus stop.
+    assert 6.0 > ARRIVAL_STOP_SEARCH_M
+    ego = np.r_[np.full(38, 5.0), np.zeros(10), np.full(12, 5.0), np.zeros(70)]
+    r = registry.score(_extended_arrival(ego))
+    assert r.passed is True and r.reason == ""
+    assert r.values["first_stop_distance_m"] == pytest.approx(0.0)
+    assert r.details["ego_stop_steps"][0] > 48
+
+
+def test_extended_arrival_only_a_queue_stop_then_rolling_past_fails():
+    ego = np.r_[np.full(38, 5.0), np.zeros(10), np.full(82, 5.0)]
+    r = registry.score(_extended_arrival(ego))
+    assert r.passed is False and r.reason == "ego stopped away from the arrival point"
+    assert r.values["first_stop_distance_m"] == pytest.approx(6.0)

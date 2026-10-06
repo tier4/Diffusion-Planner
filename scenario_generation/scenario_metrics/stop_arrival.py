@@ -48,7 +48,10 @@ label's verdict is the reaction: where the ego first stopped, comparable with op
 Holding is closed loop only and dominated by the model creeping at standstill; it is
 reported as ``hold_passed`` (0/1, its mean the hold pass rate), not part of the verdict:
 the ego's ``hold_creep_m`` against the human's own creep while holding
-(``human_hold_creep_m``) plus ``HOLD_CREEP_MARGIN_M``.
+(``human_hold_creep_m``) plus ``HOLD_CREEP_MARGIN_M``. Only a stop that answers the label
+counts as the first stop: for traffic_light_stop one held long enough
+(``TRAFFIC_LIGHT_MIN_STOP_S``) and not far before the line (``STOP_FOR_LINE_MAX_SHORT_M``),
+for arrival one near the arrival point (``ARRIVAL_STOP_SEARCH_M``).
 """
 
 from __future__ import annotations
@@ -128,6 +131,19 @@ QUEUE_PAST_LINE_M = 2.0
 # track at most this (speed is ignored when that part of the track is missing).
 QUEUE_MAX_SPEED_MPS = 1.0
 QUEUE_SPEED_WINDOW_S = 0.5
+# traffic_light_stop: the shortest ego stop (sustained-stop run, as
+# ``TEMPORAL_STOP_MIN_HOLD_S``) that counts, capped by the human's own stop duration. A
+# rolling stop is not a stop; but if the human barely stopped, the light turned green on
+# its arrival (the replayed light follows the recording), so a lawful ego need not stop
+# longer.
+TRAFFIC_LIGHT_MIN_STOP_S = 1.0
+# traffic_light_stop: a stop with the ego's front further than this before the stop line
+# (or the human's stop without one) is behind a lead vehicle, not for the line (about one
+# car length), and does not count. A stop past the line counts (and fails the tolerance).
+STOP_FOR_LINE_MAX_SHORT_M = 5.0
+# Extended arrival: only ego stops within this distance of the human's arrival stop count;
+# earlier ones further away are queueing behind other vehicles.
+ARRIVAL_STOP_SEARCH_M = 5.0
 QUEUED_REASON = "human was not at the head of the queue (a vehicle stood before the stop line)"
 
 
@@ -180,19 +196,22 @@ def _stop_runs(speed: np.ndarray, dt: float, p: StopParams) -> list[tuple[int, i
     return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]) if b - a >= width]
 
 
+def _stop_steps(run: tuple[int, int], k0: int, dt: float, p: StopParams) -> np.ndarray:
+    """Steps of the first ``sustained_stop_s`` of the stop ``run`` at/after ``k0``.
+
+    The window that makes it a stop: where the ego came to rest, before any creep that
+    the speed threshold still calls stopped.
+    """
+    start = max(run[0], k0)
+    end = min(run[1], start + round(p.sustained_stop_s / dt))
+    return np.arange(start, max(start + 1, end))
+
+
 def _first_stop_steps(
     live: list[tuple[int, int]], k0: int, dt: float, p: StopParams
 ) -> np.ndarray | None:
-    """Steps of the first ``sustained_stop_s`` of the ego's first stop at/after ``k0``.
-
-    The window that makes it a stop: where the ego came to rest, before any creep that
-    the speed threshold still calls stopped. None without a stop.
-    """
-    if not live:
-        return None
-    start = max(live[0][0], k0)
-    end = min(live[0][1], start + round(p.sustained_stop_s / dt))
-    return np.arange(start, max(start + 1, end))
+    """``_stop_steps`` of the ego's first stop at/after ``k0``; None without a stop."""
+    return _stop_steps(live[0], k0, dt, p) if live else None
 
 
 def _hold_creep_m(s_ego: np.ndarray, first: np.ndarray, judged: np.ndarray, first_s: float):
@@ -499,7 +518,11 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
 
     traffic_light_stop is judged by the reaction alone: the ego's first stop at/after the
     anchor must not pass ``reference + tolerance`` (``first_stop_overshoot_m <=
-    tolerance_m``); an ego that passes the limit without ever stopping fails. Creeping on
+    tolerance_m``). Only a stop for the line counts: one lasting ``required_stop_s`` (``min(
+    TRAFFIC_LIGHT_MIN_STOP_S, human_wait_s)``, as a sustained-stop run) with the ego no more
+    than ``STOP_FOR_LINE_MAX_SHORT_M`` short of the reference; a brief stop, or one behind
+    a lead vehicle, is skipped. An ego that passes the limit without such a stop fails
+    ("passed the stop line without stopping at it"). Creeping on
     while the red lasts is holding, reported as ``hold_passed`` (see the module doc), as
     is the share of the human's wait the replay spent inside it (``wait_ratio``; an ego
     that edges on pulls the replay to the green).
@@ -516,8 +539,10 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     Reported only, splitting the judged position into reacting and holding:
 
     - ``first_stop_overshoot_m``: the ego's first stop at/after the anchor (median arc
-      over its first ``sustained_stop_s``; for temporal_stop a held stop, see above)
-      minus the reference, signed (negative short of it); NaN if the ego never stops.
+      over its first ``sustained_stop_s``; for temporal_stop a held stop, for
+      traffic_light_stop a stop for the line, see above) minus the reference, signed
+      (negative short of it); NaN if the ego never stops. traffic_light_stop also reports
+      that stop's ``first_stop_duration_s`` and the ``required_stop_s``.
       Reacting to the scene: comparable with open loop.
     - ``hold_creep_m``: the furthest arc from that stop on over the steps the verdict
       judges (before the human's departure; for temporal_stop up to the end of the
@@ -574,6 +599,26 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     if inp.label == "temporal_stop":
         min_hold = max(1, round(TEMPORAL_STOP_MIN_HOLD_S / inp.dt))
         live = [r for r in live if r[1] - r[0] >= min_hold]
+    if inp.label == "traffic_light_stop":
+        human_wait_s, waited_s, k_out = _wait(inp, h0, h1)
+        required_s = min(TRAFFIC_LIGHT_MIN_STOP_S, human_wait_s)
+        values.update(
+            {
+                "human_wait_s": human_wait_s,
+                "waited_s": waited_s,
+                "wait_ratio": waited_s / human_wait_s,
+                "required_stop_s": required_s,
+            }
+        )
+        details["step_left_wait"] = k_out
+        # Stops for the line only (see the docstring); 1e-6 absorbs float steps.
+        live = [
+            r
+            for r in live
+            if (r[1] - r[0]) * inp.dt >= required_s - 1e-6
+            and float(np.median(s_ego[_stop_steps(r, k0, inp.dt, p)])) - ref_s
+            >= -STOP_FOR_LINE_MAX_SHORT_M
+        ]
     beyond = np.flatnonzero(s_ego[k0:] > limit)
     k_cross = k0 + int(beyond[0]) if len(beyond) else None
     values["max_s_after_anchor_m"] = float(s_ego[k0:].max())
@@ -592,15 +637,7 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
         values["hold_creep_m"] = _hold_creep_m(s_ego, first, judged, first_s)
     reason = ""
     if inp.label == "traffic_light_stop":
-        human_wait_s, waited_s, k_out = _wait(inp, h0, h1)
-        values.update(
-            {
-                "human_wait_s": human_wait_s,
-                "waited_s": waited_s,
-                "wait_ratio": waited_s / human_wait_s,
-            }
-        )
-        details["step_left_wait"] = k_out
+        values["first_stop_duration_s"] = (live[0][1] - live[0][0]) * inp.dt if live else np.nan
         values.update(_hold_values(inp, values["hold_creep_m"]))
     if inp.label == "traffic_light_stop" and first is not None:
         r0, r1 = live[0]
@@ -610,7 +647,7 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     elif inp.label == "traffic_light_stop" and k_cross is not None:
         r0 = r1 = None
         stop_s, stopped = values["max_s_after_anchor_m"], False
-        passed, reason = False, "ego passed the stop limit without stopping"
+        passed, reason = False, "ego passed the stop line without stopping at it"
     elif held and inp.label != "traffic_light_stop":
         r0, r1 = held[0]
         stop_s = float(s_ego[judged].max())
@@ -662,15 +699,17 @@ def _unless_queued(r: ScenarioResult) -> ScenarioResult:
 def _score_arrival_stop(
     inp: ClosedLoopScenarioInput, p: ArrivalParams, human: tuple[int, int]
 ) -> ScenarioResult:
-    """The ego's first stop must be within ``position_tolerance_m`` of the human's
-    arrival stop, heading within ``heading_tolerance_deg``.
+    """The ego's first stop near the human's arrival stop must be within
+    ``position_tolerance_m`` of it, heading within ``heading_tolerance_deg``.
 
     Used when the window runs on past the human's stop (``extend_until_departure``), so
     the goal radius no longer hides it. The arrival point is the middle of the human's
     first sustained stop at/after the anchor; the ego's stop is its first sustained stop
-    after ``anchor_step``, at the median pose over its first ``sustained_stop_s``
+    after ``anchor_step`` within ``ARRIVAL_STOP_SEARCH_M`` of it (earlier stops further
+    away are queueing), at the median pose over its first ``sustained_stop_s``
     (``first_stop_distance_m``, ``stop_distance_m``; heading at the middle of it).
-    Driving past without a stop fails.
+    Without such a stop the ego's first stop at all is reported and fails ("stopped away
+    from the arrival point"); driving past without a stop fails.
 
     The verdict is the reaction: where the ego first stopped, comparable with open loop.
     Staying is holding, closed loop only and dominated by the model's creep, reported
@@ -703,6 +742,13 @@ def _score_arrival_stop(
     live = [
         r for r in _stop_runs(_ego_stop_speed(inp, _STOP_RULE), inp.dt, _STOP_RULE) if r[1] > k0
     ]
+
+    def distance(r: tuple[int, int]) -> float:
+        xy = np.median(inp.ego_xy[_stop_steps(r, k0, inp.dt, _STOP_RULE)], axis=0)
+        return float(np.linalg.norm(xy - inp.rec_xy[i_arr]))
+
+    near_stops = [r for r in live if distance(r) <= ARRIVAL_STOP_SEARCH_M]
+    live = near_stops or live
     first = _first_stop_steps(live, k0, inp.dt, _STOP_RULE)
     if first is None:
         values["first_stop_distance_m"] = values["hold_creep_m"] = np.nan
