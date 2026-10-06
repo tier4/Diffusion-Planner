@@ -22,6 +22,11 @@ scored steps (the rollout's ``collision`` flag or OBB clearance <= 0, as in
 ``object_avoidance``). Steps the rollout marks ``collision_rear`` are not counted: the
 replayed agents do not react, so a rear-end hit is the replay's, not the ego's.
 
+Border cuts. ``simple_turn`` also fails when the ego cuts across a road border the human
+stayed clear of: some scored step has ``|rb_dist_m| < ROAD_BORDER_CONTACT_M`` at a border
+segment from which the human's footprint stayed at least ``TURN_BORDER_HUMAN_MARGIN_M``
+(see the constants for why the human is the reference, and ``_border_cut``).
+
 Open-loop ``simple_turn``/``centerline`` report errors only, with no pass line;
 ``MAX_LATERAL_ERROR_M`` is new here, and the raw errors are kept in ``values`` so
 another threshold can be applied offline.
@@ -97,6 +102,21 @@ LANE_FOLLOW_HORIZON_S = 30.0  # fallback without a span (builder's max window le
 LANE_FOLLOW_LANE_FRAME_STEP = 20  # recorded frames (2 s) per route-lanes lookup
 # reproducer_rollout.RB_COLLISION_THRESH_M: road-border contact below this distance.
 ROAD_BORDER_CONTACT_M = 0.1
+# simple_turn border cuts (closed loop only). Contact alone cannot fail a turn: the human
+# footprint itself comes within ROAD_BORDER_CONTACT_M of a border in 8% of recorded turns
+# (map/localisation error, short median-island borders, narrow bends). Of 172 ego turns
+# with contact in the scored stretch, 93 touched a border segment the human stayed
+# >= 0.3 m from (88 inside intersection areas, mostly left turns over the inner kerb); the
+# other 79 grazed where the human grazed too. The human's distance is taken to the same
+# segment over the recorded frames whose arc along the recorded path is nearest the
+# ego's (+- TURN_BORDER_MATCH_FRAMES). The rollout's rb_dist_m flips sign inside some
+# intersections (about -10 m far from any border), so its magnitude is used.
+TURN_BORDER_HUMAN_MARGIN_M = 0.3
+TURN_BORDER_MATCH_FRAMES = 5
+# The rollout's border distance: borders within this range of the ego, footprint sampled
+# with this many points per box edge (reproducer_rollout's road-border step score).
+_BORDER_NEAR_M = 25.0
+_FOOTPRINT_EDGE_SAMPLES = 20
 
 
 @dataclass(frozen=True)
@@ -224,15 +244,185 @@ def _ego_collisions(inp: ClosedLoopScenarioInput, w: _Window) -> np.ndarray:
     return hit
 
 
+@dataclass(frozen=True)
+class _BorderCut:
+    """Outcome of the simple_turn border-cut check (see ``_border_cut``)."""
+
+    evaluated: bool
+    cut: bool = False
+    values: dict[str, float] | None = None
+    step: int | None = None  # sim step of the worst cut
+
+
+def _footprint(shape: np.ndarray) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Perimeter samples and box (xmin, xmax, ymin, ymax) of the ego box in its own frame.
+
+    ``shape`` is ``ego_shape`` (wheelbase, length, width); the pose is the rear axle, so
+    the box overhangs it by half of (length - wheelbase) at both ends.
+    """
+    wheelbase, length, width = (float(v) for v in shape[:3])
+    rear = (length - wheelbase) / 2.0
+    xmin, xmax, ymin, ymax = -rear, length - rear, -width / 2.0, width / 2.0
+    f = np.linspace(0.0, 1.0, _FOOTPRINT_EDGE_SAMPLES)
+    x, y = xmin + f * length, ymin + f * width
+    pts = np.concatenate(
+        [
+            np.stack([x, np.full_like(f, ymin)], 1),
+            np.stack([x, np.full_like(f, ymax)], 1),
+            np.stack([np.full_like(f, xmin), y], 1),
+            np.stack([np.full_like(f, xmax), y], 1),
+        ]
+    )
+    return pts, (xmin, xmax, ymin, ymax)
+
+
+def _points_to_segments(pts: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """(P, E) distances from points to segments ``a[e] .. b[e]``."""
+    ab = b - a
+    len2 = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-10)
+    rel = pts[:, None, :] - a[None]
+    t = np.clip(np.einsum("pej,ej->pe", rel, ab) / len2, 0.0, 1.0)
+    return np.linalg.norm(rel - t[..., None] * ab[None], axis=-1)
+
+
+def _segments_hit_box(a: np.ndarray, b: np.ndarray, box: tuple[float, ...]) -> np.ndarray:
+    """(E,) bool, segment ``a[e] .. b[e]`` intersects the axis-aligned box (Liang-Barsky)."""
+    xmin, xmax, ymin, ymax = box
+    d = b - a
+    t0, t1 = np.zeros(len(a)), np.ones(len(a))
+    ok = np.ones(len(a), dtype=bool)
+    for p, q in (
+        (-d[:, 0], a[:, 0] - xmin),
+        (d[:, 0], xmax - a[:, 0]),
+        (-d[:, 1], a[:, 1] - ymin),
+        (d[:, 1], ymax - a[:, 1]),
+    ):
+        parallel = np.abs(p) < 1e-12
+        ok &= ~(parallel & (q < 0))
+        r = q / np.where(parallel, 1.0, p)
+        t0 = np.where(~parallel & (p < 0), np.maximum(t0, r), t0)
+        t1 = np.where(~parallel & (p > 0), np.minimum(t1, r), t1)
+    return ok & (t0 <= t1 + 1e-9)
+
+
+def _footprint_to_segment(
+    inp: ClosedLoopScenarioInput,
+    footprint: tuple[np.ndarray, tuple[float, ...]],
+    seg_world: np.ndarray,
+    frame: int,
+) -> float:
+    """Distance from the human footprint at recorded ``frame`` to one world segment (0 on
+    overlap)."""
+    pts, box = footprint
+    seg = _to_local(inp, seg_world, frame)
+    a, b = seg[:1], seg[1:]
+    if _segments_hit_box(a, b, box)[0]:
+        return 0.0
+    return float(_points_to_segments(pts, a, b).min())
+
+
+def _touched_border_segment(
+    inp: ClosedLoopScenarioInput,
+    footprint: tuple[np.ndarray, tuple[float, ...]],
+    borders: np.ndarray,
+    frame: int,
+    step: int,
+) -> np.ndarray | None:
+    """The world border segment (2, 2) behind the ego's border distance at ``step``.
+
+    Replays the rollout's measure: the ``road_borders`` polylines of the replayed recorded
+    ``frame`` (zero rows are padding) moved into the ego's frame, segments within
+    ``_BORDER_NEAR_M``; the first segment overlapping the box, else the one nearest the
+    perimeter samples. None when no border is in range.
+    """
+    borders = np.asarray(borders, dtype=np.float64)[..., :2]
+    valid = np.linalg.norm(borders, axis=-1) > 1e-3
+    pid, vid = np.nonzero(valid[:, :-1] & valid[:, 1:])
+    if not len(pid):
+        return None
+    world = inp.to_world(np.stack([borders[pid, vid], borders[pid, vid + 1]], axis=1), frame)
+    c, s = np.cos(inp.ego_yaw[step]), np.sin(inp.ego_yaw[step])
+    d = world - inp.ego_xy[step]
+    local = np.stack([d[..., 0] * c + d[..., 1] * s, -d[..., 0] * s + d[..., 1] * c], axis=-1)
+    a, b = local[:, 0], local[:, 1]
+    near = (np.minimum(np.linalg.norm(a, axis=-1), np.linalg.norm(b, axis=-1)) < _BORDER_NEAR_M) | (
+        np.linalg.norm((a + b) / 2.0, axis=-1) < _BORDER_NEAR_M
+    )
+    if not near.any():
+        return None
+    idx = np.flatnonzero(near)
+    pts, box = footprint
+    hit = _segments_hit_box(a[idx], b[idx], box)
+    if hit.any():
+        e = idx[np.flatnonzero(hit)[0]]
+    else:
+        e = idx[np.argmin(_points_to_segments(pts, a[idx], b[idx]).min(axis=0))]
+    return world[e]
+
+
+def _border_cut(inp: ClosedLoopScenarioInput, w: _Window) -> _BorderCut:
+    """Did the ego cut across a road border the human stayed clear of?
+
+    A scored step with ``|rb_dist_m| < ROAD_BORDER_CONTACT_M`` is a cut when the human's
+    footprint stayed at least ``TURN_BORDER_HUMAN_MARGIN_M`` from the touched segment over
+    the recorded frames nearest the ego along the recorded path (+-
+    ``TURN_BORDER_MATCH_FRAMES``). Border geometry is only rebuilt at contact steps; the
+    worst cut is the contact step with the largest human distance. Not evaluated without
+    a logged border distance or without ``road_borders`` / ``ego_shape`` in the frames.
+    """
+    if inp.road_border_m is None:
+        return _BorderCut(evaluated=False)
+    first = inp.load_frame(w.start_frame)
+    if "road_borders" not in first or "ego_shape" not in first:
+        return _BorderCut(evaluated=False)
+    footprint = _footprint(np.asarray(first["ego_shape"], dtype=np.float64))
+    rb = np.abs(inp.road_border_m[w.steps])
+    finite = np.isfinite(rb)
+    values = {"min_road_border_m": float(rb[finite].min()) if finite.any() else float("inf")}
+    contact = np.flatnonzero(finite & (rb < ROAD_BORDER_CONTACT_M))
+    if not len(contact):
+        return _BorderCut(evaluated=True, values={**values, "border_cut": 0.0})
+    rec_arc = path_arclength(w.path_xy)
+    ego_arc, _ = project_onto_path(inp.ego_xy[w.steps[contact]], w.path_xy)
+    last = len(w.path_xy) - 1
+    borders: dict[int, np.ndarray | None] = {}
+    worst, worst_step = -1.0, None
+    for i, arc in zip(contact, ego_arc):
+        step = int(w.steps[i])
+        frame = min(int(inp.rec_idx[step]), inp.n_frames - 1)
+        if frame not in borders:
+            borders[frame] = inp.load_frame(frame).get("road_borders")
+        if borders[frame] is None:
+            continue
+        seg = _touched_border_segment(inp, footprint, borders[frame], frame, step)
+        if seg is None:
+            continue
+        j = int(np.argmin(np.abs(rec_arc - arc)))
+        lo, hi = max(j - TURN_BORDER_MATCH_FRAMES, 0), min(j + TURN_BORDER_MATCH_FRAMES, last)
+        human = min(
+            _footprint_to_segment(inp, footprint, seg, w.start_frame + jj)
+            for jj in range(lo, hi + 1)
+        )
+        if human > worst:
+            worst, worst_step = human, step
+    if worst_step is None:
+        return _BorderCut(evaluated=True, values={**values, "border_cut": 0.0})
+    cut = worst >= TURN_BORDER_HUMAN_MARGIN_M
+    values.update({"border_cut": float(cut), "human_border_m": worst})
+    return _BorderCut(evaluated=True, cut=cut, values=values, step=worst_step)
+
+
 def _lateral_result(
     metric: str,
     inp: ClosedLoopScenarioInput,
     w: _Window,
     components: dict[str, torch.Tensor],
     collision_reason: str | None = None,
+    border: _BorderCut | None = None,
 ) -> ScenarioResult:
     """Shared verdict of the two lateral-deviation labels; with ``collision_reason``, an
-    ego collision during the scored steps also fails, under that reason."""
+    ego collision during the scored steps also fails, under that reason, and with
+    ``border`` so does a border cut."""
     lateral = components["lateral_error_m"][0].numpy()
     longitudinal = components["longitudinal_error_m"][0].numpy()
     values = {
@@ -251,9 +441,18 @@ def _lateral_result(
         values["collision"] = float(collided)
         if collided:
             details["first_collision_step"] = int(w.steps[np.flatnonzero(hits)[0]])
+    cut = False
+    if border is not None:
+        values["border_rule_evaluated"] = float(border.evaluated)
+        values.update(border.values or {})
+        cut = border.cut
+        if cut:
+            details["border_cut_step"] = border.step
     within = values["max_lateral_error_m"] <= MAX_LATERAL_ERROR_M
     if collided:
         reason = collision_reason
+    elif cut:
+        reason = "cut across a road border the human stayed clear of"
     elif not covered:
         reason = "ego did not cover the recorded stretch"
     elif not within:
@@ -262,7 +461,7 @@ def _lateral_result(
         reason = ""
     return ScenarioResult(
         metric=metric,
-        passed=covered and within and not collided,
+        passed=covered and within and not collided and not cut,
         values=values,
         details=details,
         reason=reason,
@@ -276,7 +475,7 @@ def score_simple_turn(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
     Mirrors ``planner_metrics/gt_lateral_deviation.py`` (the open-loop ``simple_turn``
     scorer) with the recorded stretch after the anchor as the GT path, both expressed
     in the anchor frame so the torch helper runs unchanged. An ego collision during the
-    scored steps fails the turn (see the module docstring).
+    scored steps fails the turn, and so does a border cut (see the module docstring).
     """
     metric = "gt_lateral_deviation"
     w = _window(inp, _horizon_s("simple_turn", config))
@@ -294,7 +493,9 @@ def score_simple_turn(inp: ClosedLoopScenarioInput, config=None) -> ScenarioResu
     components = compute_gt_lateral_deviation_batch(
         torch.from_numpy(ego)[None], {"ego_agent_future": torch.from_numpy(gt)[None]}
     )
-    return _lateral_result(metric, inp, w, components, "collision during the turn")
+    return _lateral_result(
+        metric, inp, w, components, "collision during the turn", _border_cut(inp, w)
+    )
 
 
 @register("centerline")

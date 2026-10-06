@@ -46,6 +46,7 @@ def make_input(
     dt: float = 0.1,
     span_frames: tuple[int, int] | None = None,
     collision_rear: np.ndarray | None = None,
+    road_border_m: np.ndarray | None = None,
 ) -> ClosedLoopScenarioInput:
     """Build an input with sensible defaults.
 
@@ -101,4 +102,5 @@ def make_input(
         load_frame=load_frame,
         span_frames=span_frames,
         collision_rear=None if collision_rear is None else np.asarray(collision_rear, dtype=bool),
+        road_border_m=None if road_border_m is None else np.asarray(road_border_m, dtype=float),
     )

@@ -189,6 +189,83 @@ def test_simple_turn_collision_outside_the_scored_steps_or_rear_ended_passes():
     assert rear.passed is True and rear.values["collision"] == 0.0
 
 
+# Bus-like box (wheelbase, length, width); the pose is the rear axle.
+_SHAPE = np.array([6.0, 10.0, 2.4])
+_BORDER_CUT_REASON = "cut across a road border the human stayed clear of"
+
+
+def _border_turn(
+    border_y: float,
+    ego_y: float,
+    rb_dist_m: float,
+    *,
+    with_borders: bool = True,
+    contact: slice = slice(ANCHOR + 20, ANCHOR + 40),
+    **kw,
+):
+    """Human straight along y=0; a road border along +x at ``border_y`` (left); the ego
+    ``ego_y`` to the left of the human, logging ``rb_dist_m`` over the ``contact`` steps."""
+    rec_xy, rec_yaw = straight_path(200, 5.0)
+    ego_xy = rec_xy + np.array([0.0, ego_y])
+    border = np.stack([np.linspace(-30.0, 30.0, 20), np.full(20, border_y)], axis=1)
+    frame = {"ego_shape": _SHAPE}
+    if with_borders:
+        frame["road_borders"] = np.concatenate([border[None], np.zeros((2, 20, 2))])
+    rb = np.full(200, 5.0)
+    rb[contact] = rb_dist_m
+    return score(
+        make_input(
+            label="simple_turn",
+            ego_xy=ego_xy,
+            ego_yaw=rec_yaw,
+            rec_xy=rec_xy,
+            rec_yaw=rec_yaw,
+            anchor_frame=ANCHOR,
+            frames=lambda i: frame,
+            road_border_m=rb,
+            **kw,
+        )
+    )
+
+
+def test_simple_turn_cutting_a_border_the_human_stayed_clear_of_fails():
+    half = _SHAPE[2] / 2
+    # The human's side is 1.0 m from the border; the ego, 0.95 m further left (within the
+    # lateral limit), is 0.05 m from it.
+    r = _border_turn(border_y=half + 1.0, ego_y=0.95, rb_dist_m=0.05)
+    assert r.passed is False and r.reason == _BORDER_CUT_REASON
+    assert r.values["border_rule_evaluated"] == 1.0 and r.values["border_cut"] == 1.0
+    assert r.values["human_border_m"] == pytest.approx(1.0, abs=1e-6)
+    assert r.values["min_road_border_m"] == pytest.approx(0.05)
+    assert r.values["max_lateral_error_m"] <= 1.0
+    assert ANCHOR + 20 <= r.details["border_cut_step"] < ANCHOR + 40
+    # A collision keeps precedence in the reason.
+    r = _border_turn(border_y=half + 1.0, ego_y=0.95, rb_dist_m=0.05, collision=_steps(ANCHOR + 30))
+    assert r.passed is False and r.reason == "collision during the turn"
+    assert r.values["border_cut"] == 1.0
+
+
+def test_simple_turn_grazing_a_border_the_human_grazed_too_passes():
+    r = _border_turn(border_y=_SHAPE[2] / 2 + 0.05, ego_y=0.0, rb_dist_m=0.05)
+    assert r.passed is True and r.reason == ""
+    assert r.values["border_cut"] == 0.0
+    assert r.values["human_border_m"] == pytest.approx(0.05, abs=1e-6)
+
+
+def test_simple_turn_negative_border_distance_far_from_any_border_is_not_a_cut():
+    # The rollout's distance flips sign inside some intersections: -10 m is 10 m away.
+    r = _border_turn(border_y=_SHAPE[2] / 2 + 10.0, ego_y=0.0, rb_dist_m=-10.0)
+    assert r.passed is True
+    assert r.values["border_cut"] == 0.0 and "human_border_m" not in r.values
+    assert r.values["min_road_border_m"] == pytest.approx(5.0)
+
+
+def test_simple_turn_without_road_borders_in_the_frames_skips_the_border_rule():
+    r = _border_turn(border_y=_SHAPE[2] / 2 + 1.0, ego_y=0.95, rb_dist_m=0.05, with_borders=False)
+    assert r.passed is True
+    assert r.values["border_rule_evaluated"] == 0.0 and "border_cut" not in r.values
+
+
 # ---------------------------------------------------------------- centerline
 
 
