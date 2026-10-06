@@ -4,6 +4,7 @@ import pytest
 from scenario_generation.scenario_metrics import registry
 from scenario_generation.scenario_metrics.stop_arrival import (
     GOAL_REACH_M,
+    HOLD_CREEP_MARGIN_M,
     TEMPORAL_STOP_MIN_HOLD_S,
     TEMPORAL_STOP_TOLERANCE_M,
 )
@@ -257,8 +258,10 @@ def test_temporal_stop_held_at_the_line_then_departing_passes():
     stop = r.details["ego_stop_steps"]
     assert stop[1] - stop[0] == 15 and 1.5 > TEMPORAL_STOP_MIN_HOLD_S
     assert r.passed is True and r.values["overshoot_m"] == pytest.approx(0.0)
-    # traffic_light_stop still judges the furthest point while the human holds.
-    assert registry.score(_stop_input(ego, human)).passed is False
+    # traffic_light_stop judges the first stop; leaving it while the human holds fails
+    # only the hold.
+    red = registry.score(_stop_input(ego, human))
+    assert red.passed is True and red.values["hold_passed"] == 0.0
 
 
 def test_temporal_stop_held_past_the_line_fails():
@@ -326,19 +329,63 @@ def test_a_jittering_stopped_ego_still_counts_as_stopped():
     assert r.values["overshoot_m"] < 0.1
 
 
-def test_creeping_past_the_line_after_stopping_fails():
+def test_creeping_past_the_line_after_stopping_passes_and_fails_the_hold():
     # Stops 1 m short, then creeps on at 0.3 m/s (still a "stop" by speed) to 2 m past.
     ego = np.r_[np.full(48, 5.0), np.zeros(10), np.full(100, 0.3)]
     r = registry.score(_stop_input(ego))
-    assert r.passed is False and r.values["ego_sustained_stop"] == 1.0
-    assert r.values["overshoot_m"] > 1.5
+    assert r.passed is True and r.values["ego_sustained_stop"] == 1.0
+    assert r.values["hold_creep_m"] > 1.5 + HOLD_CREEP_MARGIN_M
+    assert r.values["human_hold_creep_m"] == pytest.approx(0.0)
+    assert r.values["max_hold_creep_m"] == pytest.approx(HOLD_CREEP_MARGIN_M)
+    assert r.values["hold_passed"] == 0.0
 
 
-def test_a_brief_stop_short_of_the_line_then_rolling_through_fails():
+def test_a_brief_stop_short_of_the_line_then_rolling_through_passes_and_fails_the_hold():
     ego = np.r_[np.full(44, 5.0), np.zeros(10), np.full(96, 5.0)]  # stops 3 m short
     r = registry.score(_stop_input(ego))
+    assert r.passed is True
+    assert r.values["first_stop_overshoot_m"] == pytest.approx(-3.0, abs=0.1)
+    assert r.values["hold_creep_m"] > 10.0
+    assert r.values["hold_passed"] == 0.0
+
+
+def test_traffic_light_stop_holding_behind_the_line_passes_the_hold():
+    r = registry.score(_stop_input(_profile(50, 100)))
+    assert r.passed is True
+    assert r.values["hold_creep_m"] == pytest.approx(0.0)
+    assert r.values["hold_passed"] == 1.0
+
+
+def test_traffic_light_stop_first_stop_past_the_limit_fails():
+    r = registry.score(_stop_input(_profile(52, 100)))  # 1 m past, holds there
     assert r.passed is False
-    assert r.values["overshoot_m"] > 10.0
+    assert r.values["first_stop_overshoot_m"] == pytest.approx(1.0)
+    assert r.values["overshoot_m"] == pytest.approx(1.0)
+    assert r.reason == "ego's first stop was past the stop limit"
+    assert r.values["hold_passed"] == 1.0  # holding is reported apart from the verdict
+
+
+def test_traffic_light_stop_never_stopping_fails_and_has_no_hold_verdict():
+    r = registry.score(_stop_input(np.full(150, 5.0), terminated="max_steps"))
+    assert r.passed is False
+    assert r.reason == "ego passed the stop limit without stopping"
+    assert np.isnan(r.values["hold_creep_m"]) and "hold_passed" not in r.values
+
+
+def test_human_hold_creep_is_the_humans_advance_while_holding():
+    # The human stops at 25 m, creeps 1 m at 0.4 m/s (a queue moving up), holds again and
+    # departs. The ego stops at 25 m and creeps 1.8 m: within 1 m + the margin.
+    human = np.r_[np.full(50, 5.0), np.zeros(20), np.full(25, 0.4), np.zeros(30), np.full(25, 5.0)]
+    ego = np.r_[np.full(50, 5.0), np.zeros(20), np.full(45, 0.4), np.zeros(35)]
+    r = registry.score(_stop_input(ego, human))
+    assert r.values["human_hold_creep_m"] == pytest.approx(1.0)
+    assert r.values["max_hold_creep_m"] == pytest.approx(1.0 + HOLD_CREEP_MARGIN_M)
+    assert r.values["hold_creep_m"] == pytest.approx(1.8, abs=0.05)
+    assert r.passed is True and r.values["hold_passed"] == 1.0
+    # The same creep without the human's is beyond the margin.
+    alone = registry.score(_stop_input(ego))
+    assert alone.values["human_hold_creep_m"] == pytest.approx(0.0)
+    assert alone.passed is True and alone.values["hold_passed"] == 0.0
 
 
 def _line_frames(line_x_ahead: float):
@@ -397,7 +444,7 @@ def test_without_a_stop_line_the_human_stop_is_the_reference():
     assert obstacle.details["stop_reference"] == "human_stop"  # not a stop-line label
 
 
-def test_extended_arrival_needs_the_ego_to_stay_for_the_humans_dwell():
+def test_extended_arrival_reports_the_share_of_the_dwell_the_ego_stayed():
     # The bus holds at the stop over recorded frames 50..80 (3 s). The ego stops there
     # too; the replay either plays the dwell out one frame per step (it stays) or jumps
     # past it after 1 s (it edged on and pulled the recording forward).
@@ -424,12 +471,12 @@ def test_extended_arrival_needs_the_ego_to_stay_for_the_humans_dwell():
         rec_idx=np.minimum(jumped, 129),
     )
     r = registry.score(left)
-    assert r.passed is False
+    # Reported only: the verdict is the first stop.
+    assert r.passed is True and r.reason == ""
     assert r.values["wait_ratio"] == pytest.approx(1.0 / 3.0, abs=0.05)
-    assert r.reason == "ego left the bus stop before staying long enough"
 
 
-def test_traffic_light_stop_also_needs_the_red_waited_out():
+def test_traffic_light_stop_reports_the_share_of_the_red_waited_out():
     # The human waits over frames 50..150 (window end). The ego stops at the human's stop;
     # in one run the replay plays the wait out, in the other it jumps past the wait (and to
     # the window's departure frames) after 2 s, as when the ego edges on.
@@ -440,8 +487,9 @@ def test_traffic_light_stop_also_needs_the_red_waited_out():
     jumped = np.r_[np.arange(70), np.arange(111, 111 + 80)]
     early = _stop_input(_profile(50, 100), human, rec_idx=np.minimum(jumped, 149)[:150])
     r = registry.score(early)
-    assert r.passed is False
-    assert r.reason == "replay left the red light before the ego waited long enough"
+    # Reported only: leaving the red early no longer fails by itself.
+    assert r.passed is True and r.reason == ""
+    assert r.values["wait_ratio"] < 0.8
     assert r.values["overshoot_m"] == pytest.approx(0.0)
     temporal = registry.score(
         _stop_input(
@@ -459,24 +507,37 @@ def test_stop_splits_the_first_stop_from_the_creep_while_holding():
     r = registry.score(_stop_input(np.r_[np.full(48, 5.0), np.zeros(10), np.full(100, 0.3)]))
     assert r.values["first_stop_overshoot_m"] == pytest.approx(-1.0)
     assert r.values["hold_creep_m"] == pytest.approx(2.97)
-    assert r.values["overshoot_m"] == pytest.approx(
-        max(0.0, r.values["first_stop_overshoot_m"] + r.values["hold_creep_m"])
-    )
-    # The verdict and the existing values are as before the split.
-    assert r.passed is False and r.reason == ""
+    # The verdict and the stop values are the first stop's; the creep is the hold's.
+    assert r.passed is True and r.reason == ""
     assert r.details["ego_stop_steps"] == [50, 158]
-    old = {k: v for k, v in r.values.items() if k not in ("first_stop_overshoot_m", "hold_creep_m")}
-    assert old == pytest.approx(
+    stop_keys = (
+        "tolerance_m",
+        "red_light_violation_steps",
+        "human_stop_s_m",
+        "max_s_after_anchor_m",
+        "ego_stop_s_m",
+        "overshoot_m",
+        "undershoot_m",
+        "past_human_stop_m",
+        "ego_sustained_stop",
+        "human_hold_creep_m",
+        "max_hold_creep_m",
+        "hold_passed",
+    )
+    assert {k: r.values[k] for k in stop_keys} == pytest.approx(
         {
             "tolerance_m": 0.5,
             "red_light_violation_steps": 0.0,
             "human_stop_s_m": 25.0,
             "max_s_after_anchor_m": 26.97,
-            "ego_stop_s_m": 26.97,
-            "overshoot_m": 1.97,
-            "undershoot_m": 0.0,
-            "past_human_stop_m": 1.97,
+            "ego_stop_s_m": 24.0,
+            "overshoot_m": 0.0,
+            "undershoot_m": 1.0,
+            "past_human_stop_m": -1.0,
             "ego_sustained_stop": 1.0,
+            "human_hold_creep_m": 0.0,
+            "max_hold_creep_m": HOLD_CREEP_MARGIN_M,
+            "hold_passed": 0.0,
         }
     )
 
@@ -508,14 +569,35 @@ def test_extended_arrival_splits_the_first_stop_from_the_creep_while_dwelling():
     r = registry.score(_extended_arrival(ego))
     assert r.values["first_stop_distance_m"] == pytest.approx(0.0)
     assert r.values["hold_creep_m"] == pytest.approx(0.57)
-    # The verdict and the existing values are as before the split.
+    # The verdict and the stop values are the first stop's.
     assert r.passed is True and r.reason == ""
-    assert r.values["ego_stop_s_m"] == pytest.approx(25.135)
-    assert r.values["stop_distance_m"] == pytest.approx(0.12)
+    assert r.values["ego_stop_s_m"] == pytest.approx(25.0)
+    assert r.values["stop_distance_m"] == pytest.approx(0.0)
     assert r.values["wait_ratio"] == pytest.approx(1.0)
+    assert r.values["human_hold_creep_m"] == pytest.approx(0.0)
+    assert r.values["hold_passed"] == 1.0
     matched = registry.score(_extended_arrival(_profile(50, 30, 50)))
     assert matched.values["first_stop_distance_m"] == pytest.approx(0.0)
     assert matched.values["hold_creep_m"] == pytest.approx(0.0)
     through = registry.score(_extended_arrival(np.full(130, 5.0)))
     assert np.isnan(through.values["first_stop_distance_m"])
     assert np.isnan(through.values["hold_creep_m"])
+
+
+def test_extended_arrival_first_stop_within_tolerance_then_creeping_far_passes():
+    # Stops at the bus stop for 1 s, then creeps at 1 m/s while the bus still holds.
+    ego = np.r_[np.full(50, 5.0), np.zeros(10), np.full(70, 1.0)]
+    r = registry.score(_extended_arrival(ego))
+    assert r.passed is True and r.values["first_stop_distance_m"] == pytest.approx(0.0)
+    assert r.values["max_hold_creep_m"] == pytest.approx(HOLD_CREEP_MARGIN_M)
+    assert r.values["hold_creep_m"] == pytest.approx(1.9, abs=0.1)
+    assert r.values["hold_passed"] == 0.0
+
+
+def test_extended_arrival_first_stop_3m_off_fails_even_if_it_moves_up():
+    # Stops 3 m short of the bus stop, then moves up and stops at it.
+    ego = np.r_[np.full(44, 5.0), np.zeros(10), np.full(6, 5.0), np.zeros(70)]
+    r = registry.score(_extended_arrival(ego))
+    assert r.passed is False and r.reason == "ego stopped away from the arrival point"
+    assert r.values["first_stop_distance_m"] == pytest.approx(3.0)
+    assert r.values["longitudinal_offset_m"] == pytest.approx(-3.0)

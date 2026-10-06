@@ -42,6 +42,13 @@ reason) say what the open-loop definition measures on the realized trajectory:
   ``GOAL_REACH_M`` short, which alone exceeds the 2 m open-loop tolerance.
 
 ``ol_passed`` (0/1) is the open-loop rule with the same tolerance(s).
+
+traffic_light_stop and (extended) arrival split the stop into reacting and holding. The
+label's verdict is the reaction: where the ego first stopped, comparable with open loop.
+Holding is closed loop only and dominated by the model creeping at standstill; it is
+reported as ``hold_passed`` (0/1, its mean the hold pass rate), not part of the verdict:
+the ego's ``hold_creep_m`` against the human's own creep while holding
+(``human_hold_creep_m``) plus ``HOLD_CREEP_MARGIN_M``.
 """
 
 from __future__ import annotations
@@ -89,13 +96,16 @@ TEMPORAL_STOP_TOLERANCE_M = 0.15
 # ``_ego_stop_speed`` makes about 0.3 s shorter than the time spent at rest. Once the ego
 # has held such a stop, it is free to move on (see ``score_stop``).
 TEMPORAL_STOP_MIN_HOLD_S = 1.0
-# Closed loop only: the share of the human's dwell at the bus stop the ego must stay
-# before the replay leaves it.
-ARRIVAL_MIN_WAIT_RATIO = 0.8
-# Closed loop only: the share of the human's red-light wait the ego must wait before the
-# replay leaves it (the same rule and value as ``ARRIVAL_MIN_WAIT_RATIO``). Not applied to
-# temporal_stop, whose stop the human holds for about a second.
-TRAFFIC_LIGHT_MIN_WAIT_RATIO = 0.8
+# Closed loop only: how far the ego may creep on from its first stop while the human holds
+# (``hold_passed``), beyond the human's own creep. Humans creep a little while holding,
+# e.g. a queue moving up; the margin is a user decision.
+HOLD_CREEP_MARGIN_M = 1.0
+# The human holds from its first still frame after the anchor (net speed over
+# ``HUMAN_STILL_WINDOW_S`` below ``HUMAN_STILL_SPEED_MPS``, i.e. under 5 cm in 0.5 s) to
+# its last still frame before it departs (net speed above ``HUMAN_DEPART_SPEED_MPS``).
+HUMAN_STILL_WINDOW_S = 0.5
+HUMAN_STILL_SPEED_MPS = 0.1
+HUMAN_DEPART_SPEED_MPS = 1.0
 # Labels whose stop is at a stop line (vse ``stop_line_classifier``): they are judged by
 # the ego's front against that line when the human's stop frame has one.
 STOP_LINE_LABELS = ("traffic_light_stop", "temporal_stop")
@@ -222,6 +232,15 @@ def _stop_line_arc(
     return (min(crossings), front) if crossings else None
 
 
+def _net_speed(xy: np.ndarray, dt: float, window_s: float) -> np.ndarray:
+    """Net displacement over a centred ``window_s`` window, per second."""
+    n, w = len(xy), max(1, round(window_s / dt))
+    a = np.clip(np.arange(n) - w // 2, 0, max(n - 1 - w, 0))
+    b = np.minimum(a + w, n - 1)
+    span = np.maximum(b - a, 1) * dt
+    return np.linalg.norm(xy[b] - xy[a], axis=1) / span
+
+
 def _ego_stop_speed(inp: ClosedLoopScenarioInput, p: StopParams) -> np.ndarray:
     """Live ego speed for stop detection: net displacement over ``sustained_stop_s``.
 
@@ -230,11 +249,48 @@ def _ego_stop_speed(inp: ClosedLoopScenarioInput, p: StopParams) -> np.ndarray:
     while it stands still and no sustained stop is ever seen. The net displacement over
     a centred window of the stop duration is what "standing still" means here.
     """
-    n, w = inp.n_steps, max(1, round(p.sustained_stop_s / inp.dt))
-    a = np.clip(np.arange(n) - w // 2, 0, max(n - 1 - w, 0))
-    b = np.minimum(a + w, n - 1)
-    span = np.maximum(b - a, 1) * inp.dt
-    return np.linalg.norm(inp.ego_xy[b] - inp.ego_xy[a], axis=1) / span
+    return _net_speed(inp.ego_xy, inp.dt, p.sustained_stop_s)
+
+
+def _human_hold_creep_m(inp: ClosedLoopScenarioInput) -> float:
+    """How far the human advanced along the recorded path while holding.
+
+    Arc from its first still frame at/after the anchor to its last still frame before it
+    departs (the first frame after that moving faster than ``HUMAN_DEPART_SPEED_MPS``;
+    the window end if none). NaN if the human is never still after the anchor.
+    """
+    v = _net_speed(inp.rec_xy, REC_DT_S, HUMAN_STILL_WINDOW_S)
+    frames = np.arange(inp.n_frames)
+    still = np.flatnonzero((v < HUMAN_STILL_SPEED_MPS) & (frames >= inp.anchor_frame))
+    if not len(still):
+        return np.nan
+    departs = np.flatnonzero((v > HUMAN_DEPART_SPEED_MPS) & (frames > still[0]))
+    last = still[still < departs[0]][-1] if len(departs) else still[-1]
+    s_rec = path_arclength(inp.rec_xy)
+    return float(s_rec[last] - s_rec[still[0]])
+
+
+def _hold_values(inp: ClosedLoopScenarioInput, hold_creep_m: float) -> dict[str, float]:
+    """``human_hold_creep_m``, ``max_hold_creep_m`` and, when both creeps are known,
+    ``hold_passed`` (1.0 if the ego's ``hold_creep_m`` is within the maximum)."""
+    human = _human_hold_creep_m(inp)
+    values = {"human_hold_creep_m": human, "max_hold_creep_m": human + HOLD_CREEP_MARGIN_M}
+    if np.isfinite(human) and np.isfinite(hold_creep_m):
+        values["hold_passed"] = float(hold_creep_m <= values["max_hold_creep_m"])
+    return values
+
+
+def _wait(inp: ClosedLoopScenarioInput, h0: int, h1: int) -> tuple[float, float, int | None]:
+    """``(human's stop duration, time the replay spent inside it, step it left)``.
+
+    The replay cursor follows the ego, so an ego that edges on past the human's stop
+    pulls the recording forward to the human's departure (as in ``yield_wait``).
+    """
+    entered = np.flatnonzero(inp.rec_idx >= h0)
+    left = np.flatnonzero(inp.rec_idx >= h1)
+    k_in = int(entered[0]) if len(entered) else inp.n_steps
+    k_out = int(left[0]) if len(left) else inp.n_steps
+    return (h1 - h0) * REC_DT_S, max(0, k_out - k_in) * inp.dt, k_out if len(left) else None
 
 
 def _extended_path(inp: ClosedLoopScenarioInput) -> np.ndarray:
@@ -372,10 +428,12 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     departure, not overshoot, even while the human still holds (the human holds about a
     second, and the replay fast-forwards once the ego is ahead).
 
-    traffic_light_stop must also wait out the red: the replay has to stay inside the
-    human's stop for ``TRAFFIC_LIGHT_MIN_WAIT_RATIO`` of its duration (``wait_ratio``, as
-    in ``yield_wait``). An ego that edges on past the human's stop pulls the replay to
-    the green, so it can stay short of the line yet never wait for the light.
+    traffic_light_stop is judged by the reaction alone: the ego's first stop at/after the
+    anchor must not pass ``reference + tolerance`` (``first_stop_overshoot_m <=
+    tolerance_m``); an ego that passes the limit without ever stopping fails. Creeping on
+    while the red lasts is holding, reported as ``hold_passed`` (see the module doc), as
+    is the share of the human's wait the replay spent inside it (``wait_ratio``; an ego
+    that edges on pulls the replay to the green).
 
     Not scored: the human never stops after the anchor; or the trace ends (goal,
     max_steps, abort) before the ego either stops or passes the limit. The latter is
@@ -394,7 +452,8 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
       Holding: closed loop only, and dominated by the model's creep at standstill,
       which the position-keyed replay also turns into a skipped wait.
 
-    When a stop while the human holds decides the verdict, ``overshoot_m`` is
+    For traffic_light_stop ``overshoot_m`` is ``max(0, first_stop_overshoot_m)``. For the
+    other labels, when a stop while the human holds decides the verdict, it is
     ``max(0, first_stop_overshoot_m + hold_creep_m)``.
     """
     metric = "stop_overshoot"
@@ -456,7 +515,28 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
         first_s = float(np.median(s_ego[first]))
         values["first_stop_overshoot_m"] = first_s - ref_s
         values["hold_creep_m"] = _hold_creep_m(s_ego, first, judged, first_s)
-    if held:
+    reason = ""
+    if inp.label == "traffic_light_stop":
+        human_wait_s, waited_s, k_out = _wait(inp, h0, h1)
+        values.update(
+            {
+                "human_wait_s": human_wait_s,
+                "waited_s": waited_s,
+                "wait_ratio": waited_s / human_wait_s,
+            }
+        )
+        details["step_left_wait"] = k_out
+        values.update(_hold_values(inp, values["hold_creep_m"]))
+    if inp.label == "traffic_light_stop" and first is not None:
+        r0, r1 = live[0]
+        stop_s, stopped = float(np.median(s_ego[first])), True
+        passed = values["first_stop_overshoot_m"] <= p.tolerance_m
+        reason = "" if passed else "ego's first stop was past the stop limit"
+    elif inp.label == "traffic_light_stop" and k_cross is not None:
+        r0 = r1 = None
+        stop_s, stopped = values["max_s_after_anchor_m"], False
+        passed, reason = False, "ego passed the stop limit without stopping"
+    elif held and inp.label != "traffic_light_stop":
         r0, r1 = held[0]
         stop_s = float(s_ego[judged].max())
         passed, stopped = stop_s <= limit, True
@@ -492,70 +572,31 @@ def score_stop(inp: ClosedLoopScenarioInput, p: StopParams) -> ScenarioResult:
     )
     details["ego_stop_steps"] = None if r0 is None else [r0, r1]
     details["first_step_past_limit"] = k_cross
-    if inp.label != "traffic_light_stop" or not passed:
-        return ScenarioResult(metric, passed, values, details)
-    # A red light is also a wait: an ego that edges on past the human's stop pulls the
-    # replay forward to the green, so the line alone is not crossed under red.
-    wait_s = (h1 - h0) * REC_DT_S
-    entered = np.flatnonzero(inp.rec_idx >= h0)
-    left = np.flatnonzero(inp.rec_idx >= h1)
-    k_in = int(entered[0]) if len(entered) else inp.n_steps
-    k_out = int(left[0]) if len(left) else inp.n_steps
-    waited_s = max(0, k_out - k_in) * inp.dt
-    values.update(
-        {
-            "human_wait_s": wait_s,
-            "waited_s": waited_s,
-            "wait_ratio": waited_s / wait_s,
-            "min_wait_ratio": TRAFFIC_LIGHT_MIN_WAIT_RATIO,
-        }
-    )
-    details["step_left_wait"] = k_out if len(left) else None
-    if values["wait_ratio"] >= TRAFFIC_LIGHT_MIN_WAIT_RATIO:
-        return ScenarioResult(metric, True, values, details)
-    if not len(left):
-        return ScenarioResult(
-            metric,
-            None,
-            values,
-            details,
-            reason=f"trace ended ({inp.terminated}) inside the human's wait before the ego waited long enough",
-        )
-    return ScenarioResult(
-        metric,
-        False,
-        values,
-        details,
-        reason="replay left the red light before the ego waited long enough",
-    )
+    return ScenarioResult(metric, passed, values, details, reason)
 
 
 def _score_arrival_stop(
     inp: ClosedLoopScenarioInput, p: ArrivalParams, human: tuple[int, int]
 ) -> ScenarioResult:
-    """The ego must stop within ``position_tolerance_m`` of the human's arrival stop and
-    stay there for ``ARRIVAL_MIN_WAIT_RATIO`` of the human's dwell.
+    """The ego's first stop must be within ``position_tolerance_m`` of the human's
+    arrival stop, heading within ``heading_tolerance_deg``.
 
     Used when the window runs on past the human's stop (``extend_until_departure``), so
     the goal radius no longer hides it. The arrival point is the middle of the human's
-    first sustained stop at/after the anchor; the ego's stop is its sustained stop
-    (after ``anchor_step``) closest to that point along the road. Driving past without
-    a stop fails.
+    first sustained stop at/after the anchor; the ego's stop is its first sustained stop
+    after ``anchor_step``, at the median pose over its first ``sustained_stop_s``
+    (``first_stop_distance_m``, ``stop_distance_m``; heading at the middle of it).
+    Driving past without a stop fails.
 
-    A brief stop is not an arrival: the ego must also stay. As in ``yield_wait``, the
-    replay cursor follows the ego, so an ego that edges on past the stop pulls the
-    recording forward to the human's departure. The time the replay spends inside the
-    human's dwell, over the dwell's recorded duration, is the share of the dwell the ego
-    stayed (``wait_ratio``); edging up by less than the replay's search radius still
-    counts as staying. The open-loop reference values compare the final pose with the
-    window's end and say nothing here, so they are left out.
-
-    Reported only, as for the stop labels (see ``score_stop``): ``first_stop_distance_m``,
-    the distance to the arrival point at the ego's first stop after the anchor (median
-    pose over its first ``sustained_stop_s``; reacting to the scene, comparable with
-    open loop), and ``hold_creep_m``, the furthest arc from that stop on while the replay
-    is before the human's departure, minus the first stop (holding: closed loop only,
-    dominated by the model's creep). Both NaN without a stop.
+    The verdict is the reaction: where the ego first stopped, comparable with open loop.
+    Staying is holding, closed loop only and dominated by the model's creep, reported
+    only: ``hold_creep_m`` (the furthest arc from the first stop on while the replay is
+    before the human's departure, minus the first stop; NaN without a stop) against the
+    human's own creep as ``hold_passed`` (see the module doc), and the share of the
+    human's dwell the replay spent inside it (``wait_ratio``; as in ``yield_wait``, an ego
+    that edges on pulls the recording forward to the human's departure). The open-loop
+    reference values compare the final pose with the window's end and say nothing here,
+    so they are left out.
     """
     metric = "arrival"
     k0 = inp.anchor_step
@@ -587,7 +628,13 @@ def _score_arrival_stop(
         first_s = float(np.median(s_ego[first]))
         values["first_stop_distance_m"] = float(np.linalg.norm(first_xy - inp.rec_xy[i_arr]))
         values["hold_creep_m"] = _hold_creep_m(s_ego, first, dwelling, first_s)
-    if not live:
+    dwell_s, waited_s, k_out = _wait(inp, h0, h1)
+    values.update(
+        {"human_dwell_s": dwell_s, "waited_s": waited_s, "wait_ratio": waited_s / dwell_s}
+    )
+    details["step_left_dwell"] = k_out
+    values.update(_hold_values(inp, values["hold_creep_m"]))
+    if first is None:
         if (
             inp.terminated != "goal"
             and values["max_s_after_anchor_m"] < s_arr - p.position_tolerance_m
@@ -602,57 +649,29 @@ def _score_arrival_stop(
         return ScenarioResult(
             metric, False, values, details, reason="ego never stopped after the anchor"
         )
-    r0, r1 = min(live, key=lambda r: abs(float(np.median(s_ego[r[0] : r[1]])) - s_arr))
-    k = (r0 + r1 - 1) // 2
+    k = int(first[len(first) // 2])
     heading_err = float(np.degrees(abs(wrap_angle(inp.ego_yaw[k] - inp.rec_yaw[i_arr]))))
     values.update(
         {
-            "ego_stop_s_m": float(np.median(s_ego[r0:r1])),
-            "stop_distance_m": float(np.linalg.norm(inp.ego_xy[k] - inp.rec_xy[i_arr])),
-            "longitudinal_offset_m": float(s_ego[k]) - s_arr,
-            "lateral_offset_m": float(lat[k]),
+            "ego_stop_s_m": first_s,
+            "stop_distance_m": values["first_stop_distance_m"],
+            "longitudinal_offset_m": first_s - s_arr,
+            "lateral_offset_m": float(np.median(lat[first])),
             "heading_error_deg": heading_err,
         }
     )
-    details["ego_stop_steps"] = [r0, r1]
-    dwell_s = (h1 - h0) * REC_DT_S
-    entered = np.flatnonzero(inp.rec_idx >= h0)
-    left = np.flatnonzero(inp.rec_idx >= h1)
-    k_in = int(entered[0]) if len(entered) else inp.n_steps
-    k_out = int(left[0]) if len(left) else inp.n_steps
-    waited_s = max(0, k_out - k_in) * inp.dt
-    values.update(
-        {
-            "human_dwell_s": dwell_s,
-            "waited_s": waited_s,
-            "wait_ratio": waited_s / dwell_s,
-            "min_wait_ratio": ARRIVAL_MIN_WAIT_RATIO,
-        }
-    )
-    details["step_left_dwell"] = k_out if len(left) else None
+    details["ego_stop_steps"] = list(live[0])
     near = values["stop_distance_m"] <= p.position_tolerance_m
     heading_ok = heading_err <= p.heading_tolerance_deg
-    stayed = values["wait_ratio"] >= ARRIVAL_MIN_WAIT_RATIO
     details["position_within_tolerance"] = near
     details["heading_within_tolerance"] = heading_ok
-    details["stayed"] = stayed
     if not near:
         reason = "ego stopped away from the arrival point"
     elif not heading_ok:
         reason = "heading off at the arrival point"
-    elif not stayed and not len(left):
-        return ScenarioResult(
-            metric,
-            None,
-            values,
-            details,
-            reason=f"trace ended ({inp.terminated}) inside the human's dwell before the ego stayed long enough",
-        )
-    elif not stayed:
-        reason = "ego left the bus stop before staying long enough"
     else:
         reason = ""
-    return ScenarioResult(metric, near and heading_ok and stayed, values, details, reason)
+    return ScenarioResult(metric, near and heading_ok, values, details, reason)
 
 
 def score_arrival(inp: ClosedLoopScenarioInput, p: ArrivalParams) -> ScenarioResult:
