@@ -247,13 +247,20 @@ def test_traffic_light_go_holding_behind_the_line_passes():
 
 
 def test_traffic_light_go_creeping_past_the_line_on_red_fails():
-    r = departure_progress(_red_input(_ego_speeds(creep_m=1.0)))
+    r = departure_progress(_red_input(_ego_speeds(creep_m=1.5)))
     assert r.passed is False and r.reason == "ego passed the stop line on red"
     assert r.values["first_stop_past_line_m"] == pytest.approx(-0.5, abs=0.05)
-    assert r.values["hold_creep_m"] == pytest.approx(1.0, abs=0.05)
-    assert r.values["furthest_past_line_m"] == pytest.approx(0.5, abs=0.05)
+    assert r.values["hold_creep_m"] == pytest.approx(1.5, abs=0.05)
+    assert r.values["furthest_past_line_m"] == pytest.approx(1.0, abs=0.05)
     # The departure after the green is not judged by the line.
     assert r.values["progress_m"] >= r.values["threshold_m"]
+
+
+def test_traffic_light_go_edging_onto_the_line_passes():
+    # 0.4 m past the line is within the tolerance.
+    r = departure_progress(_red_input(_ego_speeds(creep_m=0.9)))
+    assert r.values["furthest_past_line_m"] == pytest.approx(0.4, abs=0.05)
+    assert TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M == 0.5 and r.passed is True
 
 
 def test_departure_is_not_judged_by_the_red():

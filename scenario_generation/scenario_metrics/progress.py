@@ -80,9 +80,11 @@ CLOSED_LOOP_DEPARTURE_HORIZON_S = 5.0
 # Recorded frames are 10 Hz; span lengths are in recorded frames.
 REC_DT_S = 0.1
 # Closed loop only: how far past the stop line a traffic_light_go ego's front may get while
-# the human waits at the red. Passing the line on red is a fail (a user decision; the
-# model typically stops 0-2 m short and then creeps 1.0-1.6 m on).
-TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M = 0.0
+# the human waits at the red (the model typically stops 0-2 m short and then creeps
+# 1.0-1.6 m on). Humans stop with the front more than 0.5 m past the line in only 2-5% of
+# red-light and stop-sign stops, and relabeled windows failed every ego 0.45 m or more past
+# it (agreement 0.88, against 0.85 with no tolerance). The same 0.5 m as traffic_light_stop.
+TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M = 0.5
 # Closed loop only (no open-loop counterpart): how much further than the human the ego
 # may get along the road while the replay is inside the human's wait (``yield_wait``).
 # Human labels passed every yield up to 2.98 m past the human's progress; how long the
