@@ -20,8 +20,8 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
-from scenario_generation.ml_planner_inputs import MlPlannerOnnx
 from scenario_generation.perf_timer import Timers
+from scenario_generation.ml_planner_inputs import load_planner
 from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
 
 
@@ -40,7 +40,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--model_path",
         required=True,
-        help="torch .pth checkpoint, or an ML Planner sampler .onnx",
+        help="an ML Planner sampler .onnx, or a Diffusion-Planner export with its args.json alongside",
     )
     p.add_argument(
         "--replan_interval",
@@ -63,16 +63,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from scenario_generation.simulate import load_model
-
     a = _parse_args(argv)
     timers = Timers()
     t_proc = time.perf_counter()
     with timers("model_load"):
-        if a.model_path.endswith(".onnx"):
-            model, model_args = MlPlannerOnnx(a.model_path, a.device), None
-        else:
-            model, model_args = load_model(a.model_path, a.device)
+        model = load_planner(a.model_path, a.device)
 
     cfg = RolloutConfig(
         fps=a.fps,
@@ -84,7 +79,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     row = run_scenario_sim_rollout(
         model,
-        model_args,
         a.osc,
         a.out_dir,
         map_path=a.map_path,

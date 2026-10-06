@@ -21,25 +21,21 @@ import json
 import math
 import os
 import time
-from collections import deque
 from concurrent.futures import Executor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
-from scenario_generation.ml_planner_inputs import MlPlannerOnnx
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
 from scenario_generation.scenario_sim_scene import (
-    _HISTORY_LEN,
     DT,
     TURN_INDICATOR_DISABLE,
     HistoryBuffers,
@@ -50,11 +46,7 @@ from scenario_generation.scenario_sim_scene import (
     resolve_ego_name,
     update_history,
 )
-from scenario_generation.simulate import (
-    _ego_to_world,
-    _predict_batch,
-    resolve_keep_turn_indicator,
-)
+from scenario_generation.simulate import _ego_to_world, resolve_keep_turn_indicator
 from scenario_generation.tensor_converter import _build_neighbor_agents_past
 from scenario_generation.tools.eval_cl_trajectory import (
     border_segments_from_map,
@@ -106,27 +98,6 @@ class RolloutConfig:
         # silently wrong speeds and brake counts, so it has to fail here.
         if abs(self.fps * DT - 1.0) > 1e-9:
             raise ValueError(f"fps={self.fps} does not match the model timestep DT={DT}")
-
-
-@torch.no_grad()
-def _predict_ego_plan(model, model_args, scene, device, ego_name: str) -> tuple[np.ndarray, int]:
-    """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class).
-
-    No ``map_cache`` is passed: the cache only pays off across steps that share one
-    ``map_data``, and this loop rebuilds it around the ego every tick.
-    """
-    preds, tis = _predict_batch(
-        model,
-        model_args,
-        scene,
-        [ego_name],
-        device,
-        return_turn_indicators=True,
-    )
-    # A model without a turn-indicator head returns no class at all. Falling back to 0 puts
-    # NO_COMMAND into a history that is in report space, where 0 is not a value, and
-    # resolve_keep_turn_indicator carries it forward from then on.
-    return preds[ego_name], int(tis.get(ego_name, TURN_INDICATOR_DISABLE))
 
 
 def _ego_plan_to_map_trajectory(
@@ -378,7 +349,6 @@ def _finalize_row(
 
 def run_scenario_sim_rollout(
     model,
-    model_args,
     osc_path: str | Path,
     output_dir: str | Path,
     map_path: str | Path | None = None,
@@ -392,13 +362,9 @@ def run_scenario_sim_rollout(
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
-    ``model`` / ``model_args`` follow the ``run_closed_loop_eval`` contract
-    (``model(data) -> (_, outputs)`` with ``outputs["prediction"]``; ``model_args`` provides
-    ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). An
-    :class:`MlPlannerOnnx` takes no ``model_args``: its inputs come from the simulator's
-    ``MlPlannerObserver``. ``builder`` lets
-    a caller that outlives one scenario reuse a parsed map, which is per-map work a
-    per-scenario process would otherwise pay per scenario.
+    ``model`` is a :mod:`scenario_generation.ml_planner_inputs` planner: it names the simulator
+    observer that builds its inputs. ``builder`` lets a caller that outlives one scenario reuse a
+    parsed map, which is per-map work a per-scenario process would otherwise pay per scenario.
     """
     # Participants in one DDS domain all discover each other, so processes sharing a domain cost
     # N^2 of discovery. 101 is the last domain whose RTPS base ports clear Linux's ephemeral
@@ -425,9 +391,8 @@ def run_scenario_sim_rollout(
     # The map-frame plan the sim is tracking, outliving the replan that set it.
     pts: np.ndarray | None = None
     # The planner is the only source of this signal -- the simulator relays what it is given --
-    # so the history the model reads is the one resolved here, held between replans.
+    # so the report the observer reads is the one resolved here, held between replans.
     ti_report = TURN_INDICATOR_DISABLE
-    ti_hist = deque([ti_report] * _HISTORY_LEN, maxlen=_HISTORY_LEN)
     # NaN until the first stepped tick; every comparison against the tolerance is then False,
     # so a rollout that never stepped reports the check as failed rather than as passed.
     coord_err: float = float("nan")
@@ -492,10 +457,8 @@ def run_scenario_sim_rollout(
                 runner, builder, osc_path, cfg, verbose
             )
         goal_xy = goal_pose[:2]
-        observer = None
-        if isinstance(model, MlPlannerOnnx):
-            with timers("map_context"):
-                observer = osp.MlPlannerObserver(ego_name, ego_route_ids, list(goal_pose[:3]))
+        with timers("map_context"):
+            observer = model.observer(osp, ego_name, ego_route_ids, list(goal_pose[:3]))
         # Already in the scene's map frame. A polyline because save_step_figure accepts a
         # lanelet id list but does not read it.
         route_polylines = (
@@ -522,7 +485,6 @@ def run_scenario_sim_rollout(
 
             with timers("scene_build"):
                 update_history(buffers, states, ego_name)
-                ti_hist.append(ti_report)
                 scene = build_scene(
                     states,
                     buffers,
@@ -531,22 +493,15 @@ def run_scenario_sim_rollout(
                     goal_pose,
                     cfg.scene,
                     ego_name,
-                    np.fromiter(ti_hist, dtype=np.int32, count=_HISTORY_LEN),
                 )
-                if observer is not None:
-                    observer.observe(ti_report)
+                observer.observe(ti_report)
 
             # Replan every ``replan_interval`` ticks; consume the cached plan in between.
             if cached_plan_ego is None or step % cfg.replan_interval == 0:
                 # The first inference is cold (lazy allocation, kernel autotuning), so it is
                 # timed as its own stage and kept out of the steady-state ms/call.
                 with timers("predict_cold" if cached_plan_ego is None else "predict"):
-                    if observer is not None:
-                        cached_plan_ego, ti_model = model.predict(observer.inputs())
-                    else:
-                        cached_plan_ego, ti_model = _predict_ego_plan(
-                            model, model_args, scene, device, ego_name
-                        )
+                    cached_plan_ego, ti_model = model.predict(observer.inputs())
                 ti_report = resolve_keep_turn_indicator(ti_model, ti_report)
 
                 with timers("sim_set_traj"):
@@ -583,6 +538,7 @@ def run_scenario_sim_rollout(
                             route_polylines=route_polylines,
                             road_border_polylines=borders,
                             sim_time=step * DT,
+                            turn_indicator_pred=ti_report,
                         )
                     )
 
