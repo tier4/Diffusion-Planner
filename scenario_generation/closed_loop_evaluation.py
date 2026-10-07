@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -356,6 +357,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
 
     mode = "full"
 
+    # A caller's ``(render pool, frames root)`` to borrow instead of building a pair here.
+    shared_render: tuple | None = None
+
     def __init__(
         self,
         model,
@@ -424,16 +428,27 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         sidecar under DDP sharding -- the same convention ``run_closed_loop_eval`` uses), while
         jobs run."""
         merged = JobRunResult(extras={"route_keys": []})
+        self._mp4_futures: list = []
         suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
         segments_path = self.out_dir / f"segments{suffix}.jsonl"
         digests_path = self.out_dir / f"tdigests{suffix}.jsonl"
+        # Borrowed or owned as a pair, never mixed: an encode reads both, so owning one and
+        # borrowing the other would tear the frames down under a running encoder.
+        shared = self.shared_render
+        pool_ctx, frames_ctx = (
+            (nullcontext(shared[0]), nullcontext(str(shared[1])))
+            if shared is not None
+            else (
+                render_pool(self.config.params.draw_workers),
+                # ffmpeg consumes and deletes these, so they must not land in the output tree.
+                tempfile.TemporaryDirectory(prefix="closed_loop_frames_"),
+            )
+        )
         with (
             segments_path.open("w", encoding="utf-8") as fout,
             digests_path.open("w", encoding="utf-8") as fdigest,
-            # One pool for every segment: a spawned worker re-imports torch and matplotlib.
-            render_pool(self.config.params.draw_workers) as draw_pool,
-            # ffmpeg consumes and deletes these, so they must not land in the output tree.
-            tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
+            pool_ctx as draw_pool,
+            frames_ctx as frames_root,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
@@ -451,6 +466,15 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 if partial_timers is not None:
                     merged.extras.setdefault("timers", Timers()).merge(partial_timers)
                 self.on_job_complete(job, partial, ri, len(jobs))
+            # Ours die at the end of this block, so the encoders reading them have to be
+            # waited on here; a borrowed pair outlives us and its caller waits instead.
+            # Either way the wait must happen: an ffmpeg failure surfaces nowhere else.
+            join = Timers()
+            with join("mp4_join"):
+                if shared is None:
+                    for future in self._mp4_futures:
+                        future.result()
+            merged.extras.setdefault("timers", Timers()).merge(join)
         return merged
 
     def _preserve_rollout_trace(self, png_dir: Path, segment_key: str) -> None:
@@ -528,8 +552,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            with timers("build_mp4"):
-                build_mp4(png_dir, seg_mp4, self.config.fps)
+            if draw_pool is None:
+                with timers("build_mp4"):
+                    build_mp4(png_dir, seg_mp4, self.config.fps)
+            else:
+                with timers("mp4_submit"):
+                    self._mp4_futures.append(
+                        draw_pool.submit(build_mp4, png_dir, seg_mp4, self.config.fps)
+                    )
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]
