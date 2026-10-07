@@ -325,9 +325,7 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             "n_groups": len(summaries),
             "n_segments": n_segments,
             "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in summaries.values()),
-            "gt_total_steps": sum(
-                int(s.get("gt_total_steps", 0) or 0) for s in summaries.values()
-            ),
+            "gt_total_steps": sum(int(s.get("gt_total_steps", 0) or 0) for s in summaries.values()),
             "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
             "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
             **pool_lane_geometry(summaries.values(), "total_steps"),

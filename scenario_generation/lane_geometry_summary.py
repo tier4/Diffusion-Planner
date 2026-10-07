@@ -40,7 +40,10 @@ def pool_lane_geometry(items, steps_key: str) -> dict:
     total = sum(float(it.get(steps_key, 0) or 0) for it in items)
     for rate_key in _LANE_GEOMETRY_RATES:
         out[rate_key] = (
-            sum(float(it.get(steps_key, 0) or 0) * float(it.get(rate_key, 0.0) or 0.0) for it in items)
+            sum(
+                float(it.get(steps_key, 0) or 0) * float(it.get(rate_key, 0.0) or 0.0)
+                for it in items
+            )
             / total
             if total
             else 0.0

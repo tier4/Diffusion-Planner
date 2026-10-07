@@ -20,7 +20,10 @@ def _passed(row: dict, condition) -> bool:
         return False
     if condition.road_border and int(row.get("road_border", {}).get("collision_count", 0)) > 0:
         return False
-    if condition.red_light_violation and int(row.get("red_light_violation", {}).get("count", 0)) > 0:
+    if (
+        condition.red_light_violation
+        and int(row.get("red_light_violation", {}).get("count", 0)) > 0
+    ):
         return False
     if condition.strong_brake and int(row.get("strong_brake", {}).get("count", 0)) > 0:
         return False
@@ -98,7 +101,9 @@ def _group_summary_paths(result_root: Path) -> list[Path]:
     )
 
 
-def recompute(result_root: Path, pass_conditions: Path, *, dry_run: bool = False) -> list[tuple[str, int, int]]:
+def recompute(
+    result_root: Path, pass_conditions: Path, *, dry_run: bool = False
+) -> list[tuple[str, int, int]]:
     """Update pass fields below one closed-loop output root and return group counts."""
     result_root = result_root.resolve()
     conditions = ClosedLoopPassConditionGroups.from_yaml(pass_conditions)
@@ -117,7 +122,13 @@ def recompute(result_root: Path, pass_conditions: Path, *, dry_run: bool = False
         refreshed["pass_rate"] = refreshed["pass_count"] / len(rows) if rows else 0.0
         refreshed["pass_condition"] = condition.to_dict()
         summaries[group_dir] = refreshed
-        changes.append((str(group_dir.relative_to(result_root)), refreshed["pass_count"], refreshed["n_segments"]))
+        changes.append(
+            (
+                str(group_dir.relative_to(result_root)),
+                refreshed["pass_count"],
+                refreshed["n_segments"],
+            )
+        )
 
         if not dry_run:
             _write_rows(group_dir / "segments.jsonl", rows)
@@ -148,7 +159,9 @@ def recompute(result_root: Path, pass_conditions: Path, *, dry_run: bool = False
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("result_root", type=Path, help="One closed_loop/YYYYMMDD_HHMM output directory")
+    parser.add_argument(
+        "result_root", type=Path, help="One closed_loop/YYYYMMDD_HHMM output directory"
+    )
     parser.add_argument("--pass-conditions", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

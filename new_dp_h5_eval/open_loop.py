@@ -97,15 +97,20 @@ def visualize_h5_prediction(
             if not len(points):
                 continue
             center = points[:, :2]
-            ax.plot(center[:, 0], center[:, 1], color=color, alpha=0.75, linewidth=1.2,
-                    label=label)
+            ax.plot(center[:, 0], center[:, 1], color=color, alpha=0.75, linewidth=1.2, label=label)
             ax.plot(
-                center[:, 0] + points[:, 2], center[:, 1] + points[:, 3],
-                color=color, alpha=0.35, linewidth=0.8,
+                center[:, 0] + points[:, 2],
+                center[:, 1] + points[:, 3],
+                color=color,
+                alpha=0.35,
+                linewidth=0.8,
             )
             ax.plot(
-                center[:, 0] + points[:, 4], center[:, 1] + points[:, 5],
-                color=color, alpha=0.35, linewidth=0.8,
+                center[:, 0] + points[:, 4],
+                center[:, 1] + points[:, 5],
+                color=color,
+                alpha=0.35,
+                linewidth=0.8,
             )
             label = "_nolegend_"
 
@@ -127,11 +132,15 @@ def visualize_h5_prediction(
     for neighbor in frame["neighbor_agents_past"]:
         valid = np.square(neighbor[:, 2]) + np.square(neighbor[:, 3]) > 0.5
         if np.any(valid):
-            ax.plot(neighbor[valid, 0], neighbor[valid, 1], color="#64748b", alpha=0.35, linewidth=0.8)
+            ax.plot(
+                neighbor[valid, 0], neighbor[valid, 1], color="#64748b", alpha=0.35, linewidth=0.8
+            )
 
     ax.plot(prediction[:, 0], prediction[:, 1], color="#f97316", linewidth=2, label="New DP output")
     ax.scatter(0.0, 0.0, color="#dc2626", marker="^", label="Ego")
-    ax.scatter(prediction[-1, 0], prediction[-1, 1], color="black", marker="x", label="Prediction end")
+    ax.scatter(
+        prediction[-1, 0], prediction[-1, 1], color="black", marker="x", label="Prediction end"
+    )
     goal = frame["goal_pose"]
     if np.linalg.norm(goal[:2]) <= 100.0:
         ax.scatter(goal[0], goal[1], color="#2563eb", marker="*", s=80, label="Goal")

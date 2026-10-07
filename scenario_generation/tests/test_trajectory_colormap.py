@@ -117,7 +117,10 @@ def test_new_metrics_skipped_on_old_style_rollout(tmp_path: Path):
 
     assert set(rendered) == set(METRIC_CHOICES) - set(_NEW_METRICS)
     for metric in _NEW_METRICS:
-        assert render_trajectory_colormap(png_dir, tmp_path / f"solo_{metric}.png", metric=metric) is None
+        assert (
+            render_trajectory_colormap(png_dir, tmp_path / f"solo_{metric}.png", metric=metric)
+            is None
+        )
 
 
 def test_centerline_risk_scaling_and_missing_value(tmp_path: Path):
@@ -127,7 +130,9 @@ def test_centerline_risk_scaling_and_missing_value(tmp_path: Path):
         _full_row(2, route_dist_m=None),  # unmeasured -> treated as 0.0, not worst-case
         _full_row(3, route_dist_m=10.0),  # far past the cap -> clamped to 1.0
     ]
-    risk, ticks, labels = _risk_and_ticks(rows, "centerline", near_miss_thresh=0.5, centerline_thresh_m=2.0)
+    risk, ticks, labels = _risk_and_ticks(
+        rows, "centerline", near_miss_thresh=0.5, centerline_thresh_m=2.0
+    )
 
     assert risk[0] == pytest.approx(0.0)
     assert risk[1] == pytest.approx(0.5)
@@ -153,7 +158,11 @@ def test_turn_indicator_risk_flags_mismatch_only(tmp_path: Path):
 @pytest.mark.parametrize(
     "metric,key,labels",
     [
-        ("deviation_collision", "deviation_collision", ["no deviation collision", "deviation collision"]),
+        (
+            "deviation_collision",
+            "deviation_collision",
+            ["no deviation collision", "deviation collision"],
+        ),
         ("collision_rear", "collision_rear", ["no rear collision", "rear collision"]),
     ],
 )

@@ -12,11 +12,7 @@ def test_train_config_runtime_fields_are_not_saved_as_json(tmp_path):
         save_dir=str(tmp_path),
     )
 
-    args_dict = {
-        key: value
-        for key, value in vars(cfg).items()
-        if not key.startswith("_")
-    }
+    args_dict = {key: value for key, value in vars(cfg).items() if not key.startswith("_")}
     args_dict["major_version"] = 5
 
     output = tmp_path / "args.json"
