@@ -34,6 +34,7 @@ import math
 import wandb
 
 from scenario_generation.closed_loop_score_keys import extract_score
+from scenario_generation.lane_geometry_summary import pool_lane_geometry
 
 # (display column name, source key in a per-group summary dict)
 _ABS_COLUMNS = [
@@ -43,7 +44,12 @@ _ABS_COLUMNS = [
     ("Route completion (%)", "mean_route_completion"),
     ("Pass rate (%)", "pass_rate"),
     ("GT deviation (m)", "mean_gt_deviation_m"),
-    ("Centerline deviation (m)", "mean_centerline_dist_m"),
+    ("Route deviation (m)", "mean_route_deviation_m"),
+    ("Route deviation unmeasured (rate)", "route_deviation_unmeasured_rate"),
+    ("Center deviation (m)", "mean_center_deviation_m"),
+    ("Center deviation signed (m)", "mean_center_deviation_signed_m"),
+    ("Center deviation max (m)", "max_center_deviation_m"),
+    ("Center deviation unmeasured (rate)", "center_deviation_unmeasured_rate"),
     ("Fails", "fail_count"),
     ("Curb hits", "total_curb_hits"),
     ("Snaps", "total_snaps"),
@@ -56,6 +62,15 @@ _ABS_COLUMNS = [
     ("Turn indicator false positive rate (%)", "turn_indicator_false_positive_rate"),
 ]
 
+_LANE_GEOMETRY_COLUMN_KEYS = (
+    "mean_route_deviation_m",
+    "route_deviation_unmeasured_rate",
+    "mean_center_deviation_m",
+    "mean_center_deviation_signed_m",
+    "max_center_deviation_m",
+    "center_deviation_unmeasured_rate",
+)
+
 _PER_1000STEPS_COLUMNS = [
     ("Group", "group"),
     ("Segments", "n_segments"),
@@ -63,7 +78,12 @@ _PER_1000STEPS_COLUMNS = [
     ("Route completion (%)", "mean_route_completion"),
     ("Pass rate (%)", "pass_rate"),
     ("GT deviation (m)", "mean_gt_deviation_m"),
-    ("Centerline deviation (m)", "mean_centerline_dist_m"),
+    ("Route deviation (m)", "mean_route_deviation_m"),
+    ("Route deviation unmeasured (rate)", "route_deviation_unmeasured_rate"),
+    ("Center deviation (m)", "mean_center_deviation_m"),
+    ("Center deviation signed (m)", "mean_center_deviation_signed_m"),
+    ("Center deviation max (m)", "max_center_deviation_m"),
+    ("Center deviation unmeasured (rate)", "center_deviation_unmeasured_rate"),
     ("Curb hits / 1k steps", "total_curb_hits"),
     ("Snaps / 1k steps", "total_snaps"),
     ("Red light / 1k steps", "total_red_light_violations"),
@@ -127,8 +147,8 @@ def _abs_value(source_key: str, summary: dict):
         # misread as "never flips spuriously".
         val = summary[source_key] if source_key in summary else extract_score(summary, source_key)
         return float(val) if isinstance(val, (int, float)) else None
-    if source_key == "mean_centerline_dist_m":
-        dev = summary.get("mean_centerline_dist_m")
+    if source_key in _LANE_GEOMETRY_COLUMN_KEYS:
+        dev = summary.get(source_key)
         return float(dev) if dev is not None and math.isfinite(float(dev)) else None
 
     # Int fields.
@@ -150,7 +170,7 @@ def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
         "mean_gt_deviation_m",  # already a per-step mean
         "turn_indicator_transition_accuracy",  # already a ratio
         "turn_indicator_false_positive_rate",  # already a ratio
-        "mean_centerline_dist_m",  # already a per-step mean
+        *_LANE_GEOMETRY_COLUMN_KEYS,  # already per-step means / rates
     ):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
@@ -189,23 +209,13 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
             dev_num += float(dev) * steps
             dev_steps += steps
 
-    # Step-weighted mean for mean_centerline_dist_m
-    cl_num = 0.0
-    cl_steps = 0
-    for v in values:
-        cl = v.get("mean_centerline_dist_m", None)
-        steps = int(v.get("total_steps", 0) or 0)
-        if cl is not None and math.isfinite(cl) and steps > 0:
-            cl_num += float(cl) * steps
-            cl_steps += steps
-
     agg: dict = {
         "n_groups": len(values),
         "n_segments": n_segments,
         "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
         "mean_route_completion": _segment_weighted_mean(values, "mean_route_completion"),
         "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
-        "mean_centerline_dist_m": (cl_num / cl_steps) if cl_steps else float("inf"),
+        **pool_lane_geometry(values, "total_steps"),
         "pass_rate": _segment_weighted_mean(values, "pass_rate"),
         "fail_count": sum(int(s.get("fail_count", 0) or 0) for s in values),
     }

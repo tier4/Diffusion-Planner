@@ -67,7 +67,7 @@ def _full_row(k: int, **overrides) -> dict:
         "red_light_violation": False,
         "gt_deviation_m": 0.1,
         "deviation_collision": False,
-        "centerline_dist_m": 0.3,
+        "route_dist_m": 0.3,
         "gt_speed_diff_mps": -1.0,
         "gt_accel_diff_mps2": 0.5,
         "gt_accel_mps2": 0.2,
@@ -122,10 +122,10 @@ def test_new_metrics_skipped_on_old_style_rollout(tmp_path: Path):
 
 def test_centerline_risk_scaling_and_missing_value(tmp_path: Path):
     rows = [
-        _full_row(0, centerline_dist_m=0.0),
-        _full_row(1, centerline_dist_m=2.0),  # == centerline_thresh_m -> cap/2 -> risk 0.5
-        _full_row(2, centerline_dist_m=None),  # unmeasured -> treated as 0.0, not worst-case
-        _full_row(3, centerline_dist_m=10.0),  # far past the cap -> clamped to 1.0
+        _full_row(0, route_dist_m=0.0),
+        _full_row(1, route_dist_m=2.0),  # == centerline_thresh_m -> cap/2 -> risk 0.5
+        _full_row(2, route_dist_m=None),  # unmeasured -> treated as 0.0, not worst-case
+        _full_row(3, route_dist_m=10.0),  # far past the cap -> clamped to 1.0
     ]
     risk, ticks, labels = _risk_and_ticks(rows, "centerline", near_miss_thresh=0.5, centerline_thresh_m=2.0)
 

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from scenario_generation.closed_loop_eval import aggregate
+from scenario_generation.lane_geometry_summary import LANE_GEOMETRY_KEYS
 from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 
 # ``aggregate`` reduces these from row keys this path never writes, and a mean over no samples
@@ -31,7 +32,7 @@ from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 _UNMEASURED_SUMMARY_KEYS = (
     "mean_route_completion",
     "mean_gt_deviation_m",
-    "mean_centerline_dist_m",
+    *LANE_GEOMETRY_KEYS,
 )
 _UNMEASURED_MARKER_KEY = "unmeasured_keys"
 

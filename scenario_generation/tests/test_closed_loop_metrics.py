@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 
 from scenario_generation.closed_loop_eval import aggregate, metrics_for_json
-from scenario_generation.metrics.centerline import score_centerline_step
+from scenario_generation.metrics.center_deviation import score_center_deviation_step
+from scenario_generation.metrics.route_deviation import score_route_deviation_step
 from scenario_generation.metrics.ego_traj import ego_traj_ego_frame
 from scenario_generation.metrics.red_light import score_red_light_step
 from scenario_generation.metrics.road_border import score_road_border_step
@@ -541,8 +542,109 @@ def test_deviation_collision_block_classifies_one_collision_event_once():
     assert block["steps"] == int((collisions & (gt_devs > thresh_m)).sum())
 
 
-def test_centerline_step_without_route_lanes_is_not_finite():
-    out = score_centerline_step(
+def test_route_deviation_step_without_route_lanes_is_not_finite():
+    out = score_route_deviation_step(
         {"route_lanes": np.zeros((25, 20, 33), dtype=np.float32)}, device="cpu"
     )
-    assert not np.isfinite(out["centerline_dist_m"])
+    assert not np.isfinite(out["route_dist_m"])
+
+
+def _route_lanes(*polylines, half_width=2.0):
+    """(1, 25, 20, 33) route_lanes whose lane i is the given (x, y) polyline, rest padding.
+
+    Boundary offsets (cols 4:6 left / 6:8 right) are +-``half_width`` along the left normal of
+    each polyline's first segment; ``half_width=0`` leaves them missing (zero).
+    """
+    lanes = np.zeros((1, 25, 20, 33), dtype=np.float32)
+    for i, pts in enumerate(polylines):
+        pts = np.asarray(pts, dtype=np.float32)
+        lanes[0, i, : len(pts), :2] = pts
+        d = pts[1] - pts[0]
+        normal = np.array([-d[1], d[0]]) / np.linalg.norm(d)
+        lanes[0, i, : len(pts), 4:6] = half_width * normal
+        lanes[0, i, : len(pts), 6:8] = -half_width * normal
+    return {"route_lanes": lanes}
+
+
+def test_center_deviation_is_signed_left_positive():
+    # Lane centerline at y=-1 (ego is 1 m LEFT of it) and at y=+0.5 (ego 0.5 m RIGHT of it).
+    left_of = score_center_deviation_step(_route_lanes([(-5.0, -1.0), (5.0, -1.0)]))
+    right_of = score_center_deviation_step(_route_lanes([(-5.0, 0.5), (5.0, 0.5)]))
+    assert left_of["center_dev_m"] == pytest.approx(1.0)
+    assert right_of["center_dev_m"] == pytest.approx(-0.5)
+
+
+def test_center_deviation_ignores_opposing_lane_and_picks_nearest_aligned():
+    # The opposing lane (pointing -x) is nearest but must be skipped; the aligned lane at
+    # y=+1.8 (ego 1.8 m right of it) is the driving lane.
+    out = score_center_deviation_step(
+        _route_lanes([(5.0, 0.1), (-5.0, 0.1)], [(-5.0, 1.8), (5.0, 1.8)])
+    )
+    assert out["center_dev_m"] == pytest.approx(-1.8)
+
+
+def test_center_deviation_accepts_up_to_90_degrees_and_rejects_beyond():
+    assert np.isfinite(score_center_deviation_step(_route_lanes([(1.0, -3.0), (1.0, 3.0)]))["center_dev_m"])
+    # Pointing back-and-sideways (> 90 deg off the ego heading).
+    assert np.isnan(score_center_deviation_step(_route_lanes([(1.0, -3.0), (-1.0, 3.0)]))["center_dev_m"])
+
+
+def test_center_deviation_unmeasured_without_route_lanes():
+    assert np.isnan(score_center_deviation_step({})["center_dev_m"])
+    assert np.isnan(score_center_deviation_step(_route_lanes())["center_dev_m"])
+
+
+def test_center_deviation_does_not_fall_back_to_lanes():
+    lanes = _route_lanes([(-5.0, 1.0), (5.0, 1.0)])["route_lanes"]
+    assert np.isnan(score_center_deviation_step({"lanes": lanes})["center_dev_m"])
+
+
+def test_lane_geometry_block_reports_unmeasured_share_and_abs_signed_max():
+    from scenario_generation.reproducer_rollout import _lane_geometry_block
+
+    inf, nan = np.inf, np.nan
+    block = _lane_geometry_block(
+        np.array([1.0, 3.0, inf, inf], dtype=np.float32),
+        np.array([-1.0, 3.0, nan, 2.0], dtype=np.float32),
+    )
+    assert block["mean_route_deviation_m"] == pytest.approx(2.0)
+    assert block["route_deviation_unmeasured_rate"] == pytest.approx(0.5)
+    assert block["mean_center_deviation_m"] == pytest.approx(2.0)  # |-1|,|3|,|2|
+    assert block["mean_center_deviation_signed_m"] == pytest.approx(4.0 / 3.0)
+    assert block["max_center_deviation_m"] == pytest.approx(3.0)
+    assert block["center_deviation_unmeasured_rate"] == pytest.approx(0.25)
+
+
+def test_lane_geometry_block_nothing_measured_is_inf_not_zero():
+    from scenario_generation.reproducer_rollout import _lane_geometry_block
+
+    block = _lane_geometry_block(np.full(3, np.inf, np.float32), np.full(3, np.nan, np.float32))
+    assert block["mean_route_deviation_m"] == float("inf")
+    assert block["mean_center_deviation_m"] == float("inf")
+    assert block["center_deviation_unmeasured_rate"] == 1.0
+
+
+def test_center_deviation_nan_when_ego_is_outside_the_lane():
+    # Half-width 2 m: 1.5 m off the centerline is inside, 3 m off is outside either side.
+    assert score_center_deviation_step(_route_lanes([(-5.0, -1.5), (5.0, -1.5)]))["center_dev_m"] == pytest.approx(1.5)
+    assert np.isnan(score_center_deviation_step(_route_lanes([(-5.0, -3.0), (5.0, -3.0)]))["center_dev_m"])
+    assert np.isnan(score_center_deviation_step(_route_lanes([(-5.0, 3.0), (5.0, 3.0)]))["center_dev_m"])
+
+
+def test_center_deviation_nan_when_ego_is_past_the_route_end():
+    # Centered laterally, but 10 m beyond the end of a 2 m half-width lane.
+    out = score_center_deviation_step(_route_lanes([(-20.0, 0.0), (-10.0, 0.0)]))
+    assert np.isnan(out["center_dev_m"])
+
+
+def test_center_deviation_nan_when_boundary_on_ego_side_is_missing():
+    assert np.isnan(score_center_deviation_step(_route_lanes([(-5.0, -1.0), (5.0, -1.0)], half_width=0.0))["center_dev_m"])
+
+
+def test_center_deviation_reads_native_h5_layout():
+    # Native layout (S, P, 6): xy, left offset, right offset.
+    lanes = np.zeros((1, 25, 20, 6), dtype=np.float32)
+    lanes[0, 0, :2, :2] = [(-5.0, -1.0), (5.0, -1.0)]
+    lanes[0, 0, :2, 2:4] = (0.0, 2.0)
+    lanes[0, 0, :2, 4:6] = (0.0, -2.0)
+    assert score_center_deviation_step({"route_lanes": lanes})["center_dev_m"] == pytest.approx(1.0)

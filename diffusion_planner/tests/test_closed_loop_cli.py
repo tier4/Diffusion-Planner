@@ -278,8 +278,8 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
     }
 
 
-def test_write_groups_manifest_includes_step_weighted_centerline_mean(tmp_path: Path):
-    """``groups.json`` must carry ``mean_centerline_dist_m`` step-weighted across groups, the
+def test_write_groups_manifest_includes_step_weighted_route_deviation_mean(tmp_path: Path):
+    """``groups.json`` must carry ``mean_route_deviation_m`` step-weighted across groups, the
     same way it already does ``mean_gt_deviation_m`` -- ``wandb_closed_loop``'s ``_aggregate``
     already computes this metric the same way, so the two aggregation paths must not drift
     apart (see ``_write_groups_manifest``'s docstring)."""
@@ -291,13 +291,13 @@ def test_write_groups_manifest_includes_step_weighted_centerline_mean(tmp_path: 
         "siteA/routeA": {
             "n_segments": 1,
             "total_steps": 100,
-            "mean_centerline_dist_m": 0.2,
+            "mean_route_deviation_m": 0.2,
             "mean_gt_deviation_m": 0.1,
         },
         "siteA/routeB": {
             "n_segments": 1,
             "total_steps": 300,
-            "mean_centerline_dist_m": 0.6,
+            "mean_route_deviation_m": 0.6,
             "mean_gt_deviation_m": 0.3,
         },
     }
@@ -305,7 +305,7 @@ def test_write_groups_manifest_includes_step_weighted_centerline_mean(tmp_path: 
 
     groups = json.loads((tmp_path / "groups.json").read_text())
     expected = (0.2 * 100 + 0.6 * 300) / 400
-    assert groups["mean_centerline_dist_m"] == pytest.approx(expected)
+    assert groups["mean_route_deviation_m"] == pytest.approx(expected)
 
 
 def _assign(spec, world_size):
@@ -335,3 +335,37 @@ def test_jobs_are_scheduled_across_groups_exactly_once():
         assert sorted(i for s in shards for i in s[group]) == sorted(ids)
     per_rank = [sum(len(v) for v in s.values()) for s in shards]
     assert min(per_rank) >= 2, f"a rank was left nearly idle: {per_rank}"
+
+
+def test_write_groups_manifest_pools_center_deviation_over_measured_steps(tmp_path: Path):
+    """A group that left 50% of its steps unmeasured contributes half the weight, and the
+    unmeasured rate / max are pooled too."""
+    import json
+
+    mod = _load_run_all_groups()
+    summaries = {
+        "siteA/routeA": {
+            "n_segments": 1,
+            "total_steps": 100,
+            "mean_center_deviation_m": 1.0,
+            "mean_center_deviation_signed_m": -1.0,
+            "max_center_deviation_m": 2.0,
+            "center_deviation_unmeasured_rate": 0.5,
+        },
+        "siteA/routeB": {
+            "n_segments": 1,
+            "total_steps": 100,
+            "mean_center_deviation_m": 4.0,
+            "mean_center_deviation_signed_m": 4.0,
+            "max_center_deviation_m": 6.0,
+            "center_deviation_unmeasured_rate": 0.0,
+        },
+    }
+    mod._write_groups_manifest(tmp_path, summaries)
+
+    groups = json.loads((tmp_path / "groups.json").read_text())
+    assert groups["mean_center_deviation_m"] == pytest.approx((1.0 * 50 + 4.0 * 100) / 150)
+    assert groups["mean_center_deviation_signed_m"] == pytest.approx((-1.0 * 50 + 4.0 * 100) / 150)
+    assert groups["center_deviation_unmeasured_rate"] == pytest.approx(0.25)
+    assert groups["max_center_deviation_m"] == 6.0
+    assert groups["mean_route_deviation_m"] == float("inf")  # nothing measured -> inf

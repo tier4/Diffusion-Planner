@@ -20,6 +20,7 @@ from diffusion_planner.utils import ddp
 
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig
+from scenario_generation.lane_geometry_summary import pool_lane_geometry
 
 from .closed_loop import (
     NativeH5FullRouteClosedLoopEvaluation,
@@ -54,6 +55,7 @@ def _write_groups_manifest(out_dir: Path, summaries: dict[str, dict]) -> None:
         ),
         "mean_route_completion": route_completion / n_segments if n_segments else 0.0,
         "mean_gt_deviation_m": dev_num / dev_steps if dev_steps else float("inf"),
+        **pool_lane_geometry(summaries.values(), "total_steps"),
         "total_curb_hits": sum(
             int(s.get("road_border", {}).get("collision_count", 0) or 0) for s in summaries.values()
         ),

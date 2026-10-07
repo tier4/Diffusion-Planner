@@ -2,7 +2,7 @@
 
 Reads the per-step trace ``reproducer_rollout.render_segment`` already writes to
 ``rollout.jsonl`` next to a segment's PNGs (ego pose plus whatever risk fields that step
-recorded -- ``clearance_m``, ``collision``, ``centerline_dist_m``, ``turn_indicator_pred``/
+recorded -- ``clearance_m``, ``collision``, ``route_dist_m``, ``turn_indicator_pred``/
 ``turn_indicator_gt``, ``deviation_collision``, ``collision_rear``, etc., one line per step)
 and draws a colored polyline (risk metric -> color) with a colorbar legend, similar in spirit
 to a routing app's "road risk" heatmap overlay.
@@ -94,7 +94,7 @@ _METRIC_TRACE_KEYS = {
     "road_border": "rb_dist_m",
     "red_light": "red_light_violation",
     "strong_brake": "speed",
-    "centerline": "centerline_dist_m",
+    "centerline": "route_dist_m",
     "turn_indicator": "turn_indicator_pred",
     "deviation_collision": "deviation_collision",
     "collision_rear": "collision_rear",
@@ -240,11 +240,11 @@ def _risk_and_ticks(
         )
     if metric == "centerline":
         # Same clamp-at-2x-threshold shape as "clearance"/"road_border", but NOT inverted --
-        # larger centerline_dist_m is worse, not smaller. Missing/None (no lane geometry to
+        # larger route_dist_m is worse, not smaller. Missing/None (no lane geometry to
         # measure against) reads as "no evidence of deviation" (0.0), not "worst case".
         cap = max(centerline_thresh_m * 2.0, 1e-6)
         vals = np.array(
-            [r.get("centerline_dist_m") if r.get("centerline_dist_m") is not None else 0.0 for r in rows],
+            [r.get("route_dist_m") if r.get("route_dist_m") is not None else 0.0 for r in rows],
             dtype=np.float64,
         )
         risk = np.clip(vals / cap, 0.0, 1.0)

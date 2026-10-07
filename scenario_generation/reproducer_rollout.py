@@ -36,11 +36,12 @@ from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.inference_compile import mark_inference_step
 from scenario_generation.metrics import (
-    score_centerline_step,
+    score_center_deviation_step,
     score_object_step,
     score_object_step_batched,
     score_red_light_step,
     score_road_border_step,
+    score_route_deviation_step,
     strong_brake_mask,
 )
 from scenario_generation.metrics.strong_brake import strong_brake_count
@@ -579,17 +580,37 @@ class _SegState:
     # re-seeded on an unstick teleport, exactly like ``turn_indicator_prev_scored_gt``, so a
     # teleport's environment jump is never itself counted as a spurious flip.
     turn_indicator_prev_scored_pred: int = 0
-    # Running sum/count of per-step route-centerline distance (m), for the
-    # mean_centerline_dist_m metric: mean nearest-segment distance from the live ego to
-    # the route_lanes/lanes centerline polyline (see ``score_centerline_step``). Same
-    # graded-signal treatment as gt_dev_sum/gt_dev_count, just measured against the map
-    # instead of the recorded ego trajectory.
-    centerline_dev_sum: float = 0.0
-    centerline_dev_count: int = 0
-    # Per-step route-centerline distance (m), parallel to ``clearances``/``gt_devs`` -- lets
-    # the per-step rollout.jsonl trace expose the same value ``mean_centerline_dist_m`` is
-    # averaged from, instead of only the segment-level mean.
-    centerline_devs: np.ndarray | None = None
+    # Per-step route deviation (m): nearest-segment distance from the live ego to the
+    # route_lanes/lanes centerline polyline (see ``score_route_deviation_step``). Parallel to
+    # ``clearances``/``gt_devs``; ``inf`` = unmeasured (no usable segment, or not yet scored).
+    # ``mean_route_deviation_m`` averages the finite steps and the unmeasured share is reported
+    # next to it, so steps that drop out of the mean stay visible.
+    route_devs: np.ndarray | None = None
+    # Per-step signed lateral offset (m) from the driving lane's centerline (left positive; see
+    # ``score_center_deviation_step``); ``nan`` = unmeasured. The ``*_center_deviation_*``
+    # summary keys are built from this.
+    center_devs: np.ndarray | None = None
+
+
+def _lane_geometry_block(route_devs: np.ndarray, center_devs: np.ndarray) -> dict:
+    """Segment-level route / center deviation summary from the per-step arrays.
+
+    ``inf`` marks a mean/max with no measured step (same convention as ``mean_gt_deviation_m``);
+    the ``*_unmeasured_rate`` keys give the share of steps left out of the means so a rollout
+    cannot look better merely because its worst steps were unmeasurable.
+    """
+    route = route_devs[np.isfinite(route_devs)]
+    center = center_devs[np.isfinite(center_devs)]
+    n = len(route_devs)
+    inf = float("inf")
+    return {
+        "mean_route_deviation_m": float(route.mean()) if len(route) else inf,
+        "route_deviation_unmeasured_rate": 1.0 - len(route) / n if n else 0.0,
+        "mean_center_deviation_m": float(np.abs(center).mean()) if len(center) else inf,
+        "mean_center_deviation_signed_m": float(center.mean()) if len(center) else inf,
+        "max_center_deviation_m": float(np.abs(center).max()) if len(center) else inf,
+        "center_deviation_unmeasured_rate": 1.0 - len(center) / n if n else 0.0,
+    }
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -724,7 +745,8 @@ def _seed_state(
         gt_dvs=np.full(cap, np.nan, dtype=np.float32),
         gt_das=np.full(cap, np.nan, dtype=np.float32),
         gt_as=np.full(cap, np.nan, dtype=np.float32),
-        centerline_devs=np.full(cap, np.inf, dtype=np.float32),
+        route_devs=np.full(cap, np.inf, dtype=np.float32),
+        center_devs=np.full(cap, np.nan, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
@@ -1074,12 +1096,8 @@ def _score_into(
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
-            cl_dev = score_centerline_step(np_dict, device=device)
-            if s.centerline_devs is not None:
-                s.centerline_devs[s.k] = float(cl_dev["centerline_dist_m"])
-            if np.isfinite(cl_dev["centerline_dist_m"]):
-                s.centerline_dev_sum += cl_dev["centerline_dist_m"]
-                s.centerline_dev_count += 1
+            s.route_devs[s.k] = score_route_deviation_step(np_dict, device=device)["route_dist_m"]
+            s.center_devs[s.k] = score_center_deviation_step(np_dict)["center_dev_m"]
             red = score_red_light_step(
                 np_dict,
                 device=device,
@@ -1493,9 +1511,7 @@ def _finalize(s: _SegState) -> dict:
         "mean_gt_deviation_m": float(s.gt_dev_sum / s.gt_dev_count)
         if s.gt_dev_count
         else float("inf"),
-        "mean_centerline_dist_m": float(s.centerline_dev_sum / s.centerline_dev_count)
-        if s.centerline_dev_count
-        else float("inf"),
+        **_lane_geometry_block(s.route_devs[: s.k], s.center_devs[: s.k]),
         "progress_m": progress_m,
         "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
         "deviation_collision": (
@@ -2279,8 +2295,11 @@ def render_segment(
                 "collision": bool(s.collisions[k]),
                 "collision_rear": bool(s.rear_collisions[k]),
                 "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
-                "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
-                if np.isfinite(s.centerline_devs[k])
+                "route_dist_m": round(float(s.route_devs[k]), 4)
+                if np.isfinite(s.route_devs[k])
+                else None,
+                "center_dev_m": round(float(s.center_devs[k]), 4)
+                if np.isfinite(s.center_devs[k])
                 else None,
                 "red_light_violation": bool(s.red_light[k]),
                 "gt_deviation_m": round(gt_deviation_m, 3),

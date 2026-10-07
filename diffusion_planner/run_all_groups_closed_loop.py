@@ -28,6 +28,7 @@ from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
 from scenario_generation.closed_loop_ddp import shard_items
+from scenario_generation.lane_geometry_summary import pool_lane_geometry
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
 )
@@ -320,15 +321,6 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
                 dev_num += float(dev) * steps
                 dev_steps += steps
 
-        cl_num = 0.0
-        cl_steps = 0
-        for v in summaries.values():
-            cl = v.get("mean_centerline_dist_m", None)
-            steps = int(v.get("total_steps", 0) or 0)
-            if cl is not None and math.isfinite(cl) and steps > 0:
-                cl_num += float(cl) * steps
-                cl_steps += steps
-
         agg = {
             "n_groups": len(summaries),
             "n_segments": n_segments,
@@ -338,7 +330,7 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             ),
             "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
             "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
-            "mean_centerline_dist_m": (cl_num / cl_steps) if cl_steps else float("inf"),
+            **pool_lane_geometry(summaries.values(), "total_steps"),
             "total_curb_hits": sum(
                 int(s.get("road_border", {}).get("collision_count", 0) or 0)
                 for s in summaries.values()
