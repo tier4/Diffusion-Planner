@@ -2,11 +2,13 @@
 
 Requires a loaded model. Skip if model not available.
 Run: python3 rlvr/test_grpo_sampler.py --model_path <path.pth> --npz_path <path.npz>
+Or under pytest: GRPO_SAMPLER_MODEL_PATH=<path.pth> GRPO_SAMPLER_NPZ_PATH=<path.npz> pytest rlvr/test_grpo_sampler.py
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,9 +17,48 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 import numpy as np
+import pytest
 import torch
 
 from rlvr.grpo_sampler import SampledTrajectory, SamplerConfig, generate_diverse_group
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        pytest.skip(f"set {name} to run the model-dependent GRPO sampler tests")
+    return value
+
+
+@pytest.fixture(scope="module")
+def device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.fixture(scope="module")
+def _loaded_model(device):
+    from preference_optimization.model_utils import load_model
+
+    model, model_args = load_model(Path(_require_env("GRPO_SAMPLER_MODEL_PATH")), device)
+    model.eval()
+    return model, model_args
+
+
+@pytest.fixture
+def model(_loaded_model):
+    return _loaded_model[0]
+
+
+@pytest.fixture
+def model_args(_loaded_model):
+    return _loaded_model[1]
+
+
+@pytest.fixture
+def data(device):
+    from preference_optimization.utils import load_npz_data
+
+    return load_npz_data(_require_env("GRPO_SAMPLER_NPZ_PATH"), device)
 
 
 def test_sampler_config_defaults():

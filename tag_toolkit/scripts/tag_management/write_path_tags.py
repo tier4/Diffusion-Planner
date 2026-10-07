@@ -56,11 +56,16 @@ from tag_toolkit.sidecar import drop_dimension, normalize_tags, read_tags, write
 from tag_toolkit.source import Source, expand_source
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+def _scenario_generation_dir() -> Path:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[3] / "scenario_generation",
+        here.parents[4] / "Diffusion-Planner" / "scenario_generation",
+    ]
+    return next((c for c in candidates if c.is_dir()), candidates[0])
 
 
-sys.path.insert(0, str(_repo_root() / "Diffusion-Planner" / "scenario_generation"))
+sys.path.insert(0, str(_scenario_generation_dir()))
 
 from site_vehicle_discovery import NPZPathInfo, parse_npz_path  # noqa: E402
 

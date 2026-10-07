@@ -67,6 +67,10 @@ guidance-gui = { workspace = true }
 tag-toolkit = { workspace = true }
 
 [tool.pytest.ini_options]
+# Manual CLI scripts (they parse argv / need a model dir) and ROS (ament) lint/launch tests
+# that cannot be collected by a plain pytest run.
+norecursedirs = ["test_scripts", "diffusion_planner_ros", ".venv", ".claude", "build", "node_modules"]
+addopts = "--ignore=rlvr/test_lat_accel.py --ignore=ros_scripts/test_delay.py --ignore=ros_scripts/test_delay_onnx.py"
 markers = [
     "benchmark: performance profiling tests (deselect with '-m \"not benchmark\"')",
 ]

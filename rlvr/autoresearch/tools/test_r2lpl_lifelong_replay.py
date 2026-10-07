@@ -2243,6 +2243,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     class _FakeTimeline:
         frame_indices = np.arange(300, dtype=np.int64)
 
+        def npz(self, _idx):
+            return {"turn_indicators": np.zeros((1,), dtype=np.int64)}
+
     def _fake_seed_state(*args, **kwargs):
         return SimpleNamespace(
             tl=_FakeTimeline(),
@@ -2253,6 +2256,8 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             collisions=np.zeros(8, dtype=bool),
             rear_collisions=np.zeros(8, dtype=bool),
             rb_dists=np.full(8, np.inf, dtype=np.float32),
+            route_devs=np.full(8, np.inf, dtype=np.float32),
+            center_devs=np.full(8, np.inf, dtype=np.float32),
             red_light=np.zeros(8, dtype=bool),
             accels=np.zeros(8, dtype=np.float32),
             strong_brake_mps2=-2.5,
@@ -2275,6 +2280,12 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             danger_event_selector=None,
             output_route_key="bagA",
             realized_lag_streak=0,
+            turn_indicator_transition_correct=0,
+            turn_indicator_transition_total=0,
+            turn_indicator_prev_scored_gt=0,
+            turn_indicator_fp_count=0,
+            turn_indicator_fp_total=0,
+            turn_indicator_prev_scored_pred=0,
             route_arc_s=None,
         )
 
@@ -2384,6 +2395,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
         def prefetch(self, _items):
             return None
 
+        def npz(self, _idx):
+            return {"turn_indicators": np.zeros((1,), dtype=np.int64)}
+
     class _FakeModel:
         def __call__(self, data):
             batch = data["dummy"].shape[0]
@@ -2419,6 +2433,8 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             collisions=np.zeros(max_steps + 1, dtype=bool),
             rear_collisions=np.zeros(max_steps + 1, dtype=bool),
             rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            route_devs=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            center_devs=np.full(max_steps + 1, np.inf, dtype=np.float32),
             red_light=np.zeros(max_steps + 1, dtype=bool),
             accels=np.zeros(max_steps + 1, dtype=np.float32),
             strong_brake_mps2=-2.5,
@@ -2439,6 +2455,12 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             danger_event_selector=None,
             output_route_key="bagA",
             realized_lag_streak=0,
+            turn_indicator_transition_correct=0,
+            turn_indicator_transition_total=0,
+            turn_indicator_prev_scored_gt=0,
+            turn_indicator_fp_count=0,
+            turn_indicator_fp_total=0,
+            turn_indicator_prev_scored_pred=0,
             route_arc_s=None,
         )
 
@@ -2540,6 +2562,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
         def prefetch(self, _items):
             return None
 
+        def npz(self, _idx):
+            return {"turn_indicators": np.zeros((1,), dtype=np.int64)}
+
     class _FakeModel:
         def __call__(self, data):
             batch = data["dummy"].shape[0]
@@ -2575,6 +2600,8 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             collisions=np.zeros(max_steps + 1, dtype=bool),
             rear_collisions=np.zeros(max_steps + 1, dtype=bool),
             rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            route_devs=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            center_devs=np.full(max_steps + 1, np.inf, dtype=np.float32),
             red_light=np.zeros(max_steps + 1, dtype=bool),
             accels=np.zeros(max_steps + 1, dtype=np.float32),
             strong_brake_mps2=-2.5,
@@ -2595,6 +2622,12 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             danger_event_selector=None,
             output_route_key="bagA",
             realized_lag_streak=0,
+            turn_indicator_transition_correct=0,
+            turn_indicator_transition_total=0,
+            turn_indicator_prev_scored_gt=0,
+            turn_indicator_fp_count=0,
+            turn_indicator_fp_total=0,
+            turn_indicator_prev_scored_pred=0,
             route_arc_s=None,
         )
 
@@ -5255,6 +5288,10 @@ def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
     # reconverted — the cache is path-keyed but stamped with size+mtime.
     three["neighbor_agents_future"][0, :, 1] = 5.0
     np.savez(p3, **three)
+    # Same shape => same size; force a distinct mtime so a coarse-granularity
+    # filesystem clock cannot make the rewrite look unchanged.
+    st = p3.stat()
+    os.utime(p3, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
     fourth = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
     assert fourth == first
     with np.load(fourth[0]) as d:

@@ -111,6 +111,7 @@ def _augmentation_inputs():
         "line_strings": torch.zeros(B, 6, 20, 4),
         "polygons": torch.zeros(B, 3, 40, 5),
         "static_objects": torch.zeros(B, 5, 10),
+        "goal_pose": torch.zeros(B, 4),
     }
     # Non-trivial ego pose so the re-centering rotation is a real one (~53 deg).
     inputs["ego_current_state"][0, :4] = torch.tensor([2.0, -1.0, 0.6, 0.8])

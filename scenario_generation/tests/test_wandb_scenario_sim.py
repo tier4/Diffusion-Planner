@@ -128,7 +128,9 @@ def test_load_case_rows(tmp_path):
     assert load_case_rows(tmp_path / "absent") == []
 
 
-def test_series_panels_cover_every_point():
+def test_series_panels_cover_every_point(monkeypatch):
+    # sys.modules.setdefault above loses to any earlier wandb import, so bind the mock directly.
+    monkeypatch.setattr("scenario_generation.wandb_scenario_sim.wandb", mock_wandb)
     points = [
         series_point(f"epoch{e:04d}", e, build_scenario_sim_scalars([_case(kind="Pass")]))
         for e in (10, 20)

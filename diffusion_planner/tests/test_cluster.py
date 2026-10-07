@@ -37,6 +37,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
+
+pytest.importorskip("sklearn")
 
 SAMPLING_DIR = Path(__file__).resolve().parent.parent / "sampling"
 sys.path.insert(0, str(SAMPLING_DIR))

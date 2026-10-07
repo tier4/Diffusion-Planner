@@ -12,6 +12,7 @@ import json
 import math
 import os
 
+import pytest
 import torch
 
 from preference_optimization.utils import load_npz_data
@@ -28,6 +29,9 @@ SSD = os.environ.get(
 VAL_SCENES = os.environ.get("VAL_SCENES", f"{SSD}/odaiba_grpo_experiments/val_v4_100.json")
 
 
+@pytest.mark.skipif(
+    not os.path.exists(VAL_SCENES), reason=f"validation scene list not found: {VAL_SCENES}"
+)
 def test_gt_rollout():
     """Apply GT ego trajectory step by step, verify state consistency."""
     with open(VAL_SCENES) as f:

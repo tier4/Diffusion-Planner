@@ -67,9 +67,11 @@ def test_resolve_closed_loop_defaults_modes_to_objects(tmp_path):
     spec.loader.exec_module(mod)
 
     j1 = tmp_path / "a.json"
-    j1.write_text(json.dumps({"x": ["/x"]}))
+    (tmp_path / "x").mkdir()
+    j1.write_text(json.dumps({"x": [str(tmp_path / "x")]}))
     j2 = tmp_path / "b.json"
-    j2.write_text(json.dumps({"y": ["/y"]}))
+    (tmp_path / "y").mkdir()
+    j2.write_text(json.dumps({"y": [str(tmp_path / "y")]}))
 
     entries = mod.resolve_closed_loop_inputs([str(j1), str(j2)])
     assert [e["mode"] for e in entries] == ["objects", "objects"]
@@ -93,7 +95,8 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path):
     spec.loader.exec_module(mod)
 
     j = tmp_path / "sites.json"
-    j.write_text(json.dumps({"all": ["/data/s"]}))
+    (tmp_path / "s").mkdir()
+    j.write_text(json.dumps({"all": [str(tmp_path / "s")]}))
 
     entries = mod.resolve_closed_loop_inputs([str(j), str(j)], modes=["objects", "noobj"])
 
