@@ -20,8 +20,8 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
-from scenario_generation.perf_timer import Timers
 from scenario_generation.ml_planner_inputs import load_planner
+from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
 
 

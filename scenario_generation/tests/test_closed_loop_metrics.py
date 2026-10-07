@@ -9,10 +9,10 @@ import pytest
 
 from scenario_generation.closed_loop_eval import aggregate, metrics_for_json
 from scenario_generation.metrics.center_deviation import score_center_deviation_step
-from scenario_generation.metrics.route_deviation import score_route_deviation_step
 from scenario_generation.metrics.ego_traj import ego_traj_ego_frame
 from scenario_generation.metrics.red_light import score_red_light_step
 from scenario_generation.metrics.road_border import score_road_border_step
+from scenario_generation.metrics.route_deviation import score_route_deviation_step
 from scenario_generation.metrics.strong_brake import strong_brake_count, strong_brake_mask
 from scenario_generation.reproducer_rollout import (
     _clearance_stats,
@@ -584,9 +584,13 @@ def test_center_deviation_ignores_opposing_lane_and_picks_nearest_aligned():
 
 
 def test_center_deviation_accepts_up_to_90_degrees_and_rejects_beyond():
-    assert np.isfinite(score_center_deviation_step(_route_lanes([(1.0, -3.0), (1.0, 3.0)]))["center_dev_m"])
+    assert np.isfinite(
+        score_center_deviation_step(_route_lanes([(1.0, -3.0), (1.0, 3.0)]))["center_dev_m"]
+    )
     # Pointing back-and-sideways (> 90 deg off the ego heading).
-    assert np.isnan(score_center_deviation_step(_route_lanes([(1.0, -3.0), (-1.0, 3.0)]))["center_dev_m"])
+    assert np.isnan(
+        score_center_deviation_step(_route_lanes([(1.0, -3.0), (-1.0, 3.0)]))["center_dev_m"]
+    )
 
 
 def test_center_deviation_unmeasured_without_route_lanes():
@@ -626,9 +630,15 @@ def test_lane_geometry_block_nothing_measured_is_inf_not_zero():
 
 def test_center_deviation_nan_when_ego_is_outside_the_lane():
     # Half-width 2 m: 1.5 m off the centerline is inside, 3 m off is outside either side.
-    assert score_center_deviation_step(_route_lanes([(-5.0, -1.5), (5.0, -1.5)]))["center_dev_m"] == pytest.approx(1.5)
-    assert np.isnan(score_center_deviation_step(_route_lanes([(-5.0, -3.0), (5.0, -3.0)]))["center_dev_m"])
-    assert np.isnan(score_center_deviation_step(_route_lanes([(-5.0, 3.0), (5.0, 3.0)]))["center_dev_m"])
+    assert score_center_deviation_step(_route_lanes([(-5.0, -1.5), (5.0, -1.5)]))[
+        "center_dev_m"
+    ] == pytest.approx(1.5)
+    assert np.isnan(
+        score_center_deviation_step(_route_lanes([(-5.0, -3.0), (5.0, -3.0)]))["center_dev_m"]
+    )
+    assert np.isnan(
+        score_center_deviation_step(_route_lanes([(-5.0, 3.0), (5.0, 3.0)]))["center_dev_m"]
+    )
 
 
 def test_center_deviation_nan_when_ego_is_past_the_route_end():
@@ -638,7 +648,11 @@ def test_center_deviation_nan_when_ego_is_past_the_route_end():
 
 
 def test_center_deviation_nan_when_boundary_on_ego_side_is_missing():
-    assert np.isnan(score_center_deviation_step(_route_lanes([(-5.0, -1.0), (5.0, -1.0)], half_width=0.0))["center_dev_m"])
+    assert np.isnan(
+        score_center_deviation_step(_route_lanes([(-5.0, -1.0), (5.0, -1.0)], half_width=0.0))[
+            "center_dev_m"
+        ]
+    )
 
 
 def test_center_deviation_reads_native_h5_layout():

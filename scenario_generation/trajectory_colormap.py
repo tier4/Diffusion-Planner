@@ -253,7 +253,10 @@ def _risk_and_ticks(
         return risk, ticks, labels
     if metric == "turn_indicator":
         risk = np.array(
-            [1.0 if r.get("turn_indicator_pred") != r.get("turn_indicator_gt") else 0.0 for r in rows],
+            [
+                1.0 if r.get("turn_indicator_pred") != r.get("turn_indicator_gt") else 0.0
+                for r in rows
+            ],
             dtype=np.float64,
         )
         return risk, [0.0, 1.0], ["indicator matches GT", "indicator mismatch"]
@@ -263,9 +266,7 @@ def _risk_and_ticks(
         )
         return risk, [0.0, 1.0], ["no deviation collision", "deviation collision"]
     if metric == "collision_rear":
-        risk = np.array(
-            [1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64
-        )
+        risk = np.array([1.0 if r.get("collision_rear") else 0.0 for r in rows], dtype=np.float64)
         return risk, [0.0, 1.0], ["no rear collision", "rear collision"]
     if metric in _SIGNED_DIFF_METRICS:
         # One direction only: the other sign (and a step with no valid GT segment, None) reads

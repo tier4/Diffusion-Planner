@@ -439,8 +439,7 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"terminated={summary['terminated_counts']}",
         f"turn_indicator transition accuracy: "
         f"{ti['transition_correct']}/{ti['transition_total']} ({ti_acc_str})",
-        f"turn_indicator false positive rate: "
-        f"{ti['fp_count']}/{ti['fp_total']} ({ti_fp_str})",
+        f"turn_indicator false positive rate: {ti['fp_count']}/{ti['fp_total']} ({ti_fp_str})",
         f"mean gt_deviation={summary['mean_gt_deviation_m']:.3f} m  "
         f"mean route_deviation={summary['mean_route_deviation_m']:.3f} m "
         f"(unmeasured {summary['route_deviation_unmeasured_rate']:.1%})  "
@@ -599,9 +598,7 @@ def aggregate(
             "fp_total": turn_fp_total,
             # None (not 0.0) when no GT-steady scored step ever occurred: a silent 0.0 would
             # misread as "never flips spuriously" rather than "nothing to measure".
-            "false_positive_rate": (
-                (turn_fp_count / turn_fp_total) if turn_fp_total > 0 else None
-            ),
+            "false_positive_rate": ((turn_fp_count / turn_fp_total) if turn_fp_total > 0 else None),
         },
         "terminated_counts": term_counts,
         "reproducer": {
