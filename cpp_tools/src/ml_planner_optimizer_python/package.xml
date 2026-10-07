@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ml_planner_optimizer_python</name>
+  <version>0.0.0</version>
+  <description>
+    Python binding of the trajectory optimizer and road border avoidance built into
+    autoware_ml_planner, compiled from its unmodified sources, so closed-loop evaluation can pass
+    a planner's output through the same post-processing the node publishes.
+  </description>
+  <maintainer email="kotaro.yoshimoto@tier4.jp">Kotaro Yoshimoto</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <depend>autoware_planning_msgs</depend>
+  <depend>autoware_utils</depend>
+  <depend>autoware_utils_geometry</depend>
+  <depend>autoware_vehicle_info_utils</depend>
+  <depend>eigen</depend>
+  <depend>geometry_msgs</depend>
+  <depend>lanelet2_core</depend>
+  <depend>nav_msgs</depend>
+  <depend>pybind11_vendor</depend>
+  <depend>python3-dev</depend>
+  <depend>rclcpp</depend>
+  <depend>yaml-cpp</depend>
+
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-numpy</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
