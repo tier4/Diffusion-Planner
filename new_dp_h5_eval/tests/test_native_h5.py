@@ -152,3 +152,17 @@ def test_native_build_input_exposes_live_ego_dynamics_to_the_renderer():
     assert np.isclose(ego.past_velocities[-1, 0], 6.0)
     assert np.isclose(ego.yaw_rate, 0.2) and np.isclose(ego.steering_angle, 0.05)
     assert np.isclose(ego.acceleration[0], 0.5)
+
+
+def test_closed_loop_entry_parser_defaults():
+    from new_dp_h5_eval.run_all_groups_closed_loop import build_parser
+
+    args = build_parser().parse_args(
+        ["--closed_loop_h5_root", "a.json", "b.json", "--model_path", "m.onnx", "--out_root", "o"]
+    )
+    assert [str(p) for p in args.closed_loop_h5_root] == ["a.json", "b.json"]
+    assert args.closed_loop_object_modes is None
+    assert args.device == "cuda"
+    assert args.providers is None
+    assert args.closed_loop_pass_conditions == ""
+    assert args.closed_loop_draw_workers == 4

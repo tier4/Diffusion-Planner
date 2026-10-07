@@ -112,7 +112,7 @@ def _load_groups(manifest: Path) -> dict[str, list[dict]]:
     return groups
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--closed_loop_h5_root", type=Path, nargs="+", required=True)
     parser.add_argument("--closed_loop_object_modes", nargs="+", default=None)
@@ -122,6 +122,11 @@ def main() -> int:
     parser.add_argument("--provider", action="append", dest="providers")
     parser.add_argument("--closed_loop_pass_conditions", default="")
     parser.add_argument("--closed_loop_draw_workers", type=int, default=4)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
     modes = args.closed_loop_object_modes or ["objects"] * len(args.closed_loop_h5_root)
