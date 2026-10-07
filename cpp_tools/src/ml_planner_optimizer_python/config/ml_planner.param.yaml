@@ -1,0 +1,70 @@
+# Copied verbatim from tier4/autoware_launch.x2 d3646107
+# (config/planning/neural_net_planner/ml_planner.param.yaml), the version pinned by
+# pilot-auto.x2 feat/v4.4/e2e-experiment-2026_09_29.
+/**:
+  ros__parameters:
+    plugins_path: $(find-pkg-share autoware_tensorrt_plugins)/plugins/libautoware_tensorrt_plugins.so
+    model:
+      backend: "tensorrt" # "ort_cuda" "ort_cpu" "ort_cuda" "ort_tensorrt"
+      precision: "fp32"
+      use_cuda_graph: true
+      onnx_model_path: /opt/autoware/mlmodels/diffusion_planner_for_x2/ml_planner.onnx
+    planning_frequency_hz: 10.0
+    remap_unsupported_objects_to_pedestrian: false
+    traffic_light_group_msg_timeout_seconds: 0.2
+    batch_size: 1
+    noise_scale: [0.0]
+    line_string_max_step_m: 5.0
+    trajectory_optimization:
+      enable: true
+      weight_longitudinal: 1.0       # tracking weight along the reference heading [1/m^2]
+      weight_lateral: 1.0            # tracking weight perpendicular to the reference heading [1/m^2]
+      weight_yaw: 10.0               # tracking weight for heading [1/rad^2]
+      weight_acceleration: 1.0       # regularization weight on acceleration input
+      weight_steering_rate: 10.0     # regularization weight on steering rate input
+      weight_velocity: 0.1          # penalizes squared velocity magnitude
+      weight_steering_angle: 1.0     # penalizes squared steering-angle magnitude
+      terminal_weight_scale: 10.0     # terminal state weight = scale * stage weight
+      min_velocity_mps: 0.0          # lower velocity bound; 0 prevents backward motion [m/s]
+      max_velocity_mps: 30.0         # upper velocity bound [m/s]
+      min_acceleration_mps2: -4.0    # [m/s^2]
+      max_acceleration_mps2: 3.0     # [m/s^2]
+      max_steering_rate_rps: 5.0     # [rad/s]
+      max_lateral_acceleration_mps2: 1.0  # soft constraint bound [m/s^2]
+      max_sqp_iterations: 100
+      goal:
+        snap_distance_m: 5.0
+        weight_longitudinal: 1000.0
+        weight_lateral: 1000.0
+        weight_yaw: 10000.0
+        weight_velocity: 10.0
+      temporal_consistency:
+        enable: true
+        weight_longitudinal: 4.0    # let the timing float more than the path [1/m^2]
+        weight_lateral: 20.0         # main term: no lateral jumps between cycles [1/m^2]
+        weight_yaw: 2.0             # [1/rad^2]
+        weight_velocity: 0.1        # keeps the speed profile from being re-planned
+        decay_time_constant_s: 1.0  # <= 0 keeps the weights uniform over the horizon [s]
+        far_weight_ratio: 0.5      # weight fraction remaining at the far end, in [0, 1]
+    road_border_avoidance:
+      enable: true
+      start_time_s: 2.0          # ignore trajectory points before this time [s]
+      footprint_margin_m: 0.4     # ego footprint inflation for the overlap check [m]
+      search_radius_m: 120.0      # road borders farther than this from ego are ignored [m]
+      shift_step_m: 0.05           # lateral shift resolution [m]
+      max_lateral_shift_m: 1.0    # cap on the total lateral offset from the raw position [m]
+      propagate_shift: true       # carry the offset over to all subsequent points
+    stop_point_fixing:
+      enable: false
+      velocity_threshold_mps: 0.3  # freeze the tail at the first point with velocity <= this while decelerating from the start [m/s]
+      min_deceleration_duration_sec: 1.0  # required continuous deceleration before fixing [s]
+    planning_factor:
+      enable_stop: true
+      enable_slowdown: false
+      stop_keep_duration_threshold: 1.0  # [s]
+      stop_velocity_threshold: 0.1       # [m/s]
+      slowdown_accel_threshold: -0.3     # [m/s^2]
+    debug_params:
+      publish_debug_route: true
+      publish_debug_map: false
+      publish_debug_linestrings: true
