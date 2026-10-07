@@ -104,16 +104,23 @@ def _ego_plan_to_map_trajectory(
     plan_ego: np.ndarray, ex: float, ey: float, eh: float
 ) -> np.ndarray:
     """Ego-frame plan -> map-frame ``[N, 4]`` of (x, y, yaw, longitudinal v) for
-    ``set_ego_trajectory``, using the current ego pose as the frame origin.
+    ``set_ego_trajectory``, using the current ego pose as the frame origin."""
+    world_xy, world_h = _ego_to_world(
+        plan_ego[:, :2], plan_ego[:, 2:4], ex, ey, eh, dtype=np.float64
+    )
+    return _with_step_speeds(world_xy, world_h, ex, ey)
+
+
+def _with_step_speeds(
+    world_xy: np.ndarray, world_h: np.ndarray, ex: float, ey: float
+) -> np.ndarray:
+    """Map-frame poses -> ``[N, 4]`` of (x, y, yaw, longitudinal v), the ego at ``(ex, ey)``.
 
     Each speed is the step onto its own point, so the first one is measured from the ego
     rather than from the point after it -- the tracker locates itself at the start of a tick
     and consumes that first value, so getting it from the wrong pair of points offsets the
     commanded speed by roughly a quarter of the plan's acceleration.
     """
-    world_xy, world_h = _ego_to_world(
-        plan_ego[:, :2], plan_ego[:, 2:4], ex, ey, eh, dtype=np.float64
-    )
     seg = np.linalg.norm(np.diff(world_xy, axis=0), axis=1)
     first = math.hypot(world_xy[0, 0] - ex, world_xy[0, 1] - ey)
     speeds = np.concatenate([[first], seg]) / DT
