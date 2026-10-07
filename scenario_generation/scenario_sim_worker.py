@@ -22,6 +22,7 @@ from scenario_generation.closed_loop_eval import (
 )
 from scenario_generation.ml_planner_inputs import load_planner
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizerConfig, add_plan_optimizer_argument
 from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
 
 
@@ -59,11 +60,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="render a PNG every N ticks and encode them to an MP4; omitted (default) renders "
         "nothing, which is what a run that only wants the metrics row should do",
     )
+    add_plan_optimizer_argument(p)
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     a = _parse_args(argv)
+    plan_optimizer = PlanOptimizerConfig.from_args(a)
     timers = Timers()
     t_proc = time.perf_counter()
     with timers("model_load"):
@@ -76,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_steps=a.warmup_steps,
         near_miss_thresh=a.near_miss_thresh,
         draw_every=a.draw_every,
+        plan_optimizer=plan_optimizer,
     )
     row = run_scenario_sim_rollout(
         model,

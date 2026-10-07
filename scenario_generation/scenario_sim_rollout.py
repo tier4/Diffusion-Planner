@@ -31,6 +31,7 @@ import numpy as np
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizer, PlanOptimizerConfig
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
@@ -90,6 +91,8 @@ class RolloutConfig:
     coord_check_tol_rad: float = 0.1
     # A PNG every N ticks; None renders nothing. Metrics do not depend on it.
     draw_every: int | None = None
+    # Optimize each plan before the sim tracks it (scenario_generation.plan_optimizer).
+    plan_optimizer: PlanOptimizerConfig | None = None
     scene: SceneConfig = field(default_factory=SceneConfig)
 
     def __post_init__(self) -> None:
@@ -100,20 +103,15 @@ class RolloutConfig:
             raise ValueError(f"fps={self.fps} does not match the model timestep DT={DT}")
 
 
-def _ego_plan_to_map_trajectory(
-    plan_ego: np.ndarray, ex: float, ey: float, eh: float
-) -> np.ndarray:
-    """Ego-frame plan -> map-frame ``[N, 4]`` of (x, y, yaw, longitudinal v) for
-    ``set_ego_trajectory``, using the current ego pose as the frame origin.
+def _map_trajectory(world_xy: np.ndarray, world_h: np.ndarray, ex: float, ey: float) -> np.ndarray:
+    """Map-frame poses -> ``[N, 4]`` of (x, y, yaw, longitudinal v) for
+    ``set_ego_trajectory``, the ego at ``(ex, ey)``.
 
     Each speed is the step onto its own point, so the first one is measured from the ego
     rather than from the point after it -- the tracker locates itself at the start of a tick
     and consumes that first value, so getting it from the wrong pair of points offsets the
     commanded speed by roughly a quarter of the plan's acceleration.
     """
-    world_xy, world_h = _ego_to_world(
-        plan_ego[:, :2], plan_ego[:, 2:4], ex, ey, eh, dtype=np.float64
-    )
     seg = np.linalg.norm(np.diff(world_xy, axis=0), axis=1)
     first = math.hypot(world_xy[0, 0] - ex, world_xy[0, 1] - ey)
     speeds = np.concatenate([[first], seg]) / DT
@@ -457,6 +455,7 @@ def run_scenario_sim_rollout(
                 runner, builder, osc_path, cfg, verbose
             )
         goal_xy = goal_pose[:2]
+        plan_optimizer: PlanOptimizer | None = None
         with timers("map_context"):
             observer = model.observer(osp, ego_name, ego_route_ids, list(goal_pose[:3]))
         # Already in the scene's map frame. A polyline because save_step_figure accepts a
@@ -478,6 +477,10 @@ def run_scenario_sim_rollout(
                 raise RuntimeError(f"Sim stopped reporting the ego entity '{ego_name}'")
             ego_state = states[ego_name]
             ex, ey, eh = baselink_xyh(ego_state)
+            if cfg.plan_optimizer is not None and plan_optimizer is None:
+                plan_optimizer = PlanOptimizer(
+                    cfg.plan_optimizer, ego_state["bounding_box"], borders
+                )
             # Logged before stepping, so row k is the state clearance and collision are
             # measured on. Recording the post-step pose instead pairs every object sample
             # with a road-border and speed sample one tick later.
@@ -504,13 +507,32 @@ def run_scenario_sim_rollout(
                     cached_plan_ego, ti_model = model.predict(observer.inputs())
                 ti_report = resolve_keep_turn_indicator(ti_model, ti_report)
 
+                world_xy, world_h = _ego_to_world(
+                    cached_plan_ego[:, :2], cached_plan_ego[:, 2:4], ex, ey, eh, dtype=np.float64
+                )
+                keep_tracked = False
+                if plan_optimizer is not None:
+                    with timers("plan_optimizer"):
+                        solved = plan_optimizer.step(
+                            np.column_stack([world_xy, world_h]),
+                            (ex, ey, eh),
+                            float(ego_state["twist"]["linear_x"]),
+                            step * DT,
+                            tuple(goal_pose[:3]),
+                        )
+                    # A failed solve publishes nothing, so the sim keeps tracking its plan;
+                    # only before the first one is the raw plan all there is.
+                    if solved is not None:
+                        world_xy, world_h = solved[:, :2], solved[:, 2]
+                    keep_tracked = solved is None and pts is not None
                 with timers("sim_set_traj"):
                     # Anchored once, at the pose it was planned from. The tracker locates
                     # itself on the trajectory by closest point, so it advances along a
                     # map-frame plan on its own; re-anchoring on a cached tick would carry
                     # the whole plan along with the ego and it would never make progress.
-                    pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
-                    runner.set_ego_trajectory(pts, ego_ref=ego_name)
+                    if not keep_tracked:
+                        pts = _map_trajectory(world_xy, world_h, ex, ey)
+                        runner.set_ego_trajectory(pts, ego_ref=ego_name)
                     runner.set_ego_turn_indicator(int(ti_report), ego_ref=ego_name)
 
             if buffers.age[ego_name] >= cfg.warmup_steps:
@@ -588,5 +610,7 @@ def run_scenario_sim_rollout(
     # rollout_total minus the parts.
     timers.add("rollout_total", time.perf_counter() - _t_rollout)
     row["map_path"] = str(map_path)
+    if plan_optimizer is not None:
+        row["plan_optimizer"] = plan_optimizer.summary()
     row["timing"] = timers.as_dict()
     return row
