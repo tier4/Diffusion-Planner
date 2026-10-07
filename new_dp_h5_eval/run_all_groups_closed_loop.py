@@ -112,10 +112,39 @@ def _load_groups(manifest: Path) -> dict[str, list[dict]]:
     return groups
 
 
+def resolve_labels(manifests: list[Path], modes: list[str], labels: list[str] | None) -> list[str]:
+    """Output directory name per input: the manifest stem unless ``labels`` names it explicitly.
+
+    A ``noobj`` input gets a ``__noobj`` suffix. Every label must be unique, otherwise two inputs
+    would write (and be keyed) into the same ``<label>/<group>`` directory.
+    """
+    if labels is not None and len(labels) != len(manifests):
+        raise ValueError(
+            f"--closed_loop_labels must provide one label per H5 manifest "
+            f"({len(labels)} labels for {len(manifests)} manifests)"
+        )
+    names = labels if labels is not None else [m.stem for m in manifests]
+    resolved = [name if mode == "objects" else f"{name}__noobj" for name, mode in zip(names, modes)]
+    duplicated = sorted({r for r in resolved if resolved.count(r) > 1})
+    if duplicated:
+        raise ValueError(
+            f"closed-loop output labels must be unique, but {duplicated} repeat; "
+            "pass distinct names with --closed_loop_labels"
+        )
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--closed_loop_h5_root", type=Path, nargs="+", required=True)
     parser.add_argument("--closed_loop_object_modes", nargs="+", default=None)
+    parser.add_argument(
+        "--closed_loop_labels",
+        nargs="+",
+        default=None,
+        help="Output directory name per --closed_loop_h5_root (default: the manifest file stem). "
+        "Needed when manifests share a stem, e.g. several 'manifest.json'.",
+    )
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--out_root", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
@@ -129,6 +158,11 @@ def main() -> int:
         parser.error(
             "--closed_loop_object_modes must provide one 'objects'/'noobj' mode per H5 manifest"
         )
+
+    try:
+        labels = resolve_labels(args.closed_loop_h5_root, modes, args.closed_loop_labels)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     cfg = ClosedLoopConfig(
         device=args.device, closed_loop_pass_conditions=args.closed_loop_pass_conditions
@@ -148,8 +182,7 @@ def main() -> int:
 
     model = ReproducerOnnxModel(args.model_path, args.providers)
     evaluators: dict[str, NativeH5FullRouteClosedLoopEvaluation] = {}
-    for manifest, mode in zip(args.closed_loop_h5_root, modes):
-        label = manifest.stem if mode == "objects" else f"{manifest.stem}__noobj"
+    for manifest, mode, label in zip(args.closed_loop_h5_root, modes, labels):
         for group_name, routes in _load_groups(manifest).items():
             group_out = out_root / label / group_name
             key = f"{label}/{group_name}"

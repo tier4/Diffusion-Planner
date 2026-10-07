@@ -152,3 +152,37 @@ def test_native_build_input_exposes_live_ego_dynamics_to_the_renderer():
     assert np.isclose(ego.past_velocities[-1, 0], 6.0)
     assert np.isclose(ego.yaw_rate, 0.2) and np.isclose(ego.steering_angle, 0.05)
     assert np.isclose(ego.acceleration[0], 0.5)
+
+
+def test_closed_loop_labels_default_to_manifest_stem_with_noobj_suffix():
+    from pathlib import Path
+
+    from new_dp_h5_eval.run_all_groups_closed_loop import resolve_labels
+
+    manifests = [Path("lap/closed_loop_site.json"), Path("lap/closed_loop_site.json")]
+    assert resolve_labels(manifests, ["objects", "noobj"], None) == [
+        "closed_loop_site",
+        "closed_loop_site__noobj",
+    ]
+
+
+def test_closed_loop_labels_name_manifests_that_share_a_stem():
+    from pathlib import Path
+
+    import pytest
+
+    from new_dp_h5_eval.run_all_groups_closed_loop import resolve_labels
+
+    lap = Path("lap/manifest.json")
+    manifests = [Path("override/manifest.json"), lap, lap]
+    modes = ["objects", "objects", "noobj"]
+    labels = ["close_loop_override", "closed_loop_site", "closed_loop_site"]
+    with pytest.raises(ValueError, match="unique"):
+        resolve_labels(manifests, modes, None)
+    assert resolve_labels(manifests, modes, labels) == [
+        "close_loop_override",
+        "closed_loop_site",
+        "closed_loop_site__noobj",
+    ]
+    with pytest.raises(ValueError, match="one label per"):
+        resolve_labels(manifests, modes, ["a"])
