@@ -142,9 +142,6 @@ def test_advance_step_tracked_fast_path():
     assert s.dyn.yaw_rate == 0.123  # read from tracker telemetry, like the serial branch
     assert s.dyn.steering == -0.05
     np.testing.assert_array_equal(s.ego_hist[-1], new_pose)
-    np.testing.assert_allclose(s.accels[3], 0.0)
-    np.testing.assert_allclose(s.brake_ema_speed, 4.0)
-    assert s.brake_speed_history == (4.0, 4.5)
+    np.testing.assert_allclose(s.accels[3], 5.0)
     _advance_step(s, np.zeros((80, 4)), 4, "cpu", Timers(), tracked=(new_pose, 4.0))
-    np.testing.assert_allclose(s.accels[4], 0.0)
-    assert s.brake_speed_history == (4.5, 4.0)
+    np.testing.assert_allclose(s.accels[4], -5.0)

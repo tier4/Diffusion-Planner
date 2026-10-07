@@ -23,6 +23,10 @@ _NEW_METRICS = (
     "speed_fast",
     "brake_excess",
     "accel_excess",
+    "accel_gtacc_liveacc",
+    "accel_gtacc_livebrk",
+    "accel_gtbrk_liveacc",
+    "accel_gtbrk_livebrk",
 )
 
 
@@ -66,6 +70,7 @@ def _full_row(k: int, **overrides) -> dict:
         "centerline_dist_m": 0.3,
         "gt_speed_diff_mps": -1.0,
         "gt_accel_diff_mps2": 0.5,
+        "gt_accel_mps2": 0.2,
         "turn_indicator_pred": 0,
         "turn_indicator_gt": 0,
     }
@@ -159,3 +164,20 @@ def test_binary_new_metrics_map_truthy_to_one(metric, key, labels):
     assert list(risk) == [0.0, 1.0]
     assert ticks == [0.0, 1.0]
     assert tick_labels == labels
+
+
+def test_accel_quad_metrics_color_only_their_cell():
+    # (recorded accel, diff): live = recorded + diff.
+    rows = [
+        {"gt_accel_mps2": 1.0, "gt_accel_diff_mps2": -0.5},  # gtacc_liveacc, |d|=0.5
+        {"gt_accel_mps2": 0.0, "gt_accel_diff_mps2": -3.0},  # gtacc_livebrk, |d|=3
+        {"gt_accel_mps2": -2.0, "gt_accel_diff_mps2": 3.0},  # gtbrk_liveacc, |d|=3
+        {"gt_accel_mps2": -1.0, "gt_accel_diff_mps2": -1.5},  # gtbrk_livebrk, |d|=1.5
+        {"gt_accel_mps2": None, "gt_accel_diff_mps2": None},
+    ]
+    hit = lambda m: [i for i, v in enumerate(_risk_and_ticks(rows, m, 1.0)[0]) if v > 0]
+    assert hit("accel_gtacc_liveacc") == [0]
+    assert hit("accel_gtacc_livebrk") == [1]
+    assert hit("accel_gtbrk_liveacc") == [2]
+    assert hit("accel_gtbrk_livebrk") == [3]
+    assert _risk_and_ticks(rows, "accel_gtacc_livebrk", 1.0)[0][1] == 1.0

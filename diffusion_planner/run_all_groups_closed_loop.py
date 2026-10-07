@@ -266,6 +266,35 @@ def _load_group_results(
     return summaries
 
 
+def _pool_group_gt_speed(summaries: list[dict]) -> dict | None:
+    """Pool each group's ``gt_speed`` block: step-weighted mean and max-of-max per slow / fast /
+    brake / accel, and per 2x2 ``accel_quad`` cell the step count, step-weighted mean and max.
+    p99 is left out: a group summary only keeps its own p99, which can't be pooled."""
+    blocks = [s["gt_speed"] for s in summaries if isinstance(s.get("gt_speed"), dict)]
+    if not blocks:
+        return None
+
+    def pool(items: list[tuple[int, dict]]) -> dict:
+        n = sum(w for w, _ in items)
+        means = [(w, c["mean"]) for w, c in items if c.get("mean") is not None]
+        return {
+            "mean": sum(w * m for w, m in means) / sum(w for w, _ in means) if means else None,
+            "max": max(float(c["max"]) for _, c in items),
+            "steps": n,
+        }
+
+    out: dict = {"n_steps": sum(int(b.get("n_steps", 0) or 0) for b in blocks)}
+    for name in ("slow", "fast", "brake", "accel"):
+        out[name] = pool([(int(b.get("n_steps", 0) or 0), b[name]) for b in blocks])
+        del out[name]["steps"]
+    quads = [b["accel_quad"] for b in blocks if isinstance(b.get("accel_quad"), dict)]
+    if quads:
+        out["accel_quad"] = {
+            name: pool([(int(q[name]["steps"]), q[name]) for q in quads]) for name in quads[0]
+        }
+    return out
+
+
 def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> None:
     """Write ``<out_dir>/groups.json`` aggregating ``summaries``.
 
@@ -365,6 +394,10 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
         agg["turn_indicator_false_positive_rate"] = (
             (_ti_fp_count / _ti_fp_total) if _ti_fp_total else None
         )
+
+        gt_speed = _pool_group_gt_speed(list(summaries.values()))
+        if gt_speed is not None:
+            agg["gt_speed"] = gt_speed
 
         total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())
         total_fail = sum(int(s.get("fail_count", 0) or 0) for s in summaries.values())

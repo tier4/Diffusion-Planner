@@ -175,8 +175,8 @@ def scenario_sim_due(args, save_epoch: bool, final_epoch: bool) -> bool:
     return save_epoch
 
 
-def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> None:
-    """Evaluate a just-saved checkpoint against the OpenSCENARIO suite, out of process.
+def scenario_sim_validate(args, epoch: int, onnx_path: str, out_dir: str) -> None:
+    """Evaluate a just-exported ONNX against the OpenSCENARIO suite, out of process.
 
     Rank 0 only, at the epochs ``scenario_sim_due`` selects. The other ranks wait at the next epoch's
     ``torch.distributed.barrier()``, which inherits the process group's timeout.
@@ -192,11 +192,15 @@ def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> Non
     """
     if not args.scenario_sim_driver:
         return
+    # The export is guarded and may have failed; scenario_sim takes nothing else.
+    if not os.path.exists(onnx_path):
+        print(f"scenario_sim @epoch {epoch + 1}: skipped, no {onnx_path}", flush=True)
+        return
 
     started = time.perf_counter()
     rc = subprocess.run(
         ["bash", args.scenario_sim_driver],
-        env={**os.environ, "CKPT": ckpt_path, "OUT": out_dir},
+        env={**os.environ, "CKPT": onnx_path, "OUT": out_dir},
     ).returncode
     elapsed = time.perf_counter() - started
     status = "ok" if rc == 0 else f"FAILED rc={rc}"
@@ -660,7 +664,7 @@ def model_training(args: TrainConfig):
                     scenario_sim_validate(
                         args,
                         epoch,
-                        f"{curr_dir}/best_model.pth",
+                        f"{curr_dir}/diffusion_planner.onnx",
                         os.path.join(curr_dir, "scenario_sim"),
                     )
 

@@ -59,6 +59,15 @@ DT = 0.1
 # Pose mode also requires the reproducer to be in ``repeat`` (Autoware-aligned); clock
 # mode is speed-only because bag frames always advance by wall time (no ``repeat``).
 STUCK_SPEED_MPS = 0.5
+# Half window (steps) for the speed of an ego placed directly on plan poses (perfect
+# tracking): the forward net displacement from this many steps back (realized) to this many
+# steps ahead on the cached plan, not the last step's hop. A stopped plan's early points zigzag
+# a few cm back and forth in a fixed per-index pattern, so the one-step hop reads 0.3-1.0 m/s
+# at a standstill (and +-25 m/s^2 accel while moving); fed back as the ego's speed it makes the
+# model keep creeping forward. Right after a replan the 8-step window holds each index of the
+# default ``replan_interval=8`` plan once, so the pattern cancels; centering it on the ego
+# avoids the ~0.4 s lag (late braking) of a trailing window.
+PERFECT_SPEED_HALF_WINDOW_STEPS = 4
 # Falling-edge debounce for ``*_count`` metrics: once an event starts, fewer than this many
 # consecutive False steps do not end it (threshold flicker does not re-count).
 EVENT_COUNT_CLEAR_FRAMES = 3
@@ -256,6 +265,9 @@ def build_input_np(
             live6[0, 4:6] = live6[1, 4:6]
         live6[-1, 4], live6[-1, 5] = dyn.speed, dyn.yaw_rate
         recen["ego_agent_past"] = live6[None]
+        # Never fed to ONNX (MODEL_INPUT_NAMES filter); the HUD/renderer reads the live
+        # speed/accel/steer/yaw_rate from it, as in the NPZ path below.
+        recen["ego_current_state"] = _live_ego_current(dyn)
         # Exact native fields -> legacy scoring-only views. They never enter ONNX.
         neighbors_live = np.zeros((frame["neighbor_agents_past"].shape[0], 11), dtype=np.float32)
         neighbors_live[:, :4] = recen0["neighbor_agents_past"][:, -1]
@@ -459,10 +471,8 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Per-step acceleration of median-then-EMA executed speed for strong braking.
+    # Per-step executed-speed acceleration for strong braking (no extra speed filter).
     accels: np.ndarray | None = None
-    brake_ema_speed: float | None = None
-    brake_speed_history: tuple[float, float] | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -533,6 +543,9 @@ class _SegState:
     # segment (see ``gt_speed_block``); NaN where no valid GT segment. None for manually-built states.
     gt_dvs: np.ndarray | None = None
     gt_das: np.ndarray | None = None
+    # Per-step recorded ego accel (m/s^2) at the same GT segment; with ``gt_das`` it gives the
+    # live accel for the 2x2 sign split in ``gt_speed_block``. NaN where no valid GT segment.
+    gt_as: np.ndarray | None = None
     # A collision counts as "deviation collision" when the live ego was more than this far
     # off the recorded GT path at the same step (see ``deviation_collision_block``).
     deviation_collision_thresh_m: float = 2.0
@@ -707,11 +720,10 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
-        brake_ema_speed=float(dyn.speed),
-        brake_speed_history=(float(dyn.speed), float(dyn.speed)),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         gt_dvs=np.full(cap, np.nan, dtype=np.float32),
         gt_das=np.full(cap, np.nan, dtype=np.float32),
+        gt_as=np.full(cap, np.nan, dtype=np.float32),
         centerline_devs=np.full(cap, np.inf, dtype=np.float32),
         deviation_collision_thresh_m=float(deviation_collision_thresh_m),
         strong_brake_mps2=float(strong_brake_mps2),
@@ -912,9 +924,7 @@ def _gt_deviation_m(
         pose = window[0]
         if abs(_wrap_pi(float(pose[2]) - float(live_yaw))) > (np.pi / 2.0):
             return GTDeviation(_GT_DEV_INF, None, lo, hi)
-        return GTDeviation(
-            float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi, lo
-        )
+        return GTDeviation(float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi, lo)
     a = window[:-1, :2]
     b = window[1:, :2]
     ab = b - a  # (M-1, 2)
@@ -986,7 +996,12 @@ def _sparse_hist(vals: np.ndarray) -> dict[str, int]:
     return {str(int(b)): int(c) for b, c in zip(bins, counts)}
 
 
-def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
+# 2x2 accel-diff cells: (recorded accel sign) x (live accel sign). "brk" = accel < 0, "acc" =
+# accel >= 0 (cruising counts as not braking). Each cell holds |live - recorded accel|.
+GT_ACCEL_QUADS = ("gtacc_liveacc", "gtacc_livebrk", "gtbrk_liveacc", "gtbrk_livebrk")
+
+
+def gt_speed_block(dvs: np.ndarray, das: np.ndarray, gt_as: np.ndarray | None = None) -> dict:
     """The ``gt_speed`` segment-row block: live minus recorded ego speed / accel, measured at
     the recorded segment nearest the live ego (same window/yaw gate as ``mean_gt_deviation_m``).
 
@@ -995,6 +1010,12 @@ def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
     late start), ``fast`` the reverse; ``brake`` = recorded accel minus live accel when
     positive (braking harder than the recorded drive), ``accel`` the reverse. NaN steps
     (no valid GT segment) are dropped. ``*_hist`` are sparse bin-index -> count histograms.
+
+    The brake/accel split above cannot tell "recorded accelerates, live only weakly" from
+    "recorded cruises, live brakes hard". When ``gt_as`` (recorded accel) is given, ``quad``
+    additionally buckets every step by (recorded accel sign x live accel sign) and keeps
+    ``n`` / ``sum`` / ``max`` / ``hist`` of ``|live - recorded accel|`` per cell, e.g.
+    ``gtacc_livebrk`` = live brakes where the recorded drive did not.
     """
     ok = np.isfinite(dvs) & np.isfinite(das)
     dv, da = dvs[ok].astype(np.float64), das[ok].astype(np.float64)
@@ -1005,6 +1026,21 @@ def gt_speed_block(dvs: np.ndarray, das: np.ndarray) -> dict:
         block[f"{name}_sum"] = float(pos.sum())
         block[f"{name}_max"] = float(pos.max()) if pos.size else 0.0
         block[f"{name}_hist"] = _sparse_hist(pos)
+    if gt_as is not None:
+        ga = np.asarray(gt_as, dtype=np.float64)[: len(dvs)][ok]
+        live = ga + da
+        absda = np.abs(da)
+        quad: dict = {}
+        for gname, gmask in (("gtacc", ga >= 0.0), ("gtbrk", ga < 0.0)):
+            for lname, lmask in (("liveacc", live >= 0.0), ("livebrk", live < 0.0)):
+                x = absda[gmask & lmask]
+                quad[f"{gname}_{lname}"] = {
+                    "n": int(x.size),
+                    "sum": float(x.sum()),
+                    "max": float(x.max()) if x.size else 0.0,
+                    "hist": _sparse_hist(x),
+                }
+        block["quad"] = quad
     return block
 
 
@@ -1054,14 +1090,42 @@ def _score_into(
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
+def _placed_speed(ego_hist: np.ndarray, new_pose: np.ndarray, ahead_pose: np.ndarray) -> float:
+    """Speed (m/s, >= 0) of an ego placed on ``new_pose``: the forward net displacement along
+    its heading from the realized pose ``PERFECT_SPEED_HALF_WINDOW_STEPS`` steps back
+    (``ego_hist[-1]`` is the pose before this step) to ``ahead_pose``, the cached plan's pose
+    that many steps ahead. Backward motion reads 0: the recorded speed is never negative."""
+    n = min(PERFECT_SPEED_HALF_WINDOW_STEPS, len(ego_hist))
+    dx = float(ahead_pose[0]) - float(ego_hist[-n, 0])
+    dy = float(ahead_pose[1]) - float(ego_hist[-n, 1])
+    h = float(new_pose[2])
+    return max(
+        0.0, (dx * math.cos(h) + dy * math.sin(h)) / ((n + PERFECT_SPEED_HALF_WINDOW_STEPS) * DT)
+    )
+
+
+def _plan_override(plan_world, off: int) -> tuple[np.ndarray, np.ndarray]:
+    """``_advance_step`` override placing the ego on world plan pose ``off``, with the pose
+    ``PERFECT_SPEED_HALF_WINDOW_STEPS`` further along (clamped to the horizon) for its speed."""
+    xy, h = plan_world
+    ahead = min(off + PERFECT_SPEED_HALF_WINDOW_STEPS, len(xy) - 1)
+    return tuple(
+        np.array([float(xy[i, 0]), float(xy[i, 1]), float(h[i])], dtype=np.float64)
+        for i in (off, ahead)
+    )
+
+
 def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None, tracked=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
-    ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
-    instead of running the tracker. Used to execute a CACHED plan open-loop between replans:
+    ``override`` = ``(world_pose(3,), ahead_pose(3,))`` places the ego exactly on a given world
+    pose instead of running the tracker; ``ahead_pose`` is the plan's pose
+    ``PERFECT_SPEED_HALF_WINDOW_STEPS`` steps further, for the speed. Used to execute a CACHED plan open-loop between replans:
     PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
     multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
-    applied directly, which is the faithful "perfect tracking" of the cached plan.
+    applied directly, which is the faithful "perfect tracking" of the cached plan. The speed
+    is the net displacement over a window centered on the ego (``_placed_speed``), not this
+    step's hop.
 
     ``tracked`` = ``(new_pose(3,), new_speed)`` from a BATCHED tracker solve
     (``mpc_tracker_batched.track_many``): the caller already ran the tracker for
@@ -1073,9 +1137,6 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
 
     was_warmup = s.k < s.warmup_steps
     snaps_before = getattr(s, "snap_count", 0)
-    prev_ema_speed = getattr(s, "brake_ema_speed", None)
-    if prev_ema_speed is None:
-        prev_ema_speed = float(s.dyn.speed)
     with timers("advance"):
         if s.k < s.warmup_steps:
             tgt = min(idx + 1, len(s.tl) - 1)
@@ -1085,7 +1146,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             steering = float(getattr(s.tracker, "last_steering", 0.0))
         elif override is not None:
             new_pose = np.asarray(override[0], dtype=np.float64)
-            new_speed = float(override[1])
+            new_speed = _placed_speed(s.ego_hist, new_pose, override[1])
             dh = (float(new_pose[2]) - float(s.live_pose[2]) + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = float(dh / DT)
             steering = 0.0
@@ -1195,20 +1256,14 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.stuck = 0
                 s.snap_count += 1
 
+        # Use the executed-speed difference directly. Perfect tracking already smooths
+        # its speed upstream through the placed-pose window; another median/EMA changes
+        # the duration of threshold crossings and therefore the two-frame confirmation.
+        # Warmup and teleports must still break the braking event history.
         if was_warmup or getattr(s, "snap_count", 0) != snaps_before:
-            s.brake_ema_speed = float(s.dyn.speed)
-            s.brake_speed_history = (float(s.dyn.speed), float(s.dyn.speed))
             brake_accel = np.nan
         else:
-            old_speeds = getattr(s, "brake_speed_history", None) or (
-                float(prev_speed),
-                float(prev_speed),
-            )
-            current_speed = float(s.dyn.speed)
-            median_speed = sorted((*old_speeds, current_speed))[1]
-            s.brake_speed_history = (old_speeds[1], current_speed)
-            s.brake_ema_speed = 0.3 * median_speed + 0.7 * prev_ema_speed
-            brake_accel = (s.brake_ema_speed - prev_ema_speed) / DT
+            brake_accel = s.dyn.accel
         if s.accels is not None and s.k - 1 < len(s.accels):
             s.accels[s.k - 1] = brake_accel
 
@@ -1350,7 +1405,7 @@ def clearance_family_block(
 
 
 def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
-    """The ``strong_brake`` block from median-then-EMA executed-speed acceleration."""
+    """The ``strong_brake`` block from executed-speed acceleration without additional filtering."""
     mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
@@ -1476,6 +1531,7 @@ def _finalize(s: _SegState) -> dict:
         "gt_speed": gt_speed_block(
             s.gt_dvs[: s.k] if s.gt_dvs is not None else np.zeros(0, dtype=np.float32),
             s.gt_das[: s.k] if s.gt_das is not None else np.zeros(0, dtype=np.float32),
+            s.gt_as[: s.k] if s.gt_as is not None else None,
         ),
         "turn_indicator": turn_indicator_block(
             s.turn_indicator_transition_correct,
@@ -2155,12 +2211,15 @@ def render_segment(
             if s.gt_devs is not None:
                 s.gt_devs[k] = gt_deviation_m
             gt_va = _gt_speed_accel(tl, gt_dev)
-            gt_dv = gt_da = None
+            gt_dv = gt_da = gt_a = None
             if gt_va is not None and s.gt_dvs is not None:
                 # Pre-step pair: dyn.speed is this tick's speed, dyn.accel the accel that produced it.
                 gt_dv = float(s.dyn.speed) - gt_va[0]
                 gt_da = float(s.dyn.accel) - gt_va[1]
+                gt_a = gt_va[1]
                 s.gt_dvs[k], s.gt_das[k] = gt_dv, gt_da
+                if s.gt_as is not None:
+                    s.gt_as[k] = gt_va[1]
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
                 deviation_streak += 1
             else:
@@ -2196,7 +2255,7 @@ def render_segment(
             _score_into(s, neighbors_live, device, timers, np_dict)
 
             # Capture the pre-step pose used for scoring; write after advancing so this row
-            # also carries the exact filtered acceleration scored at step k.
+            # also carries the exact acceleration scored at step k.
             trace_row = {
                 "k": k,
                 "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
@@ -2219,9 +2278,7 @@ def render_segment(
                 else None,
                 "collision": bool(s.collisions[k]),
                 "collision_rear": bool(s.rear_collisions[k]),
-                "rb_dist_m": round(float(s.rb_dists[k]), 4)
-                if np.isfinite(s.rb_dists[k])
-                else None,
+                "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
                 "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
                 if np.isfinite(s.centerline_devs[k])
                 else None,
@@ -2229,6 +2286,8 @@ def render_segment(
                 "gt_deviation_m": round(gt_deviation_m, 3),
                 "gt_speed_diff_mps": round(gt_dv, 3) if gt_dv is not None else None,
                 "gt_accel_diff_mps2": round(gt_da, 3) if gt_da is not None else None,
+                # Recorded accel; with the diff it gives live accel for the 2x2 cells.
+                "gt_accel_mps2": round(gt_a, 3) if gt_a is not None else None,
                 # Resolved closed-loop turn indicator going into this tick, and the
                 # recorded GT at the same frame -- same values (and same read) the
                 # segment-level turn_indicator block and the PNG renderer use, so a
@@ -2269,13 +2328,7 @@ def render_segment(
             else:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
-                tx, ty, th = (
-                    float(plan_world[0][off, 0]),
-                    float(plan_world[0][off, 1]),
-                    float(plan_world[1][off]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                override = _plan_override(plan_world, off)
                 pred_cur = _world_plan_to_ego(
                     plan_world[0][off:],
                     plan_world[1][off:],
@@ -2293,13 +2346,7 @@ def render_segment(
             # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
             # override path implements). Every step then lands on the predicted polyline point.
             if tracker_mode == "perfect" and override is None:
-                tx, ty, th = (
-                    float(plan_world[0][0, 0]),
-                    float(plan_world[0][0, 1]),
-                    float(plan_world[1][0]),
-                )
-                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                override = _plan_override(plan_world, 0)
             if (
                 draw_every is not None
                 and (window is None or (window[0] <= k <= window[1]))

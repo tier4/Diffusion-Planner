@@ -25,7 +25,7 @@ from diffusion_planner.config.closed_loop_config import ClosedLoopPassCondition
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
-from scenario_generation.reproducer_rollout import GT_DIFF_BIN, render_segment
+from scenario_generation.reproducer_rollout import GT_ACCEL_QUADS, GT_DIFF_BIN, render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -176,7 +176,36 @@ def _pool_gt_speed(rows: list[dict]) -> dict | None:
             "p99": p99,
             "max": max(float(b[f"{name}_max"]) for b in blocks),
         }
+    quads = [b["quad"] for b in blocks if isinstance(b.get("quad"), dict)]
+    if quads:
+        # Per cell: step count and |accel diff| mean / p99 / max over that cell's own steps.
+        out["accel_quad"] = {
+            name: _pool_hist_cell([q[name] for q in quads]) for name in GT_ACCEL_QUADS
+        }
     return out
+
+
+def _pool_hist_cell(cells: list[dict]) -> dict:
+    n = sum(int(c["n"]) for c in cells)
+    hist: dict[int, int] = {}
+    for c in cells:
+        for k, v in c["hist"].items():
+            hist[int(k)] = hist.get(int(k), 0) + int(v)
+    p99 = None
+    if n:
+        target, cum, p99 = 0.99 * n, n - sum(hist.values()), 0.0
+        if cum < target:
+            for k in sorted(hist):
+                cum += hist[k]
+                if cum >= target:
+                    p99 = (k + 1) * GT_DIFF_BIN
+                    break
+    return {
+        "steps": n,
+        "mean": float(sum(c["sum"] for c in cells) / n) if n else None,
+        "p99": p99,
+        "max": max(float(c["max"]) for c in cells),
+    }
 
 
 def _event_family_block(

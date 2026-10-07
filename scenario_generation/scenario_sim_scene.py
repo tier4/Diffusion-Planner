@@ -39,7 +39,6 @@ class SceneConfig:
 
     max_map_lanelets: int = 140
     map_mask_range_m: float = 100.0
-    route_window_segments: int = 25
 
 
 def resolve_ego_name(states: dict) -> str:
@@ -199,7 +198,6 @@ def build_scene(
     goal_pose: np.ndarray,
     cfg: SceneConfig,
     ego_name: str,
-    turn_indicators: np.ndarray,
 ) -> SceneContext:
     """Build a SceneContext snapshot in the map frame from this tick's sim truth."""
     ex, ey, _ = baselink_xyh(states[ego_name])
@@ -221,17 +219,6 @@ def build_scene(
             break
     map_data = builder._build_map_data(all_ids, center_xy=ego_xy)
 
-    # Ego route_lanes: a forward sliding window refreshed every tick.
-    window = (
-        builder.select_route_segment_indices(
-            ego_route_ids, ego_xy, max_segments=cfg.route_window_segments
-        )
-        or ego_route_ids[: cfg.route_window_segments]
-    )
-    route_lanes, route_sl, route_hsl = builder._route_to_33dim(
-        window, max_segments=cfg.route_window_segments
-    )
-
     agents: list[Agent] = []
     for name, st in states.items():
         atype = _agent_type(st)
@@ -250,10 +237,6 @@ def build_scene(
                 past_trajectory=traj,
                 past_velocities=buffers.velocities(name),
                 goal_pose=goal_pose.astype(np.float32) if is_ego else None,
-                route_lanes=route_lanes if is_ego else None,
-                route_speed_limit=route_sl if is_ego else None,
-                route_has_speed_limit=route_hsl if is_ego else None,
-                turn_indicators=(turn_indicators if is_ego else None),
                 route_lanelet_ids=list(ego_route_ids) if is_ego else None,
                 age_steps=buffers.age[name],
             )

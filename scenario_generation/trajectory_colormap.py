@@ -36,7 +36,22 @@ METRIC_CHOICES = (
     "speed_fast",
     "brake_excess",
     "accel_excess",
+    "accel_gtacc_liveacc",
+    "accel_gtacc_livebrk",
+    "accel_gtbrk_liveacc",
+    "accel_gtbrk_livebrk",
 )
+
+# 2x2 accel cells (recorded accel sign x live accel sign; "brk" = accel < 0, "acc" = >= 0), the
+# same cells as ``gt_speed.accel_quad``: metric -> (recorded is braking, live is braking).
+# Colored by |live - recorded accel| inside the cell, 0 elsewhere.
+_ACCEL_QUAD_METRICS = {
+    "accel_gtacc_liveacc": (False, False),
+    "accel_gtacc_livebrk": (False, True),  # live brakes where the recorded drive did not
+    "accel_gtbrk_liveacc": (True, False),
+    "accel_gtbrk_livebrk": (True, True),
+}
+_ACCEL_QUAD_CAP = 3.0
 
 # One-sided live-vs-recorded metrics, kept as separate maps so each direction is checked on its
 # own: metric -> (trace key, sign applied to the trace value, saturation cap, unit).
@@ -84,6 +99,7 @@ _METRIC_TRACE_KEYS = {
     "deviation_collision": "deviation_collision",
     "collision_rear": "collision_rear",
     **{m: spec[0] for m, spec in _SIGNED_DIFF_METRICS.items()},
+    **{m: "gt_accel_mps2" for m in _ACCEL_QUAD_METRICS},
 }
 
 # Short colorbar axis label. The ticks themselves (see _risk_and_ticks) carry the actual
@@ -105,6 +121,10 @@ _METRIC_AXIS_LABELS = {
     "speed_fast": "ego speed - recorded speed, faster only (m/s)",
     "brake_excess": "recorded accel - ego accel, harder braking only (m/s²)",
     "accel_excess": "ego accel - recorded accel, harder accel only (m/s²)",
+    "accel_gtacc_liveacc": "|accel diff|, recorded accel >= 0 & ego accel >= 0 (m/s²)",
+    "accel_gtacc_livebrk": "|accel diff|, recorded accel >= 0 & ego braking (m/s²)",
+    "accel_gtbrk_liveacc": "|accel diff|, recorded braking & ego accel >= 0 (m/s²)",
+    "accel_gtbrk_livebrk": "|accel diff|, recorded braking & ego braking (m/s²)",
 }
 
 
@@ -258,6 +278,18 @@ def _risk_and_ticks(
         risk = np.clip(vals / cap, 0.0, 1.0)
         ticks = [0.0, 0.33, 0.66, 1.0]
         return risk, ticks, [f"{cap * t:.2f}{unit}" for t in ticks]
+    if metric in _ACCEL_QUAD_METRICS:
+        want_gt_brk, want_live_brk = _ACCEL_QUAD_METRICS[metric]
+        vals = np.zeros(len(rows), dtype=np.float64)
+        for i, r in enumerate(rows):
+            ga, da = r.get("gt_accel_mps2"), r.get("gt_accel_diff_mps2")
+            if ga is None or da is None:
+                continue
+            if (ga < 0.0) == want_gt_brk and (ga + da < 0.0) == want_live_brk:
+                vals[i] = abs(da)
+        risk = np.clip(vals / _ACCEL_QUAD_CAP, 0.0, 1.0)
+        ticks = [0.0, 0.33, 0.66, 1.0]
+        return risk, ticks, [f"{_ACCEL_QUAD_CAP * t:.2f}m/s²" for t in ticks]
     raise ValueError(f"Unknown colormap metric: {metric!r} (choices: {METRIC_CHOICES})")
 
 

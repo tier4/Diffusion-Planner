@@ -124,18 +124,25 @@ def test_scenario_sim_validate_hook(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    args_disabled = SimpleNamespace(scenario_sim_driver="")
-    scenario_sim_validate(args_disabled, epoch=0, ckpt_path="/path/ckpt.pth", out_dir="/path/out")
+    onnx = tmp_path / "diffusion_planner.onnx"
+    onnx.touch()
+    args_disabled = SimpleNamespace(scenario_sim_driver="", use_wandb=False)
+    scenario_sim_validate(args_disabled, epoch=0, onnx_path=str(onnx), out_dir="/path/out")
     assert len(called_cmds) == 0
 
     # Case 2: Invokes bash driver with CKPT and OUT in env
-    args_enabled = SimpleNamespace(scenario_sim_driver="/opt/run_suite.sh")
-    scenario_sim_validate(args_enabled, epoch=4, ckpt_path="/path/ckpt.pth", out_dir="/path/out")
+    args_enabled = SimpleNamespace(scenario_sim_driver="/opt/run_suite.sh", use_wandb=False)
+    scenario_sim_validate(args_enabled, epoch=4, onnx_path=str(onnx), out_dir="/path/out")
     assert len(called_cmds) == 1
     cmd, env = called_cmds[0]
     assert cmd == ["bash", "/opt/run_suite.sh"]
-    assert env["CKPT"] == "/path/ckpt.pth"
+    assert env["CKPT"] == str(onnx)
     assert env["OUT"] == "/path/out"
+
+    # Case 3: Skipped when the guarded export left no ONNX
+    onnx.unlink()
+    scenario_sim_validate(args_enabled, epoch=4, onnx_path=str(onnx), out_dir="/path/out")
+    assert len(called_cmds) == 1
 
 
 def test_scenario_sim_due():

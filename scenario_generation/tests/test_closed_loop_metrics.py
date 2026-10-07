@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from scenario_generation.closed_loop_eval import aggregate, metrics_for_json
+from scenario_generation.metrics.centerline import score_centerline_step
 from scenario_generation.metrics.ego_traj import ego_traj_ego_frame
 from scenario_generation.metrics.red_light import score_red_light_step
 from scenario_generation.metrics.road_border import score_road_border_step
@@ -538,3 +539,10 @@ def test_deviation_collision_block_classifies_one_collision_event_once():
     assert block["count"] == 1
     assert block["count"] <= _event_count(collisions)
     assert block["steps"] == int((collisions & (gt_devs > thresh_m)).sum())
+
+
+def test_centerline_step_without_route_lanes_is_not_finite():
+    out = score_centerline_step(
+        {"route_lanes": np.zeros((25, 20, 33), dtype=np.float32)}, device="cpu"
+    )
+    assert not np.isfinite(out["centerline_dist_m"])
