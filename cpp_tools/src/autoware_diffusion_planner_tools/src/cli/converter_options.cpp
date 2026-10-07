@@ -21,9 +21,6 @@
 
 void ConverterOptions::add_converter_options(CLI::App & app)
 {
-  app.add_option(
-    "--timestamps", timestamps,
-    "Export only these JSON integer timestamps using full-bag context.");
   app.add_option("--step", step, "Frame sampling interval in 10 Hz ticks.");
   app.add_option(
     "--limit", limit,

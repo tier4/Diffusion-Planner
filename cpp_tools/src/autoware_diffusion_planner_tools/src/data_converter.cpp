@@ -70,6 +70,9 @@ bool parse_arguments(int argc, char ** argv, ConverterPaths & paths, ConverterOp
       "save_dir", paths.save_dir, "Directory where converted npz and json files are written.")
     ->required();
   converter.add_converter_options(app);
+  app.add_option(
+    "--timestamps", converter.timestamps,
+    "Export only these JSON integer timestamps using full-bag context.");
 
   try {
     app.parse(argc, argv);
