@@ -1,8 +1,8 @@
 """Stop-position overshoot metric: predicted stop point vs. GT stop point.
 
-Shared by the ``obstacle_stop`` and ``traffic_light_stop`` scenario labels:
-the scene ends with the ego stopped ahead of an obstacle or a red signal, and
-the GT ego trajectory records where it actually stopped. The predicted ego is
+Shared by the ``obstacle_stop``, ``traffic_light_stop`` and ``temporal_stop`` scenario
+labels: the scene ends with the ego stopped ahead of an obstacle, a red signal or a
+stop line, and the GT ego trajectory records where it actually stopped. The predicted ego is
 expected to stop at or before that same point along the route, projected as
 arclength ``s`` along the current, connected chain of route-lane centerlines.
 

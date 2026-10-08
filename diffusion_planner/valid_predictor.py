@@ -248,11 +248,8 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_vehicle_yield_maximum_conflict_distance_m=getattr(
                     config_obj, "scenario_vehicle_yield_maximum_conflict_distance_m", 20.0
                 ),
-                scenario_temporal_stop_horizon_seconds=getattr(
-                    config_obj, "scenario_temporal_stop_horizon_seconds", 3.0
-                ),
-                scenario_temporal_stop_maximum_forward_progress_m=getattr(
-                    config_obj, "scenario_temporal_stop_maximum_forward_progress_m", 0.5
+                scenario_temporal_stop_tolerance_m=getattr(
+                    config_obj, "scenario_temporal_stop_tolerance_m", 0.5
                 ),
                 scenario_obstacle_stop_tolerance_m=getattr(
                     config_obj, "scenario_obstacle_stop_tolerance_m", 0.5

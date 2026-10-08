@@ -21,7 +21,6 @@ from planner_metrics.object_avoidance import evaluate_object_avoidance_with_deta
 from planner_metrics.scene_data import extract_metric_scene_data
 from planner_metrics.stop_overshoot import evaluate_stop_overshoot_with_details
 from planner_metrics.yield_conflict import evaluate_yield_conflict_with_details
-from planner_metrics.yield_progress import evaluate_yield_progress_with_details
 
 METRICS = {
     "arrival": evaluate_arrival_with_details,
@@ -32,7 +31,7 @@ METRICS = {
     "object_avoidance": evaluate_object_avoidance_with_details,
     "pedestrian_yield": evaluate_yield_conflict_with_details,
     "vehicle_yield": evaluate_yield_conflict_with_details,
-    "temporal_stop": evaluate_yield_progress_with_details,
+    "temporal_stop": evaluate_stop_overshoot_with_details,
     "obstacle_stop": evaluate_stop_overshoot_with_details,
     "traffic_light_stop": evaluate_stop_overshoot_with_details,
     "lane_change": evaluate_lane_change_with_details,

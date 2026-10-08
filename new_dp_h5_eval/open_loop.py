@@ -24,7 +24,7 @@ DEFAULT_PARAMETERS = {
     "object_avoidance": {},
     "pedestrian_yield": {"minimum_pet_seconds": 0.5, "maximum_conflict_distance_m": 20.0},
     "vehicle_yield": {"minimum_pet_seconds": 0.5, "maximum_conflict_distance_m": 20.0},
-    "temporal_stop": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
+    "temporal_stop": {"tolerance_m": 0.5},
     "obstacle_stop": {"tolerance_m": 0.5},
     "traffic_light_stop": {"tolerance_m": 0.5},
 }
