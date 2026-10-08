@@ -26,7 +26,7 @@ def test_defaults_match_the_former_closed_loop_constants():
     assert DepartureParams.from_config("traffic_light_go") == DepartureParams(3.0, 2.0)
     # departure's horizon is closed loop's own (CLOSED_LOOP_DEPARTURE_HORIZON_S).
     assert DepartureParams.from_config("departure") == DepartureParams(5.0, 2.0)
-    for label in ("pedestrian_yield", "vehicle_yield", "temporal_stop"):
+    for label in ("pedestrian_yield", "vehicle_yield"):
         assert YieldParams.from_config(label) == YieldParams(3.0, 0.5)
     for label in ("traffic_light_stop", "obstacle_stop"):
         assert StopParams.from_config(label) == StopParams(0.5, 0.5, 0.5)

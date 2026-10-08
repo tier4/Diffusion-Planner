@@ -6,10 +6,11 @@ Owns labels: departure, traffic_light_go, pedestrian_yield, vehicle_yield.
 by ``yield_wait`` (closed loop only, see its docstring); the fixed-horizon
 ``yield_progress`` below scores the rest and is reported alongside.
 
-The open-loop scorers (``planner_metrics/departure.py``, ``planner_metrics/yield_progress.py``)
-read one predicted trajectory; here the same thresholds (read from
-``ScenarioOpenLoopConfig``, see ``shared_config``) are applied to the ego's *realized*
-trajectory from ``anchor_step`` on. Progress is the arc length gained along
+The open-loop departure scorer (``planner_metrics/departure.py``) reads one predicted
+trajectory; here the same thresholds (read from ``ScenarioOpenLoopConfig``, see
+``shared_config``) are applied to the ego's *realized* trajectory from ``anchor_step``
+on. ``yield_progress`` applies the same kind of fixed-horizon check with closed-loop
+constants (``YIELD_FIXED_HORIZON_S``, ``YIELD_FIXED_MAX_PROGRESS_M``). Progress is the arc length gained along
 the recorded path (``project_onto_path``), not Euclidean displacement, so a swerve or a
 sideways drift at standstill does not count as progress. A path that passes near itself
 (a loop) could snap a point onto the wrong pass; windows are 30 s of forward driving, so
@@ -67,8 +68,7 @@ from scenario_generation.scenario_metrics.registry import register
 from scenario_generation.scenario_metrics.shared_config import open_loop_parameters
 
 DEPARTURE_LABELS = ("departure", "traffic_light_go")
-# temporal_stop is a stop-line stop, scored by the stop family (``stop_arrival``); open
-# loop still scores it as a yield, so ``yield_progress`` keeps reading its config.
+# temporal_stop is a stop-line stop, scored by the stop family (``stop_arrival``).
 YIELD_LABELS = ("pedestrian_yield", "vehicle_yield")
 # Yield labels whose event span is the human's wait.
 WAIT_SPAN_LABELS = YIELD_LABELS
@@ -92,6 +92,12 @@ TRAFFIC_LIGHT_GO_STOP_LINE_TOLERANCE_M = 0.5
 # Human labels passed every yield up to 2.98 m past the human's progress; how long the
 # ego stayed in the span (``wait_ratio``, reported) disagreed with them.
 YIELD_MAX_EXCESS_PROGRESS_M = 3.0
+# Closed loop only: the fixed-horizon yield check (``yield_progress``), which scores yield
+# anchors without an event span and is reported alongside ``yield_wait``. Open loop
+# judges yields by post-encroachment time at a decision frame instead, so these no longer
+# follow its config.
+YIELD_FIXED_HORIZON_S = 3.0
+YIELD_FIXED_MAX_PROGRESS_M = 0.5
 # Closed loop only: the shortest post-encroachment time to the yielded-to agent that
 # still passes (``yield_conflict``). Human labels accepted every yield down to 0.5 s; this
 # floor is "nearly touching", not a comfort margin.
@@ -126,11 +132,11 @@ class YieldParams:
 
     @classmethod
     def from_config(cls, label: str, config=None) -> YieldParams:
-        """Both from the open-loop config (``scenario_<label>_*``, see ``shared_config``)."""
-        p = open_loop_parameters(label, config)
+        """Closed-loop constants; ``label`` and ``config`` are accepted for symmetry."""
+        del label, config
         return cls(
-            horizon_s=float(p["horizon_seconds"]),
-            maximum_forward_progress_m=float(p["maximum_forward_progress_m"]),
+            horizon_s=YIELD_FIXED_HORIZON_S,
+            maximum_forward_progress_m=YIELD_FIXED_MAX_PROGRESS_M,
         )
 
 
