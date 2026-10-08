@@ -18,7 +18,7 @@ from .model import NewDpOnnxRunner
 
 DEFAULT_PARAMETERS = {
     "centerline": {"horizon_seconds": 8.0},
-    "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
+    "departure": {"horizon_seconds": 5.0, "minimum_displacement_m": 2.0},
     "traffic_light_go": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
     "simple_turn": {"horizon_seconds": 8.0},
     "object_avoidance": {},

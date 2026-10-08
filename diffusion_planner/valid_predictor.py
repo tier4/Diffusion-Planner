@@ -225,7 +225,7 @@ def run_validation(valid_cfg: ValidConfig):
                     config_obj, "scenario_simple_turn_horizon_seconds", 8.0
                 ),
                 scenario_departure_horizon_seconds=getattr(
-                    config_obj, "scenario_departure_horizon_seconds", 3.0
+                    config_obj, "scenario_departure_horizon_seconds", 5.0
                 ),
                 scenario_departure_minimum_displacement_m=getattr(
                     config_obj, "scenario_departure_minimum_displacement_m", 2.0
