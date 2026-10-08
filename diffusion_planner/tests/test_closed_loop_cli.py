@@ -131,13 +131,22 @@ def test_scenario_sim_validate_hook(tmp_path: Path, monkeypatch):
     assert len(called_cmds) == 0
 
     # Case 2: Invokes bash driver with CKPT and OUT in env
-    args_enabled = SimpleNamespace(scenario_sim_driver="/opt/run_suite.sh", use_wandb=False)
+    args_enabled = SimpleNamespace(
+        scenario_sim_driver="/opt/run_suite.sh", use_wandb=False, plan_optimizer=False
+    )
     scenario_sim_validate(args_enabled, epoch=4, onnx_path=str(onnx), out_dir="/path/out")
     assert len(called_cmds) == 1
     cmd, env = called_cmds[0]
     assert cmd == ["bash", "/opt/run_suite.sh"]
     assert env["CKPT"] == str(onnx)
     assert env["OUT"] == "/path/out"
+    assert "PLAN_OPTIMIZER" not in env
+
+    # Case 2b: The plan optimizer switch reaches the driver, which turns it into worker flags
+    args_enabled.plan_optimizer, args_enabled.plan_optimizer_config_dir = True, "/cfg"
+    scenario_sim_validate(args_enabled, epoch=4, onnx_path=str(onnx), out_dir="/path/out")
+    _, env = called_cmds.pop()
+    assert (env["PLAN_OPTIMIZER"], env["PLAN_OPTIMIZER_CONFIG_DIR"]) == ("1", "/cfg")
 
     # Case 3: Skipped when the guarded export left no ONNX
     onnx.unlink()

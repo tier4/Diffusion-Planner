@@ -25,6 +25,7 @@ from diffusion_planner.config.closed_loop_config import ClosedLoopPassCondition
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import GT_ACCEL_QUADS, GT_DIFF_BIN, render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
@@ -698,6 +699,7 @@ def run_closed_loop_eval(
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
     draw_workers: int = 1,
+    plan_optimizer: PlanOptimizerConfig | None = None,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -779,6 +781,7 @@ def run_closed_loop_eval(
                 abort_max_snaps=abort_max_snaps,
                 drop_objects=drop_objects,
                 draw_pool=draw_pool,
+                plan_optimizer=plan_optimizer,
                 # No CLI/kwarg equivalent here; mirror render_segment's former defaults.
                 goal_mode="segment",
                 title_prefix=None,

@@ -28,6 +28,7 @@ from scenario_generation.closed_loop_evaluation import (
     RolloutParams,
 )
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
 
@@ -345,4 +346,5 @@ def rollout_params_from_closed_loop_config(
         # Native-H5 evaluation has no separate media toggle.  Keep its rendering
         # output consistent with the regular closed-loop evaluator.
         colormap_metrics=tuple(cfg.closed_loop_colormap_metrics),
+        plan_optimizer=PlanOptimizerConfig.from_args(cfg),
     )

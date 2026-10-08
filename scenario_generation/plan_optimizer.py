@@ -15,28 +15,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from diffusion_planner.config.config_cli import boolean
+from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
+from diffusion_planner.config.config_cli import _add_argument, cli_fields
 
 DT = 0.1
 
 
 def add_plan_optimizer_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--plan_optimizer",
-        type=boolean,
-        nargs="?",
-        const=True,
-        default=False,
-        help="pass each plan through ml_planner_node's road border avoidance and trajectory "
-        "optimizer (needs the ml_planner_optimizer module)",
-    )
-    parser.add_argument(
-        "--plan_optimizer_config_dir",
-        default=None,
-        help="with --plan_optimizer: a directory holding the vehicle's vehicle_info.param.yaml "
-        "and, optionally, an ml_planner.param.yaml to use instead of the installed one, which "
-        "leaves road border avoidance off",
-    )
+    """``ClosedLoopConfig``'s switch, for entry points that do not parse that config."""
+    for f in cli_fields(ClosedLoopConfig):
+        if f.name.startswith("plan_optimizer"):
+            _add_argument(parser, f)
 
 
 @dataclass(frozen=True)
@@ -100,6 +89,10 @@ class PlanOptimizer:
         self._param_yaml = str(config.param_yaml)
         self._last: tuple[float, np.ndarray] | None = None  # (sim_time, front wheel angle)
         self._cycles: list[dict] = []
+
+    def set_road_borders(self, borders: list[np.ndarray]) -> None:
+        """Map-frame ``(K, 2)`` polylines; replaces the previous set."""
+        self._optimizer.set_road_borders(borders)
 
     def step(
         self,

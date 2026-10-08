@@ -38,6 +38,8 @@ from pathlib import Path
 
 from diffusion_planner.utils import ddp
 
+from scenario_generation.plan_optimizer import PlanOptimizerConfig, add_plan_optimizer_argument
+
 
 def _negative_mps2(value: str) -> float:
     """argparse type: strong-brake threshold must be negative (accel <= thresh)."""
@@ -166,6 +168,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="empty-world ablation: zero out dynamic/static objects each step (map kept)",
     )
+    add_plan_optimizer_argument(p)
     return p.parse_args()
 
 
@@ -202,6 +205,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         abort_after=args.abort_after,
         abort_max_snaps=args.abort_max_snaps,
         drop_objects=args.drop_objects,
+        plan_optimizer=PlanOptimizerConfig.from_args(args),
     )
 
 

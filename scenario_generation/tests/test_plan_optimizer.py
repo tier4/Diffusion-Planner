@@ -29,10 +29,11 @@ class _Recorder:
         self.results: list[np.ndarray | None] = []
 
     def set_road_borders(self, borders):
-        pass
+        self.borders = borders
 
     def step(self, raw, ego, steer, stamp, goal):
         self.steers.append(steer)
+        self.ego, self.goal = ego, goal
         return {
             "trajectory": self.results.pop(0),
             "solve_time_ms": 2.0,
@@ -134,3 +135,32 @@ def test_a_failed_solve_keeps_the_tracked_plan(config_dir):
     assert s["border_shifted_cycles"] == 4 and s["border_shifted_points"] == 12
     assert s["border_max_shift_m"] == 0.25 and s["border_first_shift_s"] == 0.0
     assert s["solve_ms_p50"] == s["solve_ms_max"] == 2.0
+
+
+@pytest.mark.usefixtures("installed")
+def test_reproducer_feeds_its_input_borders_and_goal_in_the_map_frame(config_dir):
+    from scenario_generation.reproducer_rollout import _optimize_plan
+
+    optimizer = _optimizer(config_dir)
+    recorder = optimizer._optimizer
+    # Batched as the model input is: (1, N, P, C); channel 3 marks a road border.
+    lines = np.zeros((1, 2, 4, 4), dtype=np.float32)
+    lines[0, 0, :2, :2] = [[1.0, 0.0], [2.0, 0.0]]
+    lines[0, 0, :2, 3] = 1.0
+    lines[0, 1, :2, :2] = [[5.0, 5.0], [6.0, 5.0]]
+    np_dict = {"line_strings": lines, "goal_pose": np.array([[10.0, 0.0, -1.0, 0.0]])}
+    ego = types.SimpleNamespace(
+        live_pose=np.array([100.0, 50.0, np.pi / 2]),
+        dyn=types.SimpleNamespace(speed=3.0),
+        sim_time=1.5,
+    )
+    recorder.results = [_solution(0.0)]
+    plan = (np.zeros((80, 2)), np.zeros(80))
+    xy, h = _optimize_plan(optimizer, plan, ego, np_dict)
+    (border,) = recorder.borders
+    np.testing.assert_allclose(border, [[100.0, 51.0], [100.0, 52.0]], atol=1e-4)
+    gx, gy, gh = recorder.goal
+    assert (gx, gy) == pytest.approx((100.0, 60.0), abs=1e-4)
+    assert gh == pytest.approx(3 * np.pi / 2)
+    assert recorder.ego == pytest.approx((100.0, 50.0, np.pi / 2, 3.0))
+    assert xy.shape == (80, 2) and h.shape == (80,)

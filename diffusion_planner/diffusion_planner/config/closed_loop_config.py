@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import yaml
 
@@ -184,6 +184,18 @@ class ClosedLoopConfig:
     closed_loop_window: tuple[int, int] | None = None
     closed_loop_max_steps: int | None = None
     closed_loop_timeline_progress_mode: str = "pose"
+    plan_optimizer: bool = cli(
+        "pass each plan through ml_planner_node's road border avoidance and trajectory "
+        "optimizer (needs the ml_planner_optimizer module)",
+        default=False,
+    )
+    plan_optimizer_config_dir: Optional[str] = cli(
+        "with --plan_optimizer: a directory holding the vehicle's vehicle_info.param.yaml and, "
+        "optionally, an ml_planner.param.yaml to use instead of the installed one, which leaves "
+        "road border avoidance off",
+        default=None,
+        path=True,
+    )
 
     # validation in training part
     closed_loop_wandb_video_pick: str = cli(
@@ -217,8 +229,9 @@ class ClosedLoopConfig:
     # for OpenSCENARIO evaluation
     scenario_sim_driver: str = cli(
         "shell driver that evaluates a saved checkpoint against the OpenSCENARIO suite. "
-        "Empty = disabled. It receives the checkpoint and an output directory in CKPT / OUT; "
-        "every other knob is its own environment's.",
+        "Empty = disabled. It receives the checkpoint and an output directory in CKPT / OUT, "
+        "and plan_optimizer in PLAN_OPTIMIZER=1 / PLAN_OPTIMIZER_CONFIG_DIR; every other knob "
+        "is its own environment's.",
         default="",
         path=True,
     )

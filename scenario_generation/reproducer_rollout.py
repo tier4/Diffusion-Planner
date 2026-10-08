@@ -48,6 +48,7 @@ from scenario_generation.metrics.strong_brake import strong_brake_count
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizer, PlanOptimizerConfig
 from scenario_generation.render_pool import render_pool
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
@@ -1913,6 +1914,32 @@ def _polylines_from_tensor(t: np.ndarray, border_only: bool = False) -> list[np.
     return out
 
 
+def _optimize_plan(
+    optimizer: PlanOptimizer, plan_world: tuple[np.ndarray, np.ndarray], s: _SegState, np_dict
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """One planning cycle through ``optimizer`` -> ``(world_xy, world_h)``, None if it failed.
+
+    The reproducer carries no map: the road borders and the goal are the ones the model was given
+    this step, its input's road-border line strings and goal pose, in the live-ego frame.
+    """
+    ex, ey, eyaw = s.live_pose
+    lines = np.asarray(np_dict["line_strings"])[0]
+    optimizer.set_road_borders(
+        [
+            _ego_pred_to_world(b, np.zeros_like(b), ex, ey, eyaw)[0]
+            for b in _polylines_from_tensor(lines, border_only=True)
+        ]
+    )
+    g = np.asarray(np_dict["goal_pose"], dtype=np.float64).reshape(-1)
+    goal = None
+    if np.linalg.norm(g[:2]) > 1e-3:  # all zeros when the input has no goal
+        (gx, gy), gh = _ego_pred_to_world(g[:2], g[2:4], ex, ey, eyaw)
+        goal = (gx, gy, gh)
+    xy, h = plan_world
+    solved = optimizer.step(np.column_stack([xy, h]), (ex, ey, eyaw), s.dyn.speed, s.sim_time, goal)
+    return None if solved is None else (solved[:, :2], solved[:, 2])
+
+
 def _draw_step(
     np_dict,
     pred,
@@ -2043,6 +2070,7 @@ def render_segment(
     timeline_progress_mode: str,
     draw_pool: Executor | None,
     timers: Timers | None = None,
+    plan_optimizer: PlanOptimizerConfig | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -2162,6 +2190,12 @@ def render_segment(
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     plan_k = 0  # step plan_world was made at
+    optimizer = None
+    if plan_optimizer is not None:
+        wheelbase, length, width = map(float, s.ego_shape)
+        # Every metric here centres the box between the axles.
+        box = {"dimensions": {"x": length, "y": width}, "center": {"x": wheelbase / 2.0}}
+        optimizer = PlanOptimizer(plan_optimizer, box, [])
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
@@ -2348,14 +2382,29 @@ def render_segment(
                 with timers("model_forward"):
                     _, outputs = model(data)
                 pred = outputs["prediction"][0, 0].cpu().numpy()
-                plan_world = _ego_pred_to_world(
+                fresh = _ego_pred_to_world(
                     pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
                 )
-                plan_k = k
+                if optimizer is not None:
+                    with timers("plan_optimizer"):
+                        solved = _optimize_plan(optimizer, fresh, s, np_dict)
+                    # A failed solve publishes nothing, so the ego keeps executing the plan it
+                    # has; only before the first plan is the raw one all there is.
+                    if solved is not None:
+                        fresh = solved
+                    elif plan_world is not None:
+                        fresh = None
+                if fresh is not None:
+                    plan_world, plan_k = fresh, k
                 pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
                 _feed_turn_indicator(s, outputs)
                 _score_turn_indicator(s, idx)
+                offset = k - plan_k
             else:
+                # No fresh inference this step: hold the last decoded turn indicator so the
+                # 10 Hz turn_indicators history keeps scrolling with the same signal.
+                _hold_turn_indicator(s)
+            if offset > 0:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
                 override = _plan_override(plan_world, off)
@@ -2366,9 +2415,8 @@ def render_segment(
                     s.live_pose[1],
                     s.live_pose[2],
                 )
-                # No fresh inference this step: hold the last decoded turn indicator so the
-                # 10 Hz turn_indicators history keeps scrolling with the same signal.
-                _hold_turn_indicator(s)
+            elif optimizer is not None:
+                pred_cur = _world_plan_to_ego(*plan_world, *s.live_pose)
             # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
             # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
             # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
@@ -2437,7 +2485,10 @@ def render_segment(
     with timers("render_drain"):
         for f in pending:
             f.result()
-    return _finalize(s)
+    metrics = _finalize(s)
+    if optimizer is not None:
+        metrics["plan_optimizer"] = optimizer.summary()
+    return metrics
 
 
 @torch.no_grad()

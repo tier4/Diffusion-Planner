@@ -29,6 +29,7 @@ from diffusion_planner.utils import ddp
 
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
+from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
 )
@@ -194,6 +195,7 @@ def build_group_evaluator(
                 timeline_progress_mode=cfg.closed_loop_timeline_progress_mode,  # replay mode
                 deviation_collision_thresh_m=cfg.closed_loop_deviation_collision_thresh_m,
                 colormap_metrics=tuple(cfg.closed_loop_colormap_metrics) if render_media else (),
+                plan_optimizer=PlanOptimizerConfig.from_args(cfg),
             ),
             fps=float(cfg.closed_loop_fps),
             verbose=False,

@@ -33,6 +33,7 @@ from scenario_generation.closed_loop_eval import (
 )
 from scenario_generation.inference_compile import compiled_for_inference
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
@@ -94,6 +95,7 @@ class RolloutParams:
     # Metrics for the optional post-rollout trajectory-colormap PNGs.  An empty tuple keeps
     # the generic evaluator's historical behavior (the CLI caller opts in explicitly).
     colormap_metrics: tuple[str, ...]
+    plan_optimizer: PlanOptimizerConfig | None = None
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -128,6 +130,7 @@ class RolloutParams:
             "max_steps": self.max_steps,
             "timeline_progress_mode": self.timeline_progress_mode,
             "deviation_collision_thresh_m": self.deviation_collision_thresh_m,
+            "plan_optimizer": self.plan_optimizer,
         }
 
 

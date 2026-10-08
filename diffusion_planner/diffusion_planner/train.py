@@ -197,10 +197,13 @@ def scenario_sim_validate(args, epoch: int, onnx_path: str, out_dir: str) -> Non
         print(f"scenario_sim @epoch {epoch + 1}: skipped, no {onnx_path}", flush=True)
         return
 
+    env = {**os.environ, "CKPT": onnx_path, "OUT": out_dir}
+    if args.plan_optimizer:  # the driver turns these into the workers' --plan_optimizer flags
+        env.update(PLAN_OPTIMIZER="1", PLAN_OPTIMIZER_CONFIG_DIR=args.plan_optimizer_config_dir)
     started = time.perf_counter()
     rc = subprocess.run(
         ["bash", args.scenario_sim_driver],
-        env={**os.environ, "CKPT": onnx_path, "OUT": out_dir},
+        env=env,
     ).returncode
     elapsed = time.perf_counter() - started
     status = "ok" if rc == 0 else f"FAILED rc={rc}"

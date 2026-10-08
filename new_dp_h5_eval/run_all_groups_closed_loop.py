@@ -21,6 +21,7 @@ from diffusion_planner.utils import ddp
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
+from scenario_generation.plan_optimizer import add_plan_optimizer_argument
 
 from .closed_loop import (
     NativeH5FullRouteClosedLoopEvaluation,
@@ -153,6 +154,7 @@ def main() -> int:
     parser.add_argument("--provider", action="append", dest="providers")
     parser.add_argument("--closed_loop_pass_conditions", default="")
     parser.add_argument("--closed_loop_draw_workers", type=int, default=4)
+    add_plan_optimizer_argument(parser)
     args = parser.parse_args()
 
     modes = args.closed_loop_object_modes or ["objects"] * len(args.closed_loop_h5_root)
@@ -167,7 +169,10 @@ def main() -> int:
         parser.error(str(exc))
 
     cfg = ClosedLoopConfig(
-        device=args.device, closed_loop_pass_conditions=args.closed_loop_pass_conditions
+        device=args.device,
+        closed_loop_pass_conditions=args.closed_loop_pass_conditions,
+        plan_optimizer=args.plan_optimizer,
+        plan_optimizer_config_dir=args.plan_optimizer_config_dir,
     )
     cfg.closed_loop_draw_workers = args.closed_loop_draw_workers
     rank, local_rank, world_size = ddp.ddp_setup_universal(True, cfg)
