@@ -6,7 +6,7 @@ import numpy as np
 
 
 def legacy_lanes(frame: dict[str, np.ndarray]) -> np.ndarray:
-    """Build the legacy 8-column lane-polygon view used by road-border scoring.
+    """Build the legacy 8-column lane geometry used by the shared metrics.
 
     Native H5 lanes are ``xy + left-offset + right-offset``.  The legacy
     geometry helper reads the offsets from columns 4:6 and 6:8, leaving its

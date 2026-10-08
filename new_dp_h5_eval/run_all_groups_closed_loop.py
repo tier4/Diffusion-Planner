@@ -7,8 +7,10 @@ It intentionally uses ``--closed_loop_h5_root`` rather than overloading the old 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -93,20 +95,32 @@ def _load_groups(manifest: Path) -> dict[str, list[dict]]:
             if isinstance(entry, str):
                 route = {"h5_path": entry}
             elif isinstance(entry, dict) and set(entry).issubset(
-                {"h5_path", "frame_start", "frame_stop"}
+                {
+                    "h5_path",
+                    "frame_start",
+                    "frame_stop",
+                    "anchors",
+                    "segment_start_ns",
+                    "segment_end_ns",
+                }
             ):
                 route = dict(entry)
             else:
                 raise ValueError(
                     f"{manifest}: {group_name!r} entries must be an H5 path string or "
-                    "an object containing h5_path/frame_start/frame_stop"
+                    "an object containing h5_path/frame_start/frame_stop and optional anchor/span"
                 )
             if "h5_path" not in route:
                 raise ValueError(f"{manifest}: {group_name!r} route object is missing h5_path")
             h5_path = Path(route["h5_path"])
             route["h5_path"] = str(h5_path if h5_path.is_absolute() else manifest.parent / h5_path)
-            relative = h5_path if h5_path.is_absolute() else h5_path
-            route["route_id"] = f"{group_name}__{relative.parent.as_posix().replace('/', '__')}"
+            resolved_path = Path(route["h5_path"]).resolve()
+            relative_id = os.path.relpath(resolved_path, manifest.parent.resolve())
+            path_id = hashlib.sha1(relative_id.encode()).hexdigest()[:12]
+            route["route_id"] = (
+                f"{group_name}__{resolved_path.parent.name}__{path_id}"
+                f"__{route.get('frame_start', 0)}_{route.get('frame_stop', 'end')}"
+            )
             routes.append(route)
         ids = [route["route_id"] for route in routes]
         if len(ids) != len(set(ids)):
