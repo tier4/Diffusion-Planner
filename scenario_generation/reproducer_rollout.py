@@ -1122,6 +1122,15 @@ def _placed_speed(ego_hist: np.ndarray, new_pose: np.ndarray, ahead_pose: np.nda
     )
 
 
+def _plan_offset(k: int, plan_k: int, replan_interval: int) -> int | None:
+    """Steps into the cached plan made at step ``plan_k``, or None once it is due for a replan.
+
+    Counted from the plan rather than from ``k``, so a plan made off the ``replan_interval`` grid
+    (after an unstick teleport) is executed from its first pose and kept for a full interval."""
+    offset = k - plan_k
+    return offset if offset < replan_interval else None
+
+
 def _plan_override(plan_world, off: int) -> tuple[np.ndarray, np.ndarray]:
     """``_advance_step`` override placing the ego on world plan pose ``off``, with the pose
     ``PERFECT_SPEED_HALF_WINDOW_STEPS`` further along (clamped to the horizon) for its speed."""
@@ -2152,6 +2161,7 @@ def render_segment(
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
+    plan_k = 0  # step plan_world was made at
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
@@ -2328,9 +2338,9 @@ def render_segment(
             # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
             # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
             # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
-            offset = k % replan_interval
+            offset = None if plan_world is None else _plan_offset(k, plan_k, replan_interval)
             override = None
-            if plan_world is None or offset == 0:
+            if offset is None:
                 with timers("to_torch"):
                     data = _to_torch_batch([np_dict], model_args, device)
                 # No-op unless the model was compiled with cudagraphs; one inference is one step.
@@ -2341,6 +2351,7 @@ def render_segment(
                 plan_world = _ego_pred_to_world(
                     pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
                 )
+                plan_k = k
                 pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
                 _feed_turn_indicator(s, outputs)
                 _score_turn_indicator(s, idx)

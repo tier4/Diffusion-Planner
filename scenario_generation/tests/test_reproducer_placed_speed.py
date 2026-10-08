@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import DT, _advance_step, _plan_override
+from scenario_generation.reproducer_rollout import DT, _advance_step, _plan_offset, _plan_override
 
 REPLAN = 8
 
@@ -81,3 +81,11 @@ def test_backward_motion_reads_zero():
     s = _placed_state(np.zeros((31, 5), dtype=np.float64))
     out = _run(s, lambda x0, t0: x0 - 0.1 * np.arange(1, 81), 8)
     assert all(v == 0.0 for _, v, _ in out)
+
+
+def test_plan_offset_counts_from_the_plan():
+    # On the replan grid: the same steps as k % REPLAN.
+    assert [_plan_offset(k, 8, REPLAN) for k in range(8, 17)] == [*range(8), None]
+    # A plan made off the grid (after an unstick teleport at step 12) starts from its first pose
+    # and is kept for a full interval.
+    assert [_plan_offset(k, 13, REPLAN) for k in range(13, 22)] == [*range(8), None]
