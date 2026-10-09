@@ -918,6 +918,51 @@ def compute_red_light_score_batch(
     return scores
 
 
+_EGO_PERIMETER_CACHE: dict = {}
+
+
+def _ego_perimeter_points(ego_shape, device, dtype, ego_shape_host=None):
+    """The ego's 80 perimeter points in body frame, cached per (shape, device, dtype).
+
+    They depend only on the wheel base, length and width, fixed for a segment. Reading
+    those off the device is a sync, so a caller holding them on the host passes them in;
+    they must be the values the tensor holds, since the perimeter is built from them.
+    """
+    if ego_shape_host is None:
+        ego_shape_host = tuple(float(v) for v in ego_shape[:3].tolist())
+    wb, length, width = ego_shape_host
+    key = (wb, length, width, str(device), dtype)
+    hit = _EGO_PERIMETER_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    ro = (length - wb) / 2
+    _PTS_PER_SIDE = 20
+    pts = []
+    for j in range(_PTS_PER_SIDE):
+        f = j / (_PTS_PER_SIDE - 1)
+        pts.append((-ro + f * length, -width / 2))  # bottom
+        pts.append((-ro + f * length, width / 2))  # top
+        pts.append((-ro, -width / 2 + f * width))  # left
+        pts.append((length - ro, -width / 2 + f * width))  # right
+    out = torch.tensor(pts, device=device, dtype=dtype)  # (80, 2)
+    _EGO_PERIMETER_CACHE[key] = out  # one entry per vehicle shape; a run sees a handful
+    return out
+
+
+def road_border_distances(ego_trajs, ego_shape, data, *, ego_shape_host=None):
+    """``(per_timestep_min, seg_p1_all, seg_p2_all)`` -- the distance half only.
+
+    For callers that want the distance and then test the ego box against the same border
+    segments; ``compute_road_border_penalty`` would also build four penalty tensors they
+    drop and leave them to rebuild the segments. With no border, the distance is
+    ``ROAD_BORDER_NO_DATA_DISTANCE_M`` and the segments are empty, as in the penalty path.
+    """
+    return compute_road_border_penalty(
+        ego_trajs, ego_shape, data, ego_shape_host=ego_shape_host, _distances_only=True
+    )
+
+
 @torch.no_grad()
 def compute_road_border_penalty(
     ego_trajs: torch.Tensor,
@@ -926,6 +971,8 @@ def compute_road_border_penalty(
     config: RewardConfig | None = None,
     *,
     return_closest_points: bool = False,
+    ego_shape_host: tuple[float, float, float] | None = None,
+    _distances_only: bool = False,  # use road_border_distances
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor, torch.Tensor]
     | tuple[
@@ -985,6 +1032,11 @@ def compute_road_border_penalty(
             torch.zeros(N, T, 2, device=device),
             torch.zeros(N, T, 2, device=device),
         )
+    if _distances_only:
+        if return_closest_points:
+            raise ValueError("_distances_only and return_closest_points are exclusive")
+        empty = torch.zeros(0, 2, device=device)
+        _safe_return = (_safe_return[5], empty, empty)
 
     if "line_strings" not in data:
         return _safe_return
@@ -1013,31 +1065,31 @@ def compute_road_border_penalty(
     seg_p2_all = border_xy[:, 1:].reshape(-1, 2)[idx]  # (E, 2)
 
     # Build ego perimeter points (20 per side = 80 total)
-    wb = ego_shape[0].item()
-    length = ego_shape[1].item()
-    width = ego_shape[2].item()
-    ro = (length - wb) / 2
-    _PTS_PER_SIDE = 20
-    local_pts = []
-    for j in range(_PTS_PER_SIDE):
-        f = j / (_PTS_PER_SIDE - 1)
-        local_pts.append((-ro + f * length, -width / 2))  # bottom
-        local_pts.append((-ro + f * length, width / 2))  # top
-        local_pts.append((-ro, -width / 2 + f * width))  # left
-        local_pts.append((length - ro, -width / 2 + f * width))  # right
-    local_pts = torch.tensor(local_pts, device=device, dtype=ego_trajs.dtype)  # (80, 2)
+    local_pts = _ego_perimeter_points(ego_shape, device, ego_trajs.dtype, ego_shape_host)
     K_pts = local_pts.shape[0]
 
-    # For each trajectory and timestep, transform perimeter to world frame
+    # For each trajectory and timestep, transform perimeter to world frame. A single pose
+    # at the origin heading +x makes the rotation exactly the identity and the translation
+    # exactly zero, so the fast path is bit-identical -- do not relax the guard to a
+    # tolerance, which would make it an approximation.
+    ego_xy = ego_trajs[..., :2]
     cos_h = ego_trajs[..., 2]  # (N, T)
     sin_h = ego_trajs[..., 3]
-    h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
-    cos_h = cos_h / h_norm
-    sin_h = sin_h / h_norm
+    if (
+        N * T == 1
+        and bool((ego_xy == 0).all())
+        and bool((cos_h == 1).all())
+        and bool((sin_h == 0).all())
+    ):
+        world_pts = local_pts.expand(N, T, K_pts, 2)
+    else:
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
+        cos_h = cos_h / h_norm
+        sin_h = sin_h / h_norm
 
-    rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=-1).reshape(N, T, 2, 2)
-    rotated = torch.einsum("btij,kj->btki", rot, local_pts)
-    world_pts = ego_trajs[..., :2].unsqueeze(2) + rotated  # (N, T, 80, 2)
+        rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=-1).reshape(N, T, 2, 2)
+        rotated = torch.einsum("btij,kj->btki", rot, local_pts)
+        world_pts = ego_xy.unsqueeze(2) + rotated  # (N, T, 80, 2)
 
     # Pre-filter: keep only segments near the trajectory bbox to avoid
     # computing distance to all ~400 segments. Use segment midpoints for
@@ -1075,6 +1127,11 @@ def compute_road_border_penalty(
     # returned `per_timestep_min[:, 0]` carries the real distance for any
     # downstream diagnostic (cleanse, viz, eval scripts).
     per_timestep_min = min_dists.min(dim=2).values  # (N, T)
+
+    # The distances are final here; nothing below feeds back into them.
+    if _distances_only:
+        return per_timestep_min, seg_p1_all, seg_p2_all
+
     closest_return = ()
     if return_closest_points:
         # Reuse the same reduced road-border segment set as the distance metric
@@ -1764,6 +1821,7 @@ __all__ = [
     "ROAD_BORDER_NO_DATA_DISTANCE_M",
     "compute_red_light_score_batch",
     "compute_road_border_penalty",
+    "road_border_distances",
     "compute_static_collision_penalty",
     "_LANE_NEAR_THRESH",
     "_LANE_WIDE_THRESH",
