@@ -70,6 +70,9 @@ bool parse_arguments(int argc, char ** argv, ConverterPaths & paths, ConverterOp
       "save_dir", paths.save_dir, "Directory where converted npz and json files are written.")
     ->required();
   converter.add_converter_options(app);
+  app.add_option(
+    "--timestamps", converter.timestamps,
+    "Export only these JSON integer timestamps using full-bag context.");
 
   try {
     app.parse(argc, argv);
@@ -97,5 +100,10 @@ int main(int argc, char ** argv)
     return 1;
   }
 
-  return run_data_converter(paths, converter);
+  try {
+    return run_data_converter(paths, converter);
+  } catch (const std::exception & error) {
+    std::cerr << error.what() << std::endl;
+    return 1;
+  }
 }

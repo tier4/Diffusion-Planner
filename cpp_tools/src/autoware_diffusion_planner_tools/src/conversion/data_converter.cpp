@@ -15,6 +15,7 @@
 #include "conversion/data_converter.hpp"
 
 #include "conversion/override_segments.hpp"
+#include "conversion/selected_frames.hpp"
 #include "io/bag_metadata.hpp"
 #include "io/frame_writer.hpp"
 #include "io/projector_factory.hpp"
@@ -60,6 +61,10 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
 
   ParsedBagData bag_data =
     load_rosbag(paths.rosbag_path, converter.limit, converter.extract_override_segments);
+
+  if (!converter.timestamps.empty()) {
+    return export_selected_frames(bag_data, paths, converter, lane_segment_context, bag_metadata);
+  }
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
   if (missing_topics_skip) {

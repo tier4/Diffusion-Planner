@@ -43,7 +43,136 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
+
+std::optional<FrameTensors> create_frame_tensors(
+  const std::vector<FrameData> & data_list, const int64_t i,
+  const autoware_planning_msgs::msg::LaneletRoute & route, const ConverterOptions & options,
+  const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
+  const bool allow_hold_past_end)
+{
+  using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
+  using autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE;
+  using autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE;
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::STATIC_OBJECTS_SHAPE;
+  namespace constants = autoware::diffusion_planner::constants;
+  namespace preprocess = autoware::diffusion_planner::preprocess;
+  namespace utils = autoware::diffusion_planner::utils;
+
+  if (i < INPUT_T_WITH_CURRENT - 1 || i >= static_cast<int64_t>(data_list.size())) {
+    return std::nullopt;
+  }
+  // Get transformation matrix
+  const Eigen::Matrix4d bl2map = utils::pose_to_matrix4d(data_list[i].kinematic_state.pose.pose);
+  const Eigen::Matrix4d map2bl = utils::inverse(bl2map);
+
+  // Create ego sequences
+  const rclcpp::Time past_reference_time(data_list[i].kinematic_state.header.stamp);
+  auto ego_past_opt = create_ego_sequence(
+    data_list, i - INPUT_T_WITH_CURRENT + 1, INPUT_T_WITH_CURRENT, map2bl, past_reference_time,
+    options.use_interpolation, false);
+  if (!ego_past_opt) {
+    return std::nullopt;
+  }
+
+  const rclcpp::Time future_reference_time =
+    past_reference_time +
+    rclcpp::Duration::from_seconds(OUTPUT_T * constants::PREDICTION_TIME_STEP_S);
+  auto ego_future_opt = create_ego_sequence(
+    data_list, i + 1, OUTPUT_T, map2bl, future_reference_time, options.use_interpolation,
+    allow_hold_past_end);
+  if (!ego_future_opt) {
+    return std::nullopt;
+  }
+
+  // Create ego current state
+  auto ego_current = preprocess::create_ego_current_state(
+    data_list[i].kinematic_state, data_list[i].acceleration, options.ego_wheel_base);
+
+  // Process neighbor agents (both past and future with consistent agent ordering)
+  auto neighbor_result = process_neighbor_agents_and_future(data_list, i, map2bl);
+
+  // Process lanes and routes
+  const auto & ego_pos = data_list[i].kinematic_state.pose.pose.position;
+  const double center_x = ego_pos.x;
+  const double center_y = ego_pos.y;
+  const double center_z = ego_pos.z;
+
+  // Traffic-light state was resolved by build_sequences (persistent map + TTL, matching
+  // the runtime node); use it directly.
+  const std::map<lanelet::Id, preprocess::TrafficSignalStamped> & traffic_light_id_map =
+    data_list[i].traffic_light_id_map;
+
+  // Get lanes data with speed limits
+  const std::vector<int64_t> lane_segment_indices =
+    lane_segment_context.select_lane_segment_indices(
+      map2bl, center_x, center_y, NUM_SEGMENTS_IN_LANE);
+  auto [lanes, lanes_speed_limit] = lane_segment_context.create_tensor_data_from_indices(
+    map2bl, traffic_light_id_map, lane_segment_indices, NUM_SEGMENTS_IN_LANE);
+
+  // Create has_speed_limit flags based on speed_limit values
+  std::vector<uint8_t> lanes_has_speed_limit(lanes_speed_limit.size());
+  for (size_t idx = 0; idx < lanes_speed_limit.size(); ++idx) {
+    lanes_has_speed_limit[idx] =
+      (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
+  }
+
+  // Get route lanes data with speed limits
+  const std::vector<int64_t> segment_indices = lane_segment_context.select_route_segment_indices(
+    route, center_x, center_y, center_z, NUM_SEGMENTS_IN_ROUTE);
+  auto [route_lanes, route_lanes_speed_limit] =
+    lane_segment_context.create_tensor_data_from_indices(
+      map2bl, traffic_light_id_map, segment_indices, NUM_SEGMENTS_IN_ROUTE);
+
+  // Create route_lanes_has_speed_limit based on speed_limit values
+  std::vector<uint8_t> route_lanes_has_speed_limit(route_lanes_speed_limit.size());
+  for (size_t idx = 0; idx < route_lanes_speed_limit.size(); ++idx) {
+    route_lanes_has_speed_limit[idx] =
+      (route_lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
+  }
+
+  auto polygons = lane_segment_context.create_polygon_tensor(map2bl, center_x, center_y);
+  auto line_strings = lane_segment_context.create_line_string_tensor(map2bl, center_x, center_y);
+
+  // Get goal pose
+  const geometry_msgs::msg::Pose & goal_pose = route.goal_pose;
+  const Eigen::Matrix4d goal_pose_in_map = utils::pose_to_matrix4d(goal_pose);
+  const Eigen::Matrix4d goal_pose_in_bl = map2bl * goal_pose_in_map;
+  const float goal_x = goal_pose_in_bl(0, 3);
+  const float goal_y = goal_pose_in_bl(1, 3);
+  const float yaw = std::atan2(goal_pose_in_bl(1, 0), goal_pose_in_bl(0, 0));
+  std::vector<float> goal_pose_vec = {goal_x, goal_y, std::cos(yaw), std::sin(yaw)};
+
+  // Create placeholder data for static objects
+  std::vector<float> static_objects(STATIC_OBJECTS_SHAPE[1] * STATIC_OBJECTS_SHAPE[2], 0.0f);
+
+  std::vector<int32_t> turn_indicators(INPUT_T_WITH_CURRENT);
+  for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
+    turn_indicators[t] =
+      data_list[std::max(int64_t(0), i - INPUT_T_WITH_CURRENT + 1 + t)].turn_indicator.report;
+  }
+
+  std::vector<float> ego_shape = {options.ego_wheel_base, options.ego_length, options.ego_width};
+  return FrameTensors{
+    std::move(*ego_past_opt),
+    std::move(ego_current),
+    std::move(*ego_future_opt),
+    std::move(neighbor_result),
+    std::move(lanes),
+    std::move(lanes_speed_limit),
+    std::move(lanes_has_speed_limit),
+    std::move(route_lanes),
+    std::move(route_lanes_speed_limit),
+    std::move(route_lanes_has_speed_limit),
+    std::move(polygons),
+    std::move(line_strings),
+    std::move(goal_pose_vec),
+    std::move(static_objects),
+    std::move(turn_indicators),
+    std::move(ego_shape)};
+}
 
 void process_sequence(
   SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
@@ -53,17 +182,11 @@ void process_sequence(
 {
   using autoware::diffusion_planner::INPUT_T;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
-  using autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE;
-  using autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE;
   using autoware::diffusion_planner::OUTPUT_T;
   using autoware::diffusion_planner::POINTS_PER_SEGMENT;
   using autoware::diffusion_planner::SEGMENT_POINT_DIM;
-  using autoware::diffusion_planner::STATIC_OBJECTS_SHAPE;
   using autoware::diffusion_planner::TRAFFIC_LIGHT_RED;
   using autoware::diffusion_planner::TRAFFIC_LIGHT_YELLOW;
-  namespace constants = autoware::diffusion_planner::constants;
-  namespace preprocess = autoware::diffusion_planner::preprocess;
-  namespace utils = autoware::diffusion_planner::utils;
 
   const int64_t n = static_cast<int64_t>(seq.data_list.size());
   const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
@@ -116,10 +239,7 @@ void process_sequence(
   // taken as the goal — and, below, may be held for the part of the GT future that reaches past
   // the last frame, so that the stop itself is converted instead of the loop giving up OUTPUT_T
   // ticks early.
-  const bool ends_stopped = stopped_tail::ends_stopped(seq.data_list);
-  if (ends_stopped) {
-    seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
-  }
+  const bool ends_stopped = stopped_tail::prepare_sequence_goal(seq);
   const bool goal_pose_overwritten = ends_stopped;
   std::cout << "Ends stopped: " << (ends_stopped ? "yes" : "no") << std::endl;
 
@@ -141,97 +261,18 @@ void process_sequence(
     // Create token in canonical format: seq_id(8digits) + "_" + i(8digits)
     const std::string token = create_token(seq_id, i);
 
-    // Get transformation matrix
-    const Eigen::Matrix4d bl2map =
-      utils::pose_to_matrix4d(seq.data_list[i].kinematic_state.pose.pose);
-    const Eigen::Matrix4d map2bl = utils::inverse(bl2map);
-
-    // Create ego sequences
-    const rclcpp::Time past_reference_time(seq.data_list[i].kinematic_state.header.stamp);
-    const auto ego_past_opt = create_ego_sequence(
-      seq.data_list, i - INPUT_T_WITH_CURRENT + 1, INPUT_T_WITH_CURRENT, map2bl,
-      past_reference_time, options.use_interpolation, false);
-    if (!ego_past_opt) {
-      std::cout << "Failed to create ego past at frame " << i << std::endl;
+    const auto tensors = create_frame_tensors(
+      seq.data_list, i, seq.route, options, lane_segment_context, ends_stopped);
+    if (!tensors) {
+      std::cout << "Unavailable ego context at frame " << i << "/" << n << std::endl;
       break;
     }
-    const std::vector<float> & ego_past = ego_past_opt.value();
-
-    const rclcpp::Time future_reference_time =
-      past_reference_time +
-      rclcpp::Duration::from_seconds(OUTPUT_T * constants::PREDICTION_TIME_STEP_S);
-    const auto ego_future_opt = create_ego_sequence(
-      seq.data_list, i + 1, OUTPUT_T, map2bl, future_reference_time, options.use_interpolation,
-      ends_stopped);
-    if (!ego_future_opt) {
-      // Only reachable when the sequence does not end standing still; otherwise the final pose
-      // is held and the loop runs to the last frame.
-      std::cout << "Reached end of sequence at frame " << i << "/" << n << std::endl;
-      break;
-    }
-    const std::vector<float> & ego_future = ego_future_opt.value();
-
-    // Create ego current state
-    const std::vector<float> ego_current = preprocess::create_ego_current_state(
-      seq.data_list[i].kinematic_state, seq.data_list[i].acceleration, options.ego_wheel_base);
-
-    // Process neighbor agents (both past and future with consistent agent ordering)
-    const auto neighbor_result = process_neighbor_agents_and_future(seq.data_list, i, map2bl);
+    const auto & [ego_past, ego_current, ego_future, neighbor_result, lanes, lanes_speed_limit, lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings, goal_pose_vec, static_objects, turn_indicators, ego_shape] =
+      *tensors;
     const auto & neighbor_past = neighbor_result.neighbor_past;
     const auto & neighbor_future = neighbor_result.neighbor_future;
-
-    // Process lanes and routes
-    const auto & ego_pos = seq.data_list[i].kinematic_state.pose.pose.position;
-    const double center_x = ego_pos.x;
-    const double center_y = ego_pos.y;
-    const double center_z = ego_pos.z;
-
-    // Traffic-light state was resolved by build_sequences (persistent map + TTL, matching
-    // the runtime node); use it directly.
-    const std::map<lanelet::Id, preprocess::TrafficSignalStamped> & traffic_light_id_map =
-      seq.data_list[i].traffic_light_id_map;
-
-    // Get lanes data with speed limits
-    const std::vector<int64_t> lane_segment_indices =
-      lane_segment_context.select_lane_segment_indices(
-        map2bl, center_x, center_y, NUM_SEGMENTS_IN_LANE);
-    const auto [lanes, lanes_speed_limit] = lane_segment_context.create_tensor_data_from_indices(
-      map2bl, traffic_light_id_map, lane_segment_indices, NUM_SEGMENTS_IN_LANE);
-
-    // Create has_speed_limit flags based on speed_limit values
-    std::vector<uint8_t> lanes_has_speed_limit(lanes_speed_limit.size());
-    for (size_t idx = 0; idx < lanes_speed_limit.size(); ++idx) {
-      lanes_has_speed_limit[idx] =
-        (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
-    }
-
-    // Get route lanes data with speed limits
-    const std::vector<int64_t> segment_indices = lane_segment_context.select_route_segment_indices(
-      seq.route, center_x, center_y, center_z, NUM_SEGMENTS_IN_ROUTE);
-    const auto [route_lanes, route_lanes_speed_limit] =
-      lane_segment_context.create_tensor_data_from_indices(
-        map2bl, traffic_light_id_map, segment_indices, NUM_SEGMENTS_IN_ROUTE);
-
-    // Create route_lanes_has_speed_limit based on speed_limit values
-    std::vector<uint8_t> route_lanes_has_speed_limit(route_lanes_speed_limit.size());
-    for (size_t idx = 0; idx < route_lanes_speed_limit.size(); ++idx) {
-      route_lanes_has_speed_limit[idx] =
-        (route_lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
-    }
-
-    const std::vector<float> polygons =
-      lane_segment_context.create_polygon_tensor(map2bl, center_x, center_y);
-    const std::vector<float> line_strings =
-      lane_segment_context.create_line_string_tensor(map2bl, center_x, center_y);
-
-    // Get goal pose
-    const geometry_msgs::msg::Pose & goal_pose = seq.route.goal_pose;
-    const Eigen::Matrix4d goal_pose_in_map = utils::pose_to_matrix4d(goal_pose);
-    const Eigen::Matrix4d goal_pose_in_bl = map2bl * goal_pose_in_map;
-    const float goal_x = goal_pose_in_bl(0, 3);
-    const float goal_y = goal_pose_in_bl(1, 3);
-    const float yaw = std::atan2(goal_pose_in_bl(1, 0), goal_pose_in_bl(0, 0));
-    const std::vector<float> goal_pose_vec = {goal_x, goal_y, std::cos(yaw), std::sin(yaw)};
+    const float goal_x = goal_pose_vec[0];
+    const float goal_y = goal_pose_vec[1];
 
     // (1) Ego vehicle stopped
     const bool is_stop = seq.data_list[i].kinematic_state.twist.twist.linear.x < 0.1;
@@ -279,16 +320,6 @@ void process_sequence(
       no_future_progress_count = 0;
     }
 
-    // Create placeholder data for static objects
-    const std::vector<float> static_objects(
-      STATIC_OBJECTS_SHAPE[1] * STATIC_OBJECTS_SHAPE[2], 0.0f);
-
-    std::vector<int32_t> turn_indicators(INPUT_T_WITH_CURRENT);
-    for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
-      turn_indicators[t] =
-        seq.data_list[std::max(int64_t(0), i - INPUT_T_WITH_CURRENT + 1 + t)].turn_indicator.report;
-    }
-
     // Decide whether this frame is skipped — delegate to the pure decide_frame_skip function.
     const auto & covariance = seq.data_list[i].kinematic_state.pose.covariance;
     const frame_processor::FrameSkipInputs skip_inputs{
@@ -309,9 +340,6 @@ void process_sequence(
       options.green_stop_heading_tol_deg, options.green_stop_stay_radius_m,
       options.green_stop_speed_max_mps,   options.green_stop_ahead_m,
       options.green_stop_lead_fwd_m,      options.green_stop_lead_lat_m};
-
-    const std::vector<float> ego_shape = {
-      options.ego_wheel_base, options.ego_length, options.ego_width};
 
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
       skip_inputs, ego_future, ego_current, ego_shape, static_objects, neighbor_future,

@@ -106,7 +106,45 @@ Set `--map_version_source` to `log_file_info` to read `area_map_version_id` from
 `log_file_info.json`, or `metadata` to read it from `metadata.yaml`. The default is
 `log_file_info`, matching `ros_scripts/parse_rosbag_for_directory_with_map_version.py`.
 
-### Converter options
+### Selected-timestamp validation export
+
+The single-bag `data_converter` also accepts `--timestamps requests.json`, a
+nonempty, strictly increasing JSON array of integer nanosecond timestamps:
+
+```bash
+data_converter BAG MAP OUTPUT --timestamps requests.json --step=1 \
+  --ego_wheel_base 4.0 --ego_length 7.0 --ego_width 2.0
+```
+
+Use the actual vehicle dimensions. Requests must be on the native 10 Hz clock
+(the maximum first receive timestamp of odometry, acceleration, objects, turn
+indicators and route, plus multiples of 100 ms). Off-grid requests are reported,
+never moved to a nearby frame. The caller owns scenario selection and intervals;
+the converter does not read an evaluation registry.
+
+The converter loads the full bag once and shares native tensor construction and
+writers with training. The caller selects timestamps and route intervals. Selected
+export bypasses training selection/skip filters while retaining native route
+assignment, resampling, traffic/object preprocessing and per-route goal correction.
+
+Native temporal context requires 30 preceding ticks. Future labels may hold the
+final pose when the full bag ends below 0.5 m/s; otherwise future coverage is
+required. Context can cross route boundaries, while each route retains its own
+goal. The traffic-light TTL is 5 seconds. The calling dataset tools assess source
+gaps and evaluation eligibility; successfully writing NPZ does not establish that
+source measurements were complete.
+
+Outputs are native NPZ files and required pose sidecars under `selected/`.
+`requests.json` records every request's output and actual odometry timestamp, or
+its unavailability reason. Exit status is 0 for complete availability, 2 for
+unavailable requests, and 1 for invalid input or a fatal error.
+
+Use a fresh output directory with `--step=1` and `--limit=-1`. Sequence packing,
+sidecar-only mode and override extraction are incompatible with selected export.
+`--interpolation` remains available. The existing training behavior and defaults
+are retained when `--timestamps` is omitted.
+
+### Training converter options
 
 Both converter commands accept these options:
 

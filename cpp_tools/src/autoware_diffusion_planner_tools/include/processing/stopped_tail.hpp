@@ -44,6 +44,16 @@ inline bool ends_stopped(const std::vector<FrameData> & data_list)
   return std::abs(data_list.back().kinematic_state.twist.twist.linear.x) < kEndStoppedSpeedMps;
 }
 
+// Shared route-goal preparation for training and selected-timestamp export.
+inline bool prepare_sequence_goal(SequenceData & sequence)
+{
+  const bool stopped = ends_stopped(sequence.data_list);
+  if (stopped) {
+    sequence.route.goal_pose = sequence.data_list.back().kinematic_state.pose.pose;
+  }
+  return stopped;
+}
+
 }  // namespace stopped_tail
 
 #endif  // PROCESSING__STOPPED_TAIL_HPP_
