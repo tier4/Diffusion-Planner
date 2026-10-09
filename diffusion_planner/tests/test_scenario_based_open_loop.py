@@ -78,16 +78,15 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
         def __init__(self):
             self.scenario_centerline_horizon_seconds = 8.0
             self.scenario_simple_turn_horizon_seconds = 8.0
-            self.scenario_departure_horizon_seconds = 3.0
+            self.scenario_departure_horizon_seconds = 5.0
             self.scenario_departure_minimum_displacement_m = 2.0
             self.scenario_traffic_light_go_horizon_seconds = 3.0
             self.scenario_traffic_light_go_minimum_displacement_m = 2.0
-            self.scenario_pedestrian_yield_horizon_seconds = 3.0
-            self.scenario_pedestrian_yield_maximum_forward_progress_m = 0.5
-            self.scenario_vehicle_yield_horizon_seconds = 3.0
-            self.scenario_vehicle_yield_maximum_forward_progress_m = 0.5
-            self.scenario_temporal_stop_horizon_seconds = 3.0
-            self.scenario_temporal_stop_maximum_forward_progress_m = 0.5
+            self.scenario_pedestrian_yield_minimum_pet_seconds = 0.5
+            self.scenario_pedestrian_yield_maximum_conflict_distance_m = 20.0
+            self.scenario_vehicle_yield_minimum_pet_seconds = 0.5
+            self.scenario_vehicle_yield_maximum_conflict_distance_m = 20.0
+            self.scenario_temporal_stop_tolerance_m = 0.5
             self.scenario_obstacle_stop_tolerance_m = 0.5
             self.scenario_traffic_light_stop_tolerance_m = 0.5
             self.scenario_arrival_position_tolerance_m = 2.0
@@ -100,12 +99,12 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
         "arrival": {"position_tolerance_m": 2.0, "heading_tolerance_deg": 10.0},
         "centerline": {"horizon_seconds": 8.0},
         "simple_turn": {"horizon_seconds": 8.0},
-        "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
+        "departure": {"horizon_seconds": 5.0, "minimum_displacement_m": 2.0},
         "traffic_light_go": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
         "object_avoidance": {},
-        "pedestrian_yield": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
-        "vehicle_yield": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
-        "temporal_stop": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
+        "pedestrian_yield": {"minimum_pet_seconds": 0.5, "maximum_conflict_distance_m": 20.0},
+        "vehicle_yield": {"minimum_pet_seconds": 0.5, "maximum_conflict_distance_m": 20.0},
+        "temporal_stop": {"tolerance_m": 0.5},
         "obstacle_stop": {"tolerance_m": 0.5},
         "traffic_light_stop": {"tolerance_m": 0.5},
         "lane_change": {

@@ -1,8 +1,7 @@
 """Shared horizon-resolution helper for scenario-based open-loop metrics.
 
 Every metric that takes a configurable ``horizon_seconds`` parameter
-(``centerline``, ``departure``/``traffic_light_go``, ``pedestrian_yield``/
-``vehicle_yield``/``temporal_stop``, ``simple_turn``) clamps it to a valid
+(``centerline``, ``departure``/``traffic_light_go``, ``simple_turn``) clamps it to a valid
 prediction-step count the same way; this module holds that one shared
 implementation.
 """
