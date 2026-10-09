@@ -23,7 +23,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 from scipy.signal import savgol_filter
 from torch import nn
 from tqdm import tqdm
@@ -283,32 +282,20 @@ def _compute_sft_diffusion_loss(
     for _ in range(K):
         # Sample random timestep
         t = torch.rand(B, device=device) * (1 - eps) + eps
-        t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
-
-        # Prefix mask with random delay
-        max_delay = 5
-        delay = torch.randint(0, max_delay + 1, (B,), device=device)
-        prefix_mask = generate_prefix_mask(delay, P, future_len + 1)
-        mask_coeff = _random.uniform(0.0, 1.0)
-        curr_mask_time = torch.maximum(t_4d * mask_coeff, torch.tensor(eps, device=device))
-        t_4d = torch.where(prefix_mask, curr_mask_time, t_4d)
 
         # Noise and diffusion
         z = torch.randn(B, P, future_len, 4, device=device)
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
+        std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
         xT = mean + std * z
         xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-        xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
         merged_inputs = {
             k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_normalized.items()
         }
         merged_inputs["gt_trajectories"] = all_gt
         merged_inputs["sampled_trajectories"] = xT_full
-        merged_inputs["diffusion_time"] = t_4d
-        merged_inputs["prefix_mask"] = prefix_mask
-        if "delay" not in merged_inputs:
-            merged_inputs["delay"] = delay
+        merged_inputs["diffusion_time"] = t
 
         _, outputs = model(merged_inputs)
 
