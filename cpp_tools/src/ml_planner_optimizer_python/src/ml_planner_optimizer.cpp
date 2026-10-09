@@ -106,6 +106,8 @@ TrajectoryOptimizationParams optimization_params(const YAML::Node & root)
   READ_PARAM(goal.weight_yaw);
   READ_PARAM(goal.weight_velocity);
   READ_PARAM(goal.snap_distance_m);
+  READ_PARAM(goal.unlatch_horizon_s);
+  READ_PARAM(goal.unlatch_min_speed_mps);
   READ_PARAM(min_velocity_mps);
   READ_PARAM(max_velocity_mps);
   READ_PARAM(min_acceleration_mps2);

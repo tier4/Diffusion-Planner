@@ -12,6 +12,8 @@ colcon build --packages-select ml_planner_optimizer_python
 
 acados must be installed at `/opt/acados`, with `lib/` and a `.venv/` that has `acados_template`;
 the module loads it from there at run time. `build.sh` does not build this package.
+`autoware_ml_planner` must have the goal unlatch parameters (tier4/autoware_universe 34b5fc2 or
+later).
 
 `Optimizer(param_yaml, vehicle_yaml, vehicle_overrides={})` reads the node's parameter file and a
 `vehicle_info.param.yaml`; `vehicle_overrides` replaces some of its keys, e.g. with the simulated
