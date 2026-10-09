@@ -14,9 +14,11 @@ from diffusion_planner.scenario_based_open_loop.open_loop import METRICS
 from planner_metrics.scene_data import extract_metric_scene_data
 
 from .dataset import H5FrameIndex
+from .metric_compat import legacy_lanes
 from .model import NewDpOnnxRunner
 
 DEFAULT_PARAMETERS = {
+    "arrival": {"position_tolerance_m": 2.0, "heading_tolerance_deg": 10.0},
     "centerline": {"horizon_seconds": 8.0},
     "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
     "traffic_light_go": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
@@ -27,6 +29,11 @@ DEFAULT_PARAMETERS = {
     "temporal_stop": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
     "obstacle_stop": {"tolerance_m": 0.5},
     "traffic_light_stop": {"tolerance_m": 0.5},
+    "lane_change": {
+        "horizon_seconds": 8.0,
+        "minimum_lateral_shift_m": 1.0,
+        "chain_tolerance_m": 1.0,
+    },
 }
 
 
@@ -52,9 +59,9 @@ def metric_view(frame: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
     packed[..., 8:11] = frame["agent_label"][:, None, :]
     raw = {
         "ego_current_state": current,
-        "ego_agent_future": frame["ego_agent_future"],
+        "ego_agent_future": frame["ego_agent_future"][..., :4],
         "route_lanes": frame["route_lanes"],
-        "lanes": frame["lanes"],
+        "lanes": legacy_lanes(frame),
         "neighbor_agents_future": frame["neighbor_agents_future"],
         "neighbor_agents_past": packed,
         "ego_shape": frame["ego_shape"],

@@ -26,7 +26,7 @@ MODEL_INPUT_NAMES = (
 )
 
 H5_FORMAT = "diffusion_planner_frame_dataset"
-H5_FORMAT_VERSION = 4
+H5_FORMAT_VERSIONS = frozenset({4, 5})
 
 NUM_AGENTS = 321
 FUTURE_STEPS = 80

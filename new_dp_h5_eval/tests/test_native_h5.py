@@ -46,10 +46,14 @@ def test_metric_view_uses_native_shape_and_label_without_broadcast_guessing():
         "agent_label": np.arange(960, dtype=np.float32).reshape(320, 3),
         "ego_shape": np.array([2.7, 4.8, 1.9], np.float32),
     }
-    view = metric_view(frame)["neighbor_agents_past"].numpy()
-    np.testing.assert_array_equal(view[:, 0, 6:8], frame["agent_shape"])
-    np.testing.assert_array_equal(view[:, -1, 8:11], frame["agent_label"])
-    np.testing.assert_array_equal(view[..., 4:6], 0)
+    frame["lanes"][0, 0] = [1, 2, 3, 4, 5, 6]
+    view = metric_view(frame)
+    neighbors = view["neighbor_agents_past"].numpy()
+    np.testing.assert_array_equal(neighbors[:, 0, 6:8], frame["agent_shape"])
+    np.testing.assert_array_equal(neighbors[:, -1, 8:11], frame["agent_label"])
+    np.testing.assert_array_equal(neighbors[..., 4:6], 0)
+    np.testing.assert_array_equal(view["lanes"][0, 0], [1, 2, 0, 0, 3, 4, 5, 6])
+    assert view["ego_agent_future"].shape == (80, 4)
 
 
 def test_legacy_route_metric_view_derives_tangent_and_maps_red():
