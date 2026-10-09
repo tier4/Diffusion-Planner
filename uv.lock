@@ -362,6 +362,8 @@ source = { editable = "diffusion_planner" }
 dependencies = [
     { name = "einops" },
     { name = "gradio" },
+    { name = "h5py" },
+    { name = "hdf5plugin" },
     { name = "matplotlib" },
     { name = "natsort" },
     { name = "numpy" },
@@ -373,6 +375,7 @@ dependencies = [
     { name = "peft" },
     { name = "planner-metrics" },
     { name = "protobuf" },
+    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pytorch-lightning" },
     { name = "scipy" },
@@ -388,6 +391,8 @@ dependencies = [
 requires-dist = [
     { name = "einops" },
     { name = "gradio" },
+    { name = "h5py", specifier = ">=3.16.0" },
+    { name = "hdf5plugin", specifier = ">=7.0.0" },
     { name = "matplotlib" },
     { name = "natsort" },
     { name = "numpy", specifier = ">=1.26,<2" },
@@ -399,6 +404,7 @@ requires-dist = [
     { name = "peft" },
     { name = "planner-metrics", editable = "planner_metrics" },
     { name = "protobuf" },
+    { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "pydantic" },
     { name = "pytorch-lightning" },
     { name = "scipy" },
