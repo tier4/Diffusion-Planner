@@ -203,7 +203,11 @@ def score_road_border_step(np_dict: dict, *, device: str) -> dict:
     """
     rb_dist_m = float("inf")
     if "line_strings" in np_dict and "ego_shape" in np_dict:
-        ego_shape_t = _as_float_tensor(np_dict["ego_shape"], device).reshape(-1)[:3]
+        # Native H5 inputs carry ego_shape as [base_link_to_front, length, width] for the model
+        # and a scoring-only [wheelbase, length, width] as metric_ego_shape.
+        ego_shape_t = _as_float_tensor(
+            np_dict.get("metric_ego_shape", np_dict["ego_shape"]), device
+        ).reshape(-1)[:3]
         traj = torch.zeros(1, 1, 4, dtype=torch.float32, device=device)
         traj[..., 2] = 1.0  # origin, heading +x
         ls = _as_float_tensor(np_dict["line_strings"], device)
