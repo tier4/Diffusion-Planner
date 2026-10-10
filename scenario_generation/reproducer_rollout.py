@@ -989,7 +989,14 @@ def _gt_accels(tl: RouteTimeline) -> np.ndarray:
         w = _GT_ACCEL_SMOOTH_FRAMES
         pad = np.pad(np.asarray(tl.speeds, dtype=np.float64), (w // 2, w // 2), mode="edge")
         smooth = np.convolve(pad, np.ones(w) / w, mode="valid")
-        t = np.asarray(tl.frame_indices, dtype=np.float64) * DT
+        # NPZ timelines carry the recorded frame times (frame names may be nanosecond
+        # timestamps rather than indices); other timelines fall back to index * DT.
+        times = getattr(tl, "frame_times_s", None)
+        t = (
+            np.asarray(times, dtype=np.float64)
+            if times is not None
+            else np.asarray(tl.frame_indices, dtype=np.float64) * DT
+        )
         acc = np.gradient(smooth, t)
     tl._gt_accels_cache = acc
     return acc
