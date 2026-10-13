@@ -1,17 +1,23 @@
 """Native H5 is simulated and scored with the real wheelbase, not base_link_to_front.
 
-Covers the closed-loop reproducer.
+Covers the closed-loop reproducer and the open-loop object-avoidance scorer.
 """
 
 import json
 import sys
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+import torch
 
-from new_dp_h5_eval import run_all_groups_closed_loop
+from new_dp_h5_eval import open_loop, run_all_groups_closed_loop
 from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
+from new_dp_h5_eval.dataset import H5FrameIndex
+from new_dp_h5_eval.open_loop import _scoring_ego_shapes, metric_view
 from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
 from new_dp_h5_eval.vehicle import (
     DEFAULT_VEHICLE_PARAMS,
@@ -65,6 +71,11 @@ def _write_route(path, *, ego_shape, project_id="erga", count=3):
             else:
                 data = np.zeros(_FIELD_SHAPES.get(name, (1,)), np.float32)[None].repeat(count, 0)
             frames.create_dataset(name, data=data)
+        # Ground truth the open-loop scorers read; not model inputs.
+        frames.create_dataset("ego_agent_future", data=np.zeros((count, 80, 6), np.float32))
+        frames.create_dataset(
+            "neighbor_agents_future", data=np.zeros((count, 320, 80, 4), np.float32)
+        )
         metadata = file.create_group("metadata")
         metadata.create_dataset(
             "frame_time_ns", data=[1_000_000_000 + i * 100_000_000 for i in range(count)]
@@ -197,6 +208,119 @@ def test_road_border_is_scored_with_the_metric_shape():
     )
 
 
+def _write_index(path, shards):
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"h5_path": shard.name, "frame_index": 0, "frame_time_ns": 1_000_000_000}
+                for shard in shards
+            ]
+        ),
+        path,
+    )
+    return path
+
+
+def test_open_loop_shapes_are_checked_per_shard(tmp_path):
+    shard = _write_route(tmp_path / "frames.h5", ego_shape=ERGA_NATIVE)
+    index = _write_index(tmp_path / "index.parquet", [shard])
+    vehicles = load_vehicle_params(_write_params(tmp_path / "params.json", {"erga": ERGA}))
+    with H5FrameIndex(index) as dataset:
+        assert dataset.project_id(dataset.shard_path(0)) == "erga"
+        shapes = _scoring_ego_shapes(dataset, {"object_avoidance": [({}, 0)]}, vehicles)
+    np.testing.assert_allclose(shapes[0], ERGA_SIM, rtol=0, atol=1e-6)
+
+
+class _FakeRunner:
+    calls = 0
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def predict(self, frames, _seeds):
+        _FakeRunner.calls += 1
+        return np.zeros((len(frames), 1, 80, 4), np.float32), np.zeros(len(frames))
+
+
+def _patch_open_loop(monkeypatch, scored_shapes):
+    def fake_metric(prediction, data, _params):
+        scored_shapes.append(np.asarray(data["ego_shape"]))
+        return SimpleNamespace(
+            scores={"success_rate_percent": torch.zeros(len(prediction))}, details={}
+        )
+
+    _FakeRunner.calls = 0
+    monkeypatch.setattr(open_loop, "NewDpOnnxRunner", _FakeRunner)
+    monkeypatch.setattr(
+        open_loop, "METRICS", {"object_avoidance": fake_metric, "arrival": fake_metric}
+    )
+
+
+def test_open_loop_run_scores_object_avoidance_with_the_real_wheelbase(tmp_path, monkeypatch):
+    shard = _write_route(tmp_path / "frames.h5", ego_shape=ERGA_NATIVE)
+    index = _write_index(tmp_path / "index.parquet", [shard])
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(json.dumps({"object_avoidance": [{"h5_path": shard.name, "frame_index": 0}]}))
+    vehicles = load_vehicle_params(_write_params(tmp_path / "params.json", {"erga": ERGA}))
+    scored = []
+    _patch_open_loop(monkeypatch, scored)
+    open_loop.run(
+        matrix,
+        index,
+        tmp_path / "m.onnx",
+        tmp_path / "out",
+        visualize=False,
+        vehicle_params=vehicles,
+    )
+    (shapes,) = scored
+    np.testing.assert_allclose(shapes, [ERGA_SIM], rtol=0, atol=1e-6)
+
+
+def test_open_loop_run_rejects_a_bad_shard_before_any_inference(tmp_path, monkeypatch):
+    good = _write_route(tmp_path / "good.h5", ego_shape=ERGA_NATIVE)
+    # Converted with another layout; listed in a later metric than the good shard.
+    bad = _write_route(tmp_path / "bad.h5", ego_shape=ERGA_SIM)
+    index = _write_index(tmp_path / "index.parquet", [good, bad])
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(
+        json.dumps(
+            {
+                "arrival": [{"h5_path": good.name, "frame_index": 0}],
+                "object_avoidance": [{"h5_path": bad.name, "frame_index": 0}],
+            }
+        )
+    )
+    vehicles = load_vehicle_params(_write_params(tmp_path / "params.json", {"erga": ERGA}))
+    _patch_open_loop(monkeypatch, [])
+    with pytest.raises(ValueError, match="bad.h5"):
+        open_loop.run(
+            matrix,
+            index,
+            tmp_path / "m.onnx",
+            tmp_path / "out",
+            visualize=False,
+            vehicle_params=vehicles,
+        )
+    assert _FakeRunner.calls == 0
+    assert not (tmp_path / "out" / "details").exists()
+
+
+def test_metric_view_takes_the_scoring_shape():
+    frame = {
+        "ego_agent_past": np.zeros((31, 6), np.float32),
+        "ego_agent_future": np.zeros((80, 6), np.float32),
+        "route_lanes": np.zeros((25, 20, 6), np.float32),
+        "lanes": np.zeros((140, 20, 6), np.float32),
+        "neighbor_agents_future": np.zeros((320, 80, 4), np.float32),
+        "neighbor_agents_past": np.zeros((320, 31, 4), np.float32),
+        "agent_shape": np.zeros((320, 2), np.float32),
+        "agent_label": np.zeros((320, 3), np.float32),
+        "ego_shape": np.array(ERGA_NATIVE, np.float32),
+    }
+    view = metric_view(frame, np.array(ERGA_SIM, np.float32))
+    np.testing.assert_allclose(view["ego_shape"], ERGA_SIM, rtol=0, atol=1e-6)
+
+
 def test_npz_timelines_keep_their_ego_shape():
     class NpzTimeline:
         def npz(self, idx):
@@ -218,6 +342,7 @@ def test_default_vehicle_params_is_the_meta_repository_table():
             run_all_groups_closed_loop.main,
             ["--closed_loop_h5_root", "manifest.json", "--model_path", "m.onnx", "--out_root", "o"],
         ),
+        (open_loop.main, ["matrix.json", "index.parquet", "m.onnx", "out"]),
     ],
 )
 def test_runners_stop_when_the_vehicle_params_are_missing(

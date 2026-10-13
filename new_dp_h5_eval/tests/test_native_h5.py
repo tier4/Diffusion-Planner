@@ -47,7 +47,8 @@ def test_metric_view_uses_native_shape_and_label_without_broadcast_guessing():
         "ego_shape": np.array([2.7, 4.8, 1.9], np.float32),
     }
     frame["lanes"][0, 0] = [1, 2, 3, 4, 5, 6]
-    view = metric_view(frame)
+    # The scoring shape is handed through unchanged; this test is about neighbor columns.
+    view = metric_view(frame, frame["ego_shape"])
     neighbors = view["neighbor_agents_past"].numpy()
     np.testing.assert_array_equal(neighbors[:, 0, 6:8], frame["agent_shape"])
     np.testing.assert_array_equal(neighbors[:, -1, 8:11], frame["agent_label"])
