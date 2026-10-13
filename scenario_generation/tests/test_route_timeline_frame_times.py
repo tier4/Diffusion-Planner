@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from scenario_generation.reproducer_rollout import DT
+from scenario_generation.reproducer_rollout import DT, _gt_accels
 from scenario_generation.route_timeline import (
     _NS_TIMESTAMP_MIN,
     RouteTimeline,
@@ -105,3 +105,14 @@ def test_unknown_clock_names_are_not_read_as_indices():
     # Nanoseconds of a clock that starts near zero would look like huge index steps.
     with pytest.raises(ValueError, match="look like timestamps of an unknown clock"):
         _frame_times_s(np.array([5_000_000_000, 5_100_000_000]))
+
+
+def test_gt_accels_do_not_depend_on_the_naming(tmp_path):
+    xs = np.cumsum(np.linspace(0.5, 1.5, 12))  # accelerating
+    by_index = RouteTimeline(_write_route(tmp_path / "i", [f"r_{i:016d}" for i in range(12)], xs))
+    by_stamp = RouteTimeline(
+        _write_route(tmp_path / "s", [f"r_{T0_NS + i * 100_000_000}" for i in range(12)], xs)
+    )
+    np.testing.assert_allclose(by_stamp.speeds, by_index.speeds, rtol=1e-6)
+    np.testing.assert_allclose(_gt_accels(by_stamp), _gt_accels(by_index), rtol=1e-5, atol=1e-6)
+    assert np.abs(_gt_accels(by_index)[2:-2]).max() > 1.0  # really accelerating (~9 m/s^2)
