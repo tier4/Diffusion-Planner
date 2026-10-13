@@ -12,7 +12,11 @@ from new_dp_h5_eval.model import (
     legacy_feedback_turn_logits,
     seeded_initial_noise,
 )
-from new_dp_h5_eval.open_loop import metric_view
+from new_dp_h5_eval.open_loop import (
+    VISUALIZATION_SIZE_PX,
+    metric_view,
+    visualize_h5_prediction,
+)
 from new_dp_h5_eval.transforms import recenter_frame_to_pose
 from scenario_generation.reproducer_rollout import _ego_state_from_frame
 
@@ -190,3 +194,34 @@ def test_closed_loop_labels_name_manifests_that_share_a_stem():
     ]
     with pytest.raises(ValueError, match="one label per"):
         resolve_labels(manifests, modes, ["a"])
+
+
+def test_finite_runs_split_a_polyline_at_non_finite_points():
+    from new_dp_h5_eval.render import finite_runs
+
+    points = np.array([[0, 0], [1, 0], [np.nan, 0], [2, 0], [3, np.inf], [4, 0], [5, 0]])
+    runs = finite_runs(points)
+    assert [run.tolist() for run in runs] == [[[0, 0], [1, 0]], [[2, 0]], [[4, 0], [5, 0]]]
+
+
+def test_visualization_draws_scenes_with_non_finite_points(tmp_path):
+    from PIL import Image
+
+    frame = {
+        "lanes": np.zeros((2, 20, 6), np.float32),
+        "route_lanes": np.zeros((2, 20, 6), np.float32),
+        "road_borders": np.zeros((2, 20, 2), np.float32),
+        "stop_lines": np.zeros((2, 2, 2), np.float32),
+        "intersection_area": np.zeros((2, 40, 2), np.float32),
+        "ego_agent_past": np.zeros((31, 6), np.float32),
+        "ego_agent_future": np.zeros((80, 6), np.float32),
+        "neighbor_agents_past": np.zeros((2, 31, 4), np.float32),
+        "goal_pose": np.zeros(4, np.float32),
+    }
+    frame["ego_agent_past"][:, 0] = np.linspace(-15.0, 0.0, 31)
+    frame["ego_agent_past"][10] = np.nan
+    prediction = np.array([[0, 0], [5, 0], [np.nan, np.nan], [30, 30], [35, 30], [np.inf, 0]])
+    path = tmp_path / "scene.png"
+    visualize_h5_prediction(frame, prediction, path, "scene")
+    image = np.asarray(Image.open(path).convert("L"))
+    assert image.shape == (VISUALIZATION_SIZE_PX, VISUALIZATION_SIZE_PX)
