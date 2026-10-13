@@ -20,7 +20,7 @@ from planner_metrics.scene_data import extract_metric_scene_data
 from .dataset import H5FrameIndex
 from .metric_compat import legacy_lanes
 from .model import NewDpOnnxRunner
-from .render import VISUALIZATION_KEYS, visualize_h5_prediction
+from .render import render_view, save_prediction_png
 
 DRAW_QUEUE_PER_WORKER = 4
 
@@ -196,10 +196,13 @@ def run(
                         png_path = (
                             output / "visualization" / metric_name / f"{offset + i:06d}_{stem}.png"
                         )
-                        scene = {key: frames[i][key] for key in VISUALIZATION_KEYS}
                         drawing.append(
                             draw.submit(
-                                visualize_h5_prediction, scene, trajectories[i, 0], png_path, stem
+                                save_prediction_png,
+                                render_view(frames[i]),
+                                trajectories[i, 0],
+                                png_path,
+                                stem,
                             )
                         )
                         row["visualization_png"] = str(png_path)
