@@ -40,10 +40,16 @@ from .model import (
     seeded_initial_noise,
 )
 from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
+from .vehicle import VehicleDimensions, sim_ego_shape
 
 
 class NativeH5RouteTimeline(RouteTimeline):
-    """Closed-loop route backed entirely by one multi-frame native H5 shard."""
+    """Closed-loop route backed entirely by one multi-frame native H5 shard.
+
+    With ``vehicle_params``, ``sim_ego_shape`` is the ``[wheelbase, length, width]`` the
+    reproducer simulates and scores with (see ``vehicle.py``); without it, it is ``None`` and
+    the reproducer refuses to roll the route out.
+    """
 
     native_h5 = True
 
@@ -53,6 +59,7 @@ class NativeH5RouteTimeline(RouteTimeline):
         frame_start: int = 0,
         frame_stop: int | None = None,
         timers: Timers | None = None,
+        vehicle_params: dict[str, VehicleDimensions] | None = None,
     ) -> None:
         self.h5_path = Path(h5_path).expanduser().resolve()
         self._h5 = h5py.File(self.h5_path, "r")
@@ -85,6 +92,19 @@ class NativeH5RouteTimeline(RouteTimeline):
                 raise ValueError(f"invalid H5 frame range [{start}, {stop}) for {total} frames")
             self._rows = np.arange(start, stop, dtype=np.int64)
             self.frame_indices = self._rows.copy()
+            self.sim_ego_shape = None
+            if vehicle_params is not None:
+                project_id = self._h5.attrs.get("project_id")
+                if isinstance(project_id, bytes):
+                    project_id = project_id.decode()
+                if not project_id:
+                    raise ValueError(f"closed-loop H5 has no project_id attribute: {self.h5_path}")
+                self.sim_ego_shape = sim_ego_shape(
+                    self._h5["frames"]["ego_shape"][start:stop],
+                    str(project_id),
+                    vehicle_params,
+                    source=str(self.h5_path),
+                )
             self.frame_times_ns = np.asarray(metadata["frame_time_ns"][start:stop], dtype=np.int64)
             interval = float(self._h5.attrs.get("frame_interval_s", float("nan")))
             if not np.isfinite(interval) or not np.isclose(interval, DT, atol=1e-3):
@@ -254,9 +274,16 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
     construction differ from the legacy NPZ implementation.
     """
 
-    def __init__(self, *args, routes: list[dict], **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        routes: list[dict],
+        vehicle_params: dict[str, VehicleDimensions],
+        **kwargs,
+    ) -> None:
         super().__init__(*args, npz_root="native_h5", **kwargs)
         self.routes = routes
+        self.vehicle_params = vehicle_params
         self._routes_by_id = {str(route["route_id"]): route for route in routes}
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
@@ -287,6 +314,7 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
             int(route.get("frame_start", 0)),
             route.get("frame_stop"),
             timers=timers,
+            vehicle_params=self.vehicle_params,
         )
         rows: list[dict] = []
         video_mp4s: list[Path] = []

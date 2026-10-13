@@ -31,6 +31,7 @@ from .closed_loop import (
     model_args,
     rollout_params_from_closed_loop_config,
 )
+from .vehicle import add_vehicle_params_argument, vehicle_params_from_args
 
 
 def _write_groups_manifest(out_dir: Path, summaries: dict[str, dict]) -> None:
@@ -168,8 +169,10 @@ def main() -> int:
     parser.add_argument("--provider", action="append", dest="providers")
     parser.add_argument("--closed_loop_pass_conditions", default="")
     parser.add_argument("--closed_loop_draw_workers", type=int, default=4)
+    add_vehicle_params_argument(parser)
     add_plan_optimizer_argument(parser)
     args = parser.parse_args()
+    vehicle_params = vehicle_params_from_args(parser, args)
 
     modes = args.closed_loop_object_modes or ["objects"] * len(args.closed_loop_h5_root)
     if len(modes) != len(args.closed_loop_h5_root) or set(modes).difference({"objects", "noobj"}):
@@ -223,6 +226,7 @@ def main() -> int:
                     pass_condition=cfg.pass_conditions.get_condition(group_name),
                 ),
                 routes=routes,
+                vehicle_params=vehicle_params,
                 seg_len=cfg.closed_loop_seg_len,
                 ddp_rank=rank,
                 ddp_world_size=world_size,
