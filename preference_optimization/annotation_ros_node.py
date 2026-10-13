@@ -30,7 +30,6 @@ from autoware_perception_msgs.msg import (
 from autoware_planning_msgs.msg import Trajectory, TrajectoryPoint
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, TransformStamped, Vector3
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -201,7 +200,7 @@ class AnnotationRosNode(Node):
         if fig is None:
             return None
         buf = io.BytesIO()
-        FigureCanvasAgg(fig).print_png(buf)
+        fig.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
     @staticmethod

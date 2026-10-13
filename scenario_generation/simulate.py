@@ -22,18 +22,15 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-
 import numpy as np
 import torch
 
+from scenario_generation.canvas import Figure
 from scenario_generation.gt_route_extractor import assign_gt_goals_and_routes
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
 from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz, to_model_tensors
-from scenario_generation.visualize import draw_scene, draw_trajectory
+from scenario_generation.visualize import draw_scene, draw_trajectory, scene_canvas
 
 
 def load_model(model_path: str | Path, device: str = "cuda"):
@@ -545,10 +542,7 @@ def _draw_agent_view(
     heading = agent.current_heading
     color = (color_map or {}).get(agent_id, _EGO_COLOR)
 
-    from matplotlib.figure import Figure
-
-    fig = Figure(figsize=(10, 10))
-    ax = fig.add_subplot(1, 1, 1)
+    ax = Figure((10.0, 10.0), 100.0).panel((0.06, 0.04, 0.92, 0.91), equal=True)
 
     # Map elements
     draw_lanes(ax, scene.map_data)
@@ -595,13 +589,7 @@ def _draw_agent_view(
     arrow_len = max(agent.length, 2.0)
     dx = arrow_len * math.cos(heading)
     dy = arrow_len * math.sin(heading)
-    ax.annotate(
-        "",
-        xy=(pos[0] + dx, pos[1] + dy),
-        xytext=(pos[0], pos[1]),
-        arrowprops=dict(arrowstyle="->", color=color, lw=2),
-        zorder=21,
-    )
+    ax.arrows(np.array(pos[:2]), np.array([pos[0] + dx, pos[1] + dy]), color, width=2, z=21)
 
     # Planned trajectory
     if agent_id in agent_predictions:
@@ -634,20 +622,19 @@ def _draw_agent_view(
     # World path history
     if len(world_history) > 1:
         h = np.array(world_history)
-        ax.plot(h[:, 0], h[:, 1], "-", color=color, lw=2, alpha=0.7, zorder=22, label="Path")
+        ax.lines([h[:, :2]], color, width=2, alpha=0.7, z=22, label="Path")
 
     # Goal
     if agent.goal_pose is not None:
         gx, gy, gh = agent.goal_pose
-        ax.plot(
-            gx,
-            gy,
+        ax.markers(
+            np.array([gx, gy]),
             "*",
+            size=18,
             color="#ff3333",
-            ms=18,
-            markeredgecolor="black",
-            markeredgewidth=1.0,
-            zorder=30,
+            edge="#000000",
+            edge_width=1.0,
+            z=30,
             label="Goal",
         )
         draw_agent_box(
@@ -657,7 +644,7 @@ def _draw_agent_view(
     # GT future
     if agent.future_trajectory is not None:
         gt = agent.future_trajectory
-        ax.plot(gt[:, 0], gt[:, 1], "--", color="#22bb22", lw=1.5, alpha=0.5, zorder=15, label="GT")
+        ax.lines([gt[:, :2]], "#22bb22", width=1.5, alpha=0.5, dash="dash", z=15, label="GT")
 
     # Zoom: center on agent + plan tip, tight view
     zoom_pts = [pos.reshape(1, 2)]
@@ -673,24 +660,10 @@ def _draw_agent_view(
     ax.set_xlim(cx - half, cx + half)
     ax.set_ylim(cy - half, cy + half)
 
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.legend(fontsize=8, loc="upper left")
-    ax.set_title(f"{agent_id}  step {step:03d}  t={step * 0.1:.1f}s", fontsize=11)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=100)
-    fig.clf()
-
-
-def _save_and_close(fig, path: Path, dpi: int = 100) -> None:
-    """Save a matplotlib figure and release resources.
-
-    Avoids plt.close() which touches the global pyplot figure manager
-    and is not thread-safe under concurrent saves.
-    """
-    fig.savefig(path, dpi=dpi)
-    fig.clf()
+    ax.grid(0.15)
+    ax.legend("upper left")
+    ax.title(f"{agent_id}  step {step:03d}  t={step * 0.1:.1f}s", 11)
+    ax.save(output_path)
 
 
 def _cat_tensor_dicts(
@@ -1071,10 +1044,7 @@ def run_simulation(
 
             # --- Visualize ---
             if not skip_viz:
-                from matplotlib.figure import Figure
-
-                fig = Figure(figsize=(10, 10))
-                ax = fig.add_subplot(1, 1, 1)
+                ax = scene_canvas(scene, size_in=10.0, dpi=100.0)
                 draw_scene(ax, scene, ego_id)
 
                 from scenario_generation.visualize import _agent_color
@@ -1135,17 +1105,16 @@ def run_simulation(
                 hist = world_histories.get(ego_id, [])
                 if len(hist) > 1:
                     h = np.array(hist)
-                    ax.plot(h[:, 0], h[:, 1], "-", color="#3366cc", lw=2, alpha=0.8, zorder=22)
+                    ax.lines([h[:, :2]], "#3366cc", width=2, alpha=0.8, z=22)
 
-                ax.set_title(
+                ax.title(
                     f"[{mode_label}] Step {step:03d}/{n_steps}  t={step * 0.1:.1f}s  "
                     f"({n_agents} agents)",
-                    fontsize=11,
+                    11,
                 )
-                fig.tight_layout()
 
                 step_futures = [
-                    save_pool.submit(_save_and_close, fig, output_dir / f"step_{step:03d}.png"),
+                    save_pool.submit(ax.save, output_dir / f"step_{step:03d}.png"),
                 ]
                 if per_agent:
                     for agent in scene.agents:

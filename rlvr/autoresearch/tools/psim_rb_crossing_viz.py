@@ -17,15 +17,11 @@ import argparse
 import subprocess
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import torch
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
 
 from rlvr.reward import RewardConfig, _point_to_segments_min_dist
+from scenario_generation.canvas import Figure
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder, _obb_corners
 from scenario_generation.tools._heatmap_common import (
     build_route_polyline,
@@ -60,14 +56,12 @@ def _series(bag, seg1, seg2, pts, arc, shape, stride):
 
 def _draw_box(ax, corners, color, crossing, z):
     poly = np.vstack([corners, corners[:1]])
-    ax.fill(poly[:, 0], poly[:, 1], color=color, alpha=0.35, zorder=z)
-    ax.plot(
-        poly[:, 0],
-        poly[:, 1],
-        "-",
-        color=(CROSS_C if crossing else color),
-        lw=(3 if crossing else 1.5),
-        zorder=z + 1,
+    ax.polygons([corners], fill=color, alpha=0.35, z=z)
+    ax.lines(
+        [poly],
+        CROSS_C if crossing else color,
+        width=(3 if crossing else 1.5),
+        z=z + 1,
     )
 
 
@@ -181,9 +175,13 @@ def main():
             ma = mr[3]
             br = min(base, key=lambda r: abs(r[3] - ma))  # nearest-arc baseline pose
             cx, cy = mr[0], mr[1]
-            fig = Figure(figsize=(11, 11))
-            ax = fig.add_subplot(111)
-            fig.patch.set_facecolor("#f8f8f8")
+            fig = Figure((11, 11), 100, facecolor="#f8f8f8")
+            ax = fig.panel(
+                (0.06, 0.05, 0.92, 0.88),
+                xlim=(cx - args.view_half, cx + args.view_half),
+                ylim=(cy - args.view_half, cy + args.view_half),
+                equal=True,
+            )
             inview = lambda pl: (
                 pl.shape[0] >= 2
                 and (
@@ -195,34 +193,23 @@ def main():
             )
             ll = [pl for pl in lanes if inview(pl)]
             if ll:
-                ax.add_collection(
-                    LineCollection(ll, colors="#999999", linewidths=0.8, alpha=0.45, zorder=2)
-                )
+                ax.lines(ll, "#999999", width=0.8, alpha=0.45, z=2)
             bl = [pl for pl in borders if inview(pl)]
             if bl:
-                ax.add_collection(
-                    LineCollection(bl, colors=NB_BORDER, linewidths=2.2, alpha=0.9, zorder=5)
-                )
+                ax.lines(bl, NB_BORDER, width=2.2, alpha=0.9, z=5)
             m = (arc >= ma - 40) & (arc <= ma + 40)
-            ax.plot(pts[m, 0], pts[m, 1], "-", color=ROUTE_C, lw=2.0, alpha=0.5, zorder=3)
+            ax.lines([pts[m, :2]], ROUTE_C, width=2.0, alpha=0.5, z=3)
             _draw_box(ax, br[5], BASE_C, br[4] < thresh, 10)
             _draw_box(ax, mr[5], MODEL_C, mr[4] < thresh, 14)
-            ax.plot([], [], "-", color=BASE_C, lw=2, label=f"baseline  border={br[4]:.2f}m")
-            ax.plot(
-                [], [], "-", color=MODEL_C, lw=2, label=f"{args.model_label}  border={mr[4]:.2f}m"
-            )
-            ax.set_xlim(cx - args.view_half, cx + args.view_half)
-            ax.set_ylim(cy - args.view_half, cy + args.view_half)
-            ax.set_aspect("equal")
-            ax.grid(True, alpha=0.15)
-            ax.legend(fontsize=10, loc="upper left")
-            ax.set_title(
+            ax.lines([], BASE_C, width=2, label=f"baseline  border={br[4]:.2f}m")
+            ax.lines([], MODEL_C, width=2, label=f"{args.model_label}  border={mr[4]:.2f}m")
+            ax.grid(0.15)
+            ax.legend("upper left")
+            ax.title(
                 f"RB crossing region  arc~{int(ma)}m   (red outline = ego crossing border, thresh {thresh:.2f}m)",
-                fontsize=11,
+                11,
             )
-            fig.tight_layout()
-            fig.savefig(wd / f"f{fi:04d}.png", dpi=100)
-            fig.clf()
+            fig.save(wd / f"f{fi:04d}.png")
         webm = out / f"win{wi}_arc{int(wlo)}-{int(whi)}.webm"
         r = subprocess.run(
             [

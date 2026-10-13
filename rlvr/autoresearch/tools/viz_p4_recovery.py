@@ -31,16 +31,10 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
@@ -62,6 +56,7 @@ from rlvr.grpo_trainer_batched import (
     get_generation_config_labels_for_variant,
 )
 from rlvr.reward import compute_centerline_score_batch, compute_reward_batch
+from scenario_generation.canvas import Figure, oriented_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -401,7 +396,8 @@ def main() -> None:
             det_full = np.concatenate([anchor, det_traj], axis=0)
             top1_full = np.concatenate([anchor, top1_traj], axis=0)
 
-            fig, ax = plt.subplots(figsize=(11, 11))
+            fig = Figure((11, 11), dpi=110)
+            ax = fig.panel((0.125, 0.11, 0.775, 0.75), equal=True)
             draw_scene_base(ax, npz_path)
 
             with np.load(npz_path, allow_pickle=True) as _d:
@@ -412,28 +408,20 @@ def main() -> None:
             # Ego pose is the rear axle; symmetric overhang is (length-wheelbase)/2.
             ro = (elen - wb) / 2
             # Perturbed ego (now-current) is at origin in the new frame.
-            t_rot_pert = mtransforms.Affine2D().rotate(0.0).translate(0.0, 0.0) + ax.transData
-            ax.add_patch(
-                Rectangle(
-                    (-ro, -ewid / 2),
-                    elen,
-                    ewid,
-                    lw=1.6,
-                    ec="#7a6500",
-                    fc="#ffe066",
-                    alpha=0.35,
-                    zorder=20,
-                    transform=t_rot_pert,
-                )
+            ax.polygons(
+                [oriented_box(0.0, 0.0, 0.0, elen, ewid, ro)],
+                fill="#ffe066",
+                edge="#7a6500",
+                width=1.6,
+                alpha=0.35,
+                z=20,
             )
-            ax.plot([0.0], [0.0], "x", color="#7a6500", ms=9, mew=2.2, zorder=21)
+            ax.markers(np.zeros(2), "x", size=9, color="#7a6500", edge_width=2.2, z=21)
 
             for ki in range(trajs.shape[0]):
                 tr = trajs[ki].cpu().numpy()
                 tr_full = np.concatenate([anchor, tr], axis=0)
-                ax.plot(
-                    tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7, alpha=0.45, zorder=6
-                )
+                ax.lines([tr_full[:, :2]], "#888888", width=0.7, alpha=0.45, z=6)
             # Ground truth from NPZ (ego_agent_future, 3-channel x,y,yaw at
             # load time → 4-channel after heading_to_cos_sin). Drawn in green
             # so the user can compare Det / Rank-1 / K=8 candidates against
@@ -480,30 +468,15 @@ def main() -> None:
                     f"dv={meta['dv']:+.2f}m/s"
                 )
                 # Arrow from source pose to perturbed-now ego at origin.
-                ax.annotate(
-                    "",
-                    xy=(0.0, 0.0),
-                    xytext=source_pose_xy,
-                    arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=2.2),
-                    zorder=22,
-                )
-                ax.plot(
-                    [source_pose_xy[0]],
-                    [source_pose_xy[1]],
-                    "o",
-                    color="#2ca02c",
-                    ms=8,
-                    mew=0,
-                    zorder=22,
-                )
+                ax.arrows(np.array(source_pose_xy), np.zeros(2), "#2ca02c", width=2.2, z=22)
+                ax.markers(np.array(source_pose_xy), "o", size=8, color="#2ca02c", z=22)
                 ax.text(
-                    source_pose_xy[0],
-                    source_pose_xy[1] - 0.4,
+                    (source_pose_xy[0], source_pose_xy[1] - 0.4),
                     "source pose",
-                    color="#2ca02c",
-                    fontsize=9,
+                    9,
+                    "#2ca02c",
                     ha="center",
-                    zorder=22,
+                    z=22,
                 )
 
             all_pts = np.vstack(
@@ -517,22 +490,19 @@ def main() -> None:
             half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8.0
             ax.set_xlim(cx - half, cx + half)
             ax.set_ylim(cy - half, cy + half)
-            ax.set_aspect("equal")
-            ax.legend(fontsize=8, loc="upper left")
+            ax.legend("upper left")
             prefix = "[IMPROVE] " if improves else "[no-improve] "
-            ax.set_title(
+            ax.title(
                 f"{prefix}{Path(npz_path).name}\n"
                 f"{perturb_str}\n"
                 f"t0_cl={t0_cl:+.3f}(1-frame)  det_cl={float(det_r.centerline):+.3f}  "
                 f"rank1_cl={top1['cl']:+.3f}  Δ_top1-det={delta:+.3f}  "
                 f"(rank1 by reward.total; Δ apples-to-apples 80-frame)",
-                fontsize=10,
+                10,
             )
             out_dir = out_root / ("improve" if improves else "no_improve")
             out_path = out_dir / f"scene_{si:03d}_{Path(npz_path).stem}.png"
-            fig.tight_layout()
-            fig.savefig(str(out_path), dpi=110, bbox_inches="tight")
-            plt.close(fig)
+            fig.save(out_path)
 
             if improves:
                 improve_paths.append(str(npz_path))

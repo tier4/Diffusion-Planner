@@ -29,16 +29,10 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
@@ -49,6 +43,7 @@ from rlvr.autoresearch.tools.viz_cl_recovery import (
 )
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 from rlvr.reward import compute_centerline_score_batch, compute_reward_batch
+from scenario_generation.canvas import Figure, oriented_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -169,7 +164,7 @@ def main() -> None:
         scene_paths = scene_paths[: args.max_scenes]
 
     device = torch.device(DEVICE)
-    print(f"[viz_prism_compare] loading 3 models...")
+    print("[viz_prism_compare] loading 3 models...")
     m_base, args_base = _load_model(args.baseline_model, None, device)
     m_warm, args_warm = _load_model(args.warmstart_model, None, device)
     m_prism, args_prism = _load_model(args.prism_model, args.prism_lora, device)
@@ -228,7 +223,8 @@ def main() -> None:
         full_p = np.concatenate([anchor, traj_prism_lf], axis=0)
 
         # Plot
-        fig, ax = plt.subplots(figsize=(12, 12))
+        fig = Figure((12, 12), dpi=110)
+        ax = fig.panel((0.125, 0.11, 0.775, 0.74), equal=True)
         draw_scene_base(ax, npz_path)
 
         # Perturbed ego at (dx, dy) in lanelet frame — yellow translucent
@@ -240,21 +236,15 @@ def main() -> None:
         ewid = float(es_np[2]) if es_np is not None and len(es_np) >= 3 else 2.29
         # Ego pose is the rear axle; symmetric overhang is (length-wheelbase)/2.
         ro = (elen - wb) / 2
-        t_rot_pert = mtransforms.Affine2D().rotate(0.0).translate(dx_pert, dy_pert) + ax.transData
-        ax.add_patch(
-            Rectangle(
-                (-ro, -ewid / 2),
-                elen,
-                ewid,
-                lw=1.6,
-                ec="#7a6500",
-                fc="#ffe066",
-                alpha=0.35,
-                zorder=20,
-                transform=t_rot_pert,
-            )
+        ax.polygons(
+            [oriented_box(dx_pert, dy_pert, 0.0, elen, ewid, ro)],
+            fill="#ffe066",
+            edge="#7a6500",
+            width=1.6,
+            alpha=0.35,
+            z=20,
         )
-        ax.plot([dx_pert], [dy_pert], "x", color="#7a6500", ms=9, mew=2.2, zorder=21)
+        ax.markers(np.array([dx_pert, dy_pert]), "x", size=9, color="#7a6500", edge_width=2.2, z=21)
 
         # Model trajectories
         draw_traj(
@@ -296,36 +286,27 @@ def main() -> None:
                 f"lon={lon:+.2f}m  yaw={meta['dtheta_deg']:+.1f}°  "
                 f"dv={meta['dv']:+.2f}m/s"
             )
-            ax.annotate(
-                "",
-                xy=(dx_pert, dy_pert),
-                xytext=(0.0, 0.0),
-                arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=2.2),
-                zorder=22,
-            )
-            ax.plot([0.0], [0.0], "o", color="#2ca02c", ms=8, mew=0, zorder=22)
-            ax.text(0.0, -0.4, "source pose", color="#2ca02c", fontsize=9, ha="center", zorder=22)
+            ax.arrows(np.zeros(2), np.array([dx_pert, dy_pert]), "#2ca02c", width=2.2, z=22)
+            ax.markers(np.zeros(2), "o", size=8, color="#2ca02c", z=22)
+            ax.text((0.0, -0.4), "source pose", 9, "#2ca02c", ha="center", z=22)
 
         all_pts = np.vstack([full_b[:, :2], full_w[:, :2], full_p[:, :2], np.array([[0.0, 0.0]])])
         cx, cy = float(np.mean(all_pts[:, 0])), float(np.mean(all_pts[:, 1]))
         half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8.0
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        ax.legend(fontsize=9, loc="upper left")
+        ax.legend("upper left")
         delta_pw = cl_prism - cl_warm
         delta_pb = cl_prism - cl_base
-        ax.set_title(
+        ax.title(
             f"{Path(npz_path).name}\n{perturb_str}\n"
             f"t0_cl={t0_cl:+.3f}    "
             f"baseline cl={cl_base:+.3f}   warmstart cl={cl_warm:+.3f}   PRiSM cl={cl_prism:+.3f}\n"
             f"Δ(PRiSM−warmstart)={delta_pw:+.3f}   Δ(PRiSM−baseline)={delta_pb:+.3f}",
-            fontsize=10,
+            10,
         )
         out_path = out_root / f"scene_{si:03d}_{Path(npz_path).stem}.png"
-        fig.tight_layout()
-        fig.savefig(str(out_path), dpi=110, bbox_inches="tight")
-        plt.close(fig)
+        fig.save(out_path)
 
         summary.append(
             {

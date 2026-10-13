@@ -748,7 +748,7 @@ def run_closed_loop_eval(
     digests_name = "tdigests.jsonl" if shard is None else f"tdigests_{shard[0]}.jsonl"
     fout = open(out_dir / segments_name, "w")
     fdigest = open(out_dir / digests_name, "w")
-    # One pool for every route: a spawned worker re-imports torch and matplotlib.
+    # One pool for every route: a spawned worker re-imports torch.
     draw_pool = render_pool(draw_workers)
     try:
         for ri, key in enumerate(route_keys):

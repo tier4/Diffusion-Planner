@@ -32,15 +32,12 @@ import argparse
 import json
 import os
 
-import matplotlib
+import numpy as np
+import torch
+from tqdm import tqdm
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from matplotlib.cm import ScalarMappable  # noqa: E402
-from matplotlib.colors import Normalize  # noqa: E402
-from tqdm import tqdm  # noqa: E402
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values
 
 
 def torch_kmeans(x, k, iters, seed, device):
@@ -95,52 +92,41 @@ def plot_prototypes(prototypes, counts, output_png):
     K, T, _ = prototypes.shape
     end_x, end_y = prototypes[:, -1, 0], prototypes[:, -1, 1]
     span = max(np.abs(end_y).max(), 1e-3)
-    norm = Normalize(vmin=-span, vmax=span)  # blue=right, red=left
-    cmap = plt.get_cmap("coolwarm")
+    colors = map_values(end_y, "coolwarm", -span, span)  # blue=right, red=left
     # line width / marker size scale with cluster population (sqrt for a gentle spread).
     frac = np.sqrt(counts / max(counts.max(), 1))
 
-    fig, (ax_xy, ax_end) = plt.subplots(1, 2, figsize=(15, 7.5))
+    fig = Figure((15, 7.5), dpi=120)
+    ax_xy, ax_end = fig.grid(1, 2, margins=(0.06, 0.98, 0.08, 0.9), wspace=0.3, equal=True)[0]
     for k in range(K):
-        c = cmap(norm(end_y[k]))
-        ax_xy.plot(
-            prototypes[k, :, 0],
-            prototypes[k, :, 1],
-            "-",
-            color=c,
-            lw=0.6 + 2.4 * frac[k],
-            alpha=0.85,
+        ax_xy.lines([prototypes[k]], colors[k], width=0.6 + 2.4 * frac[k], alpha=0.85)
+        ax_xy.markers(np.array([end_x[k], end_y[k]]), "o", size=2 + 4 * frac[k], color=colors[k])
+    ax_xy.markers(np.zeros(2), "*", size=14, color="#000000", z=5, label="ego t=0")
+    ax_xy.title(f"{K} trajectory-mode prototypes (ego frame; width ~ #members)")
+    ax_xy.xlabel("x forward [m]")
+    ax_xy.ylabel("y left [m]")
+    ax_xy.grid(0.3)
+    ax_xy.legend("upper left")
+    ax_xy.colorbar("coolwarm", -span, span, label="endpoint y (left +) [m]")
+
+    for k in range(K):
+        ax_end.markers(
+            np.array([end_x[k], end_y[k]]),
+            "o",
+            size=np.sqrt(20 + 180 * frac[k]),
+            color=colors[k],
+            z=1,
         )
-        ax_xy.plot(end_x[k], end_y[k], "o", color=c, ms=2 + 4 * frac[k])
-    ax_xy.plot(0, 0, "k*", ms=14, zorder=5, label="ego t=0")
-    ax_xy.set_title(f"{K} trajectory-mode prototypes (ego frame; width ~ #members)")
-    ax_xy.set_xlabel("x forward [m]")
-    ax_xy.set_ylabel("y left [m]")
-    ax_xy.set_aspect("equal", adjustable="box")
-    ax_xy.grid(True, alpha=0.3)
-    ax_xy.legend(loc="upper left")
-    fig.colorbar(
-        ScalarMappable(norm=norm, cmap=cmap),
-        ax=ax_xy,
-        fraction=0.046,
-        pad=0.04,
-        label="endpoint y (left +) [m]",
-    )
-
-    ax_end.scatter(end_x, end_y, c=end_y, cmap=cmap, norm=norm, s=20 + 180 * frac)
     for k in range(K):
-        ax_end.annotate(str(int(counts[k])), (end_x[k], end_y[k]), fontsize=6, alpha=0.6)
-    ax_end.plot(0, 0, "k*", ms=14)
-    ax_end.set_title("prototype endpoints (label = #members)")
-    ax_end.set_xlabel("endpoint x forward [m]  (~ speed over horizon)")
-    ax_end.set_ylabel("endpoint y left [m]")
-    ax_end.set_aspect("equal", adjustable="box")
-    ax_end.grid(True, alpha=0.3)
+        ax_end.text((end_x[k], end_y[k]), str(int(counts[k])), 6, "#00000099")
+    ax_end.markers(np.zeros(2), "*", size=14, color="#000000")
+    ax_end.title("prototype endpoints (label = #members)")
+    ax_end.xlabel("endpoint x forward [m]  (~ speed over horizon)")
+    ax_end.ylabel("endpoint y left [m]")
+    ax_end.grid(0.3)
 
-    fig.suptitle(f"KMeans prototypes: K={K}, T={T}, N={int(counts.sum())}", fontsize=13)
-    fig.tight_layout()
-    fig.savefig(output_png, dpi=120)
-    plt.close(fig)
+    fig.suptitle(f"KMeans prototypes: K={K}, T={T}, N={int(counts.sum())}", 13)
+    fig.save(output_png)
 
 
 def get_args():

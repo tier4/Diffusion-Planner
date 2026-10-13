@@ -24,16 +24,10 @@ import json
 import math
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Rectangle
 
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.lora_utils import load_lora_checkpoint
@@ -45,12 +39,13 @@ from rlvr.grpo_trainer_batched import (
     generate_all_scenes_batched,
     get_generation_config_labels_for_variant,
 )
-from rlvr.reward import RewardConfig, compute_centerline_score_batch, compute_reward_batch
+from rlvr.reward import compute_centerline_score_batch, compute_reward_batch
+from scenario_generation.canvas import Figure, Panel, oriented_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def draw_scene_base(ax, npz_path, draw_stopped_neighbors=True):
+def draw_scene_base(ax: Panel, npz_path, draw_stopped_neighbors=True):
     """Lane centerlines (grey dashed) + lane boundaries (blue) + road borders (black)
     + route_lanes centerline (bold orange — the scene's planned path, what CL reward scores against)."""
     npz = np.load(npz_path, allow_pickle=True)
@@ -62,13 +57,8 @@ def draw_scene_base(ax, npz_path, draw_stopped_neighbors=True):
         pts = lane[:, :2]
         if lane.shape[1] > 7:
             lb, rb = lane[:, 4:6], lane[:, 6:8]
-            ax.plot(
-                pts[:, 0] + lb[:, 0], pts[:, 1] + lb[:, 1], "-", color="#6a9ec9", lw=0.6, alpha=0.6
-            )
-            ax.plot(
-                pts[:, 0] + rb[:, 0], pts[:, 1] + rb[:, 1], "-", color="#6a9ec9", lw=0.6, alpha=0.6
-            )
-        ax.plot(pts[:, 0], pts[:, 1], "--", color="grey", lw=0.4, alpha=0.5)
+            ax.lines([pts + lb, pts + rb], "#6a9ec9", width=0.6, alpha=0.6)
+        ax.lines([pts], "#808080", width=0.4, alpha=0.5, dash="dash")
 
     # Route_lanes: the scene's planned path — this is what `compute_centerline_score_batch` scores against
     if "route_lanes" in npz.files:
@@ -80,15 +70,13 @@ def draw_scene_base(ax, npz_path, draw_stopped_neighbors=True):
             pts = lane[:, :2]
             valid = np.linalg.norm(pts, axis=-1) > 1e-3
             if valid.sum() >= 2:
-                ax.plot(
-                    pts[valid, 0],
-                    pts[valid, 1],
-                    "-",
-                    color="#ff7f0e",
-                    lw=2.0,
+                ax.lines(
+                    [pts[valid]],
+                    "#ff7f0e",
+                    width=2.0,
                     alpha=0.85,
+                    z=8,
                     label="ROUTE centerline" if i == 0 else None,
-                    zorder=8,
                 )
 
     if "line_strings" in npz.files:
@@ -101,7 +89,7 @@ def draw_scene_base(ax, npz_path, draw_stopped_neighbors=True):
             ch3 = ch[:, 3]
             mask = ch3 > 0.5
             if mask.sum() >= 2:
-                ax.plot(pts[mask, 0], pts[mask, 1], "-", color="black", lw=1.1, alpha=0.9)
+                ax.lines([pts[mask]], "#000000", width=1.1, alpha=0.9)
 
     if (
         draw_stopped_neighbors
@@ -135,35 +123,21 @@ def draw_scene_base(ax, npz_path, draw_stopped_neighbors=True):
             length = float(nb_past[i, -1, 7])
             if width < 0.1 or length < 0.1:
                 continue
-            t_rot = mtransforms.Affine2D().rotate(heading).translate(xy0[0], xy0[1]) + ax.transData
-            ax.add_patch(
-                Rectangle(
-                    (-length / 2, -width / 2),
-                    length,
-                    width,
-                    lw=1.2,
-                    ec="#cc6600",
-                    fc="#ffb366",
-                    alpha=0.75,
-                    zorder=14,
-                    transform=t_rot,
-                )
+            ax.polygons(
+                [oriented_box(xy0[0], xy0[1], heading, length, width, length / 2)],
+                fill="#ffb366",
+                edge="#cc6600",
+                width=1.2,
+                alpha=0.75,
+                z=14,
             )
 
 
-def draw_traj(ax, traj, label, color, npz_path, with_footprints=True):
+def draw_traj(ax: Panel, traj, label, color, npz_path, with_footprints=True):
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
-    ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2, alpha=0.75, zorder=11)
-    ax.plot(
-        traj[::5, 0],
-        traj[::5, 1],
-        "o",
-        color=color,
-        ms=3,
-        alpha=0.9,
-        mew=0,
-        zorder=12,
-        label=f"{label} ({pl:.1f}m)",
+    ax.lines([traj[:, :2]], color, width=2, alpha=0.75, z=11)
+    ax.markers(
+        traj[::5, :2], "o", size=3, color=color, alpha=0.9, z=12, label=f"{label} ({pl:.1f}m)"
     )
     if not with_footprints:
         return
@@ -184,37 +158,29 @@ def draw_traj(ax, traj, label, color, npz_path, with_footprints=True):
         if hn <= 0.01:
             continue
         heading = np.arctan2(sin_h / hn, cos_h / hn)
-        t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
         alpha = 0.35 if ts == len(traj) - 1 else 0.15
         lw = 1.2 if ts == len(traj) - 1 else 0.5
-        ax.add_patch(
-            Rectangle(
-                (-ro, -width / 2),
-                length,
-                width,
-                lw=lw,
-                ec=color,
-                fc=color,
-                alpha=alpha,
-                zorder=11,
-                transform=t_rot,
-            )
+        ax.polygons(
+            [oriented_box(cx, cy, heading, length, width, ro)],
+            fill=color,
+            edge=color,
+            width=lw,
+            alpha=alpha,
+            z=11,
         )
 
 
-def draw_gt(ax, npz_path):
+def draw_gt(ax: Panel, npz_path):
     npz = np.load(npz_path, allow_pickle=True)
     gt = npz["ego_agent_future"][:, :2]
     valid = np.abs(gt).sum(axis=-1) > 0.01
     if valid.sum() < 2:
         return
     gt_v = gt[valid]
-    ax.plot(
-        gt_v[:, 0],
-        gt_v[:, 1],
-        "-",
-        color="black",
-        lw=1.5,
+    ax.lines(
+        [gt_v],
+        "#000000",
+        width=1.5,
         alpha=0.5,
         label=f"GT ({np.linalg.norm(np.diff(gt_v, axis=0), axis=1).sum():.1f}m)",
     )
@@ -280,14 +246,8 @@ def main():
 
     n = len(args.indices)
     rows = (n + args.cols - 1) // args.cols
-    fig, axes = plt.subplots(rows, args.cols, figsize=(9 * args.cols, 9 * rows))
-    if rows == 1 and args.cols == 1:
-        axes = np.array([[axes]])
-    elif rows == 1:
-        axes = axes[None, :]
-    elif args.cols == 1:
-        axes = axes[:, None]
-    axes_flat = axes.flatten()
+    fig = Figure((9 * args.cols, 9 * rows), dpi=110)
+    axes_flat = [p for row in fig.grid(rows, args.cols, equal=True) for p in row]
 
     for plot_idx, si in enumerate(args.indices):
         if plot_idx >= len(axes_flat):
@@ -428,20 +388,18 @@ def main():
         half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 6
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        ax.legend(fontsize=7, loc="upper left")
+        ax.legend("upper left")
         delta = best_cl_e["cl"] - t0_cl
-        ax.set_title(
+        ax.title(
             f"[{si}] t0_cl={t0_cl:+.2f}  top1_cl={top1['cl']:+.2f}  best_cl={best_cl_e['cl']:+.2f}  Δ_best={delta:+.2f}",
-            fontsize=9,
+            9,
         )
 
     for j in range(len(args.indices), len(axes_flat)):
-        axes_flat[j].axis("off")
+        axes_flat[j].hide()
 
-    fig.tight_layout()
     out = Path(args.output_dir) / "cl_recovery.png"
-    fig.savefig(out, dpi=110, bbox_inches="tight")
+    fig.save(out)
     print(f"Saved: {out}")
 
 

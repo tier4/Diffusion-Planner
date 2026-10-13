@@ -35,8 +35,6 @@ import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
 
 from planner_metrics.vehicle_collision import obb_corners
 from preference_optimization.lora_utils import load_lora_checkpoint
@@ -52,6 +50,7 @@ from rlvr.autoresearch.tools.recovery_test import (
     get_tangent_at_origin,
     transform_to_new_ego_frame,
 )
+from scenario_generation.canvas import Figure
 from scenario_generation.visualize import draw_agent_box as _viz_draw_agent_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -390,41 +389,21 @@ def _render_step(
     """Render and save one step's overview PNG."""
     ex, ey, eh = float(ego_pose[0]), float(ego_pose[1]), float(ego_pose[2])
 
-    fig = Figure(figsize=(10, 10))
-    ax = fig.add_subplot(1, 1, 1)
-    fig.patch.set_facecolor("#f8f8f8")
+    fig = Figure((10, 10), 100, facecolor="#f8f8f8")
+    ax = fig.panel(
+        (0.09, 0.06, 0.89, 0.84),
+        xlim=(ex - view_half_m, ex + view_half_m),
+        ylim=(ey - view_half_m, ey + view_half_m),
+        equal=True,
+    )
 
     # 1) Lane network (centerline + left/right markings, gray)
     if centerlines:
-        ax.add_collection(
-            LineCollection(
-                centerlines,
-                colors=_LANE_COLOR,
-                linewidths=0.6,
-                alpha=0.7 * 0.4,
-                zorder=1,
-            )
-        )
+        ax.lines(centerlines, _LANE_COLOR, width=0.6, alpha=0.7 * 0.4, z=1)
     if lefts:
-        ax.add_collection(
-            LineCollection(
-                lefts,
-                colors=_LANE_BORDER_COLOR,
-                linewidths=1.1,
-                alpha=0.7,
-                zorder=2,
-            )
-        )
+        ax.lines(lefts, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
     if rights:
-        ax.add_collection(
-            LineCollection(
-                rights,
-                colors=_LANE_BORDER_COLOR,
-                linewidths=1.1,
-                alpha=0.7,
-                zorder=2,
-            )
-        )
+        ax.lines(rights, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
 
     # 1b) Road borders (red) — AABB-filtered to the viewport
     half = view_half_m * 1.5
@@ -441,20 +420,12 @@ def _render_step(
         if in_view.any():
             filtered_borders.append(pl)
     if filtered_borders:
-        ax.add_collection(
-            LineCollection(
-                filtered_borders,
-                colors=_ROAD_BORDER_COLOR,
-                linewidths=2.0,
-                alpha=0.9,
-                zorder=5,
-            )
-        )
+        ax.lines(filtered_borders, _ROAD_BORDER_COLOR, width=2.0, alpha=0.9, z=5)
 
     # 2) Route polylines (blue)
     for pl in route_polylines:
         if pl.shape[0] >= 2:
-            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR, lw=2.5, alpha=0.6, zorder=3)
+            ax.lines([pl[:, :2]], _ROUTE_COLOR, width=2.5, alpha=0.6, z=3)
 
     # 3) Ego footprint + heading arrow
     _draw_agent_box(
@@ -471,29 +442,19 @@ def _render_step(
         wheelbase=ego_wheelbase,
     )
     arrow_len = max(ego_length, 2.5)
-    ax.annotate(
-        "",
-        xy=(ex + arrow_len * math.cos(eh), ey + arrow_len * math.sin(eh)),
-        xytext=(ex, ey),
-        arrowprops=dict(arrowstyle="-|>", color=_EGO_COLOR, lw=1.5, mutation_scale=12),
-        zorder=21,
+    ax.arrows(
+        np.array([ex, ey]),
+        np.array([ex + arrow_len * math.cos(eh), ey + arrow_len * math.sin(eh)]),
+        _EGO_COLOR,
+        width=1.5,
+        head=12,
+        z=21,
     )
 
     # 4) Predicted plan ahead
     if plan_world is not None and plan_world.shape[0] > 1:
-        ax.plot(
-            plan_world[:, 0], plan_world[:, 1], "-", color=_PRED_COLOR, lw=1.8, alpha=0.6, zorder=25
-        )
-        ax.plot(
-            plan_world[::3, 0],
-            plan_world[::3, 1],
-            "o",
-            color=_PRED_COLOR,
-            ms=2.5,
-            alpha=0.8,
-            mew=0,
-            zorder=26,
-        )
+        ax.lines([plan_world[:, :2]], _PRED_COLOR, width=1.8, alpha=0.6, z=25)
+        ax.markers(plan_world[::3, :2], "o", size=2.5, color=_PRED_COLOR, alpha=0.8, z=26)
         # End-of-plan footprint (faint)
         _draw_agent_box(
             ax,
@@ -516,33 +477,33 @@ def _render_step(
         d_corner = np.hypot(corners[:, 0] - border_pt[0], corners[:, 1] - border_pt[1])
         start = corners[int(d_corner.argmin())]
         body_d = float(np.hypot(start[0] - border_pt[0], start[1] - border_pt[1]))
-        ax.plot(
-            [start[0], border_pt[0]],
-            [start[1], border_pt[1]],
-            "k--",
-            linewidth=1.3,
+        ax.lines(
+            [np.array([start[:2], border_pt[:2]])],
+            "#000000",
+            width=1.3,
             alpha=0.7,
-            zorder=29,
+            dash="dash",
+            z=29,
         )
-        ax.plot(
-            border_pt[0],
-            border_pt[1],
-            "ko",
-            markersize=6,
-            zorder=30,
-            markeredgecolor="white",
-            markeredgewidth=0.8,
+        ax.markers(
+            np.asarray(border_pt[:2]),
+            "o",
+            size=6,
+            color="#000000",
+            edge="#ffffff",
+            edge_width=0.8,
+            z=30,
         )
         mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
-        ax.annotate(
+        ax.text(
+            (mx, my),
             f"{body_d:.2f} m",
-            xy=(mx, my),
-            fontsize=8,
-            color="black",
+            8,
+            "#000000",
             ha="center",
             va="center",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="black", alpha=0.7),
-            zorder=31,
+            box={"face": "#ffffff", "edge": "#000000", "alpha": 0.7, "pad": 0.2},
+            z=31,
         )
 
     # 6) Lateral offset to centerline
@@ -553,12 +514,9 @@ def _render_step(
     )
 
     # 7) Viewport
-    ax.set_xlim(ex - view_half_m, ex + view_half_m)
-    ax.set_ylim(ey - view_half_m, ey + view_half_m)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m, initial ego frame)")
-    ax.set_ylabel("Y (m, initial ego frame)")
+    ax.grid(0.15)
+    ax.xlabel("X (m, initial ego frame)")
+    ax.ylabel("Y (m, initial ego frame)")
 
     title = (
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  "
@@ -569,10 +527,8 @@ def _render_step(
     )
     if title_prefix:
         title = f"{title_prefix}\n{title}"
-    ax.set_title(title, fontsize=10)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=100)
-    fig.clf()
+    ax.title(title, 10)
+    fig.save(output_path)
 
 
 # ---------------------------------------------------------------------------

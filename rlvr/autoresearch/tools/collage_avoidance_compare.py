@@ -22,18 +22,15 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.image as mpimg
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from PIL import Image
 
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_collision_guidance import _score_traj
 from rlvr.autoresearch.tools.viz_prism_compare import _det_predict, _load_model
+from scenario_generation.canvas import Figure
 
 
 @torch.no_grad()
@@ -59,9 +56,9 @@ def main():
     with open(args.scenes) as f:
         scene_paths = json.load(f)
 
-    print(f"Loading baseline model...")
+    print("Loading baseline model...")
     m_base, args_base = _load_model(args.baseline_model, None, device)
-    print(f"Loading trained model...")
+    print("Loading trained model...")
     m_train, args_train = _load_model(args.trained_model, None, device)
 
     results = []
@@ -124,17 +121,27 @@ def main():
     )
 
     rows = (len(selected) + args.cols - 1) // args.cols
-    fig, axes = plt.subplots(rows, args.cols, figsize=(7 * args.cols, 7 * rows))
-    axes_flat = np.atleast_1d(axes).ravel()
+    fig = Figure((7 * args.cols, 7 * rows + 1.2), 150)
+    axes_flat = [
+        ax
+        for row in fig.grid(
+            rows,
+            args.cols,
+            margins=(0.01, 0.99, 0.01, 1.0 - 1.2 / (7 * rows + 1.2)),
+            wspace=0.05,
+            hspace=0.12,
+        )
+        for ax in row
+    ]
 
     for ax in axes_flat:
-        ax.axis("off")
+        ax.axis_off()
 
     for k, r in enumerate(selected):
         ax = axes_flat[k]
-        img = mpimg.imread(r["png"])
-        ax.imshow(img)
-        ax.axis("off")
+        img = np.asarray(Image.open(r["png"]).convert("RGB"))
+        ax.image(img)
+        ax.axis_off()
 
         base_d = r["base_sc_min"]
         train_d = r["train_sc_min"]
@@ -154,17 +161,15 @@ def main():
             f"trained: {train_d:+.2f}m ({r['train_zone']})  "
             f"Δ={delta:+.2f}m{tag}"
         )
-        ax.set_title(title, fontsize=10, fontweight="bold" if tag else "normal")
+        ax.title(title, 10, weight="bold" if tag else "normal")
 
     fig.suptitle(
         f"Static Obstacle Avoidance: Baseline vs Trained Model\n"
         f"{n_fixed} collisions fixed, {n_margin} margins improved",
-        fontsize=14,
-        fontweight="bold",
-        y=1.01,
+        14,
+        weight="bold",
     )
-    fig.tight_layout()
-    fig.savefig(args.output, dpi=150, bbox_inches="tight", pad_inches=0.3)
+    fig.save(args.output)
     print(f"\nCollage saved to {args.output}")
 
     summary_path = Path(args.output).with_suffix(".json")

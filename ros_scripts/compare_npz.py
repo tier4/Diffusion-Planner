@@ -2,12 +2,14 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
+
 # カラーパレットを定義
-colors = plt.cm.tab10.colors  # 10色のカラーパレット
+colors = [qualitative("tab10", i) for i in range(10)]  # 10色のカラーパレット
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
@@ -43,7 +45,8 @@ for f1, f2 in zip(npz_list1, npz_list2):
     save_dir = f2.parent.parent / "compare"
     save_dir.mkdir(exist_ok=True, parents=True)
     itr += 1
-    plt.figure(figsize=(12, 9))  # デフォルト(8, 6)から(8, 12)に変更
+    fig = Figure((12, 9), dpi=100)  # デフォルト(8, 6)から(8, 12)に変更
+    ax_py, ax_cpp = (row[0] for row in fig.grid(2, 1, margins=(0.06, 0.7, 0.05, 0.95)))
 
     for key in npz1.keys():
         if key == "map_name" or key == "token":
@@ -110,38 +113,20 @@ for f1, f2 in zip(npz_list1, npz_list2):
             marker = "o" if "past" in key else "x"
 
             # 上下に分けてプロット
-            plt.subplot(2, 1, 1)  # 上側: Python
-            plt.plot(
-                nonzero1[:, 0],
-                nonzero1[:, 1],
-                marker=marker,
-                color=color,
-                label=f"py_{key}_{i}",
-            )
             RANGE = 50
-            plt.xlim(-RANGE, RANGE)
-            plt.ylim(-RANGE, RANGE)
-            plt.legend(loc="upper left", bbox_to_anchor=(1, 1), ncol=2)
-            plt.title("Python")
+            for ax, nonzero, name, title in (
+                (ax_py, nonzero1, "py", "Python"),  # 上側: Python
+                (ax_cpp, nonzero2, "cpp", "C++"),  # 下側: C++
+            ):
+                ax.lines([nonzero[:, :2]], color, label=f"{name}_{key}_{i}")
+                ax.markers(nonzero[:, :2], marker, size=6, color=color)
+                ax.set_xlim(-RANGE, RANGE)
+                ax.set_ylim(-RANGE, RANGE)
+                ax.legend("upper right")
+                ax.title(title)
 
-            plt.subplot(2, 1, 2)  # 下側: C++
-            plt.plot(
-                nonzero2[:, 0],
-                nonzero2[:, 1],
-                marker=marker,
-                color=color,
-                label=f"cpp_{key}_{i}",
-            )
-            plt.xlim(-RANGE, RANGE)
-            plt.ylim(-RANGE, RANGE)
-            plt.legend(loc="upper left", bbox_to_anchor=(1, 1), ncol=2)
-            plt.title("C++")
-
-    # 全体的なレイアウト調整
-    plt.tight_layout()
-    plt.savefig(save_dir / f"{itr:08d}.png", bbox_inches="tight")
+    fig.save(save_dir / f"{itr:08d}.png")
     print(save_dir / f"{itr:08d}.png")
-    plt.clf()
 
 all_ok = True
 for key, val in result_map.items():

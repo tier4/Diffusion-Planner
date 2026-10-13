@@ -192,63 +192,44 @@ def sweep_scene(model, model_args, npz_path, combos, zero_idx, rcfg, args, devic
 
 def render_audit(result, combos, zero_idx, out_png):
     """Trajectory-fan render: all combos colored by eta_col, det in black."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     from rlvr.autoresearch.tools.ghost_sim_common import extract_stopped_neighbors
     from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base
+    from scenario_generation.canvas import scene_panel
+    from scenario_generation.colormaps import map_values
     from scenario_generation.visualize import draw_agent_box
 
     trajs = result["_trajs"]
-    fig, ax = plt.subplots(figsize=(11, 11))
+    span = float(np.abs(trajs[..., :2]).max()) + 10
+    ax = scene_panel((-10, max(span, 40)), (-span / 2, span / 2), size_in=(11, 11), dpi=110)
     draw_scene_base(ax, result["scene_path"])
     for x, y, h, length, w in extract_stopped_neighbors(result["scene_path"]):
-        draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
+        draw_agent_box(ax, x, y, h, length, w, color="#dc143c", alpha=0.5)
 
-    cmap = plt.get_cmap("coolwarm")
     for i, (el, ec, st) in enumerate(combos):
         if i == zero_idx:
             continue
-        color = cmap(0.5 * (ec + 1.0))
+        color = map_values(np.array(0.5 * (ec + 1.0)), "coolwarm", 0.0, 1.0)
         crossed = result["combos"][i]["static_crossing"]
-        ax.plot(
-            trajs[i, :, 0], trajs[i, :, 1], "-", color=color, lw=0.9, alpha=0.35 if crossed else 0.8
-        )
-    ax.plot(
-        trajs[zero_idx, :, 0],
-        trajs[zero_idx, :, 1],
-        "-",
-        color="black",
-        lw=2.2,
-        label="det (no guidance)",
-    )
+        ax.lines([trajs[i, :, :2]], color, width=0.9, alpha=0.35 if crossed else 0.8)
+    ax.lines([trajs[zero_idx, :, :2]], "#000000", width=2.2, label="det (no guidance)")
     if result["best"] is not None:
         b = result["best"]
         bi = result["combos"].index(b)
-        ax.plot(
-            trajs[bi, :, 0],
-            trajs[bi, :, 1],
-            "-",
-            color="lime",
-            lw=2.2,
+        ax.lines(
+            [trajs[bi, :, :2]],
+            "#00ff00",
+            width=2.2,
             label=(
                 f"best lat={b['eta_lat']:+.2f} col={b['eta_col']:+.2f} "
                 f"st={b['stretch']:.2f} sc={b['sc_min_dist']:+.2f}m"
             ),
         )
-    ax.set_title(
+    ax.title(
         f"{result['scene']}  [{result['status']}]  "
         f"det sc={result['det']['sc_min_dist']:+.2f}m  stopped={result['sc_n_stopped']}"
     )
-    ax.legend(loc="upper right", fontsize=8)
-    ax.set_aspect("equal")
-    span = np.abs(trajs[..., :2]).max() + 10
-    ax.set_xlim(-10, max(span, 40))
-    ax.set_ylim(-span / 2, span / 2)
-    fig.savefig(out_png, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    ax.legend("upper right")
+    ax.save(out_png)
 
 
 def main():

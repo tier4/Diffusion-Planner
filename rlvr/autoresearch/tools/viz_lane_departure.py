@@ -21,15 +21,8 @@ import argparse
 import json
 import os
 
-import matplotlib
 import numpy as np
 import torch
-
-matplotlib.use("Agg")
-import matplotlib.cm as cmx
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-from matplotlib.patches import Polygon as MplPolygon
 
 from preference_optimization.utils import load_npz_data
 from rlvr.reward import (
@@ -40,6 +33,7 @@ from rlvr.reward import (
     _point_in_polygons,
     _point_to_segments_dist,
 )
+from scenario_generation.canvas import Figure
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -402,24 +396,18 @@ def _draw_common(ax, r, zoom=None):
         if lanes_raw.dim() == 4:
             lanes_raw = lanes_raw[0]
         lanes_raw = lanes_raw.cpu().numpy()
+        lane_fills, lane_edges = [], []
         for s in range(lanes_raw.shape[0]):
             c = lanes_raw[s, :, :2]
             v = np.linalg.norm(c, axis=-1) > 1e-3
             if v.sum() < 2:
                 continue
-            lx = lanes_raw[s, v, 0] + lanes_raw[s, v, 4]
-            ly = lanes_raw[s, v, 1] + lanes_raw[s, v, 5]
-            rx = lanes_raw[s, v, 0] + lanes_raw[s, v, 6]
-            ry = lanes_raw[s, v, 1] + lanes_raw[s, v, 7]
-            ax.fill(
-                np.concatenate([lx, rx[::-1]]),
-                np.concatenate([ly, ry[::-1]]),
-                color="lightgreen",
-                alpha=0.15,
-                zorder=1,
-            )
-            ax.plot(lx, ly, "b-", linewidth=0.4, alpha=0.25, zorder=4)
-            ax.plot(rx, ry, "b-", linewidth=0.4, alpha=0.25, zorder=4)
+            left = lanes_raw[s, v, 0:2] + lanes_raw[s, v, 4:6]
+            right = lanes_raw[s, v, 0:2] + lanes_raw[s, v, 6:8]
+            lane_fills.append(np.concatenate([left, right[::-1]]))
+            lane_edges += [left, right]
+        ax.polygons(lane_fills, fill="#90ee90", alpha=0.15, z=1)
+        ax.lines(lane_edges, "#0000ff", width=0.4, alpha=0.25, z=4)
 
     # Road borders from line_strings
     if "line_strings" in data:
@@ -434,19 +422,17 @@ def _draw_common(ax, r, zoom=None):
             else:
                 v = np.abs(pts[:, :2]).sum(axis=-1) > 0.01
             if v.sum() > 1:
-                ax.plot(pts[v, 0], pts[v, 1], "r-", linewidth=3, alpha=0.8, zorder=6)
+                ax.lines([pts[v, :2]], "#ff0000", width=3, alpha=0.8, z=6)
 
     # GT trajectory
-    ax.plot(r["gt_raw"][:, 0], r["gt_raw"][:, 1], "g--", linewidth=2.5, zorder=7)
+    ax.lines([r["gt_raw"][:, :2]], "#008000", width=2.5, dash="dash", z=7)
 
     # Ego box
     corners = _ego_box_corners(r)
-    ax.add_patch(
-        MplPolygon(corners, closed=True, fill=False, edgecolor="darkred", linewidth=2.5, zorder=8)
-    )
+    ax.polygons([corners], edge="#8b0000", width=2.5, z=8)
 
     # Axes
-    ax.set_aspect("equal")
+    ax.equal = True
     cx, cy = r["cx"], r["cy"]
     if zoom is not None:
         ax.set_xlim(cx - zoom, cx + zoom)
@@ -458,35 +444,39 @@ def _draw_common(ax, r, zoom=None):
         span = max(gt_x.max() - gt_x.min(), gt_y.max() - gt_y.min()) / 2 + 8
         ax.set_xlim(xc - span, xc + span)
         ax.set_ylim(yc - span, yc + span)
-    ax.grid(True, alpha=0.2)
+    ax.grid(0.2)
 
 
 def _draw_perimeter_points(ax, r, cmap, norm_v, mark_outside_lane=False, point_size=20):
     """Draw ego perimeter points colored by distance."""
     config = r.get("config") or RewardConfig(enable_overprogress=True)
-    for p in range(len(r["pt_dists"])):
-        col = cmap(norm_v(r["pt_dists"][p]))
-        sz = point_size
-        mk = "o"
-        if mark_outside_lane and not r["pt_in_any"][p]:
-            col = "red"
-            mk = "X"
-            sz = point_size * 2
-        elif not mark_outside_lane:
-            if r["pt_dists"][p] < config.rb_cross_thresh:
-                col = "red"
-                mk = "X"
-                sz = point_size * 2
-        ax.scatter(
-            r["world_pts"][p, 0],
-            r["world_pts"][p, 1],
-            c=[col],
-            s=sz,
-            marker=mk,
-            zorder=9,
-            edgecolors="black",
-            linewidths=0.3,
-        )
+    dists = np.asarray(r["pt_dists"], dtype=np.float64)
+    if mark_outside_lane:
+        flagged = ~np.asarray(r["pt_in_any"], dtype=bool)
+    else:
+        flagged = dists < config.rb_cross_thresh
+    pts = np.asarray(r["world_pts"])[:, :2]
+    ax.markers(
+        pts[~flagged],
+        "o",
+        size=np.sqrt(point_size),
+        values=dists[~flagged],
+        cmap=cmap,
+        vmin=norm_v[0],
+        vmax=norm_v[1],
+        edge="#000000",
+        edge_width=0.3,
+        z=9,
+    )
+    ax.markers(
+        pts[flagged],
+        "X",
+        size=np.sqrt(point_size * 2),
+        color="#ff0000",
+        edge="#000000",
+        edge_width=0.3,
+        z=9,
+    )
 
 
 def _draw_distance_line(ax, r, marker_size=12, line_width=2):
@@ -494,69 +484,94 @@ def _draw_distance_line(ax, r, marker_size=12, line_width=2):
     wp = r["wp"]
     cbp = r["closest_boundary_pt"]
     min_dist = r["pt_dists"][r["worst"]]
-    ax.plot(wp[0], wp[1], "kX", markersize=marker_size, markeredgewidth=2, zorder=10)
-    ax.plot([wp[0], cbp[0]], [wp[1], cbp[1]], "k-", linewidth=line_width, zorder=10)
-    ax.plot(cbp[0], cbp[1], "ko", markersize=max(4, marker_size // 2), zorder=10)
+    ax.markers(
+        np.array([wp[:2]]),
+        "X",
+        size=marker_size,
+        color="#000000",
+        edge="#000000",
+        edge_width=2,
+        z=10,
+    )
+    ax.lines([np.array([wp[:2], cbp[:2]])], "#000000", width=line_width, z=10)
+    ax.markers(np.array([cbp[:2]]), "o", size=max(4, marker_size // 2), color="#000000", z=10)
     return min_dist
+
+
+def _annotate(ax, text, xy, xytext, size):
+    """A yellow-boxed note at ``xytext`` with an arrow to ``xy``, in data coordinates."""
+    ax.arrows(np.array([xytext]), np.array([xy]), "#000000", width=2, z=11)
+    ax.text(
+        xytext,
+        text,
+        size=size,
+        va="bottom",
+        box={"face": "#ffff00", "alpha": 0.9, "pad": 0.3},
+        z=11,
+        weight="bold",
+    )
+
+
+def _legend_entries(ax, entries):
+    """Legend-only rows: ``("patch", color, label)`` or ``("line", color, width, dash, label)``."""
+    for entry in entries:
+        if entry[0] == "patch":
+            ax.polygons([], fill=entry[1], label=entry[2])
+        else:
+            ax.lines([], entry[1], width=entry[2], dash=entry[3], label=entry[4])
 
 
 def draw_scene_lane(result, output_path, zoom=None):
     """Draw lane departure visualization."""
     r = result
-    fig, ax = plt.subplots(1, 1, figsize=(16, 14))
+    fig = Figure((16, 14), dpi=150)
+    ax = fig.panel()
     _draw_common(ax, r, zoom)
 
     # Outer boundary segments
-    for i in range(r["outer_p1"].shape[0]):
-        ax.plot(
-            [r["outer_p1"][i, 0], r["outer_p2"][i, 0]],
-            [r["outer_p1"][i, 1], r["outer_p2"][i, 1]],
-            "r-",
-            linewidth=1.0,
-            alpha=0.4,
-            zorder=5,
-        )
+    ax.lines(
+        list(np.stack([r["outer_p1"][:, :2], r["outer_p2"][:, :2]], 1)),
+        "#ff0000",
+        width=1.0,
+        alpha=0.4,
+        z=5,
+    )
 
-    cmap_c = cmx.RdYlGn
-    norm_v = plt.Normalize(vmin=0, vmax=2.0)
+    cmap_c = "RdYlGn"
+    norm_v = (0.0, 2.0)
     _draw_perimeter_points(ax, r, cmap_c, norm_v, mark_outside_lane=True)
     min_dist = _draw_distance_line(ax, r)
 
-    ax.annotate(
+    _annotate(
+        ax,
         f"Dist to road edge: {min_dist:.3f}m\n"
         f"All in lane: {r['pt_in_any'].all()}\n"
         f"Outer segs: {r['n_outer']}/{r['n_total_segs']}",
-        xy=(r["wp"][0], r["wp"][1]),
-        xytext=(r["wp"][0] + 0.5, r["wp"][1] + 2),
-        fontsize=12,
-        fontweight="bold",
-        arrowprops=dict(arrowstyle="->", lw=2),
-        bbox=dict(facecolor="yellow", alpha=0.9),
-        zorder=11,
+        (r["wp"][0], r["wp"][1]),
+        (r["wp"][0] + 0.5, r["wp"][1] + 2),
+        12,
     )
 
-    sm = plt.cm.ScalarMappable(cmap=cmap_c, norm=norm_v)
-    plt.colorbar(sm, ax=ax, shrink=0.4, label="Distance to road edge (m)")
+    ax.colorbar(cmap_c, *norm_v, label="Distance to road edge (m)")
 
-    ax.legend(
-        handles=[
-            Patch(facecolor="lightgreen", alpha=0.3, label="Lane polygon"),
-            plt.Line2D([0], [0], color="r", linewidth=1.5, alpha=0.6, label="Outer boundary seg"),
-            plt.Line2D([0], [0], color="r", linewidth=3, label="Road border"),
-            plt.Line2D([0], [0], color="g", ls="--", linewidth=2.5, label="GT trajectory"),
+    _legend_entries(
+        ax,
+        [
+            ("patch", "#90ee90", "Lane polygon"),
+            ("line", "#ff0000", 1.5, None, "Outer boundary seg"),
+            ("line", "#ff0000", 3, None, "Road border"),
+            ("line", "#008000", 2.5, "dash", "GT trajectory"),
         ],
-        fontsize=10,
-        loc="upper left",
     )
+    ax.legend("upper left")
 
     scene_name = os.path.basename(r["scene_path"]).replace(".npz", "")
-    ax.set_title(
+    ax.title(
         f"{scene_name} — step {r['step']}, {r['total_yaw']:.0f} deg curve\n"
         f"Lane departure | Outer segs: {r['n_outer']}/{r['n_total_segs']}",
-        fontsize=13,
+        size=13,
     )
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(output_path)
 
 
 def _rb_zone(min_dist, config):
@@ -576,19 +591,16 @@ def _draw_rb_panel(ax, r, zoom=None, is_zoomed=False):
     _draw_common(ax, r, zoom)
 
     # Border segments (thin orange)
-    for i in range(r["seg_p1"].shape[0]):
-        ax.plot(
-            [r["seg_p1"][i, 0], r["seg_p2"][i, 0]],
-            [r["seg_p1"][i, 1], r["seg_p2"][i, 1]],
-            "-",
-            color="orange",
-            linewidth=0.8 if not is_zoomed else 1.5,
-            alpha=0.3 if not is_zoomed else 0.5,
-            zorder=5,
-        )
+    ax.lines(
+        list(np.stack([r["seg_p1"][:, :2], r["seg_p2"][:, :2]], 1)),
+        "#ffa500",
+        width=0.8 if not is_zoomed else 1.5,
+        alpha=0.3 if not is_zoomed else 0.5,
+        z=5,
+    )
 
-    cmap_c = cmx.RdYlGn
-    norm_v = plt.Normalize(vmin=0, vmax=2.0)
+    cmap_c = "RdYlGn"
+    norm_v = (0.0, 2.0)
     pt_sz = 20 if not is_zoomed else 60
     _draw_perimeter_points(ax, r, cmap_c, norm_v, mark_outside_lane=False, point_size=pt_sz)
     mk_sz = 12 if not is_zoomed else 18
@@ -599,29 +611,23 @@ def _draw_rb_panel(ax, r, zoom=None, is_zoomed=False):
 
     # Annotation — position differently for zoomed view
     if is_zoomed:
-        ax.annotate(
+        _annotate(
+            ax,
             f"Dist: {min_dist:.3f}m | {zone}\n"
             f"cross<{config.rb_cross_thresh}m  near<{config.rb_near_thresh}m  wide<{config.rb_wide_thresh}m",
-            xy=(r["wp"][0], r["wp"][1]),
-            xytext=(r["wp"][0] + 0.3, r["wp"][1] + 1.0),
-            fontsize=12,
-            fontweight="bold",
-            arrowprops=dict(arrowstyle="->", lw=2),
-            bbox=dict(facecolor="yellow", alpha=0.9),
-            zorder=11,
+            (r["wp"][0], r["wp"][1]),
+            (r["wp"][0] + 0.3, r["wp"][1] + 1.0),
+            12,
         )
     else:
-        ax.annotate(
+        _annotate(
+            ax,
             f"Min dist: {min_dist:.3f}m | Zone: {zone}\n"
             f"Thresholds: cross<{config.rb_cross_thresh}m, near<{config.rb_near_thresh}m, wide<{config.rb_wide_thresh}m\n"
             f"Segments: {r['n_segments']}",
-            xy=(r["wp"][0], r["wp"][1]),
-            xytext=(r["wp"][0] + 0.5, r["wp"][1] + 2),
-            fontsize=11,
-            fontweight="bold",
-            arrowprops=dict(arrowstyle="->", lw=2),
-            bbox=dict(facecolor="yellow", alpha=0.9),
-            zorder=11,
+            (r["wp"][0], r["wp"][1]),
+            (r["wp"][0] + 0.5, r["wp"][1] + 2),
+            11,
         )
 
     return min_dist, zone, cmap_c, norm_v
@@ -632,7 +638,8 @@ def draw_scene_rb(result, output_path, zoom=None):
     r = result
     config = r.get("config", RewardConfig(enable_overprogress=True))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(28, 13))
+    fig = Figure((28, 13), dpi=150)
+    ((ax1, ax2),) = fig.grid(1, 2, wspace=0.15)
 
     # Left: overview
     min_dist, zone, cmap_c, norm_v = _draw_rb_panel(ax1, r, zoom=zoom, is_zoomed=False)
@@ -646,74 +653,68 @@ def draw_scene_rb(result, output_path, zoom=None):
     r_zoomed["cy"] = float(wp[1])
     _draw_rb_panel(ax2, r_zoomed, zoom=roi_zoom, is_zoomed=True)
 
-    ax1.set_title("Overview", fontsize=13)
-    ax2.set_title(f"Zoomed ROI ({roi_zoom:.0f}m)", fontsize=13)
+    ax1.title("Overview", size=13)
+    ax2.title(f"Zoomed ROI ({roi_zoom:.0f}m)", size=13)
 
-    sm = plt.cm.ScalarMappable(cmap=cmap_c, norm=norm_v)
-    plt.colorbar(sm, ax=[ax1, ax2], shrink=0.4, label="Distance to road border (m)")
+    ax2.colorbar(cmap_c, *norm_v, label="Distance to road border (m)")
 
-    ax1.legend(
-        handles=[
-            Patch(facecolor="lightgreen", alpha=0.15, label="Lane polygon"),
-            plt.Line2D([0], [0], color="r", linewidth=3, label="Road border"),
-            plt.Line2D([0], [0], color="g", ls="--", linewidth=2.5, label="GT trajectory"),
-            plt.Line2D([0], [0], color="orange", linewidth=0.8, alpha=0.3, label="Border segments"),
+    _legend_entries(
+        ax1,
+        [
+            ("patch", "#90ee90", "Lane polygon"),
+            ("line", "#ff0000", 3, None, "Road border"),
+            ("line", "#008000", 2.5, "dash", "GT trajectory"),
+            ("line", "#ffa500", 0.8, None, "Border segments"),
         ],
-        fontsize=9,
-        loc="upper left",
     )
+    ax1.legend("upper left")
 
     scene_name = os.path.basename(r["scene_path"]).replace(".npz", "")
     fig.suptitle(
         f"{scene_name} — step {r['step']}, {r['total_yaw']:.0f} deg curve\n"
         f"Road border: {min_dist:.3f}m ({zone}) | {r['n_segments']} segments",
-        fontsize=14,
-        fontweight="bold",
+        size=14,
+        weight="bold",
     )
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(output_path)
 
 
 def draw_scene_both(lane_result, rb_result, output_path, zoom=None):
     """Draw side-by-side lane departure + road border comparison."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(30, 14))
-    cmap_c = cmx.RdYlGn
-    norm_v = plt.Normalize(vmin=0, vmax=2.0)
+    fig = Figure((30, 14), dpi=150)
+    ((ax1, ax2),) = fig.grid(1, 2, wspace=0.15)
+    cmap_c = "RdYlGn"
+    norm_v = (0.0, 2.0)
 
     # Left: lane departure
     r = lane_result
     _draw_common(ax1, r, zoom)
-    for i in range(r["outer_p1"].shape[0]):
-        ax1.plot(
-            [r["outer_p1"][i, 0], r["outer_p2"][i, 0]],
-            [r["outer_p1"][i, 1], r["outer_p2"][i, 1]],
-            "r-",
-            linewidth=1.0,
-            alpha=0.4,
-            zorder=5,
-        )
+    ax1.lines(
+        list(np.stack([r["outer_p1"][:, :2], r["outer_p2"][:, :2]], 1)),
+        "#ff0000",
+        width=1.0,
+        alpha=0.4,
+        z=5,
+    )
     _draw_perimeter_points(ax1, r, cmap_c, norm_v, mark_outside_lane=True)
     lane_dist = _draw_distance_line(ax1, r)
-    ax1.set_title(
+    ax1.title(
         f"Lane departure — dist={lane_dist:.3f}m, in_lane={r['pt_in_any'].all()}\n"
         f"Outer segs: {r['n_outer']}/{r['n_total_segs']}",
-        fontsize=13,
+        size=13,
     )
 
     # Right: road border
     r = rb_result
     config = r.get("config", RewardConfig(enable_overprogress=True))
     _draw_common(ax2, r, zoom)
-    for i in range(r["seg_p1"].shape[0]):
-        ax2.plot(
-            [r["seg_p1"][i, 0], r["seg_p2"][i, 0]],
-            [r["seg_p1"][i, 1], r["seg_p2"][i, 1]],
-            "-",
-            color="orange",
-            linewidth=0.8,
-            alpha=0.3,
-            zorder=5,
-        )
+    ax2.lines(
+        list(np.stack([r["seg_p1"][:, :2], r["seg_p2"][:, :2]], 1)),
+        "#ffa500",
+        width=0.8,
+        alpha=0.3,
+        z=5,
+    )
     _draw_perimeter_points(ax2, r, cmap_c, norm_v, mark_outside_lane=False)
     rb_dist = _draw_distance_line(ax2, r)
     if rb_dist < config.rb_cross_thresh:
@@ -724,23 +725,21 @@ def draw_scene_both(lane_result, rb_result, output_path, zoom=None):
         zone = "WIDE"
     else:
         zone = "SAFE"
-    ax2.set_title(
+    ax2.title(
         f"Road border — dist={rb_dist:.3f}m, zone={zone}\n"
         f"{r['n_segments']} segments | thresholds: cross<{config.rb_cross_thresh}, near<{config.rb_near_thresh}, wide<{config.rb_wide_thresh}m",
-        fontsize=13,
+        size=13,
     )
 
-    sm = plt.cm.ScalarMappable(cmap=cmap_c, norm=norm_v)
-    plt.colorbar(sm, ax=[ax1, ax2], shrink=0.4, label="Distance to boundary (m)")
+    ax2.colorbar(cmap_c, *norm_v, label="Distance to boundary (m)")
 
     scene_name = os.path.basename(lane_result["scene_path"]).replace(".npz", "")
     fig.suptitle(
         f"{scene_name} — step {lane_result['step']}, {lane_result['total_yaw']:.0f} deg curve",
-        fontsize=15,
-        fontweight="bold",
+        size=15,
+        weight="bold",
     )
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(output_path)
 
 
 # ---------------------------------------------------------------------------

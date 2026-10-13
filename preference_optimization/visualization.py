@@ -2,14 +2,12 @@
 
 from pathlib import Path
 
-import matplotlib
-import matplotlib.pyplot as plt
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from torch.utils.data import DataLoader
 
-matplotlib.use("Agg")  # Non-interactive backend
+from scenario_generation.canvas import Figure
 
 
 @torch.no_grad()
@@ -66,7 +64,8 @@ def visualize_validation(
             prediction = outputs["prediction"][0].cpu().numpy()  # [P, T, 4]
 
             # Create visualization
-            fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+            fig = Figure((8, 8), 100)
+            ax = fig.panel(equal=True)
 
             # Visualize input context (map, past trajectories, etc.)
             vis_data = model_args.observation_normalizer.inverse(data)
@@ -76,31 +75,22 @@ def visualize_validation(
             visualize_inputs(vis_data, save_path=None, ax=ax)
 
             # Plot ego prediction
-            ax.plot(
-                prediction[0, :, 0],
-                prediction[0, :, 1],
-                color="orange",
-                label="Ego Prediction",
-                linewidth=2,
-            )
+            ax.lines([prediction[0, :, :2]], "#ffa500", width=2, label="Ego Prediction")
 
             # Plot neighbor predictions
-            for i in range(1, prediction.shape[0]):
-                ax.plot(
-                    prediction[i, :, 0],
-                    prediction[i, :, 1],
-                    color="teal",
-                    alpha=0.5,
-                    linewidth=1,
-                )
+            ax.lines(
+                [prediction[i, :, :2] for i in range(1, prediction.shape[0])],
+                "#008080",
+                width=1,
+                alpha=0.5,
+            )
 
-            ax.legend()
-            ax.set_title(f"Epoch {epoch} - Sample {sample_count + 1}")
+            ax.legend("upper right")
+            ax.title(f"Epoch {epoch} - Sample {sample_count + 1}")
 
             # Save figure
             save_path = vis_dir / f"sample_{sample_count:03d}_epoch_{epoch:04d}.png"
-            plt.savefig(save_path, dpi=100, bbox_inches="tight")
-            plt.close(fig)
+            fig.save(save_path)
 
             sample_count += 1
 

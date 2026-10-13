@@ -1,15 +1,49 @@
 from pathlib import Path
 
-import matplotlib
-
-# 高速化のためAggバックエンドを使用（GUIなし、ファイル出力特化）
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.collections import LineCollection
 
 from diffusion_planner.dimensions import *
+from scenario_generation.canvas import Figure, Panel
+
+_NAMED_COLORS = {
+    "r": "#ff0000",
+    "red": "#ff0000",
+    "green": "#008000",
+    "yellow": "#ffff00",
+    "purple": "#800080",
+    "black": "#000000",
+    "blue": "#0000ff",
+    "orange": "#ffa500",
+    "gray": "#808080",
+    "brown": "#a52a2a",
+    "olive": "#808000",
+}
+
+
+def _hex(color: str) -> str:
+    """A ``#rrggbb`` colour for a matplotlib colour name, or the colour itself when already hex."""
+    return color if color.startswith("#") else _NAMED_COLORS[color]
+
+
+def fancy_arrow(x, y, dx, dy, width, head_width, head_length) -> np.ndarray:
+    """Outline of a matplotlib ``FancyArrow`` from ``(x, y)`` along ``(dx, dy)`` plus its head."""
+    distance = float(np.hypot(dx, dy))
+    length = distance + head_length
+    half = np.array(
+        [
+            [0.0, 0.0],
+            [-head_length, -head_width / 2],
+            [-head_length, -width / 2],
+            [-length, -width / 2],
+            [-length, 0.0],
+        ]
+    )
+    half[:, 0] += head_length
+    outline = np.concatenate([half[:-1], (half * [1, -1])[-2::-1]])
+    cos, sin = (dx / distance, dy / distance) if distance > 0 else (1.0, 0.0)
+    rotated = outline @ np.array([[cos, sin], [-sin, cos]])
+    return rotated + np.array([x + dx, y + dy])
 
 
 def get_traffic_light_color(traffic_light):
@@ -46,12 +80,12 @@ def turn_indicator_int_to_str(turn_indicator):
     return label
 
 
-def draw_bounding_box(ax, x, y, cos, sin, len_x, len_y, color, alpha):
+def draw_bounding_box(ax: Panel, x, y, cos, sin, len_x, len_y, color, alpha):
     """
     Draw a bounding box at the specified position with given dimensions and heading.
 
     Args:
-        ax: matplotlib axis
+        ax: canvas panel
         x, y: center position
         cos, sin: orientation in radians
         len_x, len_y: length and width of the bounding box
@@ -72,18 +106,16 @@ def draw_bounding_box(ax, x, y, cos, sin, len_x, len_y, color, alpha):
         rot_ndy = next_dx * sin + next_dy * cos
 
         line_color = "red" if (d == 0) else color
-        ax.add_line(
-            plt.Line2D(
-                [x + rot_cdx, x + rot_ndx],
-                [y + rot_cdy, y + rot_ndy],
-                color=line_color,
-                alpha=alpha,
-                linewidth=1,
-            )
+        ax.lines(
+            [np.array([[x + rot_cdx, y + rot_cdy], [x + rot_ndx, y + rot_ndy]])],
+            _hex(line_color),
+            width=1,
+            alpha=alpha,
+            z=2,
         )
 
 
-def draw_ego_vehicle(ax, inputs, show_future=True):
+def draw_ego_vehicle(ax: Panel, inputs, show_future=True):
     """Draw ego vehicle, its past and future trajectories."""
     ego_state = inputs["ego_current_state"][0]
     ego_x, ego_y = ego_state[0], ego_state[1]
@@ -97,28 +129,24 @@ def draw_ego_vehicle(ax, inputs, show_future=True):
     dy = car_length / 2 * np.sin(ego_heading)
 
     # Draw the ego vehicle as an arrow
-    ax.arrow(
-        ego_x,
-        ego_y,
-        dx,
-        dy,
-        width=car_width / 2,
-        head_width=car_width,
-        head_length=car_length / 3,
-        fc="r",
-        ec="r",
+    ax.polygons(
+        [fancy_arrow(ego_x, ego_y, dx, dy, car_width / 2, car_width, car_length / 3)],
+        fill=_hex("r"),
+        edge=_hex("r"),
+        width=1.0,
         alpha=0.7,
+        z=1,
     )
 
     # Draw past trajectory
     if "ego_agent_past" in inputs:
         ego_past = inputs["ego_agent_past"][0]
-        ax.plot(
-            ego_past[:, 0],
-            ego_past[:, 1],
-            color="orange",
+        ax.lines(
+            [np.stack([ego_past[:, 0], ego_past[:, 1]], 1)],
+            _hex("orange"),
             alpha=0.5,
-            linestyle="--",
+            dash="dash",
+            z=2,
             label="Ego Past Trajectory",
         )
 
@@ -146,8 +174,8 @@ def draw_ego_vehicle(ax, inputs, show_future=True):
         if np.any(valid_indices):
             valid_future = ego_future[valid_indices]
             t_values = np.linspace(0, 1, len(valid_future))
-            colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
-            ax.scatter(valid_future[:, 0], valid_future[:, 1], c=colors, alpha=0.5, s=20)
+            colors = [(1.0 * t, 0.0, 1.0 * (1 - t)) for t in t_values]
+            ax.markers(valid_future[:, :2], "o", size=np.sqrt(20), color=colors, alpha=0.5, z=1)
 
         # plot as arrow
         # for t in range(0, ego_future.shape[0], 4):
@@ -189,17 +217,15 @@ def draw_ego_vehicle(ax, inputs, show_future=True):
     return ego_x, ego_y, ego_state
 
 
-def draw_neighbor_agents(ax, inputs):
+def draw_neighbor_agents(ax: Panel, inputs):
     """Draw neighbor agents with their trajectories and bounding boxes."""
     neighbors = inputs["neighbor_agents_past"][0]
     last_timestep = neighbors.shape[1] - 1
 
     past_lines = []
     past_colors = []
-    current_boxes = []
     velocity_arrows = []
-    future_scatter_x = []
-    future_scatter_y = []
+    future_scatter_xy = []
     future_scatter_colors = []
 
     for i in range(neighbors.shape[0]):
@@ -233,10 +259,9 @@ def draw_neighbor_agents(ax, inputs):
             valid_indices = ~((neighbor_future[:, 0] == 0) & (neighbor_future[:, 1] == 0))
             if np.any(valid_indices):
                 valid_future = neighbor_future[valid_indices]
-                future_scatter_x.extend(valid_future[:, 0])
-                future_scatter_y.extend(valid_future[:, 1])
+                future_scatter_xy.append(valid_future[:, :2])
                 t_values = np.linspace(0, 1, len(valid_future))
-                colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
+                colors = [(1.0 * t, 0.0, 1.0 * (1 - t)) for t in t_values]
                 future_scatter_colors.extend(colors)
 
         # Collect velocity arrows
@@ -245,36 +270,39 @@ def draw_neighbor_agents(ax, inputs):
             velocity_arrows.append((n_x, n_y, vel_x / 2, vel_y / 2))
 
     # Batch drawing
-    if past_lines:
-        lc_past = LineCollection(
-            past_lines, colors=past_colors, alpha=0.6, linewidths=1, linestyles="--"
+    for color in dict.fromkeys(past_colors):
+        ax.lines(
+            [line for line, c in zip(past_lines, past_colors) if c == color],
+            _hex(color),
+            width=1,
+            alpha=0.6,
+            dash="dash",
+            z=2,
         )
-        ax.add_collection(lc_past)
 
-    if current_boxes:
-        lc_boxes = LineCollection(current_boxes, colors="gray", alpha=0.5, linewidths=1)
-        ax.add_collection(lc_boxes)
-
-    if future_scatter_x:
-        ax.scatter(future_scatter_x, future_scatter_y, c=future_scatter_colors, alpha=0.5, s=8)
+    if future_scatter_xy:
+        ax.markers(
+            np.concatenate(future_scatter_xy),
+            "o",
+            size=np.sqrt(8),
+            color=future_scatter_colors,
+            alpha=0.5,
+            z=1,
+        )
 
     # Draw velocity arrows
-    for x, y, dx, dy in velocity_arrows:
-        ax.arrow(
-            x,
-            y,
-            dx,
-            dy,
-            width=0.2,
-            head_width=0.5,
-            head_length=0.3,
-            fc="orange",
-            ec="orange",
+    if velocity_arrows:
+        ax.polygons(
+            [fancy_arrow(x, y, dx, dy, 0.2, 0.5, 0.3) for x, y, dx, dy in velocity_arrows],
+            fill=_hex("orange"),
+            edge=_hex("orange"),
+            width=1.0,
             alpha=0.6,
+            z=1,
         )
 
 
-def draw_static_objects(ax, inputs):
+def draw_static_objects(ax: Panel, inputs):
     """Draw static objects."""
     static_objects = inputs["static_objects"][0]
 
@@ -292,18 +320,14 @@ def draw_static_objects(ax, inputs):
         colors = ["orange", "gray", "yellow", "brown"]
         obj_color = colors[obj_type % len(colors)]
 
-        rect = plt.Rectangle(
-            (obj_x - obj_length / 2, obj_y - obj_width / 2),
-            obj_length,
-            obj_width,
-            angle=np.degrees(obj_heading),
-            color=obj_color,
-            alpha=0.4,
-        )
-        ax.add_patch(rect)
+        corner = np.array([obj_x - obj_length / 2, obj_y - obj_width / 2])
+        cos, sin = np.cos(obj_heading), np.sin(obj_heading)
+        local = np.array([[0, 0], [obj_length, 0], [obj_length, obj_width], [0, obj_width]])
+        rect = corner + local @ np.array([[cos, sin], [-sin, cos]])
+        ax.polygons([rect], fill=_hex(obj_color), edge=_hex(obj_color), width=1.0, alpha=0.4, z=1)
 
 
-def draw_lanes(ax, inputs):
+def draw_lanes(ax: Panel, inputs):
     """Draw lane boundaries."""
     lanes = inputs["lanes"][0]
     lane_lines = []
@@ -325,56 +349,55 @@ def draw_lanes(ax, inputs):
         lane_lines.append(np.array([rx, ry]).T)
         lane_colors.append(color)
 
-    if lane_lines:
-        lc_lanes = LineCollection(lane_lines, colors=lane_colors, alpha=0.25, linewidths=1)
-        ax.add_collection(lc_lanes)
-
-
-def draw_route(ax, inputs, color="olive", label=None):
-    """Draw route lanes."""
-    route_lanes = inputs["route_lanes"][0]
-
-    for i in range(route_lanes.shape[0]):
-        ax.plot(
-            route_lanes[i, :, 0],
-            route_lanes[i, :, 1],
-            alpha=0.5,
-            linewidth=2,
-            color=color,
-            linestyle="--",
-            label=label if i == 0 else None,
+    for color in dict.fromkeys(lane_colors):
+        ax.lines(
+            [line for line, c in zip(lane_lines, lane_colors) if c == color],
+            _hex(color),
+            width=1,
+            alpha=0.25,
+            z=2,
         )
 
 
-def draw_goal_pose(ax, inputs):
+def draw_route(ax: Panel, inputs, color="olive", label=None):
+    """Draw route lanes."""
+    route_lanes = inputs["route_lanes"][0]
+    ax.lines(
+        [route_lanes[i, :, :2] for i in range(route_lanes.shape[0])],
+        _hex(color),
+        width=2,
+        alpha=0.5,
+        dash="dash",
+        z=2,
+        label=label,
+    )
+
+
+def draw_goal_pose(ax: Panel, inputs):
     """Draw goal pose."""
     if "goal_pose" in inputs:
         goal_x, goal_y, goal_cos, goal_sin = inputs["goal_pose"][0]
         goal_dx = 2 * goal_cos
         goal_dy = 2 * goal_sin
-        ax.arrow(
-            goal_x,
-            goal_y,
-            goal_dx,
-            goal_dy,
-            width=0.5,
-            head_width=1.0,
-            head_length=1.0,
-            fc="blue",
-            ec="blue",
+        ax.polygons(
+            [fancy_arrow(goal_x, goal_y, goal_dx, goal_dy, 0.5, 1.0, 1.0)],
+            fill=_hex("blue"),
+            edge=_hex("blue"),
+            width=1.0,
             alpha=0.7,
+            z=1,
             label="Goal Pose",
         )
 
 
-def draw_polygons_and_lines(ax, inputs):
+def draw_polygons_and_lines(ax: Panel, inputs):
     """Draw polygons and line strings."""
     if "polygons" in inputs:
         for i in range(inputs["polygons"].shape[1]):
             polygon = inputs["polygons"][0, i]
             if np.sum(np.abs(polygon)) < 1e-6:
                 continue
-            ax.fill(polygon[:, 0], polygon[:, 1], color="gray", alpha=0.5)
+            ax.polygons([polygon[:, :2]], fill=_hex("gray"), edge=_hex("gray"), alpha=0.5, z=1)
 
     if "line_strings" in inputs:
         for i in range(inputs["line_strings"].shape[1]):
@@ -384,22 +407,22 @@ def draw_polygons_and_lines(ax, inputs):
             # Check one-hot type: [x, y, stop_line, road_border]
             is_road_border = line_string.shape[-1] > 3 and np.any(line_string[:, 3] > 0.5)
             if is_road_border:
-                ax.plot(line_string[:, 0], line_string[:, 1], color="red", linewidth=1)
+                ax.lines([line_string[:, :2]], _hex("red"), width=1, z=2)
             else:
-                ax.plot(line_string[:, 0], line_string[:, 1], color="orange", linewidth=1)
+                ax.lines([line_string[:, :2]], _hex("orange"), width=1, z=2)
 
 
-def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
+def setup_axis(ax: Panel, ego_x, ego_y, ego_state, view_range, inputs):
     """Setup axis properties and add status text."""
     ego_vel_x, ego_vel_y = ego_state[4], ego_state[5]
     ego_acc_x, ego_acc_y = ego_state[6], ego_state[7]
     ego_steering = ego_state[8]
     ego_yaw_rate = ego_state[9]
 
-    ax.set_xlabel("X [m]")
-    ax.set_ylabel("Y [m]")
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.3)
+    ax.xlabel("X [m]")
+    ax.ylabel("Y [m]")
+    ax.equal = True
+    ax.grid(0.3)
     ax.set_xlim(ego_x - view_range, ego_x + view_range)
     ax.set_ylim(ego_y - view_range, ego_y + view_range)
 
@@ -421,8 +444,7 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
         turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred)
 
     ax.text(
-        view_range - 1,
-        view_range - 1,
+        (view_range - 1, view_range - 1),
         f"VelocityX: {ego_vel_x:.2f} m/s\n"
         f"VelocityY: {ego_vel_y:.2f} m/s\n"
         f"AccelerationX: {ego_acc_x:.2f} m/s²\n"
@@ -431,17 +453,18 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
         f"Yaw Rate: {ego_yaw_rate:.2f} rad/s\n"
         f"Turn Command GT: {turn_indicator_text_gt}\n"
         f"Turn Command PR: {turn_indicator_text_pred}",
-        fontsize=8,
-        color="red",
+        8,
+        _hex("red"),
         ha="right",
         va="top",
+        z=3,
     )
 
 
 def visualize_inputs(
     inputs: dict,
     save_path: Path | None = None,
-    ax: None = None,
+    ax: Panel | None = None,
     view_ranges: list = None,
     annotation: str | None = None,
     annotation_color: str = "red",
@@ -456,7 +479,7 @@ def visualize_inputs(
     Args:
         inputs: Input data dictionary
         save_path: Path to save the visualization
-        ax: Matplotlib axis (for single plot compatibility)
+        ax: Canvas panel (for single plot compatibility)
         view_ranges: List of view ranges in meters [60, 120] for multi-range visualization
         annotation: Optional banner drawn at the top of the figure. Drawn with a fixed
             size/position so the figure height stays constant across frames (e.g. the
@@ -493,15 +516,12 @@ def visualize_inputs(
         setup_axis(ax, ego_x, ego_y, ego_state, view_ranges[0], inputs)
 
         if save_path is not None:
-            plt.tight_layout()
-            plt.savefig(save_path, dpi=100, bbox_inches="tight")
-            plt.close()
+            ax.figure.save(save_path)
         return ax
 
     # Multi-plot mode
-    fig, axes = plt.subplots(1, len(view_ranges), figsize=(10 * len(view_ranges), 8))
-    if len(view_ranges) == 1:
-        axes = [axes]
+    fig = Figure((10 * len(view_ranges), 8), dpi=100)
+    axes = fig.grid(1, len(view_ranges), margins=(0.07, 0.98, 0.07, 0.92), wspace=0.2)[0]
 
     for i, view_range in enumerate(view_ranges):
         current_ax = axes[i]
@@ -518,15 +538,13 @@ def visualize_inputs(
         setup_axis(current_ax, ego_x, ego_y, ego_state, view_range, inputs)
 
         # Add title to distinguish different ranges
-        current_ax.set_title(f"View Range: {view_range}m")
+        current_ax.title(f"View Range: {view_range}m")
 
     if annotation is not None:
-        fig.suptitle(annotation, color=annotation_color, fontsize=12, fontweight="bold")
+        fig.suptitle(annotation, size=12, weight="bold", color=_hex(annotation_color))
 
     if save_path is not None:
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=100, bbox_inches="tight")
-        plt.close()
+        fig.save(save_path)
         return fig, axes
 
     return fig, axes

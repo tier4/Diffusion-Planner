@@ -3,8 +3,6 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-import matplotlib.patches as patches
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
@@ -14,6 +12,8 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 )
 from diffusion_planner.utils.data_augmentation_frenet import FrenetStatePerturbationTensor
 from diffusion_planner.utils.visualize_input import visualize_inputs
+
+from scenario_generation.canvas import Figure
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_npz", type=Path)
@@ -59,7 +59,8 @@ else:
 
 # Save original data visualization with augmentation range rectangle
 original_save_path = save_dir / "original.png"
-fig, ax = plt.subplots(figsize=(10, 10))
+fig = Figure((10, 10), dpi=100)
+ax = fig.panel((0.1, 0.07, 0.87, 0.87))
 
 # Visualize inputs on the ax
 view_range = 30
@@ -69,14 +70,8 @@ visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range]
 # table it inherits (_low/_high) — its t=0 displacement is lateral-only, bounded
 # by dy_max — so draw that band instead of a misleading rectangle.
 if args.augment_type == "frenet":
-    ax.axhline(aug.dy_max, color="red", linestyle="--", linewidth=2)
-    ax.axhline(
-        -aug.dy_max,
-        color="red",
-        linestyle="--",
-        linewidth=2,
-        label="Augmentation Range (lateral)",
-    )
+    ax.hline(aug.dy_max, "#ff0000", 2, dash="dash", z=2)
+    ax.hline(-aug.dy_max, "#ff0000", 2, dash="dash", z=2, label="Augmentation Range (lateral)")
 else:
     # bounds are (9,) since the perturbation-dim decorrelation fix; older
     # checkouts carried (1, 9) — handle both
@@ -84,22 +79,13 @@ else:
     hi = np.atleast_2d(aug._high.cpu().numpy())[0]
     x_min, y_min = lo[0], lo[1]
     x_max, y_max = hi[0], hi[1]
-    rect = patches.Rectangle(
-        (x_min, y_min),
-        x_max - x_min,
-        y_max - y_min,
-        linewidth=2,
-        edgecolor="red",
-        facecolor="none",
-        linestyle="--",
-        label="Augmentation Range",
+    rect = np.array(
+        [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max], [x_min, y_min]]
     )
-    ax.add_patch(rect)
-ax.legend()
+    ax.lines([rect], "#ff0000", 2, dash="dash", z=1, label="Augmentation Range")
+ax.legend("upper left")
 
-plt.tight_layout()
-plt.savefig(original_save_path, dpi=100)
-plt.close()
+fig.save(original_save_path)
 
 trial_num = 10
 elapsed_times = []

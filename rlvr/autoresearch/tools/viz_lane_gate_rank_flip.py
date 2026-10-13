@@ -28,13 +28,8 @@ import json
 import os
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 import torch
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 
 from preference_optimization.utils import load_npz_data
 from rlvr.reward import (
@@ -42,6 +37,7 @@ from rlvr.reward import (
     _point_in_polygons,
     _point_to_segments_dist,
 )
+from scenario_generation.canvas import Figure
 
 
 def classify_all_segments(lanes: torch.Tensor, nudge: float = 0.05, gap_threshold: float = 0.5):
@@ -140,7 +136,8 @@ def plot_scene(data, out_path, scene_name):
 
     seg_p1, seg_p2, is_outer, is_junction, is_shared = classify_all_segments(lanes)
 
-    fig, ax = plt.subplots(figsize=(13, 12))
+    fig = Figure((13, 12), dpi=110)
+    ax = fig.panel(equal=True)
 
     # Lane polygon fills
     lanes_np = lanes.cpu().numpy()
@@ -153,16 +150,16 @@ def plot_scene(data, out_path, scene_name):
         ly = lanes_np[s, v, 1] + lanes_np[s, v, 5]
         rx = lanes_np[s, v, 0] + lanes_np[s, v, 6]
         ry = lanes_np[s, v, 1] + lanes_np[s, v, 7]
-        ax.fill(
-            np.concatenate([lx, rx[::-1]]),
-            np.concatenate([ly, ry[::-1]]),
-            color="lightgray",
+        ax.polygons(
+            [np.stack([np.concatenate([lx, rx[::-1]]), np.concatenate([ly, ry[::-1]])], 1)],
+            fill="#d3d3d3",
+            edge="#d3d3d3",
             alpha=0.25,
-            zorder=1,
+            z=1,
         )
         # Centerline
         cl = lanes_np[s, v, :2]
-        ax.plot(cl[:, 0], cl[:, 1], color="gray", linewidth=0.4, alpha=0.4, zorder=2)
+        ax.lines([cl], "#808080", width=0.4, alpha=0.4, z=2)
 
     # Road borders (red)
     if "line_strings" in data:
@@ -177,7 +174,7 @@ def plot_scene(data, out_path, scene_name):
             else:
                 v = np.abs(pts[:, :2]).sum(axis=-1) > 0.01
             if v.sum() > 1:
-                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5, alpha=0.75, zorder=4)
+                ax.lines([pts[v, :2]], "#ff0000", width=2.5, alpha=0.75, z=4)
 
     # Segments colored by category
     p1 = seg_p1.cpu().numpy()
@@ -186,24 +183,12 @@ def plot_scene(data, out_path, scene_name):
     junction_mask = is_junction.cpu().numpy()
     shared_mask = is_shared.cpu().numpy()
 
-    for i in range(p1.shape[0]):
-        if outer_mask[i]:
-            color, ls, lw, alpha = "black", "-", 2.5, 0.95
-        elif junction_mask[i]:
-            color, ls, lw, alpha = "darkorange", "--", 3.0, 0.95
-        elif shared_mask[i]:
-            color, ls, lw, alpha = "steelblue", "-", 0.8, 0.5
-        else:
-            continue
-        ax.plot(
-            [p1[i, 0], p2[i, 0]],
-            [p1[i, 1], p2[i, 1]],
-            color=color,
-            linestyle=ls,
-            linewidth=lw,
-            alpha=alpha,
-            zorder=5 if color == "darkorange" else 3,
-        )
+    segments = np.stack([p1, p2], axis=1)
+    shared_only = shared_mask & ~outer_mask & ~junction_mask
+    junction_only = junction_mask & ~outer_mask
+    ax.lines(list(segments[outer_mask]), "#000000", width=2.5, alpha=0.95, z=3)
+    ax.lines(list(segments[junction_only]), "#ff8c00", width=3.0, alpha=0.95, dash="dash", z=5)
+    ax.lines(list(segments[shared_only]), "#4682b4", width=0.8, alpha=0.5, z=3)
 
     # GT trajectory for context
     gt = data.get("ego_agent_future")
@@ -213,15 +198,7 @@ def plot_scene(data, out_path, scene_name):
         gt_np = gt.cpu().numpy()
         gt_v = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
         if gt_v.sum() > 1:
-            ax.plot(
-                gt_np[gt_v, 0],
-                gt_np[gt_v, 1],
-                color="gold",
-                linestyle="--",
-                linewidth=2,
-                alpha=0.9,
-                zorder=6,
-            )
+            ax.lines([gt_np[gt_v, :2]], "#ffd700", width=2, alpha=0.9, dash="dash", z=6)
 
     # Ego starting position
     ego_cur = data.get("ego_current_state")
@@ -232,38 +209,20 @@ def plot_scene(data, out_path, scene_name):
             ec = ec[0]
         ec_np = ec.cpu().numpy()
         ego_xy = (float(ec_np[0]), float(ec_np[1]))
-        ax.plot(
-            ego_xy[0],
-            ego_xy[1],
-            marker="*",
-            markersize=18,
-            markerfacecolor="darkred",
-            markeredgecolor="black",
-            linestyle="None",
-            zorder=10,
-        )
+        ax.markers(np.array(ego_xy), "*", size=18, color="#8b0000", edge="#000000", z=10)
 
     # Counts
     n_outer = int(outer_mask.sum())
     n_junction = int(junction_mask.sum())
     n_shared = int(shared_mask.sum())
 
-    legend = [
-        Patch(facecolor="black", edgecolor="black", label=f"OUTER road edge  ({n_outer})"),
-        Patch(
-            facecolor="darkorange", edgecolor="darkorange", label=f"JUNCTION GAP  ({n_junction})"
-        ),
-        Patch(
-            facecolor="steelblue",
-            edgecolor="steelblue",
-            label=f"SHARED (between lanes)  ({n_shared})",
-        ),
-        Patch(facecolor="red", edgecolor="red", label="road border (line_strings)"),
-        Patch(facecolor="gold", edgecolor="gold", label="GT trajectory"),
-    ]
-    ax.legend(handles=legend, loc="upper left", fontsize=10)
+    ax.polygons([], fill="#000000", label=f"OUTER road edge  ({n_outer})")
+    ax.polygons([], fill="#ff8c00", label=f"JUNCTION GAP  ({n_junction})")
+    ax.polygons([], fill="#4682b4", label=f"SHARED (between lanes)  ({n_shared})")
+    ax.polygons([], fill="#ff0000", label="road border (line_strings)")
+    ax.polygons([], fill="#ffd700", label="GT trajectory")
+    ax.legend("upper left")
 
-    ax.set_aspect("equal")
     # Zoom: bbox of segments
     all_p = np.vstack([p1, p2])
     if ego_xy is not None:
@@ -273,16 +232,14 @@ def plot_scene(data, out_path, scene_name):
     span = max(all_p[:, 0].max() - all_p[:, 0].min(), all_p[:, 1].max() - all_p[:, 1].min()) / 2 + 5
     ax.set_xlim(cx - span, cx + span)
     ax.set_ylim(cy - span, cy + span)
-    ax.grid(True, alpha=0.25)
-    ax.set_title(
+    ax.grid(0.25)
+    ax.title(
         f"Lane boundary classification — {scene_name}\n"
         f"orange = junction-gap segments (would be mis-classified as outer without the nudge proximity check)",
-        fontsize=11,
+        11,
     )
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(out_path)
 
 
 def main():

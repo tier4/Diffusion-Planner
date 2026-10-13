@@ -35,14 +35,11 @@ import math
 import re
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from planner_metrics.vehicle_collision import obb_corners
+from scenario_generation.canvas import GRID_COLOR, Figure, nice_ticks
 from scenario_generation.tools._heatmap_common import (
     bin_scalar_by_arc,
     build_route_polyline,
@@ -472,13 +469,11 @@ def main():
     min_a_v, mean_a_v = np.array(min_a_v), np.array(mean_a_v)
     min_b_v, mean_b_v = np.array(min_b_v), np.array(mean_b_v)
 
-    fig = plt.figure(figsize=(max(14, n_enc * 2.0), 6))
-    gs = fig.add_gridspec(1, 2, width_ratios=[1, 3], wspace=0.08)
-    ax_map = fig.add_subplot(gs[0, 0])
-    ax_bars = fig.add_subplot(gs[0, 1])
+    fig = Figure((max(14, n_enc * 2.0), 6.0), 150.0)
+    ax_map = fig.panel((0.04, 0.1, 0.226, 0.8), equal=True)
+    ax_bars = fig.panel((0.302, 0.1, 0.678, 0.8))
 
-    ax_map.set_aspect("equal")
-    ax_map.plot(pts[:, 0], pts[:, 1], color="#cccccc", lw=2.0, zorder=1)
+    ax_map.lines([pts[:, :2]], "#cccccc", width=2.0, z=1)
     for i, (ea, eb) in enumerate(matched):
         arc = ea["arc_mean"] if ea else eb["arc_mean"]
         idx = min(int(np.searchsorted(s, arc)), len(pts) - 1)
@@ -487,103 +482,87 @@ def main():
             eb["min"] if eb else 99.0,
         )
         c = "#cc0000" if tightest < 0.4 else "#ff8800" if tightest < safe_thresh else "#228B22"
-        ax_map.plot(
-            pts[idx, 0],
-            pts[idx, 1],
-            "o",
-            color=c,
-            ms=8,
-            zorder=10,
-            markeredgecolor="black",
-            markeredgewidth=0.8,
-        )
-        ax_map.annotate(
-            f"{i + 1}",
+        ax_map.markers(pts[idx, :2], "o", size=8, color=c, edge="#000000", edge_width=0.8, z=10)
+        ax_map.text(
             (pts[idx, 0], pts[idx, 1]),
-            fontsize=7,
-            fontweight="bold",
+            f"{i + 1}",
+            7,
             ha="center",
             va="bottom",
-            xytext=(0, 7),
-            textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="black", lw=0.4),
+            offset=(0, 7),
+            box={"face": "#ffffff", "edge": "#000000", "pad": 0.1},
+            weight="bold",
         )
-    ax_map.set_title("Route", fontsize=9)
-    ax_map.tick_params(labelsize=6)
+    ax_map.title("Route", 9)
+    ax_map.tick_style(size=6)
 
     x = np.arange(n_enc)
     w = 0.18
-    ax_bars.bar(
+    ax_bars.bars(
         x - 1.5 * w,
         min_a_v,
         w,
-        label=f"{args.label_a} min",
         color="#d62728",
+        edge="#000000",
         alpha=0.9,
-        edgecolor="black",
-        lw=0.4,
+        label=f"{args.label_a} min",
     )
-    ax_bars.bar(
+    ax_bars.bars(
         x - 0.5 * w,
         mean_a_v,
         w,
-        label=f"{args.label_a} mean",
         color="#d62728",
+        edge="#000000",
         alpha=0.35,
-        edgecolor="black",
-        lw=0.4,
+        label=f"{args.label_a} mean",
     )
     if has_b:
-        ax_bars.bar(
+        ax_bars.bars(
             x + 0.5 * w,
             min_b_v,
             w,
-            label=f"{args.label_b} min",
             color="#2166ac",
+            edge="#000000",
             alpha=0.9,
-            edgecolor="black",
-            lw=0.4,
+            label=f"{args.label_b} min",
         )
-        ax_bars.bar(
+        ax_bars.bars(
             x + 1.5 * w,
             mean_b_v,
             w,
-            label=f"{args.label_b} mean",
             color="#2166ac",
+            edge="#000000",
             alpha=0.35,
-            edgecolor="black",
-            lw=0.4,
+            label=f"{args.label_b} mean",
         )
 
     for xi, va, vb in zip(x, min_a_v, min_b_v if has_b else [np.nan] * n_enc):
         if not np.isnan(va):
             ax_bars.text(
-                xi - 1.5 * w,
-                va + 0.02,
+                (xi - 1.5 * w, va + 0.02),
                 f"{va:.2f}",
+                6.5,
+                "#d62728",
                 ha="center",
                 va="bottom",
-                fontsize=6.5,
-                color="#d62728",
-                fontweight="bold",
+                weight="bold",
             )
         if has_b and not np.isnan(vb):
             ax_bars.text(
-                xi + 0.5 * w,
-                vb + 0.02,
+                (xi + 0.5 * w, vb + 0.02),
                 f"{vb:.2f}",
+                6.5,
+                "#2166ac",
                 ha="center",
                 va="bottom",
-                fontsize=6.5,
-                color="#2166ac",
-                fontweight="bold",
+                weight="bold",
             )
 
-    ax_bars.axhspan(0, 0.2, alpha=0.07, color="red")
-    ax_bars.axhspan(0.2, 0.4, alpha=0.04, color="orange")
-    ax_bars.axhline(0.2, color="#cc0000", lw=0.6, ls="--", alpha=0.5)
-    ax_bars.axhline(0.4, color="#ff8800", lw=0.6, ls="--", alpha=0.5)
-    ax_bars.axhline(safe_thresh, color="#228B22", lw=0.6, ls="--", alpha=0.3)
+    ax_bars.span(0, 0.2, color="#ff0000", alpha=0.07)
+    ax_bars.span(0.2, 0.4, color="#ffa500", alpha=0.04)
+    ax_bars.hline(0.2, "#cc0000", width=0.6, dash="dash", alpha=0.5)
+    ax_bars.hline(0.4, "#ff8800", width=0.6, dash="dash", alpha=0.5)
+    ax_bars.hline(safe_thresh, "#228B22", width=0.6, dash="dash", alpha=0.3)
 
     if has_b:
         for i in range(n_enc):
@@ -592,43 +571,20 @@ def main():
                 continue
             y_top = max(mean_a_v[i], mean_b_v[i]) + 0.12
             if ma >= safe_thresh and mb >= safe_thresh:
-                ax_bars.text(
-                    x[i],
-                    y_top,
-                    "both safe",
-                    ha="center",
-                    fontsize=6,
-                    color="#228B22",
-                    fontstyle="italic",
-                )
+                ax_bars.text((x[i], y_top), "both safe", 6, "#228B22", ha="center")
             elif mb > ma:
-                ax_bars.text(
-                    x[i],
-                    y_top,
-                    args.label_b,
-                    ha="center",
-                    fontsize=6,
-                    color="#2166ac",
-                    fontweight="bold",
-                )
+                ax_bars.text((x[i], y_top), args.label_b, 6, "#2166ac", ha="center", weight="bold")
             elif ma > mb:
-                ax_bars.text(
-                    x[i],
-                    y_top,
-                    args.label_a,
-                    ha="center",
-                    fontsize=6,
-                    color="#d62728",
-                    fontweight="bold",
-                )
+                ax_bars.text((x[i], y_top), args.label_a, 6, "#d62728", ha="center", weight="bold")
 
-    ax_bars.set_xticks(x)
-    ax_bars.set_xticklabels(labels, fontsize=7)
-    ax_bars.set_ylabel("Clearance (m)", fontsize=10)
-    ax_bars.legend(fontsize=7, ncol=4, loc="upper right")
-    ax_bars.grid(axis="y", alpha=0.15)
+    ax_bars.xticks(x, labels)
+    ax_bars.ylabel("Clearance (m)")
+    ax_bars.legend("upper right", ncol=4, size=7)
     all_v = np.concatenate([v[~np.isnan(v)] for v in [min_a_v, mean_a_v, min_b_v, mean_b_v]])
-    ax_bars.set_ylim(0, min(3.5, float(all_v.max()) * 1.2))
+    y_top = min(3.5, float(all_v.max()) * 1.2)
+    ax_bars.set_ylim(0, y_top)
+    for tick in nice_ticks(0.0, y_top):
+        ax_bars.hline(float(tick), GRID_COLOR, width=0.8, alpha=0.15, z=0)
 
     tight = sum(
         1
@@ -642,14 +598,8 @@ def main():
         f"{n_enc} encounters",
         f"{tight} tight (< {safe_thresh}m)",
     ]
-    fig.suptitle(
-        "Parked vehicle avoidance: " + ", ".join(title_parts),
-        fontsize=12,
-        fontweight="bold",
-    )
-    fig.subplots_adjust(left=0.04, right=0.98, bottom=0.1, top=0.90)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=150, bbox_inches="tight")
+    fig.suptitle("Parked vehicle avoidance: " + ", ".join(title_parts), 12, weight="bold")
+    fig.save(args.output)
     print(f"Saved {args.output}")
 
     np.savez(

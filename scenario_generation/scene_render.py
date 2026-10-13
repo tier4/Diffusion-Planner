@@ -11,13 +11,10 @@ from __future__ import annotations
 
 import math
 
-import matplotlib
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
-from matplotlib.patches import Rectangle
 
+from scenario_generation.canvas import Figure, Panel, oriented_box
 from scenario_generation.scene_context import AgentType, SceneContext
 from scenario_generation.tools.scene_tree import ObstaclePlacement
 from scenario_generation.visualize import (
@@ -92,6 +89,23 @@ def _extract_border_polylines(scene: SceneContext) -> list[np.ndarray]:
     return polylines
 
 
+def _draw_placed_box(
+    ax: Panel,
+    x: float,
+    y: float,
+    yaw: float,
+    length: float,
+    width: float,
+    color: str,
+    lw: float,
+    z: float,
+) -> None:
+    """A centroid-referenced box, filled and dash-outlined at alpha 0.3."""
+    corners = oriented_box(float(x), float(y), float(yaw), length, width, length / 2)
+    ax.polygons([corners], fill=color, alpha=0.3, z=z)
+    ax.lines([np.concatenate([corners, corners[:1]])], color, width=lw, alpha=0.3, dash="dash", z=z)
+
+
 def render_scene_at_step(
     scene: SceneContext,
     obstacles: list[ObstaclePlacement] | None = None,
@@ -100,6 +114,7 @@ def render_scene_at_step(
     step_idx: int = 0,
     total_steps: int = 1,
     figsize: tuple[float, float] = (10, 10),
+    dpi: float = 100.0,
     gt_traj: np.ndarray | None = None,
     det_traj: np.ndarray | None = None,
     guided_trajs: list[np.ndarray] | None = None,
@@ -112,10 +127,10 @@ def render_scene_at_step(
     show_traj_rb: bool = False,
     show_traj_nb: bool = False,
     nb_pred_trajs: np.ndarray | None = None,
-) -> matplotlib.figure.Figure:
+) -> Figure:
     """Render a scene with placed obstacles overlaid, matching replay sim style."""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    fig.patch.set_facecolor("#f8f8f8")
+    fig = Figure(figsize, dpi, facecolor="#f8f8f8")
+    ax = fig.panel((0.09, 0.07, 0.88, 0.87), equal=True)
 
     # Lane network
     draw_lanes(ax, scene.map_data, alpha=0.7)
@@ -126,8 +141,6 @@ def render_scene_at_step(
     # Road borders from lanelet2 map (world frame → ego frame via canonical transform)
     _ego_frame_borders = None
     if map_border_polylines and ego_world_pose is not None:
-        from matplotlib.collections import LineCollection as _LC
-
         from scenario_generation.transforms import _rotation_matrix, transform_positions
 
         ex_w, ey_w, eyaw_w = ego_world_pose
@@ -148,7 +161,7 @@ def render_scene_at_step(
             ego_segs.append(pts_ego)
             _ego_frame_borders.append(pts_ego)
         if ego_segs:
-            ax.add_collection(_LC(ego_segs, colors="red", linewidths=2.5, alpha=0.7, zorder=4))
+            ax.lines(ego_segs, "#ff0000", width=2.5, alpha=0.7, z=4)
 
     # Stop lines
     draw_stop_lines(ax, scene.map_data)
@@ -159,8 +172,6 @@ def render_scene_at_step(
         draw_route(ax, ego.route_lanes, color=_ROUTE_COLOR, alpha=0.5, lw=2.5)
 
     # Traffic light colored overlay on lanes + route_lanes
-    from matplotlib.collections import LineCollection
-
     tl_hex = {0: "#22bb22", 1: "#ddaa00", 2: "#dd2222"}  # green, yellow, red
     tl_segments: dict[str, list[np.ndarray]] = {}
     _ego_rl = ego.route_lanes if ego is not None else None
@@ -186,15 +197,7 @@ def render_scene_at_step(
                 continue
             tl_segments.setdefault(hex_color, []).append(pts[valid])
     for hex_color, segs in tl_segments.items():
-        ax.add_collection(
-            LineCollection(
-                segs,
-                colors=hex_color,
-                linewidths=2.5,
-                alpha=0.85,
-                zorder=4,
-            )
-        )
+        ax.lines(segs, hex_color, width=2.5, alpha=0.85, z=4)
 
     # Static objects from map
     so = scene.map_data.static_objects
@@ -240,33 +243,11 @@ def render_scene_at_step(
         past = agent.past_trajectory
         valid = np.abs(past[:, :2]).sum(axis=1) > 1e-6
         if valid.sum() > 1:
-            ax.plot(
-                past[valid, 0],
-                past[valid, 1],
-                "--",
-                color=color,
-                lw=0.9,
-                alpha=_alpha_trail,
-                zorder=7,
-            )
+            ax.lines([past[valid, :2]], color, width=0.9, alpha=_alpha_trail, dash="dash", z=7)
 
         # Bounding box
         if is_placed:
-            rear_ovh = agent.length / 2  # placed obstacle is a neighbor (centroid-referenced)
-            t_rot = mtransforms.Affine2D().rotate(heading).translate(pos[0], pos[1]) + ax.transData
-            rect = Rectangle(
-                (-rear_ovh, -agent.width / 2),
-                agent.length,
-                agent.width,
-                lw=2.5,
-                ec=color,
-                fc=color,
-                alpha=0.3,
-                linestyle="--",
-                zorder=25,
-                transform=t_rot,
-            )
-            ax.add_patch(rect)
+            _draw_placed_box(ax, pos[0], pos[1], heading, agent.length, agent.width, color, 2.5, 25)
         else:
             draw_agent_box(
                 ax,
@@ -288,40 +269,35 @@ def render_scene_at_step(
         if _dimmed:
             continue
         arrow_len = max(agent.length, 2.5)
-        ax.annotate(
-            "",
-            xy=(pos[0] + arrow_len * math.cos(heading), pos[1] + arrow_len * math.sin(heading)),
-            xytext=(pos[0], pos[1]),
-            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5, mutation_scale=12),
-            zorder=21 if is_ego else 16,
+        ax.arrows(
+            np.array(pos[:2]),
+            np.array(
+                [pos[0] + arrow_len * math.cos(heading), pos[1] + arrow_len * math.sin(heading)]
+            ),
+            color,
+            width=1.5,
+            head=9,
+            z=21 if is_ego else 16,
         )
 
         # Speed label
         speed = float(np.linalg.norm(agent.current_velocity))
-        ax.annotate(
-            f"{agent.id} ({speed:.1f} m/s)",
+        ax.text(
             (pos[0], pos[1]),
-            fontsize=7,
-            color=color,
+            f"{agent.id} ({speed:.1f} m/s)",
+            7,
+            color,
             ha="center",
             va="bottom",
-            xytext=(0, 6),
-            textcoords="offset points",
-            zorder=22,
+            offset=(0, 6),
+            z=22,
         )
 
         # Goal
         if agent.goal_pose is not None and is_ego:
             gx, gy = agent.goal_pose[0], agent.goal_pose[1]
-            ax.plot(
-                gx,
-                gy,
-                "*",
-                color=color,
-                ms=14,
-                zorder=25,
-                markeredgecolor="black",
-                markeredgewidth=0.8,
+            ax.markers(
+                np.array([gx, gy]), "*", size=14, color=color, edge="#000000", edge_width=0.8, z=25
             )
 
     # Placed obstacles (orange=static, blue=moving, red=selected)
@@ -339,49 +315,35 @@ def render_scene_at_step(
             yaw = obs.yaw_rad
 
             # Draw OBB with dashed outline (placed obstacle = neighbor, centroid-referenced)
-            rear_overhang = obs.length / 2
-            t_rot = mtransforms.Affine2D().rotate(yaw).translate(obs.x, obs.y) + ax.transData
-            rect = Rectangle(
-                (-rear_overhang, -obs.width / 2),
-                obs.length,
-                obs.width,
-                lw=lw,
-                ec=color,
-                fc=color,
-                alpha=0.3,
-                linestyle="--",
-                zorder=30,
-                transform=t_rot,
-            )
-            ax.add_patch(rect)
+            _draw_placed_box(ax, obs.x, obs.y, yaw, obs.length, obs.width, color, lw, 30)
 
             # Heading arrow (longer for moving, proportional to speed)
             _spd = getattr(obs, "speed", 0.0) if _is_mov else 0.0
             arrow_len = max(obs.length, 2.0) + _spd * 0.3
-            ax.annotate(
-                "",
-                xy=(obs.x + arrow_len * math.cos(yaw), obs.y + arrow_len * math.sin(yaw)),
-                xytext=(obs.x, obs.y),
-                arrowprops=dict(arrowstyle="-|>", color=color, lw=2.0, mutation_scale=14),
-                zorder=31,
+            ax.arrows(
+                np.array([obs.x, obs.y]),
+                np.array([obs.x + arrow_len * math.cos(yaw), obs.y + arrow_len * math.sin(yaw)]),
+                color,
+                width=2.0,
+                head=10.5,
+                z=31,
             )
 
             # Label (include speed for moving obstacles)
             _lbl = f"[{obs.label}]"
             if _is_mov and _spd > 0:
                 _lbl += f" {_spd:.1f} m/s"
-            ax.annotate(
-                _lbl,
+            ax.text(
                 (obs.x, obs.y),
-                fontsize=8,
-                fontweight="bold",
-                color=color,
+                _lbl,
+                8,
+                color,
                 ha="center",
                 va="bottom",
-                xytext=(0, 10),
-                textcoords="offset points",
-                zorder=32,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85, lw=1),
+                offset=(0, 10),
+                box={"face": "#ffffff", "edge": color, "alpha": 0.85, "pad": 0.2},
+                z=32,
+                weight="bold",
             )
 
     # Reward overlays: road border distance + neighbor distance
@@ -487,28 +449,26 @@ def render_scene_at_step(
                                 ),
                             )
                             bp = s1 + t_val * d_seg
-                            ax.plot(
-                                [ep[0], bp[0]],
-                                [ep[1], bp[1]],
-                                "-",
-                                color=color,
-                                lw=2.5,
+                            ax.lines(
+                                [np.array([[ep[0], ep[1]], [bp[0], bp[1]]])],
+                                color,
+                                width=2.5,
                                 alpha=0.9,
-                                zorder=35,
+                                z=35,
                             )
-                            ax.plot(bp[0], bp[1], "o", color=color, ms=6, zorder=36)
+                            ax.markers(np.array(bp[:2]), "o", size=6, color=color, z=36)
                     mid_x = float(ego_pos[0])
                     mid_y = float(ego_pos[1]) + 1.5
-                    ax.annotate(
-                        f"RB {dist:.2f}m",
+                    ax.text(
                         (mid_x, mid_y),
-                        fontsize=8,
-                        fontweight="bold",
-                        color=color,
+                        f"RB {dist:.2f}m",
+                        8,
+                        color,
                         ha="center",
                         va="bottom",
-                        zorder=37,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
+                        box={"face": "#ffffff", "edge": color, "alpha": 0.85, "pad": 0.2},
+                        z=37,
+                        weight="bold",
                     )
 
         if show_nb_dist:
@@ -551,25 +511,17 @@ def render_scene_at_step(
                     pe = pt_e[i].numpy()
                     pn = pt_n[i].numpy()
                     color = "#dd2222" if d < 0.5 else "#ff8800" if d < 1.5 else "#22bb22"
-                    ax.plot(
-                        [pe[0], pn[0]],
-                        [pe[1], pn[1]],
-                        "-",
-                        color=color,
-                        lw=2.0,
-                        alpha=0.8,
-                        zorder=35,
-                    )
+                    ax.lines([np.stack([pe[:2], pn[:2]])], color, width=2.0, alpha=0.8, z=35)
                     mid_x, mid_y = (pe[0] + pn[0]) / 2, (pe[1] + pn[1]) / 2
-                    ax.annotate(
-                        f"{d:.2f}m",
+                    ax.text(
                         (mid_x, mid_y),
-                        fontsize=7,
-                        color=color,
+                        f"{d:.2f}m",
+                        7,
+                        color,
                         ha="center",
                         va="bottom",
-                        zorder=37,
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.8),
+                        box={"face": "#ffffff", "edge": color, "alpha": 0.8, "pad": 0.15},
+                        z=37,
                     )
 
     # Trajectory overlays
@@ -788,30 +740,25 @@ def render_scene_at_step(
                                     ),
                                 )
                                 bp_t = s1_t + tv * d_s
-                                ax.plot(
-                                    [ep_t[0], bp_t[0]],
-                                    [ep_t[1], bp_t[1]],
-                                    "-",
-                                    color=dc,
-                                    lw=2.5,
+                                ax.lines(
+                                    [np.array([[ep_t[0], ep_t[1]], [bp_t[0], bp_t[1]]])],
+                                    dc,
+                                    width=2.5,
                                     alpha=0.9,
-                                    zorder=39,
+                                    z=39,
                                 )
-                                ax.plot(bp_t[0], bp_t[1], "o", color=dc, ms=5, zorder=39)
-                        ax.annotate(
-                            f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
+                                ax.markers(np.array(bp_t[:2]), "o", size=5, color=dc, z=39)
+                        ax.text(
                             (wx, wy),
-                            fontsize=7,
-                            fontweight="bold",
-                            color=dc,
+                            f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
+                            7,
+                            dc,
                             ha="center",
                             va="top",
-                            xytext=(0, -8),
-                            textcoords="offset points",
-                            zorder=40,
-                            bbox=dict(
-                                boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85
-                            ),
+                            offset=(0, -8),
+                            box={"face": "#ffffff", "edge": traj_color, "alpha": 0.85, "pad": 0.2},
+                            z=40,
+                            weight="bold",
                         )
 
             _all_nb_corners = _placed_obs_corners[:]
@@ -874,27 +821,24 @@ def render_scene_at_step(
                         zorder=38,
                         wheelbase=float(ego.wheelbase),
                     )
-                    ax.plot(
-                        [worst_nb_pe[0], worst_nb_pn[0]],
-                        [worst_nb_pe[1], worst_nb_pn[1]],
-                        "-",
-                        color=dc,
-                        lw=2.5,
+                    ax.lines(
+                        [np.stack([worst_nb_pe[:2], worst_nb_pn[:2]])],
+                        dc,
+                        width=2.5,
                         alpha=0.9,
-                        zorder=39,
+                        z=39,
                     )
-                    ax.annotate(
-                        f"{traj_label} NB {worst_nb_dist:.2f}m @t{worst_nb_idx}",
+                    ax.text(
                         (wx, wy),
-                        fontsize=7,
-                        fontweight="bold",
-                        color=dc,
+                        f"{traj_label} NB {worst_nb_dist:.2f}m @t{worst_nb_idx}",
+                        7,
+                        dc,
                         ha="center",
                         va="bottom",
-                        xytext=(0, 8),
-                        textcoords="offset points",
-                        zorder=40,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
+                        offset=(0, 8),
+                        box={"face": "#ffffff", "edge": traj_color, "alpha": 0.85, "pad": 0.2},
+                        z=40,
+                        weight="bold",
                     )
 
     # Viewport: center on ego
@@ -903,17 +847,14 @@ def render_scene_at_step(
         ax.set_xlim(ex - view_half, ex + view_half)
         ax.set_ylim(ey - view_half, ey + view_half)
 
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    ax.grid(0.15)
+    ax.xlabel("X (m)")
+    ax.ylabel("Y (m)")
 
     # Legend for trajectory overlays
-    handles, labels = ax.get_legend_handles_labels()
-    if labels:
-        ax.legend(fontsize=7, loc="upper right", framealpha=0.8)
+    ax.legend("upper right")
 
-    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=10)
+    ax.title(f"Step {step_idx} / {total_steps - 1}", 10)
 
     # Current ego speed readout — drawn in the lower-left corner (out of the way
     # of the title (top) and the trajectory legend (upper-right)). Reads the ego's
@@ -923,18 +864,16 @@ def render_scene_at_step(
     if ego is not None:
         ego_speed = float(np.linalg.norm(ego.current_velocity))
         ax.text(
-            0.015,
-            0.015,
+            (0.015, 0.015),
             f"ego speed: {ego_speed:.1f} m/s ({ego_speed * 3.6:.0f} km/h)",
-            transform=ax.transAxes,
+            10,
+            "#000000",
             ha="left",
             va="bottom",
-            fontsize=10,
-            fontweight="bold",
-            color="black",
-            zorder=30,
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.75),
+            box={"face": "#ffffff", "edge": "#000000", "alpha": 0.75, "pad": 0.3},
+            z=30,
+            coords="axes",
+            weight="bold",
         )
 
-    fig.tight_layout()
     return fig

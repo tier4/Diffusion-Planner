@@ -2,8 +2,9 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -11,6 +12,21 @@ def parse_args():
     parser.add_argument("root_dir", type=Path)
     parser.add_argument("--limit", type=int, default=-1)
     return parser.parse_args()
+
+
+def panel_grid(size_in, rows, cols, n_used=None, **kwargs):
+    """A figure's panels in row-major order, hiding the cells past ``n_used``."""
+    fig = Figure(size_in, dpi=100)
+    grid = fig.grid(rows, cols, margins=(0.06, 0.98, 0.07, 0.95), **kwargs)
+    panels = [panel for row in grid for panel in row]
+    for panel in panels[n_used if n_used is not None else len(panels) :]:
+        panel.hide()
+    return fig, panels
+
+
+def scatter(panel, x, y):
+    """Default matplotlib scatter: tab10 blue circles of 36 pt²."""
+    panel.markers(np.stack([x, y], 1), "o", size=6, color="#1f77b4", z=1)
 
 
 if __name__ == "__main__":
@@ -60,62 +76,28 @@ if __name__ == "__main__":
     # (1) ego #
     ###########
     ego_current_state = npy_data_list["ego_current_state"]
-    plt.figure(figsize=(10, 8))
     ROW_NUM = 5
-    plt.subplot(ROW_NUM, 2, 1)
-    plt.hist(ego_current_state[:, 0], range=(-1, 1), bins=BIN_NUM)
-    plt.xlabel("ego position x")
-    plt.ylabel("count")
+    fig, panels = panel_grid((10, 8), ROW_NUM, 2, hspace=0.8)
+    ego_labels = [
+        "ego position x",
+        "ego position y",
+        "ego heading cos",
+        "ego heading sin",
+        "ego velocity x",
+        "ego velocity y",
+        "ego acceleration x",
+        "ego acceleration y",
+        "ego steering angle",
+        "ego yaw rate",
+    ]
+    for column, (panel, label) in enumerate(zip(panels, ego_labels)):
+        hist_range = (-1, 1) if column < 4 else None
+        panel.hist(ego_current_state[:, column], range=hist_range, bins=BIN_NUM)
+        panel.xlabel(label)
+        panel.ylabel("count")
 
-    plt.subplot(ROW_NUM, 2, 2)
-    plt.hist(ego_current_state[:, 1], range=(-1, 1), bins=BIN_NUM)
-    plt.xlabel("ego position y")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 3)
-    plt.hist(ego_current_state[:, 2], range=(-1, 1), bins=BIN_NUM)
-    plt.xlabel("ego heading cos")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 4)
-    plt.hist(ego_current_state[:, 3], range=(-1, 1), bins=BIN_NUM)
-    plt.xlabel("ego heading sin")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 5)
-    plt.hist(ego_current_state[:, 4], bins=BIN_NUM)
-    plt.xlabel("ego velocity x")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 6)
-    plt.hist(ego_current_state[:, 5], bins=BIN_NUM)
-    plt.xlabel("ego velocity y")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 7)
-    plt.hist(ego_current_state[:, 6], bins=BIN_NUM)
-    plt.xlabel("ego acceleration x")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 8)
-    plt.hist(ego_current_state[:, 7], bins=BIN_NUM)
-    plt.xlabel("ego acceleration y")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 9)
-    plt.hist(ego_current_state[:, 8], bins=BIN_NUM)
-    plt.xlabel("ego steering angle")
-    plt.ylabel("count")
-
-    plt.subplot(ROW_NUM, 2, 10)
-    plt.hist(ego_current_state[:, 9], bins=BIN_NUM)
-    plt.xlabel("ego yaw rate")
-    plt.ylabel("count")
-
-    plt.tight_layout()
     save_path = root_dir.parent / "ego_current_state.png"
-    plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-    plt.close()
+    fig.save(save_path)
     print(f"Save to {save_path}")
 
     ########################
@@ -123,38 +105,18 @@ if __name__ == "__main__":
     ########################
     ego_agent_future = npy_data_list["ego_agent_future"]
 
-    # 2 seconds later
-    plt.subplot(2, 2, 1)
-    plt.scatter(ego_agent_future[:, 20 - 1, 0], ego_agent_future[:, 20 - 1, 1])
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title("2 seconds later")
-    plt.axis("equal")
-    # 4 seconds later
-    plt.subplot(2, 2, 2)
-    plt.scatter(ego_agent_future[:, 40 - 1, 0], ego_agent_future[:, 40 - 1, 1])
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title("4 seconds later")
-    plt.axis("equal")
-    # 6 seconds later
-    plt.subplot(2, 2, 3)
-    plt.scatter(ego_agent_future[:, 60 - 1, 0], ego_agent_future[:, 60 - 1, 1])
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title("6 seconds later")
-    plt.axis("equal")
-    # 8 seconds later
-    plt.subplot(2, 2, 4)
-    plt.scatter(ego_agent_future[:, 80 - 1, 0], ego_agent_future[:, 80 - 1, 1])
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title("8 seconds later")
-    plt.axis("equal")
-    plt.tight_layout()
+    fig, panels = panel_grid((6.4, 4.8), 2, 2, hspace=0.6, equal=True)
+    for panel, seconds in zip(panels, [2, 4, 6, 8]):
+        scatter(
+            panel,
+            ego_agent_future[:, seconds * 10 - 1, 0],
+            ego_agent_future[:, seconds * 10 - 1, 1],
+        )
+        panel.xlabel("x [m]")
+        panel.ylabel("y [m]")
+        panel.title(f"{seconds} seconds later")
     save_path = root_dir.parent / "ego_agent_future.png"
-    plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-    plt.close()
+    fig.save(save_path)
     print(f"Save to {save_path}")
 
     ############################
@@ -163,36 +125,28 @@ if __name__ == "__main__":
     neighbor_agents_past = npy_data_list["neighbor_agents_past"]
     # 2 seconds before
     # position
-    plt.figure(figsize=(20, 10))
+    fig, panels = panel_grid((20, 10), 4, 8, hspace=0.6, xlim=(-100, 100), ylim=(-100, 100))
     for i in range(32):
-        plt.subplot(4, 8, i + 1)
-        plt.scatter(neighbor_agents_past[:, i, 0, 0], neighbor_agents_past[:, i, 0, 1])
-        plt.xlim(-100, 100)
-        plt.ylim(-100, 100)
-        plt.xlabel("x [m]")
-        plt.ylabel("y [m]")
-        plt.title(f"2 seconds before agent{i}")
-    plt.tight_layout()
+        scatter(panels[i], neighbor_agents_past[:, i, 0, 0], neighbor_agents_past[:, i, 0, 1])
+        panels[i].xlabel("x [m]")
+        panels[i].ylabel("y [m]")
+        panels[i].title(f"2 seconds before agent{i}")
     save_path = root_dir.parent / "neighbor_agents_past.png"
-    plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-    plt.close()
+    fig.save(save_path)
     print(f"Save to {save_path}")
 
     target = [2, 3, 4, 5, 6, 7]
     label_list = ["cos", "sin", "velocity_x", "velocity_y", "width", "length"]
 
     for index, label in zip(target, label_list):
-        plt.figure(figsize=(20, 10))
+        fig, panels = panel_grid((20, 10), 4, 8, hspace=0.6)
         for i in range(32):
-            plt.subplot(4, 8, i + 1)
-            plt.hist(neighbor_agents_past[:, i, 0, index], bins=BIN_NUM)
-            plt.xlabel(label)
-            plt.ylabel("count")
-            plt.title(f"agent{i}")
-        plt.tight_layout()
+            panels[i].hist(neighbor_agents_past[:, i, 0, index], bins=BIN_NUM)
+            panels[i].xlabel(label)
+            panels[i].ylabel("count")
+            panels[i].title(f"agent{i}")
         save_path = root_dir.parent / f"neighbor_agents_past_{label}_hist.png"
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-        plt.close()
+        fig.save(save_path)
         print(f"Save to {save_path}")
 
     ##############################
@@ -201,26 +155,22 @@ if __name__ == "__main__":
     neighbor_agents_future = npy_data_list["neighbor_agents_future"]
     # seconds later
     for timestep in [20, 40, 60, 80]:
-        plt.figure(figsize=(20, 10))
+        fig, panels = panel_grid((20, 10), 4, 8, hspace=0.6, xlim=(-100, 100), ylim=(-100, 100))
         for i in range(32):
-            plt.subplot(4, 8, i + 1)
-            plt.scatter(
+            scatter(
+                panels[i],
                 neighbor_agents_future[:, i, timestep - 1, 0],
                 neighbor_agents_future[:, i, timestep - 1, 1],
             )
-            plt.xlim(-100, 100)
-            plt.ylim(-100, 100)
-            plt.xlabel("x [m]")
-            plt.ylabel("y [m]")
-            plt.title(f"2 seconds later agent{i}")
-        plt.tight_layout()
+            panels[i].xlabel("x [m]")
+            panels[i].ylabel("y [m]")
+            panels[i].title(f"2 seconds later agent{i}")
         save_path = root_dir.parent / f"neighbor_agents_future_{timestep // 10}sec_later.png"
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-        plt.close()
+        fig.save(save_path)
         print(f"Save to {save_path}")
 
         # heading cos
-        plt.figure(figsize=(20, 10))
+        fig, panels = panel_grid((20, 10), 4, 8, hspace=0.6)
         for i in range(32):
             nf = neighbor_agents_future[:, i, timestep - 1]
             if nf.shape[-1] == 4:
@@ -229,21 +179,18 @@ if __name__ == "__main__":
                 cos = np.cos(nf[:, 2])
             else:
                 raise ValueError(f"neighbor future must be 3- or 4-col, got {nf.shape}")
-            plt.subplot(4, 8, i + 1)
-            plt.hist(cos, bins=BIN_NUM)
-            plt.xlabel("heading cos")
-            plt.ylabel("count")
-            plt.title(f"agent{i}")
-        plt.tight_layout()
+            panels[i].hist(cos, bins=BIN_NUM)
+            panels[i].xlabel("heading cos")
+            panels[i].ylabel("count")
+            panels[i].title(f"agent{i}")
         save_path = (
             root_dir.parent / f"neighbor_agents_future_cos_{timestep // 10}sec_later_hist.png"
         )
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-        plt.close()
+        fig.save(save_path)
         print(f"Save to {save_path}")
 
         # heading sin
-        plt.figure(figsize=(20, 10))
+        fig, panels = panel_grid((20, 10), 4, 8, hspace=0.6)
         for i in range(32):
             nf = neighbor_agents_future[:, i, timestep - 1]
             if nf.shape[-1] == 4:
@@ -252,17 +199,14 @@ if __name__ == "__main__":
                 sin = np.sin(nf[:, 2])
             else:
                 raise ValueError(f"neighbor future must be 3- or 4-col, got {nf.shape}")
-            plt.subplot(4, 8, i + 1)
-            plt.hist(sin, bins=BIN_NUM)
-            plt.xlabel("heading sin")
-            plt.ylabel("count")
-            plt.title(f"agent{i}")
-        plt.tight_layout()
+            panels[i].hist(sin, bins=BIN_NUM)
+            panels[i].xlabel("heading sin")
+            panels[i].ylabel("count")
+            panels[i].title(f"agent{i}")
         save_path = (
             root_dir.parent / f"neighbor_agents_future_sin_{timestep // 10}sec_later_hist.png"
         )
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-        plt.close()
+        fig.save(save_path)
         print(f"Save to {save_path}")
 
     ######################
@@ -272,15 +216,12 @@ if __name__ == "__main__":
     target = [0, 1, 2, 3, 4, 5]
     label_list = ["pos_x", "pos_y", "head_cos", "head_sin", "obj_width", "obj_length"]
     for index, label in zip(target, label_list):
-        plt.figure(figsize=(20, 10))
+        fig, panels = panel_grid((20, 10), 3, 2, n_used=5, hspace=0.6)
         for i in range(5):
-            plt.subplot(3, 2, i + 1)
-            plt.hist(static_objects[:, i, index], bins=BIN_NUM)
-            plt.xlabel(label)
-            plt.ylabel("count")
-            plt.title(f"agent{i}")
-        plt.tight_layout()
+            panels[i].hist(static_objects[:, i, index], bins=BIN_NUM)
+            panels[i].xlabel(label)
+            panels[i].ylabel("count")
+            panels[i].title(f"agent{i}")
         save_path = root_dir.parent / f"static_object_{label}_hist.png"
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-        plt.close()
+        fig.save(save_path)
         print(f"Save to {save_path}")

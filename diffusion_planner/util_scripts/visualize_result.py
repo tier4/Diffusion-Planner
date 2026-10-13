@@ -2,8 +2,10 @@ import argparse
 import os
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -31,7 +33,8 @@ if __name__ == "__main__":
     # Plot "metric_score"
     save_dir = metrics_dir.parent / "metric_graphs"
     save_dir.mkdir(exist_ok=True)
-    plt.barh(mean_metrics.keys(), mean_metrics.values())
-    plt.tight_layout()
-    plt.savefig(save_dir / "mean.png", bbox_inches="tight", pad_inches=0.1)
-    plt.close()
+    ax = Figure((6.4, 4.8), dpi=100).panel((0.4, 0.1, 0.56, 0.86))
+    positions = np.arange(len(mean_metrics))
+    ax.bars(positions, list(mean_metrics.values()), width=0.8, horizontal=True)
+    ax.yticks(positions, list(mean_metrics.keys()))
+    ax.save(save_dir / "mean.png")

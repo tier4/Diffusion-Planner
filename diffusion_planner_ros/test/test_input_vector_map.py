@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 
-import matplotlib.pyplot as plt
 import numpy as np
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
     convert_lanelet,
     create_lane_tensor,
 )
 from scipy.spatial.transform import Rotation
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -55,18 +56,16 @@ if __name__ == "__main__":
     )
     print(f"{lanes_tensor.shape=}")
 
-    plt.figure(figsize=(10, 8))
+    ax = Figure((10, 8), dpi=100).panel(xlim=(-RANGE, RANGE), ylim=(-RANGE, RANGE))
     for i in range(lanes_tensor.shape[1]):
-        result = lanes_tensor[0, i]
-        plt.plot(result[:, 0], result[:, 1], "r-")
-        plt.plot(result[:, 4] + result[:, 0], result[:, 5] + result[:, 1], "g-")
-        plt.plot(result[:, 6] + result[:, 0], result[:, 7] + result[:, 1], "b-")
+        result = np.asarray(lanes_tensor[0, i])
+        ax.lines([result[:, :2]], "#ff0000")
+        ax.lines([result[:, 4:6] + result[:, :2]], "#008000")
+        ax.lines([result[:, 6:8] + result[:, :2]], "#0000ff")
 
-    plt.xlabel("x[m]")
-    plt.ylabel("y[m]")
-    plt.xlim(-RANGE, RANGE)
-    plt.ylim(-RANGE, RANGE)
-    plt.grid(alpha=0.3)
+    ax.xlabel("x[m]")
+    ax.ylabel("y[m]")
+    ax.grid(0.3)
     save_path = "./test_input_vector_map.png"
-    plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
+    ax.save(save_path)
     print(f"Saved plot to {save_path}")

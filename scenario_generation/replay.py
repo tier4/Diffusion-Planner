@@ -59,9 +59,6 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import torch
 
@@ -90,6 +87,7 @@ from rlvr.reward import (
     compute_road_border_penalty,
     reward_breakdown_to_json_dict,
 )
+from scenario_generation.canvas import Panel, scene_panel
 from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
     _obb_collides,
@@ -105,7 +103,6 @@ from scenario_generation.scene_context import Agent, AgentType, SceneContext
 from scenario_generation.simulate import (
     _ego_to_world,
     _predict_batch,
-    _save_and_close,
     advance_scene,
     advance_scene_mpc,
     load_model,
@@ -1223,7 +1220,7 @@ def stable_palette_index(agent_id: str) -> int:
     return zlib.crc32(agent_id.encode())
 
 
-def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
+def _draw_lane_network(canvas: Panel, map_data, alpha: float = 0.7) -> None:
     """Draw lane centerlines **and** left/right borders from the 33-dim tensor.
 
     Borders are reconstructed via ``centerline + lane[:, 4:6]`` (left) and
@@ -1231,8 +1228,6 @@ def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
     zero-filled in replay scenes so we can't rely on it; the borders we draw
     here come from the lane tensor which is always populated.
     """
-    from matplotlib.collections import LineCollection
-
     lanes = map_data.lanes
     centerlines, lefts, rights = [], [], []
     for i in range(lanes.shape[0]):
@@ -1248,47 +1243,19 @@ def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
             lefts.append((pts + lane[:, 4:6])[valid])
             rights.append((pts + lane[:, 6:8])[valid])
 
-    if centerlines:
-        ax.add_collection(
-            LineCollection(
-                centerlines,
-                colors=_LANE_COLOR,
-                linewidths=0.6,
-                alpha=alpha * 0.4,
-                zorder=1,
-            )
-        )
-    if lefts:
-        ax.add_collection(
-            LineCollection(
-                lefts,
-                colors=_LANE_BORDER_COLOR,
-                linewidths=1.1,
-                alpha=alpha,
-                zorder=2,
-            )
-        )
-    if rights:
-        ax.add_collection(
-            LineCollection(
-                rights,
-                colors=_LANE_BORDER_COLOR,
-                linewidths=1.1,
-                alpha=alpha,
-                zorder=2,
-            )
-        )
+    canvas.lines(centerlines, _LANE_COLOR, 0.6, alpha * 0.4, z=1)
+    canvas.lines(lefts + rights, _LANE_BORDER_COLOR, 1.1, alpha, z=2)
 
 
-def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=None) -> None:
+def _draw_road_borders(
+    canvas: Panel, road_border_polylines, view_center=None, view_half_m=None
+) -> None:
     """Draw actual road-border polylines (curbs/walls) in red. Separate from
     lane markings; these come from the builder's line_strings_cache (type
     ``road_border``), not from the lane tensor.
     """
     if not road_border_polylines:
         return
-    from matplotlib.collections import LineCollection
-
     # AABB filter to avoid drawing the whole map each tick
     if view_center is not None and view_half_m is not None:
         cx, cy = view_center
@@ -1308,17 +1275,7 @@ def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=
         polylines = filtered
     else:
         polylines = [pl for pl in road_border_polylines if pl.shape[0] >= 2]
-    if not polylines:
-        return
-    ax.add_collection(
-        LineCollection(
-            polylines,
-            colors=_ROAD_BORDER_COLOR,
-            linewidths=2.0,
-            alpha=0.9,
-            zorder=5,  # above lanes, below agents
-        )
-    )
+    canvas.lines(polylines, _ROAD_BORDER_COLOR, 2.0, 0.9, z=5)
 
 
 def _ego_obb_corners(
@@ -1592,36 +1549,26 @@ def save_step_figure(
     reading (``ego.turn_indicators[-1]``, which can lag one step behind a closed-loop
     caller's freshly-decoded prediction) and add the recorded GT class alongside it.
     """
-    from matplotlib.figure import Figure
-
     ego = scene.ego_agent
     if ego is None:
         return
     ex, ey = ego.current_position
 
-    fig = Figure(figsize=(10, 10))
-    ax = fig.add_subplot(1, 1, 1)
-    fig.patch.set_facecolor("#f8f8f8")
+    canvas = scene_panel(
+        (ex - view_half_m, ex + view_half_m),
+        (ey - view_half_m, ey + view_half_m),
+        facecolor="#f8f8f8",
+    )
 
     # 1) Lane network (centerlines + left / right lane markings, gray).
-    _draw_lane_network(ax, scene.map_data)
+    _draw_lane_network(canvas, scene.map_data)
 
     # 1b) Road borders (curbs/walls) from the lanelet map, drawn in red.
-    _draw_road_borders(ax, road_border_polylines, view_center=(ex, ey), view_half_m=view_half_m)
+    _draw_road_borders(canvas, road_border_polylines, view_center=(ex, ey), view_half_m=view_half_m)
 
     # 2) Ego route polyline (drawn below agents but above lanes).
     if route_polylines:
-        for pl in route_polylines:
-            if pl.shape[0] >= 2:
-                ax.plot(
-                    pl[:, 0],
-                    pl[:, 1],
-                    "-",
-                    color=_ROUTE_COLOR,
-                    lw=2.5,
-                    alpha=0.6,
-                    zorder=3,
-                )
+        canvas.lines([pl[:, :2] for pl in route_polylines], _ROUTE_COLOR, 2.5, 0.6, z=3)
 
     # 2b) Traffic-light coloured overlay on ALL lanes in map_data that have
     #     active TL state (route, parallel, and perpendicular). Read
@@ -1631,8 +1578,6 @@ def save_step_figure(
     #     upstream; in NPZ-replay they come straight from the recorded
     #     tensor. The per-lane `tl_onehot.sum() < 0.5` filter below
     #     skips lanes with no TL data.
-    from matplotlib.collections import LineCollection
-
     from scenario_generation.traffic_light import TL_HEX, TL_NONE
 
     tl_segments: dict[str, list[np.ndarray]] = {}  # hex → list of polylines
@@ -1657,15 +1602,7 @@ def save_step_figure(
         tl_segments.setdefault(hex_color, []).append(pts[valid])
 
     for hex_color, segs in tl_segments.items():
-        ax.add_collection(
-            LineCollection(
-                segs,
-                colors=hex_color,
-                linewidths=2.5,
-                alpha=0.85,
-                zorder=4,
-            )
-        )
+        canvas.lines(segs, hex_color, 2.5, 0.85, z=4)
 
     # 3) Agents + per-agent predicted trajectories.
     # Assign colors by hashing the agent id (or extracting a stable numeric
@@ -1689,19 +1626,11 @@ def save_step_figure(
         past = agent.past_trajectory
         valid = np.abs(past[:, :2]).sum(axis=1) > 1e-6
         if valid.sum() > 1:
-            ax.plot(
-                past[valid, 0],
-                past[valid, 1],
-                "--",
-                color=color,
-                lw=0.9,
-                alpha=0.5,
-                zorder=7,
-            )
+            canvas.lines([past[valid, :2]], color, 0.9, 0.5, dash="dash", z=7)
 
         # Bounding box + heading arrow.
         draw_agent_box(
-            ax,
+            canvas,
             pos[0],
             pos[1],
             heading,
@@ -1714,23 +1643,12 @@ def save_step_figure(
             wheelbase=agent.wheelbase if is_ego else None,
         )
         arrow_len = max(agent.length, 2.5)
-        ax.annotate(
-            "",
-            xy=(pos[0] + arrow_len * math.cos(heading), pos[1] + arrow_len * math.sin(heading)),
-            xytext=(pos[0], pos[1]),
-            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5, mutation_scale=12),
-            zorder=21 if is_ego else 16,
+        head = (pos[0] + arrow_len * math.cos(heading), pos[1] + arrow_len * math.sin(heading))
+        canvas.arrows(
+            np.array(pos[:2]), np.array(head), color, width=1.5, head=9, z=21 if is_ego else 16
         )
-        ax.annotate(
-            agent.id,
-            (pos[0], pos[1]),
-            fontsize=7,
-            color=color,
-            ha="center",
-            va="bottom",
-            xytext=(0, 6),
-            textcoords="offset points",
-            zorder=22,
+        canvas.text(
+            (pos[0], pos[1]), agent.id, 7, color, ha="center", va="bottom", offset=(0, 6), z=22
         )
 
         # Predicted trajectory from the model (in that agent's ego frame).
@@ -1745,7 +1663,7 @@ def save_step_figure(
             )
             plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
             draw_trajectory(
-                ax,
+                canvas,
                 plan_traj,
                 color,
                 lw=1.8 if is_ego else 1.0,
@@ -1790,14 +1708,7 @@ def save_step_figure(
                 continue
             front_corner = center + fwd * front_local + side_dir * half_wid
             rear_corner = center + fwd * rear_local + side_dir * half_wid
-            ax.plot(
-                [front_corner[0], rear_corner[0]],
-                [front_corner[1], rear_corner[1]],
-                color=color,
-                lw=2.0,
-                solid_capstyle="round",
-                zorder=zorder,
-            )
+            canvas.lines([np.stack([front_corner, rear_corner])], color, 2.0, z=zorder)
 
     def _draw_turn_fill(
         cx: float,
@@ -1814,8 +1725,6 @@ def save_step_figure(
         outline/label stay untouched and the tint reads as "this half is lit" rather than a
         line that can visually compete with the amber pred line.
         """
-        from matplotlib.patches import Polygon
-
         length, width, wheelbase = float(ego.length), float(ego.width), float(ego.wheelbase)
         half_wid = width / 2.0
         rear_overhang = (length - wheelbase) / 2.0
@@ -1830,15 +1739,11 @@ def save_step_figure(
                 continue
             front_side = front_center + side_dir * half_wid
             rear_side = rear_center + side_dir * half_wid
-            ax.add_patch(
-                Polygon(
-                    np.array([front_center, front_side, rear_side, rear_center]),
-                    closed=True,
-                    facecolor=color,
-                    edgecolor="none",
-                    alpha=alpha,
-                    zorder=zorder,
-                )
+            canvas.polygons(
+                [np.array([front_center, front_side, rear_side, rear_center])],
+                fill=color,
+                alpha=alpha,
+                z=zorder,
             )
 
     # 3a-turn) Turn-indicator edge highlight on the LIVE ego box, showing the closed-loop
@@ -1864,7 +1769,7 @@ def save_step_figure(
     if reproducer_ego is not None:
         rx, ry, rh = float(reproducer_ego[0]), float(reproducer_ego[1]), float(reproducer_ego[2])
         draw_agent_box(
-            ax,
+            canvas,
             rx,
             ry,
             rh,
@@ -1877,16 +1782,8 @@ def save_step_figure(
             wheelbase=ego.wheelbase,
             filled=False,
         )
-        ax.annotate(
-            "reproducer",
-            (rx, ry),
-            fontsize=6,
-            color=_EGO_COLOR,
-            ha="center",
-            va="top",
-            xytext=(0, -8),
-            textcoords="offset points",
-            zorder=24,
+        canvas.text(
+            (rx, ry), "reproducer", 6, _EGO_COLOR, ha="center", va="top", offset=(0, -8), z=24
         )
         # Turn-indicator fill on the reproducer (GT) box, showing the recorded GT class --
         # kept on the GT box itself rather than overlaid on the live ego, so pred vs GT reads
@@ -1908,73 +1805,45 @@ def save_step_figure(
     if gt_deviation_viz is not None:
         window_xy, nearest_xy, dist_m = gt_deviation_viz
         if window_xy is not None and len(window_xy) >= 2:
-            ax.plot(
-                window_xy[:, 0],
-                window_xy[:, 1],
-                "-",
-                color=_GT_PATH_COLOR,
-                lw=1.3,
-                alpha=0.55,
-                zorder=6,
-            )
+            canvas.lines([np.asarray(window_xy)[:, :2]], _GT_PATH_COLOR, 1.3, 0.55, z=6)
         if nearest_xy is not None:
             nx, ny = float(nearest_xy[0]), float(nearest_xy[1])
-            ax.plot([ex, nx], [ey, ny], "--", color=_GT_DEV_COLOR, lw=1.5, zorder=22)
-            ax.annotate(
-                f"{float(dist_m):.2f} m",
-                ((ex + nx) / 2, (ey + ny) / 2),
-                fontsize=7,
-                color=_GT_DEV_COLOR,
-                zorder=24,
+            canvas.lines([np.array([[ex, ey], [nx, ny]])], _GT_DEV_COLOR, 1.5, dash="dash", z=22)
+            canvas.text(
+                ((ex + nx) / 2, (ey + ny) / 2), f"{float(dist_m):.2f} m", 7, _GT_DEV_COLOR, z=24
             )
 
     # 3b) Extra ego-frame trajectories (e.g. GT vs model output side by side).
     # Each entry: (traj[T, >=4] with x, y, cos, sin in the CURRENT ego frame,
-    # matplotlib color, legend label).
+    # hex color, legend label).
     if extra_ego_trajectories:
         ex0, ey0 = float(ego.current_position[0]), float(ego.current_position[1])
         for traj, color, label in extra_ego_trajectories:
             xy, _ = _ego_to_world(traj[:, :2], traj[:, 2:4], ex0, ey0, ego.current_heading)
-            ax.plot(
-                xy[:, 0],
-                xy[:, 1],
-                "-",
-                color=color,
-                lw=2.2,
-                alpha=0.9,
-                zorder=26,
-                label=label,
-            )
-            ax.plot(xy[-1, 0], xy[-1, 1], "o", color=color, ms=5, zorder=26)
-        ax.legend(loc="upper right", fontsize=9, framealpha=0.85)
+            canvas.lines([xy], color, 2.2, 0.9, z=26, label=label)
+            canvas.markers(xy[-1], "o", 5, color, z=26)
+        canvas.legend("upper right")
 
     # 4) Ego goal marker (if within viewport).
     if ego.goal_pose is not None:
         gx, gy = float(ego.goal_pose[0]), float(ego.goal_pose[1])
         if abs(gx - ex) <= view_half_m and abs(gy - ey) <= view_half_m:
-            ax.plot(
-                gx,
-                gy,
-                "*",
-                color="#d62728",
-                ms=18,
-                zorder=30,
-                markeredgecolor="black",
-                markeredgewidth=0.8,
+            canvas.markers(
+                np.array([gx, gy]), "*", 18, "#d62728", edge="#000000", edge_width=0.8, z=30
             )
 
-    # 5) Viewport: fixed square around ego.
-    ax.set_xlim(ex - view_half_m, ex + view_half_m)
-    ax.set_ylim(ey - view_half_m, ey + view_half_m)
-    ax.set_aspect("equal")
-    # Fixed tick spacing so the grid doesn't jitter between frames.
-    from matplotlib.ticker import MultipleLocator
-
-    ax.xaxis.set_major_locator(MultipleLocator(20.0))
-    ax.yaxis.set_major_locator(MultipleLocator(20.0))
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    # 5) Fixed 20 m ticks around the ego so the grid doesn't jitter between frames.
+    canvas.xticks(
+        20.0
+        * np.arange(math.ceil((ex - view_half_m) / 20.0), math.floor((ex + view_half_m) / 20.0) + 1)
+    )
+    canvas.yticks(
+        20.0
+        * np.arange(math.ceil((ey - view_half_m) / 20.0), math.floor((ey + view_half_m) / 20.0) + 1)
+    )
+    canvas.grid(0.15)
+    canvas.xlabel("X (m)")
+    canvas.ylabel("Y (m)")
 
     goal_d = (
         float(np.linalg.norm(ego.current_position - ego.goal_pose[:2]))
@@ -2014,130 +1883,102 @@ def save_step_figure(
     rb_info = _ego_border_distance(ego, scene.map_data)
     if rb_info is not None:
         rb_ego_pt, rb_border_pt, rb_dist = rb_info
-        ax.plot(
-            [rb_ego_pt[0], rb_border_pt[0]],
-            [rb_ego_pt[1], rb_border_pt[1]],
-            "k--",
-            linewidth=1.3,
-            alpha=0.7,
-            zorder=29,
-        )
-        ax.plot(
-            [rb_ego_pt[0], rb_border_pt[0]],
-            [rb_ego_pt[1], rb_border_pt[1]],
-            "o",
-            color="black",
-            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
-            zorder=30,
-            markeredgecolor="white",
-            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
-        )
-        mx, my = (rb_ego_pt[0] + rb_border_pt[0]) / 2, (rb_ego_pt[1] + rb_border_pt[1]) / 2
-        dx, dy = rb_border_pt[0] - rb_ego_pt[0], rb_border_pt[1] - rb_ego_pt[1]
-        seg_len = math.hypot(dx, dy)
-        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
-            nx, ny = -dy / seg_len, dx / seg_len
-        else:
-            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
-        ax.annotate(
+        _draw_distance_line(
+            canvas,
+            rb_ego_pt,
+            rb_border_pt,
             f"rb {rb_dist:.2f}m",
-            xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
-            fontsize=8,
-            color="black",
-            ha="center",
-            va="center",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="black", alpha=0.7),
-            zorder=31,
+            "#000000",
+            1.3,
+            0.7,
+            "dash",
+            8,
+            0.2,
+            distance_label_offset_m,
         )
 
     # Ego ↔ nearest stopped-NPC closest-pair line. Always draw the nearest
     # neighbor when present; the distance primitive is shared with the reward.
     sc_pair = _ego_nearest_static_npc(scene, threshold_m=float("inf"))
     if sc_pair is not None:
-        pt_e, pt_n, sc_d, sc_id = sc_pair
-        ax.plot(
-            [pt_e[0], pt_n[0]],
-            [pt_e[1], pt_n[1]],
-            "-",
-            color="#cc0000",
-            lw=1.8,
-            alpha=0.85,
-            zorder=29,
-        )
-        ax.plot(
-            [pt_e[0], pt_n[0]],
-            [pt_e[1], pt_n[1]],
-            "o",
-            color="#cc0000",
-            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
-            zorder=30,
-            markeredgecolor="white",
-            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
-        )
-        # Offset the label perpendicular to the line so it doesn't sit on
-        # top of it. The offset is configurable in metres.
-        mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
-        dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
-        seg_len = math.hypot(dx, dy)
-        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
-            nx, ny = -dy / seg_len, dx / seg_len
-        else:
-            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
-        ax.annotate(
+        pt_e, pt_n, sc_d, _ = sc_pair
+        _draw_distance_line(
+            canvas,
+            pt_e,
+            pt_n,
             f"{sc_d:.2f} m",
-            xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
-            fontsize=7,
-            color="#cc0000",
-            ha="center",
-            va="center",
-            bbox=dict(boxstyle="round,pad=0.1", facecolor="white", edgecolor="#cc0000", alpha=0.85),
-            zorder=31,
+            "#cc0000",
+            1.8,
+            0.85,
+            None,
+            7,
+            0.1,
+            distance_label_offset_m,
         )
 
     # Ego ↔ nearest moving NPC closest-pair line (blue).
     mv_pair = _ego_nearest_moving_npc(scene, threshold_m=float("inf"))
     if mv_pair is not None:
-        pt_e, pt_n, mv_d, mv_id = mv_pair
-        ax.plot(
-            [pt_e[0], pt_n[0]],
-            [pt_e[1], pt_n[1]],
-            "-",
-            color="#0055cc",
-            lw=1.8,
-            alpha=0.85,
-            zorder=29,
-        )
-        ax.plot(
-            [pt_e[0], pt_n[0]],
-            [pt_e[1], pt_n[1]],
-            "o",
-            color="#0055cc",
-            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
-            zorder=30,
-            markeredgecolor="white",
-            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
-        )
-        mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
-        dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
-        seg_len = math.hypot(dx, dy)
-        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
-            nx, ny = -dy / seg_len, dx / seg_len
-        else:
-            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
-        ax.annotate(
+        pt_e, pt_n, mv_d, _ = mv_pair
+        _draw_distance_line(
+            canvas,
+            pt_e,
+            pt_n,
             f"{mv_d:.2f} m",
-            xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
-            fontsize=7,
-            color="#0055cc",
-            ha="center",
-            va="center",
-            bbox=dict(boxstyle="round,pad=0.1", facecolor="white", edgecolor="#0055cc", alpha=0.85),
-            zorder=31,
+            "#0055cc",
+            1.8,
+            0.85,
+            None,
+            7,
+            0.1,
+            distance_label_offset_m,
         )
 
-    ax.set_title(title, fontsize=10)
-    fig.subplots_adjust(left=0.10, right=0.95, bottom=0.08, top=0.92)
-    _save_and_close(fig, output_path)
+    canvas.title(title, 10)
+    canvas.save(output_path)
+
+
+def _draw_distance_line(
+    canvas: Panel,
+    start: np.ndarray,
+    end: np.ndarray,
+    label: str,
+    color: str,
+    width: float,
+    alpha: float,
+    dash: str | None,
+    font_size: float,
+    pad: float,
+    label_offset_m: float,
+) -> None:
+    """A closest-pair line with white-edged endpoints and a boxed label offset perpendicular to it."""
+    points = np.array([start[:2], end[:2]], dtype=np.float64)
+    canvas.lines([points], color, width, alpha, dash=dash, z=29)
+    canvas.markers(
+        points,
+        "o",
+        _DISTANCE_ENDPOINT_MARKER_SIZE,
+        color,
+        edge="#ffffff",
+        edge_width=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
+        z=30,
+    )
+    (dx, dy), seg_len = points[1] - points[0], float(np.linalg.norm(points[1] - points[0]))
+    if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
+        nx, ny = -dy / seg_len, dx / seg_len
+    else:
+        nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
+    mid = points.mean(axis=0)
+    canvas.text(
+        (mid[0] + nx * label_offset_m, mid[1] + ny * label_offset_m),
+        label,
+        font_size,
+        color,
+        ha="center",
+        va="center",
+        box={"face": "#ffffff", "edge": color, "alpha": alpha, "pad": pad},
+        z=31,
+    )
 
 
 @torch.no_grad()

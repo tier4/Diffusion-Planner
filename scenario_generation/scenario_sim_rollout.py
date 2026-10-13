@@ -404,7 +404,7 @@ def run_scenario_sim_rollout(
     osp_out = output_dir / "osp_out"
     osp_out.mkdir(parents=True, exist_ok=True)
 
-    # Gated: the renderer pulls in matplotlib and the whole replay module.
+    # Gated: the renderer pulls in the whole replay module.
     save_step_figure = None
     if cfg.draw_every:
         from scenario_generation.replay import save_step_figure

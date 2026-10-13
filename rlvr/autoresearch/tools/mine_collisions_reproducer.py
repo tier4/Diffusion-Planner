@@ -433,7 +433,7 @@ def main() -> None:
         from scenario_generation.render_pool import render_pool
         from scenario_generation.reproducer_rollout import render_segment
 
-        # One pool for every hit: a spawned worker re-imports torch and matplotlib.
+        # One pool for every hit: a spawned worker re-imports torch.
         draw_pool = render_pool(4)
         render_root = args.out.with_suffix(".renders")
         render_root.mkdir(parents=True, exist_ok=True)

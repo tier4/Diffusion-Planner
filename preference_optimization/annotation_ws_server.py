@@ -22,7 +22,6 @@ from typing import Any
 
 import torch
 import websockets
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
 
 # Ensure parent directory is in path for diffusion_planner imports
@@ -124,7 +123,7 @@ class AnnotationWsServer:
         if fig is None:
             return None
         buffer = io.BytesIO()
-        FigureCanvasAgg(fig).print_png(buffer)
+        fig.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("ascii")
 
     def _extract_metrics_tables(self, metrics_text: str) -> dict[str, str]:
@@ -630,7 +629,7 @@ class AnnotationWsServer:
         except ConnectionClosedOK:
             # Normal close handshake.
             pass
-        except ConnectionClosedError as exc:
+        except ConnectionClosedError:
             # Abrupt close (e.g., browser/tab killed) should not be treated as server error.
             pass
         except ConnectionClosed as exc:

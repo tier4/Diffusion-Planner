@@ -31,10 +31,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 from rlvr.autoresearch.tools._psim_centerline_common import (
@@ -47,6 +43,8 @@ from rlvr.autoresearch.tools.eval_psim_centerline import (
     collect_run,
     collect_run_trajectory_log,
 )
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 
 
 def _parse_run(spec: str) -> dict:
@@ -191,49 +189,42 @@ def main():
     vmax = max(vmax, 0.5)
 
     N = len(runs)
-    fig, axes = plt.subplots(1, N, figsize=(7 * N, 9), sharex=True, sharey=True)
-    if N == 1:
-        axes = [axes]
+    fig = Figure((7 * N, 9), dpi=140)
+    (axes,) = fig.grid(1, N, equal=True)
     for ax, r in zip(axes, runs):
         d = cropped[r["name"]]
-        ax.plot(
-            polyline[:, 0],
-            polyline[:, 1],
-            "-",
-            color="0.7",
-            lw=2.5,
+        ax.lines(
+            [polyline[:, :2]],
+            "#b3b3b3",
+            width=2.5,
             alpha=0.5,
-            zorder=1,
+            z=1,
             label="route centerline",
         )
-        sc = ax.scatter(
-            d["world_xy"][:, 0],
-            d["world_xy"][:, 1],
-            c=np.abs(d["lat"]),
+        ax.markers(
+            d["world_xy"][:, :2],
+            "o",
+            size=np.sqrt(18),
+            values=np.abs(d["lat"]),
             cmap="inferno",
             vmin=0.0,
             vmax=vmax,
-            s=18,
             alpha=0.9,
-            edgecolors="none",
-            zorder=2,
+            z=2,
         )
-        ax.set_title(
+        ax.title(
             f"{r['name']}\nmean|lat|={np.mean(np.abs(d['lat'])):.3f}m  "
             f"p95={np.percentile(np.abs(d['lat']), 95):.3f}m  "
             f"max={np.max(np.abs(d['lat'])):.3f}m  n={len(d['lat'])}"
         )
-        ax.set_xlabel("MGRS x [m]")
-        ax.set_ylabel("MGRS y [m]")
+        ax.xlabel("MGRS x [m]")
+        ax.ylabel("MGRS y [m]")
         ax.set_xlim(x_min, x_max)
         ax.set_ylim(y_min, y_max)
-        ax.set_aspect("equal")
-        ax.legend(loc="upper right")
-        plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.02, label="|lat| [m]")
-    plt.suptitle("Centerline-tracking heatmap (each dot = one frame)", y=0.99)
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "heatmap_nway_xy.png", dpi=140)
-    plt.close()
+        ax.legend("upper right")
+        ax.colorbar("inferno", 0.0, vmax, "|lat| [m]")
+    fig.suptitle("Centerline-tracking heatmap (each dot = one frame)")
+    fig.save(args.out_dir / "heatmap_nway_xy.png")
 
     # ---- Δ map: each non-base run binned along arc-length and re-projected ----
     arc_max = max(cropped[r["name"]]["lon"].max() for r in runs)
@@ -254,46 +245,40 @@ def main():
 
     diff_panels = [(r["name"], arcs[r["name"]] - arcs[base_name]) for r in runs[1:]]
     if diff_panels:
-        fig, axes = plt.subplots(
-            1, len(diff_panels), figsize=(8 * len(diff_panels), 9), sharex=True, sharey=True
-        )
-        if len(diff_panels) == 1:
-            axes = [axes]
+        fig = Figure((8 * len(diff_panels), 9), dpi=140)
+        (axes,) = fig.grid(1, len(diff_panels), equal=True)
         all_finite = np.concatenate([d[np.isfinite(d)] for _, d in diff_panels])
         vlim = max(float(np.percentile(np.abs(all_finite), 98)) if all_finite.size else 1.0, 0.3)
         for ax, (name, diff_arc) in zip(axes, diff_panels):
             poly_diff = diff_arc[poly_bin]
             valid = np.isfinite(poly_diff)
-            ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.85", lw=2.0, zorder=1)
-            sc = ax.scatter(
-                polyline[valid, 0],
-                polyline[valid, 1],
-                c=poly_diff[valid],
+            ax.lines([polyline[:, :2]], "#d9d9d9", width=2.0, z=1)
+            ax.markers(
+                polyline[valid, :2],
+                "o",
+                size=np.sqrt(80),
+                values=poly_diff[valid],
                 cmap="RdBu_r",
                 vmin=-vlim,
                 vmax=vlim,
-                s=80,
-                edgecolors="none",
-                zorder=2,
+                z=2,
             )
-            ax.set_title(
+            ax.title(
                 f"Δ |lat| ({name} − {base_name})\n"
                 f"blue = {name} better   red = {name} worse\n"
                 f"mean Δ = {np.nanmean(diff_arc):+.3f} m"
             )
-            ax.set_xlabel("MGRS x [m]")
-            ax.set_ylabel("MGRS y [m]")
+            ax.xlabel("MGRS x [m]")
+            ax.ylabel("MGRS y [m]")
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(y_min, y_max)
-            ax.set_aspect("equal")
-            plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.02, label="Δ |lat| [m]")
-        plt.tight_layout()
-        plt.savefig(args.out_dir / "heatmap_nway_diff.png", dpi=140)
-        plt.close()
+            ax.colorbar("RdBu_r", -vlim, vlim, "Δ |lat| [m]")
+        fig.save(args.out_dir / "heatmap_nway_diff.png")
 
     # ---- Stacked histograms ----
-    colors = ["C0", "C3", "C2", "C4", "C1", "C5"]
-    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = [qualitative("tab10", i) for i in (0, 3, 2, 4, 1, 5)]
+    fig = Figure((10, 5), dpi=140)
+    ax = fig.panel()
     bins = np.linspace(-2.0, 2.0, 161)
     for i, r in enumerate(runs):
         d = cropped[r["name"]]
@@ -305,29 +290,30 @@ def main():
             color=colors[i % len(colors)],
             label=f"{r['name']} (n={len(d['lat'])}, mean|lat|={np.mean(np.abs(d['lat'])):.3f}m)",
         )
-    ax.axvline(0, color="k", lw=0.7)
-    ax.set_xlabel("signed lateral offset [m]   (+ left, − right)")
-    ax.set_ylabel("density")
-    ax.set_title("Lateral offset distribution to route centerline")
-    ax.legend(loc="upper right")
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "histogram_offsets.png", dpi=140)
-    plt.close()
+    ax.vline(0, color="#000000", width=0.7)
+    ax.xlabel("signed lateral offset [m]   (+ left, − right)")
+    ax.ylabel("density")
+    ax.title("Lateral offset distribution to route centerline")
+    ax.legend("upper right")
+    fig.save(args.out_dir / "histogram_offsets.png")
 
     # ---- Progress vs |lat| ----
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig = Figure((12, 5), dpi=140)
+    ax = fig.panel()
     for i, r in enumerate(runs):
-        d = cropped[r["name"]]
         c = colors[i % len(colors)]
-        ax.plot(arc_centers, arcs[r["name"]], color=c, lw=2.0, label=f"{r['name']} (binned mean)")
-    ax.set_xlabel("longitudinal arc-length along route centerline [m]")
-    ax.set_ylabel("|lateral offset| [m]")
-    ax.set_title("Lateral tracking error vs route progress")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "progress_vs_offset.png", dpi=140)
-    plt.close()
+        ax.lines(
+            [np.stack([arc_centers, arcs[r["name"]]], 1)],
+            c,
+            width=2.0,
+            label=f"{r['name']} (binned mean)",
+        )
+    ax.xlabel("longitudinal arc-length along route centerline [m]")
+    ax.ylabel("|lateral offset| [m]")
+    ax.title("Lateral tracking error vs route progress")
+    ax.legend("upper right")
+    ax.grid(0.3)
+    fig.save(args.out_dir / "progress_vs_offset.png")
 
     print(f"\nWrote outputs to {args.out_dir}")
 

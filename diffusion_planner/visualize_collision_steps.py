@@ -23,40 +23,40 @@ Example:
 
 import argparse
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
-from diffusion_planner.grpo_utils import (  # noqa: E402
+import numpy as np
+import torch
+from diffusion_planner.grpo_epoch import _neighbor_future_world
+from diffusion_planner.grpo_utils import (
     compute_collision_reward,
     expand_batch,
     sample_group,
 )
-from diffusion_planner.loss import (  # noqa: E402
+from diffusion_planner.loss import (
     _NEIGHBOR_EVAL_STEPS,
     compute_ego_bbox_corners,
 )
-from diffusion_planner.model.guidance.collision import center_rect_to_points  # noqa: E402
-from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
-from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
-from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+from diffusion_planner.model.guidance.collision import center_rect_to_points
+from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.neighbor_db import (
     DEFAULT_NEIGHBOR_DB_PATH,
     NeighborPatternDB,
 )
-from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
-from matplotlib.patches import Polygon  # noqa: E402
-from torch.utils.data import default_collate  # noqa: E402
+from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
+from torch.utils.data import default_collate
 
 # reuse the loaders / road drawing from the sample-group visualizer.
-from visualize_grpo_samples import (  # noqa: E402
+from visualize_grpo_samples import (
     boolean,
     build_train_args,
     draw_road,
+    figure_legend,
+    gray,
     load_model,
 )
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values, qualitative
 
 
 def parse_viz_args():
@@ -218,13 +218,17 @@ def main():
 
     steps = [s for s in _NEIGHBOR_EVAL_STEPS if s < T]
     P = len(steps)
-    base_cmap = plt.get_cmap("tab10" if n <= 10 else "turbo")
-    scolor = (lambda i: base_cmap(i % 10)) if n <= 10 else (lambda i: base_cmap(i / max(n - 1, 1)))
+    scolor = (
+        (lambda i: qualitative("tab10", i % 10))
+        if n <= 10
+        else (lambda i: map_values(i / max(n - 1, 1), "turbo", 0.0, 1.0))
+    )
 
     cols = min(P, 5)
     rows = int(np.ceil(P / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(5.6 * cols, 5.6 * rows))
-    axes = np.atleast_1d(axes).ravel()
+    fig = Figure((5.6 * cols, 5.6 * rows), dpi=120)
+    grid = fig.grid(rows, cols, margins=(0.05, 0.98, 0.04, 0.86), wspace=0.2, hspace=0.3)
+    axes = [panel for row in grid for panel in row]
 
     for j, t in enumerate(steps):
         ax = axes[j]
@@ -248,18 +252,14 @@ def main():
             if not valid_np[p]:
                 continue
             is_inj = injected_mask[p] if p < len(injected_mask) else False
-            c, lw = ("magenta", 1.6) if is_inj else ("0.4", 1.0)
-            ax.add_patch(
-                Polygon(
-                    neigh_corners_np[p],
-                    closed=True,
-                    fill=is_inj,
-                    facecolor=(c if is_inj else "none"),
-                    edgecolor=c,
-                    lw=lw,
-                    alpha=0.25 if is_inj else 0.7,
-                    zorder=3.5,
-                )
+            c, lw = ("#ff00ff", 1.6) if is_inj else (gray(0.4), 1.0)
+            ax.polygons(
+                [neigh_corners_np[p]],
+                fill=c if is_inj else None,
+                edge=c,
+                width=lw,
+                alpha=0.25 if is_inj else 0.7,
+                z=3.5,
             )
 
         # N ego boxes at step t, one color per sample; collided samples get a red dashed overlay.
@@ -269,54 +269,24 @@ def main():
             color = scolor(i)
             pen_i = float(nc_penalty[i, t])
             collided = pen_i > 0.0
-            ax.add_patch(
-                Polygon(
-                    ec,
-                    closed=True,
-                    fill=False,
-                    edgecolor=color,
-                    lw=2.2 if collided else 1.4,
-                    alpha=0.95,
-                    zorder=5,
-                )
-            )
+            ax.polygons([ec], edge=color, width=2.2 if collided else 1.4, alpha=0.95, z=5)
             if collided:
-                ax.add_patch(
-                    Polygon(
-                        ec,
-                        closed=True,
-                        fill=True,
-                        facecolor="red",
-                        edgecolor="red",
-                        lw=1.0,
-                        alpha=0.18,
-                        zorder=4.5,
-                    )
-                )
+                ax.polygons([ec], fill="#ff0000", edge="#ff0000", width=1.0, alpha=0.18, z=4.5)
                 collide_list.append(f"s{i}(p={pen_i:.2f})")
-            ax.annotate(
-                str(i),
-                xy=tuple(ec.mean(0)),
-                fontsize=7,
-                color=color,
-                ha="center",
-                va="center",
-                fontweight="bold",
-                zorder=6,
+            ax.text(
+                tuple(ec.mean(0)), str(i), 7, color, ha="center", va="center", weight="bold", z=6
             )
-            ax.plot(
-                ego_xy[i, :, 0], ego_xy[i, :, 1], "-", color=color, lw=0.8, alpha=0.35, zorder=3
-            )
+            ax.lines([ego_xy[i]], color, 0.8, 0.35, z=3)
 
         k_coll = len(collide_list)
-        ax.set_title(
+        ax.title(
             f"step {t}   collisions {k_coll}/{n} (margin={margin})\n"
             + ("collide: " + ", ".join(collide_list) if collide_list else "all clear"),
-            fontsize=9,
-            color=("red" if k_coll else "green"),
+            9,
+            color="red" if k_coll else "green",
         )
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, alpha=0.3)
+        ax.equal = True
+        ax.grid(0.3)
 
         # zoom to cover all N ego boxes (the colliding neighbor sits within margin, so in-frame).
         ego_pts_t = ego_corners[:, t].reshape(-1, 2)  # [N*4, 2]
@@ -326,30 +296,32 @@ def main():
         ax.set_ylim(ctr[1] - half, ctr[1] + half)
 
     for ax in axes[P:]:
-        ax.axis("off")
+        ax.axis_off()
 
     # legend: one entry per sample (with its scalar reward) + neighbor proxies.
-    sample_handles = [
-        plt.Line2D([0], [0], color=scolor(i), lw=2, label=f"s{i} r={reward[i]:.1f}")
-        for i in range(n)
-    ]
+    sample_entries = [(f"s{i} r={reward[i]:.1f}", scolor(i), 2, None) for i in range(n)]
     proxies = [
-        plt.Line2D([0], [0], color="red", lw=2, label="collision (red fill)"),
-        plt.Line2D([0], [0], color="magenta", lw=1.6, label="injected collider"),
-        plt.Line2D([0], [0], color="0.4", lw=1.0, label="scene neighbor"),
+        ("collision (red fill)", "#ff0000", 2, None),
+        ("injected collider", "#ff00ff", 1.6, None),
+        ("scene neighbor", gray(0.4), 1.0, None),
     ]
-    fig.legend(
-        handles=sample_handles + proxies, loc="upper center", fontsize=8, ncol=min(n + 3, 11)
+    entries = sample_entries + proxies
+    ncol = min(n + 3, 11)
+    legend_height = int(np.ceil(len(entries) / ncol)) * 0.3 / (5.6 * rows)
+    legend_width = min(0.96, ncol * 1.6 / (5.6 * cols))
+    figure_legend(
+        fig,
+        (0.5 - legend_width / 2, 0.955 - legend_height, legend_width, legend_height),
+        entries,
+        ncol,
     )
     total_pen = float(nc_penalty.sum())
     fig.suptitle(
         f"GRPO collision check @ eval steps {steps}  |  scene #{idx}, N={n}  "
         f"mean reward={reward.mean():.2f}, best={reward.max():.2f}  total penalty={total_pen:.2f}",
-        fontsize=12,
-        y=0.99,
+        12,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
-    fig.savefig(v.output_path, dpi=120)
+    fig.save(v.output_path)
     print(f"Saved {P} eval-step panels ({n} samples each) to {v.output_path}")
     n_collide = [int((nc_penalty[:, s] > 0).sum()) for s in steps]
     print(f"  collisions per eval step {steps}: {n_collide}  (out of N={n})")

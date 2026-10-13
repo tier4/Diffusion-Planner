@@ -72,10 +72,11 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 from jinja2 import Environment, FileSystemLoader
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values
 
 
 @dataclasses.dataclass
@@ -665,13 +666,8 @@ def make_static_plots(
     vmax_lane = max(float(np.max(lane_haus)), 1e-6) if lane_haus else 1.0
     vmax_line = max(float(np.max(line_haus)), 1e-6) if line_haus else 1.0
     vmax_poly = max(float(np.max(poly_haus)), 1e-6) if poly_haus else 1.0
-    cmap = matplotlib.cm.get_cmap("viridis")
-    norm_lane = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_lane)
-    norm_line = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_line)
-    norm_poly = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_poly)
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    ax1, ax2, ax3, ax4 = axes.flatten()
+    fig = Figure((16, 12), dpi=180)
+    (ax1, ax2), (ax3, ax4) = fig.grid(2, 2, margins=(0.05, 0.97, 0.04, 0.95), equal=True)
 
     # Panel 1: Fused overlay (reference first, then internal)
     for lane in reference["lane_segments"]:
@@ -679,43 +675,40 @@ def make_static_plots(
         l_id, l = points3_id_to_np(lane["left_boundary"])
         r_id, r = points3_id_to_np(lane["right_boundary"])
         if len(c):
-            ax1.plot(c[:, 0], c[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+            ax1.lines([c[:, :2]], "#2d5016", 1.5, 0.7)
         if len(l):
-            ax1.plot(l[:, 0], l[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+            ax1.lines([l[:, :2]], "#2d5016", 1.5, 0.7)
         if len(r):
-            ax1.plot(r[:, 0], r[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+            ax1.lines([r[:, :2]], "#2d5016", 1.5, 0.7)
     for line_string in reference["line_strings"]:
         s = points3_to_np(line_string["points"])
         if len(s):
-            ax1.plot(s[:, 0], s[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+            ax1.lines([s[:, :2]], "#2d5016", 1.5, 0.7)
     for p in reference["polygons"]:
         poly = points3_to_np(p["points"])
         if len(poly):
-            ax1.plot(poly[:, 0], poly[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+            ax1.lines([poly[:, :2]], "#2d5016", 1.5, 0.7)
 
     for lane in internal["lane_segments"]:
         c = points3_to_np(lane["centerline"])
         r = points3_to_np(lane["right_boundary"])
         l = points3_to_np(lane["left_boundary"])
         if len(c):
-            ax1.plot(c[:, 0], c[:, 1], color="blue", alpha=0.55, linewidth=0.9)
+            ax1.lines([c[:, :2]], "#0000ff", 0.9, 0.55)
         if len(r):
-            ax1.plot(r[:, 0], r[:, 1], color="blue", alpha=0.55, linewidth=0.9)
+            ax1.lines([r[:, :2]], "#0000ff", 0.9, 0.55)
         if len(l):
-            ax1.plot(l[:, 0], l[:, 1], color="blue", alpha=0.55, linewidth=0.9)
+            ax1.lines([l[:, :2]], "#0000ff", 0.9, 0.55)
     for i, line_string in enumerate(internal["line_strings"]):
         s = points3_to_np(line_string["points"])
         if len(s):
-            ax1.plot(s[:, 0], s[:, 1], color="red", alpha=0.8)
+            ax1.lines([s[:, :2]], "#ff0000", 1.5, 0.8)
     for i, polygon in enumerate(internal["polygons"]):
         poly = points3_to_np(polygon["points"])
         if len(poly):
-            ax1.fill(
-                poly[:, 0], poly[:, 1], color="green", alpha=0.4, edgecolor="green", linewidth=1
-            )
+            ax1.polygons([poly[:, :2]], fill="#008000", edge="#008000", width=1, alpha=0.4)
 
-    ax1.set_title("Fused Overlay (Reference + Internal)")
-    ax1.set_aspect("equal")
+    ax1.title("Fused Overlay (Reference + Internal)")
 
     # Panel 2: Lane error heatmap (per-type scale)
     for lane in internal["lane_segments"]:
@@ -723,60 +716,36 @@ def make_static_plots(
         c = points3_to_np(lane["centerline"])
         l = points3_to_np(lane["left_boundary"])
         r = points3_to_np(lane["right_boundary"])
-        if len(c):
-            err = lane_error_map.get(lane_id, 0.0)
-            ax2.plot(c[:, 0], c[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
-        if len(l):
-            err = lane_error_map.get(lane_id, 0.0)
-            ax2.plot(l[:, 0], l[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
-        if len(r):
-            err = lane_error_map.get(lane_id, 0.0)
-            ax2.plot(r[:, 0], r[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
-    ax2.set_title("Lane Error Heatmap (Hausdorff)")
-    ax2.set_aspect("equal")
-    sm2 = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm_lane)
-    sm2.set_array([])
-    cbar2 = fig.colorbar(sm2, ax=ax2, shrink=0.8)
-    cbar2.set_label("Hausdorff error (m)", fontsize=10)
+        err = lane_error_map.get(lane_id, 0.0)
+        color = map_values(err, "viridis", 0.0, vmax_lane)
+        for points in (c, l, r):
+            if len(points):
+                ax2.lines([points[:, :2]], color, 1.2, 0.9)
+    ax2.title("Lane Error Heatmap (Hausdorff)")
+    ax2.colorbar("viridis", 0.0, vmax_lane, "Hausdorff error (m)")
 
     # Panel 3: Line string error heatmap (per-type scale)
     for i, l in enumerate(internal["line_strings"]):
         s = points3_to_np(l["points"])
         if len(s):
             err = line_error_map.get(i, 0.0)
-            ax3.plot(s[:, 0], s[:, 1], color=cmap(norm_line(err)), alpha=0.9, linewidth=1.2)
-    ax3.set_title("Line String Error Heatmap (Hausdorff)")
-    ax3.set_aspect("equal")
-    sm3 = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm_line)
-    sm3.set_array([])
-    cbar3 = fig.colorbar(sm3, ax=ax3, shrink=0.8)
-    cbar3.set_label("Hausdorff error (m)", fontsize=10)
+            ax3.lines([s[:, :2]], map_values(err, "viridis", 0.0, vmax_line), 1.2, 0.9)
+    ax3.title("Line String Error Heatmap (Hausdorff)")
+    ax3.colorbar("viridis", 0.0, vmax_line, "Hausdorff error (m)")
 
     # Panel 4: Polygon error heatmap (per-type scale)
     for i, p in enumerate(internal["polygons"]):
         poly = points3_to_np(p["points"])
         if len(poly):
             err = poly_error_map.get(i, 0.0)
-            ax4.fill(
-                poly[:, 0],
-                poly[:, 1],
-                color=cmap(norm_poly(err)),
-                alpha=0.5,
-                edgecolor=cmap(norm_poly(err)),
-                linewidth=1,
-            )
-    ax4.set_title("Polygon Error Heatmap (Hausdorff)")
-    ax4.set_aspect("equal")
-    sm4 = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm_poly)
-    sm4.set_array([])
-    cbar4 = fig.colorbar(sm4, ax=ax4, shrink=0.8)
-    cbar4.set_label("Hausdorff error (m)", fontsize=10)
+            color = map_values(err, "viridis", 0.0, vmax_poly)
+            ax4.polygons([poly[:, :2]], fill=color, edge=color, width=1, alpha=0.5)
+    ax4.title("Polygon Error Heatmap (Hausdorff)")
+    ax4.colorbar("viridis", 0.0, vmax_poly, "Hausdorff error (m)")
 
-    for ax in axes.flatten():
-        ax.grid(True, alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=180)
-    plt.close(fig)
+    for ax in (ax1, ax2, ax3, ax4):
+        ax.grid(0.2)
+    fig.save(out_path)
 
 
 def _pts_to_coords(pts: np.ndarray) -> List[List[float]]:

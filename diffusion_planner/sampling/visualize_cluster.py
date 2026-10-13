@@ -37,8 +37,10 @@ import math
 import random
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
+
+from scenario_generation.canvas import Figure, Panel
+from scenario_generation.colormaps import qualitative
 
 # ── I/O ──────────────────────────────────────────────────────────────────────
 
@@ -58,20 +60,18 @@ def load_trajectory(npz_path: str) -> np.ndarray:
 # ── plotting ─────────────────────────────────────────────────────────────────
 
 
-def _draw_cluster(
-    ax: plt.Axes, paths: list, max_samples: int, color: str, rng: random.Random
-) -> None:
+def _draw_cluster(ax: Panel, paths: list, max_samples: int, color: str, rng: random.Random) -> None:
     sampled = rng.sample(paths, min(max_samples, len(paths)))
 
     for npz_path in sampled:
         try:
             xy = load_trajectory(npz_path)
-            ax.plot(xy[:, 0], xy[:, 1], color=color, alpha=0.3, linewidth=0.8)
+            ax.lines([xy], color, width=0.8, alpha=0.3)
         except Exception as e:
             print(f"  [warn] skipping {npz_path}: {e}")
 
     # Mark the ego origin
-    ax.scatter([0], [0], color="black", s=20, zorder=5)
+    ax.markers(np.zeros(2), "o", size=np.sqrt(20), color="#000000", z=5)
 
 
 def visualize(cluster_json: str, output: str | None, max_samples: int, seed: int) -> None:
@@ -83,49 +83,39 @@ def visualize(cluster_json: str, output: str | None, max_samples: int, seed: int
     n_cols = math.ceil(math.sqrt(n_clusters))
     n_rows = math.ceil(n_clusters / n_cols)
 
-    cmap = plt.get_cmap("tab20")
     rng = random.Random(seed)
 
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(4 * n_cols, 4 * n_rows),
-        squeeze=False,
-    )
+    fig = Figure((4 * n_cols, 4 * n_rows), dpi=150)
+    axes = fig.grid(n_rows, n_cols, margins=(0.08, 0.98, 0.06, 0.92), wspace=0.35, equal=True)
     fig.suptitle(
         f"ego_agent_future trajectories by cluster  (max {max_samples} samples each)",
-        fontsize=12,
+        12,
     )
 
     for idx, cluster_id in enumerate(cluster_ids):
         row, col = divmod(idx, n_cols)
         ax = axes[row][col]
         paths = clusters[cluster_id]
-        color = cmap(idx % 20)
+        color = qualitative("tab20", idx % 20)
 
         _draw_cluster(ax, paths, max_samples, color, rng)
 
-        ax.set_title(f"{cluster_id}  (n={len(paths)})", fontsize=9)
-        ax.set_xlabel("x [m]", fontsize=7)
-        ax.set_ylabel("y [m]", fontsize=7)
-        ax.set_aspect("equal")
-        ax.grid(True, linewidth=0.4, alpha=0.5)
-        ax.tick_params(labelsize=7)
+        ax.title(f"{cluster_id}  (n={len(paths)})", 9)
+        ax.xlabel("x [m]")
+        ax.ylabel("y [m]")
+        ax.grid(0.5)
 
     # Hide unused axes
     for idx in range(n_clusters, n_rows * n_cols):
         row, col = divmod(idx, n_cols)
-        axes[row][col].set_visible(False)
-
-    fig.tight_layout()
+        axes[row][col].hide()
 
     if output:
         out_path = Path(output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        fig.save(out_path)
         print(f"Saved figure to {out_path}")
     else:
-        plt.show()
+        fig.image().show()
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -145,7 +135,7 @@ def get_args():
         "--output",
         type=str,
         default=None,
-        help="Save figure to this path (PNG/PDF/SVG). If omitted, display interactively.",
+        help="Save figure to this path (PNG). If omitted, display interactively.",
     )
     parser.add_argument(
         "--max_samples",

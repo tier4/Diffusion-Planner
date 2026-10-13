@@ -33,10 +33,6 @@ import argparse
 import math
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
@@ -47,6 +43,8 @@ from rlvr.grpo_trainer_batched import (
     _normalize_batch,
     _stack_scene_data,
 )
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 from scenario_generation.tools._heatmap_common import (
     bin_by_arc,
     build_route_polyline,
@@ -211,12 +209,11 @@ def main():
     diff_abs = np.nanmax(np.abs(diff)) if np.any(~np.isnan(diff)) else 1.0
     diff_abs = max(float(diff_abs), 0.1)
 
-    fig = plt.figure(figsize=(12, 14))
-    gs = fig.add_gridspec(4, 1, height_ratios=[1.6, 1.6, 1.6, 1.0])
-    ax_a = fig.add_subplot(gs[0])
-    ax_b = fig.add_subplot(gs[1], sharex=ax_a, sharey=ax_a)
-    ax_d = fig.add_subplot(gs[2], sharex=ax_a, sharey=ax_a)
-    ax_line = fig.add_subplot(gs[3])
+    fig = Figure((12.0, 14.0), 140.0)
+    ax_a = fig.panel((0.08, 0.735, 0.9, 0.215))
+    ax_b = fig.panel((0.08, 0.475, 0.9, 0.215))
+    ax_d = fig.panel((0.08, 0.215, 0.9, 0.215))
+    ax_line = fig.panel((0.08, 0.04, 0.9, 0.135))
 
     plot_route_heatmap(
         ax_a,
@@ -254,33 +251,42 @@ def main():
         (ax_b, 0.0, vmax, "viridis"),
         (ax_d, -diff_abs, diff_abs, "RdBu_r"),
     ]:
-        sm = plt.cm.ScalarMappable(cmap=cm, norm=plt.Normalize(vmin=vmin_, vmax=vmax_))
-        sm.set_array([])
-        cb = plt.colorbar(sm, ax=ax, pad=0.01, fraction=0.025)
-        cb.ax.tick_params(labelsize=8)
-        cb.set_label("m", fontsize=8)
+        ax.colorbar(cm, vmin_, vmax_, "m")
 
-    ax_line.plot(bs_mid, mean_gt, label=f"{args.label_gt} mean |lat|", color="C0", lw=1.4)
-    ax_line.plot(bs_mid, mean_det, label=f"{args.label_det} mean |lat|", color="C1", lw=1.4)
-    ax_line.plot(bs_mid, max_gt, label=f"{args.label_gt} max |lat|", color="C0", lw=0.8, alpha=0.5)
-    ax_line.plot(
-        bs_mid, max_det, label=f"{args.label_det} max |lat|", color="C1", lw=0.8, alpha=0.5
+    c0, c1 = qualitative("tab10", 0), qualitative("tab10", 1)
+    ax_line.lines(
+        [np.stack([bs_mid, mean_gt], 1)], c0, width=1.4, label=f"{args.label_gt} mean |lat|"
     )
-    ax_line.axhline(0.25, color="#888", lw=0.5, ls="--")
-    ax_line.set_xlabel("Route arc length (m)")
-    ax_line.set_ylabel("Prediction deviation from centerline (m)")
-    ax_line.legend(fontsize=8, ncol=2)
-    ax_line.grid(alpha=0.3)
+    ax_line.lines(
+        [np.stack([bs_mid, mean_det], 1)], c1, width=1.4, label=f"{args.label_det} mean |lat|"
+    )
+    ax_line.lines(
+        [np.stack([bs_mid, max_gt], 1)],
+        c0,
+        width=0.8,
+        alpha=0.5,
+        label=f"{args.label_gt} max |lat|",
+    )
+    ax_line.lines(
+        [np.stack([bs_mid, max_det], 1)],
+        c1,
+        width=0.8,
+        alpha=0.5,
+        label=f"{args.label_det} max |lat|",
+    )
+    ax_line.hline(0.25, "#888888", width=0.5, dash="dash")
+    ax_line.xlabel("Route arc length (m)")
+    ax_line.ylabel("Prediction deviation from centerline (m)")
+    ax_line.legend("upper right", ncol=2, size=8)
+    ax_line.grid(0.3)
 
     fig.suptitle(
         f"Per-prediction route deviation: {args.label_gt} vs {args.label_det}  "
         f"({len(npzs)} frames × 80 pred-steps, route {s_max:.0f} m, "
         f"{n_bins} bins × {bin_m:.0f} m)",
-        fontsize=11,
+        11,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=140, bbox_inches="tight")
+    fig.save(args.output)
     print(f"saved {args.output}")
 
     np.savez(

@@ -17,15 +17,10 @@ Usage:
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 import torch
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
@@ -36,6 +31,7 @@ from exploration_policy.utils import generate_reference_trajectory, get_frozen_e
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from scenario_generation.canvas import Figure, Panel
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -55,7 +51,7 @@ def load_model(model_path):
     return model, args
 
 
-def draw_road_borders(ax, data_raw, max_dist=25):
+def draw_road_borders(ax: Panel, data_raw, max_dist=25):
     if "lanes" in data_raw:
         lanes = data_raw["lanes"]
         for s in range(lanes.shape[0]):
@@ -72,7 +68,7 @@ def draw_road_borders(ax, data_raw, max_dist=25):
                         pts.append([cx + bx, cy + by])
                 if pts:
                     pts = np.array(pts)
-                    ax.plot(pts[:, 0], pts[:, 1], "-", color="orange", linewidth=0.8, alpha=0.4)
+                    ax.lines([pts], "#ffa500", width=0.8, alpha=0.4)
     if "route_lanes" in data_raw:
         rl = data_raw["route_lanes"]
         for s in range(rl.shape[0]):
@@ -89,7 +85,7 @@ def draw_road_borders(ax, data_raw, max_dist=25):
                         pts.append([cx + bx, cy + by])
                 if pts:
                     pts = np.array(pts)
-                    ax.plot(pts[:, 0], pts[:, 1], "-", color="red", linewidth=1.5, alpha=0.6)
+                    ax.lines([pts], "#ff0000", width=1.5, alpha=0.6)
 
 
 @torch.no_grad()
@@ -144,10 +140,10 @@ def main():
     n = len(indices)
     cols = min(args.cols, n)
     rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
-    if n == 1:
-        axes = np.array([axes])
-    axes = axes.flatten()
+    fig = Figure((6 * cols, 5 * rows), dpi=150)
+    axes = [
+        p for row in fig.grid(rows, cols, margins=(0.07, 0.97, 0.05, 0.84), equal=True) for p in row
+    ]
 
     for plot_idx, si in enumerate(indices):
         npz_path = all_scenes[si]
@@ -212,46 +208,28 @@ def main():
         ax = axes[plot_idx]
         draw_road_borders(ax, data_raw)
 
-        ax.plot(ego_past[:, 0], ego_past[:, 1], "k-", linewidth=3, label="ego past", zorder=5)
-        ax.plot(gt[:T, 0], gt[:T, 1], "g-", linewidth=2.5, label="GT", zorder=4)
-        ax.plot(
-            traj_no_guide[:T, 0],
-            traj_no_guide[:T, 1],
-            "b-",
-            linewidth=2.5,
-            label="no guidance",
-            zorder=3,
-        )
-        ax.plot(
-            traj_guided[:T, 0],
-            traj_guided[:T, 1],
-            "m--",
-            linewidth=2.5,
-            label="with guidance",
-            zorder=6,
+        ax.lines([ego_past[:, :2]], "#000000", width=3, z=5, label="ego past")
+        ax.lines([gt[:T, :2]], "#008000", width=2.5, z=4, label="GT")
+        ax.lines([traj_no_guide[:T, :2]], "#0000ff", width=2.5, z=3, label="no guidance")
+        ax.lines(
+            [traj_guided[:T, :2]], "#bf00bf", width=2.5, dash="dash", z=6, label="with guidance"
         )
 
         # Arrows showing actual shift direction
         for t in [10, 20, 35]:
             if t < T:
-                ax.annotate(
-                    "",
-                    xy=(traj_guided[t, 0], traj_guided[t, 1]),
-                    xytext=(traj_no_guide[t, 0], traj_no_guide[t, 1]),
-                    arrowprops=dict(arrowstyle="->", color="magenta", lw=2),
-                )
+                ax.arrows(traj_no_guide[t, :2], traj_guided[t, :2], "#ff00ff", width=2)
 
         name = Path(npz_path).stem[-20:]
         lat_cm = eta_lat * args.lambda_lat * 100
         lon_pct = eta_lon * args.lambda_lon * 100
-        ax.set_title(
+        ax.title(
             f"Scene {si}: {name}\n"
             f"η_lat={eta_lat:.3f} ({lat_cm:.0f}cm), η_lon={eta_lon:.3f} ({lon_pct:.1f}%)",
-            fontsize=10,
+            10,
         )
-        ax.legend(fontsize=7, loc="upper left")
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.2)
+        ax.legend("upper left")
+        ax.grid(0.2)
 
         all_x = np.concatenate(
             [traj_no_guide[:T, 0], traj_guided[:T, 0], gt[:T, 0], ego_past[:, 0]]
@@ -264,16 +242,14 @@ def main():
         ax.set_ylim(all_y.min() - margin, all_y.max() + margin)
 
     for i in range(n, len(axes)):
-        axes[i].set_visible(False)
+        axes[i].hide()
 
-    plt.suptitle(
+    fig.suptitle(
         "Actual Guided Inference\n"
         "Blue=unguided, Magenta=guided (real DiT output), Green=GT, Red=road borders",
-        fontsize=13,
+        13,
     )
-    plt.tight_layout()
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(args.output, dpi=150)
+    fig.save(args.output)
     print(f"Saved to {args.output}")
 
 

@@ -18,9 +18,10 @@ import math
 import pickle
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.collections import LineCollection
+
+from scenario_generation.canvas import Panel
+from scenario_generation.colormaps import map_values
 
 
 def load_route(route_path: Path):
@@ -228,9 +229,9 @@ def segments_from_polyline(pts: np.ndarray, s: np.ndarray, bin_m: float, n_bins:
     return out
 
 
-def plot_route_heatmap(ax, pts, bin_segments, bin_values, title, vmin, vmax, cmap):
-    ax.set_aspect("equal")
-    ax.plot(pts[:, 0], pts[:, 1], color="#cccccc", lw=1.0, zorder=1)
+def plot_route_heatmap(ax: Panel, pts, bin_segments, bin_values, title, vmin, vmax, cmap):
+    ax.equal = True
+    ax.lines([pts[:, :2]], "#cccccc", width=1.0, z=1)
     valid_segs, valid_vals = [], []
     for segs, v in zip(bin_segments, bin_values):
         if segs is None or np.isnan(v):
@@ -238,17 +239,7 @@ def plot_route_heatmap(ax, pts, bin_segments, bin_values, title, vmin, vmax, cma
         valid_segs.append(segs)
         valid_vals.append(v)
     if valid_vals:
-        lc_lines, lc_colors = [], []
-        for segs, v in zip(valid_segs, valid_vals):
-            for i in range(len(segs) - 1):
-                lc_lines.append([segs[i], segs[i + 1]])
-                lc_colors.append(v)
-        lc = LineCollection(
-            lc_lines,
-            array=np.array(lc_colors),
-            cmap=cmap,
-            norm=plt.Normalize(vmin=vmin, vmax=vmax),
-            linewidths=4.0,
-        )
-        ax.add_collection(lc)
-    ax.set_title(title, fontsize=10)
+        colors = map_values(np.array(valid_vals), cmap, vmin, vmax)
+        for segs, color in zip(valid_segs, colors):
+            ax.lines([segs[:, :2]], color, width=4.0, z=2)
+    ax.title(title, 10)

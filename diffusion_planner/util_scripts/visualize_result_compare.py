@@ -2,9 +2,10 @@ import argparse
 import os
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -40,15 +41,13 @@ if __name__ == "__main__":
     y = np.arange(len(all_keys))
     h = 0.4
 
-    plt.figure(figsize=(8, 6))
-    plt.barh(y + h / 2, v1, height=h, label=args.label1)
-    plt.barh(y - h / 2, v2, height=h, label=args.label2)
-    plt.yticks(y, all_keys)
-    plt.xlabel("metric_score")
-    plt.legend(loc="upper left", bbox_to_anchor=(1, 1))
-    plt.tight_layout()
+    ax = Figure((8, 6), dpi=100).panel((0.4, 0.1, 0.56, 0.86))
+    ax.bars(y + h / 2, v1, width=h, color="#1f77b4", horizontal=True, label=str(args.label1))
+    ax.bars(y - h / 2, v2, width=h, color="#ff7f0e", horizontal=True, label=str(args.label2))
+    ax.yticks(y, all_keys)
+    ax.xlabel("metric_score")
+    ax.legend("lower right")
 
     save_dir = args.metrics_dir1 / "metric_graphs_compare"
     save_dir.mkdir(exist_ok=True)
-    plt.savefig(save_dir / "compare.png", bbox_inches="tight", pad_inches=0.1)
-    plt.close()
+    ax.save(save_dir / "compare.png")

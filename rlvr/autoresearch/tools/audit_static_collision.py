@@ -60,6 +60,7 @@ from rlvr.reward import (
     compute_reward_batch,
     compute_static_collision_penalty,
 )
+from scenario_generation.canvas import Figure, Panel, oriented_box
 from scenario_generation.replay import SpawnConfig
 
 _NPZ_RE = re.compile(r"replay_step_(\d+)\.npz$")
@@ -221,15 +222,13 @@ _ROAD_BORDER_COLOR = "#dd2222"
 _EGO_NOW_COLOR = "#3366cc"
 
 
-def _draw_lane_network_from_tensor(ax, lanes: np.ndarray, alpha: float = 0.7) -> None:
+def _draw_lane_network_from_tensor(ax: Panel, lanes: np.ndarray, alpha: float = 0.7) -> None:
     """Draw lane centerlines + left/right boundaries from the 33-dim lane tensor.
 
     Mirrors :func:`scenario_generation.replay._draw_lane_network` but takes the
     raw ndarray straight from an NPZ (``data_np["lanes"]``). Borders come from
     ``centerline + lane[:, 4:6]`` (left) and ``+ lane[:, 6:8]`` (right).
     """
-    from matplotlib.collections import LineCollection
-
     if lanes is None:
         return
     if lanes.ndim == 4:
@@ -248,36 +247,8 @@ def _draw_lane_network_from_tensor(ax, lanes: np.ndarray, alpha: float = 0.7) ->
             lefts.append((pts + lane[:, 4:6])[valid])
             rights.append((pts + lane[:, 6:8])[valid])
 
-    if centerlines:
-        ax.add_collection(
-            LineCollection(
-                centerlines,
-                colors=_LANE_CL_COLOR,
-                linewidths=0.6,
-                alpha=alpha * 0.4,
-                zorder=1,
-            )
-        )
-    if lefts:
-        ax.add_collection(
-            LineCollection(
-                lefts,
-                colors=_LANE_BORDER_COLOR,
-                linewidths=1.0,
-                alpha=alpha,
-                zorder=2,
-            )
-        )
-    if rights:
-        ax.add_collection(
-            LineCollection(
-                rights,
-                colors=_LANE_BORDER_COLOR,
-                linewidths=1.0,
-                alpha=alpha,
-                zorder=2,
-            )
-        )
+    ax.lines(centerlines, _LANE_CL_COLOR, 0.6, alpha * 0.4, z=1)
+    ax.lines(lefts + rights, _LANE_BORDER_COLOR, 1.0, alpha, z=2)
 
 
 def _zone_for(d: float, cross_t: float = 0.2, near_t: float = 0.5, wide_t: float = 1.0) -> str:
@@ -314,16 +285,9 @@ def _draw_audit_figure(
     8 s plan the ego enters each danger band — essential for survival-
     mode reward interpretation.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.transforms as mtransforms
-    from matplotlib.patches import Rectangle
-
-    fig = plt.figure(figsize=(11, 12))
-    ax = fig.add_subplot(2, 1, 1)
-    ax_ts = fig.add_subplot(2, 1, 2)
+    fig = Figure((11, 12), dpi=130)
+    (ax,), (ax_ts,) = fig.grid(2, 1)
+    ax.equal = True
 
     # --- Top: spatial view ---
 
@@ -343,27 +307,18 @@ def _draw_audit_figure(
                 line = ls[i]
                 valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=-1) > 0.01)
                 if valid.sum() > 1:
-                    ax.plot(
-                        line[valid, 0],
-                        line[valid, 1],
-                        color=_ROAD_BORDER_COLOR,
-                        lw=2.0,
-                        alpha=0.5,
-                        zorder=3,
-                    )
+                    ax.lines([line[valid, :2]], _ROAD_BORDER_COLOR, width=2.0, alpha=0.5, z=3)
 
     # Predicted ego trajectory polyline (thin, grey).
     ego_xy = arrays["ego_traj"][:, :2]
     T = arrays["ego_traj"].shape[0]
     per_ts_min = arrays["per_ts_min"]  # (T,)
-    ax.plot(
-        ego_xy[:, 0],
-        ego_xy[:, 1],
-        "-",
-        color="#555",
-        lw=1.2,
+    ax.lines(
+        [ego_xy],
+        "#555555",
+        width=1.2,
         alpha=0.8,
-        zorder=10,
+        z=10,
         label="predicted path (0..7.9 s)",
     )
 
@@ -381,20 +336,14 @@ def _draw_audit_figure(
     )
     cx0, cy0 = ego_xy[0]
     cog0 = (cx0 + math.cos(h0) * ego_wb / 2.0, cy0 + math.sin(h0) * ego_wb / 2.0)
-    t_rot0 = mtransforms.Affine2D().rotate(h0).translate(cog0[0], cog0[1]) + ax.transData
-    ax.add_patch(
-        Rectangle(
-            (-ego_L / 2, -ego_W / 2),
-            ego_L,
-            ego_W,
-            lw=2.0,
-            ec=_EGO_NOW_COLOR,
-            fc=_EGO_NOW_COLOR,
-            alpha=0.30,
-            zorder=18,
-            transform=t_rot0,
-            label="ego @ t=0 (now)",
-        )
+    ax.polygons(
+        [oriented_box(cog0[0], cog0[1], h0, ego_L, ego_W, ego_L / 2)],
+        fill=_EGO_NOW_COLOR,
+        edge=_EGO_NOW_COLOR,
+        width=2.0,
+        alpha=0.30,
+        z=18,
+        label="ego @ t=0 (now)",
     )
 
     # Ego footprint at argmin_t (or first-crossing, whichever the caller
@@ -408,20 +357,14 @@ def _draw_audit_figure(
     cog = (cx + math.cos(heading) * ego_wb / 2.0, cy + math.sin(heading) * ego_wb / 2.0)
     zone = _zone_for(sc_min_dist)
     ego_color = _ZONE_COLORS[zone]
-    t_rot = mtransforms.Affine2D().rotate(heading).translate(cog[0], cog[1]) + ax.transData
-    ax.add_patch(
-        Rectangle(
-            (-ego_L / 2, -ego_W / 2),
-            ego_L,
-            ego_W,
-            lw=2.0,
-            ec=ego_color,
-            fc=ego_color,
-            alpha=0.35,
-            zorder=20,
-            transform=t_rot,
-            label=f"ego @ t={argmin_t}",
-        )
+    ax.polygons(
+        [oriented_box(cog[0], cog[1], heading, ego_L, ego_W, ego_L / 2)],
+        fill=ego_color,
+        edge=ego_color,
+        width=2.0,
+        alpha=0.35,
+        z=20,
+        label=f"ego @ t={argmin_t}",
     )
 
     # All stopped-neighbour OBBs (faint so the offender stands out).
@@ -440,50 +383,34 @@ def _draw_audit_figure(
         width = float(nb_shapes_all[i, 0])  # tensor col 6 = width
         length = float(nb_shapes_all[i, 1])  # tensor col 7 = length
         is_offender = i == argmin_nb_global
-        t_rot = mtransforms.Affine2D().rotate(heading_i).translate(x, y) + ax.transData
-        ax.add_patch(
-            Rectangle(
-                (-length / 2, -width / 2),
-                length,
-                width,
-                lw=1.6 if is_offender else 0.8,
-                ec="#cc6600" if is_offender else "#cc9966",
-                fc="#ffb366" if is_offender else "#ffd9a6",
-                alpha=0.85 if is_offender else 0.45,
-                zorder=15 if is_offender else 13,
-                transform=t_rot,
-            )
+        ax.polygons(
+            [oriented_box(x, y, heading_i, length, width, length / 2)],
+            fill="#ffb366" if is_offender else "#ffd9a6",
+            edge="#cc6600" if is_offender else "#cc9966",
+            width=1.6 if is_offender else 0.8,
+            alpha=0.85 if is_offender else 0.45,
+            z=15 if is_offender else 13,
         )
 
     # Closest-pair line at argmin_t.
     pt_e = arrays["ego_pts"][argmin_t]
     pt_n = arrays["npc_pts"][argmin_t]
-    ax.plot(
-        [pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]], "-", color=ego_color, lw=2.2, alpha=0.95, zorder=30
-    )
-    ax.plot(
-        [pt_e[0], pt_n[0]],
-        [pt_e[1], pt_n[1]],
-        "o",
-        color=ego_color,
-        ms=6,
-        zorder=31,
-        markeredgecolor="white",
-        markeredgewidth=0.7,
-    )
+    pair = np.array([pt_e[:2], pt_n[:2]], dtype=np.float64)
+    ax.lines([pair], ego_color, width=2.2, alpha=0.95, z=30)
+    ax.markers(pair, "o", size=6, color=ego_color, edge="#ffffff", edge_width=0.7, z=31)
     mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
     dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
     seg_len = math.hypot(dx, dy)
     nx_, ny_ = (-dy / seg_len, dx / seg_len) if seg_len > 1e-6 else (0.0, 1.0)
-    ax.annotate(
+    ax.text(
+        (mx + nx_ * 1.2, my + ny_ * 1.2),
         f"{sc_min_dist:.2f} m",
-        xy=(mx + nx_ * 1.2, my + ny_ * 1.2),
-        fontsize=7,
+        size=7,
         color=ego_color,
         ha="center",
         va="center",
-        bbox=dict(boxstyle="round,pad=0.1", facecolor="white", edgecolor=ego_color, alpha=0.9),
-        zorder=32,
+        box={"face": "#ffffff", "edge": ego_color, "alpha": 0.9, "pad": 0.1},
+        z=32,
     )
 
     # Frame the view around (ego-at-argmin, offender).
@@ -494,64 +421,62 @@ def _draw_audit_figure(
     half = max(float(all_x.max() - all_x.min()), float(all_y.max() - all_y.min())) * 0.6 + 6.0
     ax.set_xlim(cx_v - half, cx_v + half)
     ax.set_ylim(cy_v - half, cy_v + half)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.legend(loc="upper left", fontsize=7)
-    ax.set_title(
+    ax.grid(0.15)
+    ax.xlabel("X (m)")
+    ax.ylabel("Y (m)")
+    ax.legend("upper left")
+    ax.title(
         f"sim step {step:04d}  predicted sc_min_dist={sc_min_dist:.2f} m "
         f"@t={argmin_t}/{T - 1} ({argmin_t * dt:.1f}s)  offender_idx={argmin_nb_global}",
-        fontsize=10,
+        size=10,
     )
 
     # --- Bottom: per-timestep clearance time series ---
 
     t_axis = np.arange(T) * dt  # seconds into the 8 s plan
-    ax_ts.axhspan(0, 0.2, color=_ZONE_COLORS["cross"], alpha=0.10, label="cross <0.2 m")
-    ax_ts.axhspan(0.2, 0.5, color=_ZONE_COLORS["near"], alpha=0.08, label="near <0.5 m")
-    ax_ts.axhspan(0.5, 1.0, color=_ZONE_COLORS["wide"], alpha=0.06, label="wide <1 m")
+    for low, high, zone_name, zone_alpha, zone_label in (
+        (0.0, 0.2, "cross", 0.10, "cross <0.2 m"),
+        (0.2, 0.5, "near", 0.08, "near <0.5 m"),
+        (0.5, 1.0, "wide", 0.06, "wide <1 m"),
+    ):
+        ax_ts.span(low, high, color=_ZONE_COLORS[zone_name], alpha=zone_alpha)
+        ax_ts.polygons([], fill=_ZONE_COLORS[zone_name], label=zone_label)
 
-    ax_ts.plot(
-        t_axis,
-        per_ts_min,
-        "-",
-        color="#333",
-        lw=1.3,
+    ax_ts.lines(
+        [np.stack([t_axis, per_ts_min], 1)],
+        "#333333",
+        width=1.3,
         alpha=0.9,
         label="min clearance to any stopped NPC",
     )
-    ax_ts.plot(
-        t_axis[argmin_t],
-        per_ts_min[argmin_t],
+    ax_ts.markers(
+        np.array([[t_axis[argmin_t], per_ts_min[argmin_t]]]),
         "o",
+        size=7,
         color=ego_color,
-        ms=7,
-        zorder=10,
-        markeredgecolor="white",
-        markeredgewidth=0.7,
+        edge="#ffffff",
+        edge_width=0.7,
+        z=10,
         label=f"argmin @ t={argmin_t}",
     )
-    ax_ts.axvline(t_axis[argmin_t], color=ego_color, ls="--", lw=0.8, alpha=0.5)
-    ax_ts.axhline(viz_threshold_m, color="#777", lw=0.8, ls="--", alpha=0.6)
+    ax_ts.vline(t_axis[argmin_t], color=ego_color, dash="dash", width=0.8, alpha=0.5)
+    ax_ts.hline(viz_threshold_m, color="#777777", width=0.8, dash="dash", alpha=0.6)
 
-    ax_ts.set_xlabel("prediction time (s)  →  plan horizon")
-    ax_ts.set_ylabel("clearance (m)")
+    ax_ts.xlabel("prediction time (s)  →  plan horizon")
+    ax_ts.ylabel("clearance (m)")
     ax_ts.set_xlim(0, t_axis[-1])
     ax_ts.set_ylim(
         min(-0.2, float(per_ts_min.min()) - 0.1),
         max(viz_threshold_m + 0.5, float(per_ts_min.max()) + 0.1),
     )
-    ax_ts.grid(True, alpha=0.2)
-    ax_ts.legend(loc="upper right", fontsize=7)
-    ax_ts.set_title(
+    ax_ts.grid(0.2)
+    ax_ts.legend("upper right")
+    ax_ts.title(
         "Zones entered over the 8 s plan — key for survival-mode reward",
-        fontsize=9,
+        size=9,
     )
 
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=130, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(output_path)
 
 
 def _draw_timeline_figure(summary: list[dict], output_path: Path, viz_threshold_m: float) -> None:
@@ -560,11 +485,6 @@ def _draw_timeline_figure(summary: list[dict], output_path: Path, viz_threshold_
     Shows at a glance which parts of the run produced dangerous plans.
     Crossings (sc_min_dist < 0.2 m by default) are highlighted.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     if not summary:
         return
 
@@ -573,49 +493,52 @@ def _draw_timeline_figure(summary: list[dict], output_path: Path, viz_threshold_
     n_stopped = np.array([r["sc_n_stopped"] for r in summary])
     crossed = np.array([r["static_crossing"] for r in summary], dtype=bool)
 
-    fig = plt.figure(figsize=(14, 5))
-    ax = fig.add_subplot(1, 1, 1)
+    fig = Figure((14, 5), dpi=130)
+    ax = fig.panel()
 
     # Background shading for danger zones.
-    ax.axhspan(0, 0.2, color="#cc0000", alpha=0.10, label="_cross")
-    ax.axhspan(0.2, 0.5, color="#ff8800", alpha=0.08, label="_near")
-    ax.axhspan(0.5, 1.0, color="#e5c200", alpha=0.06, label="_wide")
+    ax.span(0, 0.2, color="#cc0000", alpha=0.10)
+    ax.span(0.2, 0.5, color="#ff8800", alpha=0.08)
+    ax.span(0.5, 1.0, color="#e5c200", alpha=0.06)
 
-    ax.plot(steps, dmin, "-", color="#333", lw=1.0, alpha=0.8, label="predicted sc_min_dist")
-    ax.plot(
-        steps[crossed],
-        dmin[crossed],
+    ax.lines(
+        [np.stack([steps, dmin], 1)],
+        "#333333",
+        width=1.0,
+        alpha=0.8,
+        label="predicted sc_min_dist",
+    )
+    ax.markers(
+        np.stack([steps[crossed], dmin[crossed]], 1),
         "o",
+        size=4,
         color="#cc0000",
-        ms=4,
         label=f"crossing (d<0.2 m): {int(crossed.sum())}",
     )
-    ax.axhline(
+    ax.hline(
         viz_threshold_m,
-        color="#777",
-        lw=0.8,
-        ls="--",
+        color="#777777",
+        width=0.8,
+        dash="dash",
         alpha=0.6,
         label=f"viz_threshold ({viz_threshold_m:.1f} m)",
     )
 
-    ax.set_xlabel("sim step")
-    ax.set_ylabel("predicted sc_min_dist (m)")
+    ax.xlabel("sim step")
+    ax.ylabel("predicted sc_min_dist (m)")
     ax.set_ylim(0, max(viz_threshold_m + 1.0, float(dmin.max()) + 0.2))
-    ax.grid(True, alpha=0.2)
-    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(0.2)
+    ax.legend("upper right")
 
     n_total = len(summary)
     pct_cross = 100.0 * crossed.sum() / n_total if n_total else 0.0
-    ax.set_title(
+    ax.title(
         f"Predicted static-collision timeline — {n_total} sim steps  "
         f"({crossed.sum()} crossings, {pct_cross:.1f}%)  "
         f"max stopped NPCs visible/step: {int(n_stopped.max()) if n_total else 0}",
-        fontsize=10,
+        size=10,
     )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=130, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(output_path)
 
 
 def main() -> None:

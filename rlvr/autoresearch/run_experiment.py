@@ -376,10 +376,7 @@ def evaluate_checkpoint(
 
 def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_dir, name):
     """Generate trajectory comparison images for the worst offroad scenes."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    from scenario_generation.canvas import Figure
 
     model.eval()
 
@@ -417,13 +414,8 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
     n = len(selected)
     cols = min(3, n)
     rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
-    if rows == 1 and cols == 1:
-        axes = np.array([[axes]])
-    elif rows == 1:
-        axes = axes[None, :]
-    elif cols == 1:
-        axes = axes[:, None]
+    fig = Figure((6 * cols, 5 * rows), dpi=150)
+    axes = fig.grid(rows, cols, equal=True)
 
     for idx, (scene_i, offroad_frac, total, path_len) in enumerate(selected):
         ax = axes[idx // cols][idx % cols]
@@ -442,7 +434,7 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
                 pts = rl[seg_idx, :, :2].cpu().numpy()
                 valid = np.abs(pts).sum(axis=1) > 0.1
                 if valid.sum() > 1:
-                    ax.plot(pts[valid, 0], pts[valid, 1], "g-", alpha=0.4, linewidth=1)
+                    ax.lines([pts[valid]], "#008000", width=1, alpha=0.4)
 
         # Plot lane boundaries
         if "lanes" in data:
@@ -455,26 +447,18 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
                 if valid.sum() > 1:
                     lb = lanes[seg_idx, :, 4:6].cpu().numpy()
                     rb = lanes[seg_idx, :, 6:8].cpu().numpy()
-                    ax.plot(
-                        (pts + lb)[valid, 0], (pts + lb)[valid, 1], "k-", alpha=0.15, linewidth=0.5
-                    )
-                    ax.plot(
-                        (pts + rb)[valid, 0], (pts + rb)[valid, 1], "k-", alpha=0.15, linewidth=0.5
-                    )
+                    ax.lines([(pts + lb)[valid], (pts + rb)[valid]], "#000000", 0.5, 0.15)
 
-        ax.plot(traj[:, 0], traj[:, 1], "r-", linewidth=2.5)
-        ax.plot(0, 0, "go", markersize=8)
-        ax.set_title(
+        ax.lines([traj[:, :2]], "#ff0000", width=2.5)
+        ax.markers(np.array([[0.0, 0.0]]), "o", size=8, color="#008000")
+        ax.title(
             f"Scene {scene_i}: offroad={offroad_frac:.0%} path={path_len:.1f}m rew={total:.1f}"
         )
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.3)
+        ax.grid(0.3)
 
-    plt.suptitle(f"{name}: trajectory visualization (6 worst offroad scenes)", fontsize=12)
-    plt.tight_layout()
+    fig.suptitle(f"{name}: trajectory visualization (6 worst offroad scenes)", size=12)
     out_path = run_dir / "trajectory_vis.png"
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+    fig.save(out_path)
     print(f"  Visualization saved to {out_path}")
 
 

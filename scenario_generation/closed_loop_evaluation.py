@@ -433,7 +433,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         with (
             segments_path.open("w", encoding="utf-8") as fout,
             digests_path.open("w", encoding="utf-8") as fdigest,
-            # One pool for every segment: a spawned worker re-imports torch and matplotlib.
+            # One pool for every segment: a spawned worker re-imports torch.
             render_pool(self.config.params.draw_workers) as draw_pool,
             # ffmpeg consumes and deletes these, so they must not land in the output tree.
             tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,

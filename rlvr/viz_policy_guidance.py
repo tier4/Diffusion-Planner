@@ -19,12 +19,8 @@ import json
 import sys
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 import torch
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -36,9 +32,10 @@ from utils import load_npz_data
 
 from exploration_policy import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, get_frozen_encoder
+from scenario_generation.canvas import Figure, Panel
 
 
-def draw_road_borders(ax, data_raw, max_dist=25):
+def draw_road_borders(ax: Panel, data_raw, max_dist=25):
     """Draw lane boundaries from NPZ lane data."""
     # All lanes (orange, thin)
     if "lanes" in data_raw:
@@ -57,7 +54,7 @@ def draw_road_borders(ax, data_raw, max_dist=25):
                         pts.append([cx + bx, cy + by])
                 if pts:
                     pts = np.array(pts)
-                    ax.plot(pts[:, 0], pts[:, 1], "-", color="orange", linewidth=0.8, alpha=0.4)
+                    ax.lines([pts], "#ffa500", width=0.8, alpha=0.4)
 
     # Route lanes (red, thicker)
     if "route_lanes" in data_raw:
@@ -76,14 +73,12 @@ def draw_road_borders(ax, data_raw, max_dist=25):
                         pts.append([cx + bx, cy + by])
                 if pts:
                     pts = np.array(pts)
-                    ax.plot(
-                        pts[:, 0],
-                        pts[:, 1],
-                        "-",
-                        color="red",
-                        linewidth=1.5,
+                    ax.lines(
+                        [pts],
+                        "#ff0000",
+                        width=1.5,
                         alpha=0.6,
-                        label="road border" if s == 0 and side == "left" else "",
+                        label="road border" if s == 0 and side == "left" else None,
                     )
 
 
@@ -146,11 +141,14 @@ def main():
     n = len(picks)
     cols = min(3, n)
     rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
-    if n == 1:
-        axes = [axes]
-    else:
-        axes = axes.flatten()
+    fig = Figure((6 * cols, 5 * rows), 150)
+    axes = [
+        panel
+        for row in fig.grid(
+            rows, cols, margins=(0.06, 0.98, 0.05, 1 - 1.3 / (5 * rows)), equal=True
+        )
+        for panel in row
+    ]
 
     for idx, npz_path in enumerate(picks):
         data_raw = np.load(npz_path)
@@ -183,35 +181,28 @@ def main():
         ax = axes[idx]
         draw_road_borders(ax, data_raw)
 
-        ax.plot(ego_past[:, 0], ego_past[:, 1], "k-", linewidth=3, label="ego past", zorder=5)
-        ax.plot(gt[:T, 0], gt[:T, 1], "g-", linewidth=2.5, label="GT", zorder=4)
-        ax.plot(ref[:T, 0], ref[:T, 1], "b-", linewidth=2.5, label="ref (no guidance)", zorder=3)
-        ax.plot(
-            shifted[:T, 0],
-            shifted[:T, 1],
-            "m--",
-            linewidth=2.5,
+        ax.lines([ego_past[:, :2]], "#000000", width=3, label="ego past", z=5)
+        ax.lines([gt[:T, :2]], "#008000", width=2.5, label="GT", z=4)
+        ax.lines([ref[:T, :2]], "#0000ff", width=2.5, label="ref (no guidance)", z=3)
+        ax.lines(
+            [shifted[:T, :2]],
+            "#bf00bf",
+            width=2.5,
+            dash="dash",
             label=f"guided ({offset_m * 100:.0f}cm)",
-            zorder=6,
+            z=6,
         )
 
-        for t in [10, 20, 30]:
-            if t < T:
-                ax.annotate(
-                    "",
-                    xy=(shifted[t, 0], shifted[t, 1]),
-                    xytext=(ref[t, 0], ref[t, 1]),
-                    arrowprops=dict(arrowstyle="->", color="magenta", lw=2),
-                )
+        steps = [t for t in [10, 20, 30] if t < T]
+        ax.arrows(ref[steps, :2], shifted[steps, :2], "#ff00ff", width=2)
 
         name = Path(npz_path).stem[-25:]
-        ax.set_title(
+        ax.title(
             f"{name}\nη_lat={eta_lat:.4f} ({offset_m * 100:.1f}cm), η_lon={eta_lon:.4f}",
-            fontsize=10,
+            10,
         )
-        ax.legend(fontsize=7, loc="upper left")
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.2)
+        ax.legend("upper left")
+        ax.grid(0.2)
 
         all_x = np.concatenate([ref[:T, 0], gt[:T, 0], ego_past[:, 0]])
         all_y = np.concatenate([ref[:T, 1], gt[:T, 1], ego_past[:, 1]])
@@ -221,14 +212,13 @@ def main():
 
     # Hide unused axes
     for i in range(n, len(axes)):
-        axes[i].set_visible(False)
+        axes[i].hide()
 
-    plt.suptitle(
-        f"Policy Guidance Visualization\nBlue=ref, Magenta=guided, Green=GT, Red=road borders",
-        fontsize=13,
+    fig.suptitle(
+        "Policy Guidance Visualization\nBlue=ref, Magenta=guided, Green=GT, Red=road borders",
+        13,
     )
-    plt.tight_layout()
-    plt.savefig(args.output, dpi=150)
+    fig.save(args.output)
     print(f"Saved to {args.output}")
 
 

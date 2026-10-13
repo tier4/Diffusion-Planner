@@ -17,11 +17,11 @@ def visualize_scenario_prediction(
     history and goal pose. It is converted to the cosine/sine representation
     expected by the shared input visualizer before rendering.
     """
-    import matplotlib.pyplot as plt
     import torch
 
     from diffusion_planner.train_epoch import heading_to_cos_sin
     from diffusion_planner.utils.visualize_input import visualize_inputs
+    from scenario_generation.canvas import Figure
 
     sample_inputs = {}
     for key, value in inputs.items():
@@ -36,7 +36,8 @@ def visualize_scenario_prediction(
         if key in sample_inputs:
             sample_inputs[key] = heading_to_cos_sin(sample_inputs[key])
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig = Figure((8, 8), dpi=120)
+    ax = fig.panel((0.1, 0.07, 0.87, 0.87))
     visualize_inputs(
         sample_inputs,
         ax=ax,
@@ -48,25 +49,23 @@ def visualize_scenario_prediction(
     )
 
     prediction_xy = prediction.detach().float().cpu().numpy()
-    ax.plot(
-        prediction_xy[:, 0],
-        prediction_xy[:, 1],
-        color="orange",
-        linewidth=2,
+    ax.lines(
+        [prediction_xy[:, :2]],
+        "#ffa500",
+        width=2,
+        z=2,
         label="Diffusion Planner output",
     )
-    ax.scatter(
-        prediction_xy[-1, 0],
-        prediction_xy[-1, 1],
-        color="black",
-        marker="x",
+    ax.markers(
+        prediction_xy[-1, :2],
+        "x",
+        size=6,
+        color="#000000",
+        z=1,
         label="final point",
     )
-    ax.set_title(title)
-    ax.legend(loc="best")
-    fig.tight_layout()
+    ax.title(title)
+    ax.legend("upper left")
 
     save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(save_path)

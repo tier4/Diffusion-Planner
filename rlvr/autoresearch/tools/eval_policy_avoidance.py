@@ -30,7 +30,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusion_planner.model.guidance.composer import GuidanceComposer
-from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 
 import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
@@ -292,45 +291,33 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
 
 
 def render_scene(row, out_png):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     from rlvr.autoresearch.tools.ghost_sim_common import extract_stopped_neighbors
     from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base
+    from scenario_generation.canvas import scene_panel
     from scenario_generation.visualize import draw_agent_box
 
     guided, det = row["_trajs"]
-    fig, ax = plt.subplots(figsize=(10, 10))
+    span = float(max(np.abs(det[..., :2]).max(), np.abs(guided[..., :2]).max())) + 12
+    ax = scene_panel((-12, max(span, 40)), (-span / 2, span / 2), size_in=(10, 10), dpi=110)
     draw_scene_base(ax, row["scene_path"])
     for x, y, h, length, w in extract_stopped_neighbors(row["scene_path"]):
-        draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
-    ax.plot(
-        det[:, 0],
-        det[:, 1],
-        "-",
-        color="black",
-        lw=2.2,
+        draw_agent_box(ax, x, y, h, length, w, color="#dc143c", alpha=0.5)
+    ax.lines(
+        [det[:, :2]],
+        "#000000",
+        width=2.2,
         label=f"baseline det sc={row['baseline']['sc_min_dist']:+.2f}m",
     )
-    ax.plot(
-        guided[:, 0],
-        guided[:, 1],
-        "-",
-        color="lime",
-        lw=2.2,
+    ax.lines(
+        [guided[:, :2]],
+        "#00ff00",
+        width=2.2,
         label=f"policy-guided sc={row['guided']['sc_min_dist']:+.2f}m",
     )
     eta_str = " ".join(f"{h}={v:+.2f}" for h, v in row["etas"].items())
-    ax.set_title(f"{row['scene']}  η: {eta_str}  dev={row['deviation']:.2f}m")
-    ax.legend(loc="upper right", fontsize=9)
-    ax.set_aspect("equal")
-    span = max(np.abs(det[..., :2]).max(), np.abs(guided[..., :2]).max()) + 12
-    ax.set_xlim(-12, max(span, 40))
-    ax.set_ylim(-span / 2, span / 2)
-    fig.savefig(out_png, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    ax.title(f"{row['scene']}  η: {eta_str}  dev={row['deviation']:.2f}m")
+    ax.legend("upper right")
+    ax.save(out_png)
 
 
 def make_collage(png_paths: list[Path], out_path: Path, cols: int = 4):

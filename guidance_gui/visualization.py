@@ -6,23 +6,19 @@ adapted from the plotting methods in preference_optimization/annotation_gui.py.
 
 from __future__ import annotations
 
-import io
-
-import matplotlib.cm as cm
-import matplotlib.patches as patches
 import numpy as np
-from matplotlib.figure import Figure
 from PIL import Image, ImageDraw
+
+from scenario_generation.canvas import Figure, Panel, oriented_box
+from scenario_generation.colormaps import qualitative
 
 # ---------------------------------------------------------------------------
 # Colour palette for N independent samples
 # ---------------------------------------------------------------------------
 
-_SAMPLE_CMAP = cm.get_cmap("tab10")
 
-
-def sample_color(i: int) -> tuple:
-    return _SAMPLE_CMAP(i % 10)
+def sample_color(i: int) -> str:
+    return qualitative("tab10", i)
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +118,13 @@ def _gt_curvature(ego_future: np.ndarray, ego_state: np.ndarray) -> np.ndarray |
 
 
 def _draw_vehicle_footprint(
-    ax, x: float, y: float, heading: float, ego_shape: np.ndarray, color: str, alpha: float = 0.5
+    ax: Panel,
+    x: float,
+    y: float,
+    heading: float,
+    ego_shape: np.ndarray,
+    color: str,
+    alpha: float = 0.5,
 ) -> None:
     """Draw a rotated rectangle representing the vehicle footprint."""
     wheel_base = float(ego_shape[0])
@@ -133,20 +135,8 @@ def _draw_vehicle_footprint(
     cx = x + (wheel_base / 2) * np.cos(heading)
     cy = y + (wheel_base / 2) * np.sin(heading)
 
-    rect = patches.Rectangle(
-        (-length / 2, -width / 2),
-        length,
-        width,
-        linewidth=1.5,
-        edgecolor=color,
-        facecolor=color,
-        alpha=alpha,
-    )
-    transform = (
-        patches.mpatches.mpl.transforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-    )
-    rect.set_transform(transform)
-    ax.add_patch(rect)
+    corners = oriented_box(cx, cy, heading, length, width, length / 2)
+    ax.polygons([corners], fill=color, edge=color, width=1.5, alpha=alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +151,7 @@ def plot_trajectory(
     anchor_enabled: bool = False,
     time_step: int | None = None,
     view_range: int = 60,
-) -> Figure:
+) -> Image.Image:
     """Main trajectory plot showing N samples, GT dashed, optional anchor dotted.
 
     Args:
@@ -173,12 +163,12 @@ def plot_trajectory(
         view_range: Half-range for axis limits in metres.
 
     Returns:
-        matplotlib Figure.
+        PIL Image of the figure.
     """
     from diffusion_planner.utils.visualize_input import visualize_inputs
 
-    fig = Figure(figsize=(10, 10))
-    ax = fig.add_subplot(111)
+    fig = Figure((10, 10), 100)
+    ax = fig.panel(equal=True)
 
     # Determine plot centre from first sample trajectory midpoint
     ref_traj = samples[0]
@@ -194,7 +184,7 @@ def plot_trajectory(
     for i in range(N):
         traj = samples[i]
         color = sample_color(i)
-        ax.plot(traj[:, 0], traj[:, 1], color=color, linewidth=2.5, alpha=0.8, label=f"Sample {i}")
+        ax.lines([traj[:, :2]], color, width=2.5, alpha=0.8, label=f"Sample {i}")
         if time_step is not None and 0 <= time_step < len(traj):
             ego_shape = data_cpu.get("ego_shape")
             if ego_shape is not None:
@@ -202,13 +192,8 @@ def plot_trajectory(
                 x, y = traj[time_step, 0], traj[time_step, 1]
                 heading = np.arctan2(traj[time_step, 3], traj[time_step, 2])
                 _draw_vehicle_footprint(ax, x, y, heading, ego_shape_np, color=sample_color(i))
-            ax.scatter(
-                [traj[time_step, 0]],
-                [traj[time_step, 1]],
-                color=color,
-                s=50,
-                zorder=10,
-                edgecolors="black",
+            ax.markers(
+                traj[time_step, :2], "o", size=np.sqrt(50), color=color, edge="#000000", z=10
             )
 
     # Ground truth
@@ -219,43 +204,46 @@ def plot_trajectory(
         ego_future = np.array(ego_future).reshape(-1, 3)  # (80, 3)
         valid = ~((ego_future[:, 0] == 0) & (ego_future[:, 1] == 0))
         if np.any(valid):
-            ax.plot(
-                ego_future[valid, 0],
-                ego_future[valid, 1],
-                color="gray",
-                linewidth=2,
-                linestyle="--",
+            ax.lines(
+                [ego_future[valid, :2]],
+                "#808080",
+                width=2,
                 alpha=0.7,
+                dash="dash",
                 label="GT",
             )
 
     # Anchor prototype
     if anchor_enabled and anchor is not None:
         T = min(anchor.shape[0], samples.shape[1])
-        ax.plot(
-            anchor[:T, 0],
-            anchor[:T, 1],
-            color="orange",
-            linewidth=2,
-            linestyle=":",
+        ax.lines(
+            [anchor[:T, :2]],
+            "#ffa500",
+            width=2,
             alpha=0.85,
+            dash="dot",
             label="Anchor prototype",
         )
 
-    ax.legend(loc="upper left", fontsize=7)
-    ax.set_title("Trajectory Samples")
+    ax.legend("upper left")
+    ax.title("Trajectory Samples")
     half = view_range / 2
     ax.set_xlim(center_x - half, center_x + half)
     ax.set_ylim(center_y - half, center_y + half)
-    ax.set_aspect("equal")
 
-    return fig
+    return fig.image()
+
+
+def _profile_panels(fig: Figure) -> tuple[Panel, Panel]:
+    """Two stacked chart panels filling a profile figure."""
+    (top,), (bottom,) = fig.grid(2, 1, margins=(0.16, 0.96, 0.08, 0.95), hspace=0.3)
+    return top, bottom
 
 
 def plot_velocity(
     samples: np.ndarray,
     data: dict,
-) -> Figure:
+) -> Image.Image:
     """Speed and longitudinal acceleration profiles for all N samples + GT.
 
     Args:
@@ -263,11 +251,10 @@ def plot_velocity(
         data: Observation dict (needs ego_current_state, optionally ego_agent_future).
 
     Returns:
-        matplotlib Figure with two subplots (speed top, acceleration bottom).
+        PIL Image with two charts (speed top, acceleration bottom).
     """
-    fig = Figure(figsize=(6, 7))
-    ax_vel = fig.add_subplot(211)
-    ax_acc = fig.add_subplot(212)
+    fig = Figure((6, 7), 100)
+    ax_vel, ax_acc = _profile_panels(fig)
 
     data_cpu = {k: v.cpu().numpy() if hasattr(v, "cpu") else v for k, v in data.items()}
     ego_state = np.array(data_cpu["ego_current_state"]).reshape(-1)  # (10,)
@@ -277,45 +264,43 @@ def plot_velocity(
         vel = _calculate_velocities(traj, ego_state)
         acc = _calculate_accelerations(vel)
         t = np.arange(len(vel))
-        ax_vel.plot(t, vel, color=color, linewidth=1.8, alpha=0.75, label=f"S{i}")
-        ax_acc.plot(t, acc, color=color, linewidth=1.8, alpha=0.75)
+        ax_vel.lines([np.stack([t, vel], 1)], color, width=1.8, alpha=0.75, label=f"S{i}")
+        ax_acc.lines([np.stack([t, acc], 1)], color, width=1.8, alpha=0.75)
 
     # Ground truth
     if "ego_agent_future" in data_cpu:
         ego_future = np.array(data_cpu["ego_agent_future"]).reshape(-1, 3)
         gt_vel = _gt_velocities(ego_future, ego_state)
         if gt_vel is not None:
-            ax_vel.plot(
-                np.arange(len(gt_vel)),
-                gt_vel,
-                color="black",
-                linewidth=2,
-                linestyle="--",
+            ax_vel.lines(
+                [np.stack([np.arange(len(gt_vel)), gt_vel], 1)],
+                "#000000",
+                width=2,
                 alpha=0.7,
+                dash="dash",
                 label="GT",
             )
 
-    ax_vel.set_ylabel("Speed (km/h)")
+    ax_vel.ylabel("Speed (km/h)")
     ax_vel.set_ylim(0, 80)
-    ax_vel.set_title("Speed")
-    ax_vel.legend(loc="upper right", fontsize=7)
-    ax_vel.grid(True, alpha=0.3)
+    ax_vel.title("Speed")
+    ax_vel.legend("upper right")
+    ax_vel.grid(0.3)
 
-    ax_acc.set_ylabel("Accel (m/s²)")
-    ax_acc.set_xlabel("Time step")
+    ax_acc.ylabel("Accel (m/s²)")
+    ax_acc.xlabel("Time step")
     ax_acc.set_ylim(-3, 3)
-    ax_acc.set_title("Longitudinal Acceleration")
-    ax_acc.grid(True, alpha=0.3)
-    ax_acc.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+    ax_acc.title("Longitudinal Acceleration")
+    ax_acc.grid(0.3)
+    ax_acc.hline(0, "#808080", width=0.5, dash="dash")
 
-    fig.tight_layout()
-    return fig
+    return fig.image()
 
 
 def plot_lateral_curvature(
     samples: np.ndarray,
     data: dict,
-) -> Figure:
+) -> Image.Image:
     """Lateral acceleration and curvature profiles for all N samples + GT.
 
     Args:
@@ -323,11 +308,10 @@ def plot_lateral_curvature(
         data: Observation dict.
 
     Returns:
-        matplotlib Figure with two subplots.
+        PIL Image with two charts.
     """
-    fig = Figure(figsize=(6, 7))
-    ax_lat = fig.add_subplot(211)
-    ax_curv = fig.add_subplot(212)
+    fig = Figure((6, 7), 100)
+    ax_lat, ax_curv = _profile_panels(fig)
 
     data_cpu = {k: v.cpu().numpy() if hasattr(v, "cpu") else v for k, v in data.items()}
     ego_state = np.array(data_cpu["ego_current_state"]).reshape(-1)
@@ -338,8 +322,8 @@ def plot_lateral_curvature(
         curv = _calculate_curvature(traj, ego_state)
         lat_acc = _calculate_lateral_acceleration(curv, vel)
         t = np.arange(len(curv))
-        ax_lat.plot(t, lat_acc, color=color, linewidth=1.8, alpha=0.75, label=f"S{i}")
-        ax_curv.plot(t, curv, color=color, linewidth=1.8, alpha=0.75)
+        ax_lat.lines([np.stack([t, lat_acc], 1)], color, width=1.8, alpha=0.75, label=f"S{i}")
+        ax_curv.lines([np.stack([t, curv], 1)], color, width=1.8, alpha=0.75)
 
     # Ground truth
     if "ego_agent_future" in data_cpu:
@@ -348,50 +332,37 @@ def plot_lateral_curvature(
         gt_curv = _gt_curvature(ego_future, ego_state)
         if gt_vel is not None and gt_curv is not None:
             gt_lat = _calculate_lateral_acceleration(gt_curv, gt_vel)
-            ax_lat.plot(
-                np.arange(len(gt_lat)),
-                gt_lat,
-                color="black",
-                linewidth=2,
-                linestyle="--",
+            ax_lat.lines(
+                [np.stack([np.arange(len(gt_lat)), gt_lat], 1)],
+                "#000000",
+                width=2,
                 alpha=0.7,
+                dash="dash",
                 label="GT",
             )
-            ax_curv.plot(
-                np.arange(len(gt_curv)),
-                gt_curv,
-                color="black",
-                linewidth=2,
-                linestyle="--",
+            ax_curv.lines(
+                [np.stack([np.arange(len(gt_curv)), gt_curv], 1)],
+                "#000000",
+                width=2,
                 alpha=0.7,
+                dash="dash",
             )
 
-    ax_lat.set_ylabel("Lat. accel (m/s²)")
+    ax_lat.ylabel("Lat. accel (m/s²)")
     ax_lat.set_ylim(0, 8)
-    ax_lat.set_title("Lateral Acceleration")
-    ax_lat.axhline(y=3.0, color="purple", linestyle=":", linewidth=1, alpha=0.5)
-    ax_lat.legend(loc="upper right", fontsize=7)
-    ax_lat.grid(True, alpha=0.3)
+    ax_lat.title("Lateral Acceleration")
+    ax_lat.hline(3.0, "#800080", width=1, dash="dot", alpha=0.5)
+    ax_lat.legend("upper right")
+    ax_lat.grid(0.3)
 
-    ax_curv.set_ylabel("Curvature (1/m)")
-    ax_curv.set_xlabel("Time step")
+    ax_curv.ylabel("Curvature (1/m)")
+    ax_curv.xlabel("Time step")
     ax_curv.set_ylim(-0.2, 0.2)
-    ax_curv.set_title("Path Curvature")
-    ax_curv.grid(True, alpha=0.3)
-    ax_curv.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+    ax_curv.title("Path Curvature")
+    ax_curv.grid(0.3)
+    ax_curv.hline(0, "#808080", width=0.5, dash="dash")
 
-    fig.tight_layout()
-    return fig
-
-
-def _fig_to_pil(fig: Figure) -> Image.Image:
-    """Convert a matplotlib Figure to a PIL Image."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=72, bbox_inches="tight")
-    buf.seek(0)
-    img = Image.open(buf).copy()
-    buf.close()
-    return img
+    return fig.image()
 
 
 def render_prototype_thumbnail(
@@ -409,20 +380,19 @@ def render_prototype_thumbnail(
     Returns:
         PIL Image for use in gr.Gallery.
     """
-    fig = Figure(figsize=(2, 2))
-    ax = fig.add_subplot(111)
-    for i, proto in enumerate(all_protos):
-        if i != index:
-            ax.plot(proto[:, 0], proto[:, 1], color="#cccccc", linewidth=0.8, alpha=0.6)
-    ax.plot(
-        all_protos[index, :, 0], all_protos[index, :, 1], color="royalblue", linewidth=2.2, zorder=5
+    fig = Figure((2, 2), 72)
+    ax = fig.panel((0.03, 0.03, 0.94, 0.82), equal=True)
+    ax.lines(
+        [proto[:, :2] for i, proto in enumerate(all_protos) if i != index],
+        "#cccccc",
+        width=0.8,
+        alpha=0.6,
     )
-    ax.scatter([0], [0], c="red", s=20, zorder=6)
-    ax.set_title(f"#{index}  n={count}", fontsize=8, fontweight="bold" if selected else "normal")
-    ax.set_aspect("equal")
-    ax.axis("off")
-    fig.tight_layout(pad=0.2)
-    img = _fig_to_pil(fig)
+    ax.lines([all_protos[index, :, :2]], "#4169e1", width=2.2, z=5)
+    ax.markers(np.zeros(2), "o", size=np.sqrt(20), color="#ff0000", z=6)
+    ax.title(f"#{index}  n={count}", 8, weight="bold" if selected else "normal")
+    ax.axis_off()
+    img = fig.image()
     if selected:
         draw = ImageDraw.Draw(img)
         w, h = img.size

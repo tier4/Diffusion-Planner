@@ -2,9 +2,10 @@ import argparse
 from pathlib import Path
 
 import lanelet2
-import matplotlib.pyplot as plt
 import numpy as np
 from autoware_lanelet2_extension_python.projection import MGRSProjector
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,18 +74,12 @@ if __name__ == "__main__":
     array_pedestrian_lanes = np.vstack(array_pedestrian_lanes)
     array_other_lanes = np.vstack(array_other_lanes)
 
-    plt.plot(
-        array_other_lanes[:, 0], array_other_lanes[:, 1], ".", color="black", label="other lanes"
-    )
-    plt.plot(
-        array_pedestrian_lanes[:, 0],
-        array_pedestrian_lanes[:, 1],
-        ".",
-        color="red",
-        label="pedestrian lanes",
+    ax = Figure((6.4, 4.8), dpi=100).panel(equal=True)
+    ax.markers(array_other_lanes[:, :2], ".", size=6, color="#000000", label="other lanes")
+    ax.markers(
+        array_pedestrian_lanes[:, :2], ".", size=6, color="#ff0000", label="pedestrian lanes"
     )
 
     print(f"num_pedestrian_lane: {num_pedestrian_lane}")
-    plt.legend()
-    plt.axis("equal")
-    plt.savefig("out.png")
+    ax.legend("upper right")
+    ax.save("out.png")

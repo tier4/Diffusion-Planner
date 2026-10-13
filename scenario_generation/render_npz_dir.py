@@ -20,9 +20,6 @@ import argparse
 import multiprocessing as mp
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 
 from scenario_generation.npz_loader import from_npz

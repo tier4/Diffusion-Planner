@@ -138,8 +138,7 @@ def parse_args() -> argparse.Namespace:
         "--draw_every",
         type=int,
         default=8,
-        help="render a PNG only every N steps (1 = every step). PNG rendering (matplotlib) is the "
-        "dominant cost; this throttles it without touching the rollout. Frames are encoded at --fps "
+        help="render a PNG only every N steps (1 = every step). This throttles PNG rendering without touching the rollout. Frames are encoded at --fps "
         "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
     )
     p.add_argument(

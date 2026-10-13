@@ -21,39 +21,39 @@ Example:
 
 import argparse
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
-from diffusion_planner.grpo_utils import compute_collision_reward, sample_group  # noqa: E402
-from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
-from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+import numpy as np
+import torch
+from diffusion_planner.grpo_epoch import _neighbor_future_world
+from diffusion_planner.grpo_utils import compute_collision_reward, sample_group
+from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils.neighbor_db import (
     DEFAULT_NEIGHBOR_DB_PATH,
     NeighborPatternDB,
 )
-from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
+from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 
 # reuse the loaders / drawing helpers from the sample-group visualizer.
-from visualize_grpo_samples import (  # noqa: E402
+from visualize_grpo_samples import (
     _bbox_corners,
     _nonzero_rows,
     boolean,
     build_train_args,
     draw_footprints,
     draw_road,
+    figure_legend,
+    gray,
     load_model,
     select_batch,
 )
+
+from scenario_generation.canvas import Figure
 
 # neighbor past columns (see loss.py).
 _PAST_X, _PAST_Y, _PAST_COS, _PAST_SIN = 0, 1, 2, 3
 _PAST_WIDTH, _PAST_LENGTH = 6, 7
 
-_COLOR_A = "tab:blue"
-_COLOR_B = "tab:red"
+_COLOR_A = "#1f77b4"
+_COLOR_B = "#d62728"
 
 
 def parse_viz_args():
@@ -256,8 +256,10 @@ def main():
 
     cols = min(4, S)
     rows = int(np.ceil(S / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 6 * rows))
-    axes = np.atleast_1d(axes).ravel()
+    fig = Figure((6 * cols, 6 * rows), dpi=120)
+    grid = fig.grid(rows, cols, margins=(0.05, 0.98, 0.04, 0.9), wspace=0.2, hspace=0.25)
+    axes = [panel for row in grid for panel in row]
+    legend_entries = []
 
     for s in range(S):
         ax = axes[s]
@@ -270,7 +272,7 @@ def main():
             if not np.any(past != 0.0):
                 continue
             is_inj = injected_mask[s, p]
-            box_c = "magenta" if is_inj else "0.5"
+            box_c = "#ff00ff" if is_inj else gray(0.5)
             cur = past[-1]
             corners = _bbox_corners(
                 cur[_PAST_X],
@@ -280,37 +282,32 @@ def main():
                 cur[_PAST_LENGTH],
                 cur[_PAST_WIDTH],
             )
-            ax.plot(
-                corners[:, 0],
-                corners[:, 1],
-                "-",
-                color=box_c,
-                lw=1.4 if is_inj else 0.8,
-                alpha=0.9 if is_inj else 0.7,
-                zorder=3.5 if is_inj else 2,
+            ax.lines(
+                [corners],
+                box_c,
+                1.4 if is_inj else 0.8,
+                0.9 if is_inj else 0.7,
+                z=3.5 if is_inj else 2,
             )
             # past / history trajectory (model input): dashed, to distinguish from solid future
             hist = _nonzero_rows(past[:, :2])
             if hist.shape[0] > 0:
-                ax.plot(
-                    hist[:, 0],
-                    hist[:, 1],
-                    "--",
-                    color=box_c,
-                    lw=1.0 if is_inj else 0.7,
-                    alpha=0.7 if is_inj else 0.4,
-                    zorder=2,
+                ax.lines(
+                    [hist],
+                    box_c,
+                    1.0 if is_inj else 0.7,
+                    0.7 if is_inj else 0.4,
+                    dash="dash",
+                    z=2,
                 )
             fut = _nonzero_rows(neigh_future[s, p, :, :2])
             if fut.shape[0] > 0:
-                ax.plot(
-                    fut[:, 0],
-                    fut[:, 1],
-                    "-",
-                    color=box_c,
-                    lw=1.0 if is_inj else 0.8,
-                    alpha=0.8 if is_inj else 0.5,
-                    zorder=2,
+                ax.lines(
+                    [fut],
+                    box_c,
+                    1.0 if is_inj else 0.8,
+                    0.8 if is_inj else 0.5,
+                    z=2,
                 )
 
         ego_len, ego_wid = float(ego_shape[s, 1]), float(ego_shape[s, 2])
@@ -318,35 +315,31 @@ def main():
         # GT ego future
         gt = _nonzero_rows(ego_future_gt[s, :, :2])
         if gt.shape[0] > 0:
-            ax.plot(gt[:, 0], gt[:, 1], "k--", lw=1.8, label="GT" if s == 0 else None, zorder=4)
+            ax.lines([gt], "#000000", 1.8, dash="dash", z=4)
+            if s == 0:
+                legend_entries.append(("GT", "#000000", 1.8, "dash"))
 
         # the two models' deterministic trajectories
         for ego, color, lbl in ((ego_a, _COLOR_A, v.label_a), (ego_b, _COLOR_B, v.label_b)):
             traj = ego[s]  # [T, 4]
-            ax.plot(
-                traj[:, 0],
-                traj[:, 1],
-                "-",
-                color=color,
-                lw=2.0,
-                label=lbl if s == 0 else None,
-                zorder=5,
-            )
+            ax.lines([traj[:, :2]], color, 2.0, z=5)
+            if s == 0:
+                legend_entries.append((lbl, color, 2.0, None))
             if v.show_footprint:
                 draw_footprints(ax, traj, ego_len, ego_wid, color, 20, alpha=0.4, mode="tail")
 
         # current ego box + origin
         ego_cur = raw_np["ego_current_state"][s]
         ego_box = _bbox_corners(ego_cur[0], ego_cur[1], ego_cur[2], ego_cur[3], ego_len, ego_wid)
-        ax.plot(ego_box[:, 0], ego_box[:, 1], "-", color="black", lw=2.0, zorder=6)
-        ax.plot(0, 0, "k*", ms=10, zorder=6)
+        ax.lines([ego_box], "#000000", 2.0, z=6)
+        ax.markers(np.zeros(2), "*", size=10, color="#000000", z=6)
 
-        ax.set_title(
+        ax.title(
             f"scene #{idx[s]}   {v.label_a} r={reward_a[s]:.2f}   {v.label_b} r={reward_b[s]:.2f}",
-            fontsize=10,
+            10,
         )
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, alpha=0.3)
+        ax.equal = True
+        ax.grid(0.3)
 
         if v.zoom_margin > 0:
             focus = np.concatenate([ego_a[s, :, :2], ego_b[s, :, :2], np.zeros((1, 2))], axis=0)
@@ -358,17 +351,23 @@ def main():
             ax.set_ylim(lo[1], hi[1])
 
     for ax in axes[S:]:
-        ax.axis("off")
+        ax.axis_off()
 
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right", fontsize=10, ncol=3)
+    legend_height = int(np.ceil(len(legend_entries) / 3)) * 0.35 / (6 * rows)
+    legend_width = min(0.5, 3 * 1.8 / (6 * cols))
+    figure_legend(
+        fig,
+        (0.98 - legend_width, 0.965 - legend_height, legend_width, legend_height),
+        legend_entries,
+        3,
+        size=10,
+    )
     fig.suptitle(
         f"Temperature-0 trajectory comparison on synthetic scenes  |  "
         f"{v.label_a} mean r={reward_a.mean():.2f}, {v.label_b} mean r={reward_b.mean():.2f}",
-        fontsize=12,
+        12,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    fig.savefig(v.output_path, dpi=120)
+    fig.save(v.output_path)
     print(f"Saved {S} scenes to {v.output_path}")
     print(
         f"  {v.label_a} mean reward={reward_a.mean():.3f}  "

@@ -35,9 +35,9 @@ import math
 import shutil
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 
+from scenario_generation.canvas import Figure
 from scenario_generation.tools._heatmap_common import (
     bin_scalar_by_arc,
     build_route_polyline,
@@ -97,13 +97,10 @@ def _render_heatmap(
     bin_s_mid, mean_val, min_val = bin_scalar_by_arc(arc, dist, s_max, bin_m)
     segs = segments_from_polyline(pts, _arc_lengths(pts), bin_m, n_bins)
 
-    fig, (ax_map, ax_line) = plt.subplots(
-        2,
-        1,
-        figsize=(11, 9),
-        gridspec_kw={"height_ratios": [3, 1]},
-    )
-    cmap = plt.get_cmap("RdYlGn")
+    fig = Figure((11.0, 9.0), 110.0)
+    ax_map = fig.panel((0.08, 0.37, 0.88, 0.59))
+    ax_line = fig.panel((0.08, 0.06, 0.88, 0.22))
+    cmap = "RdYlGn"
     plot_route_heatmap(
         ax_map,
         pts,
@@ -114,40 +111,36 @@ def _render_heatmap(
         vmax=vmax,
         cmap=cmap,
     )
-    ax_map.autoscale_view()
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0.0, vmax))
-    sm.set_array([])
-    cb = fig.colorbar(sm, ax=ax_map, fraction=0.035, pad=0.02)
-    cb.set_label("min clearance (m)  — red=close, green=safe")
-    ax_map.set_xlabel("x (m)")
-    ax_map.set_ylabel("y (m)")
+    ax_map.colorbar(cmap, 0.0, vmax, "min clearance (m)  — red=close, green=safe")
+    ax_map.xlabel("x (m)")
+    ax_map.ylabel("y (m)")
 
     # Min-clearance vs arc line chart.
     valid = ~np.isnan(min_val)
-    ax_line.plot(
-        bin_s_mid[valid], min_val[valid], "-", color="#cc0000", lw=1.5, label="min clearance / bin"
+    ax_line.lines(
+        [np.stack([bin_s_mid[valid], min_val[valid]], 1)],
+        "#cc0000",
+        width=1.5,
+        label="min clearance / bin",
     )
-    ax_line.plot(
-        bin_s_mid[valid],
-        mean_val[valid],
-        "--",
-        color="#888888",
-        lw=1.0,
+    ax_line.lines(
+        [np.stack([bin_s_mid[valid], mean_val[valid]], 1)],
+        "#888888",
+        width=1.0,
+        dash="dash",
         label="mean clearance / bin",
     )
-    ax_line.axhline(
-        threshold, color="black", ls=":", lw=1.0, label=f"bad threshold {threshold:.1f} m"
+    ax_line.hline(
+        threshold, "#000000", width=1.0, dash="dot", label=f"bad threshold {threshold:.1f} m"
     )
-    ax_line.set_xlabel("route arc-length (m)")
-    ax_line.set_ylabel("clearance (m)")
+    ax_line.xlabel("route arc-length (m)")
+    ax_line.ylabel("clearance (m)")
     # Keep the threshold line visible even when it sits above the colour cap.
     ax_line.set_ylim(0, max(vmax, threshold) * 1.1)
-    ax_line.legend(fontsize=8, loc="upper right")
-    ax_line.grid(alpha=0.3)
+    ax_line.legend("upper right")
+    ax_line.grid(0.3)
 
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=110)
-    plt.close(fig)
+    fig.save(out_png)
     return bin_s_mid, mean_val, min_val
 
 

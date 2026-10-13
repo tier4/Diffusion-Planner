@@ -8,18 +8,13 @@ Requires ROS + Autoware environment sourced for lanelet2 / MGRSProjector imports
 """
 
 import base64
-import io
 import os
 import sys
 from dataclasses import dataclass
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
+
+from scenario_generation.canvas import Figure
 
 # lanelet2 requires ROS/Autoware Python paths (set by sourcing setup.bash).
 _ROS_FALLBACK_PATHS = ["/opt/ros/humble/lib/python3.10/site-packages"]
@@ -183,32 +178,19 @@ class MapRenderer:
     def render_viewport(self, viewport: Viewport, dpi: int = 100) -> bytes:
         fig_w = viewport.canvas_w / dpi
         fig_h = viewport.canvas_h / dpi
-        fig = Figure(figsize=(fig_w, fig_h), dpi=dpi)
-        ax = fig.add_axes([0, 0, 1, 1])
-
-        cropped_boundaries = self._crop_segments(self.boundary_segments, viewport)
-        if cropped_boundaries:
-            ax.add_collection(LineCollection(cropped_boundaries, colors="#404040", linewidths=0.5))
-
-        cropped_vehicle = self._crop_segments(self.vehicle_segments, viewport)
-        if cropped_vehicle:
-            ax.add_collection(LineCollection(cropped_vehicle, colors="#000000", linewidths=0.8))
-
-        cropped_ped = self._crop_segments(self.pedestrian_segments, viewport)
-        if cropped_ped:
-            ax.add_collection(LineCollection(cropped_ped, colors="#ffaaaa", linewidths=0.6))
-
-        ax.set_xlim(viewport.xmin, viewport.xmax)
-        ax.set_ylim(viewport.ymin, viewport.ymax)
-        ax.set_aspect("equal")
-        ax.axis("off")
-        fig.patch.set_facecolor("#f8f8f8")
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, bbox_inches=None, pad_inches=0)
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
+        fig = Figure((fig_w, fig_h), float(dpi), facecolor="#f8f8f8")
+        ax = fig.panel(
+            (0.0, 0.0, 1.0, 1.0),
+            xlim=(viewport.xmin, viewport.xmax),
+            ylim=(viewport.ymin, viewport.ymax),
+            equal=True,
+            facecolor="#f8f8f8",
+        )
+        ax.axis_off()
+        ax.lines(self._crop_segments(self.boundary_segments, viewport), "#404040", width=0.5)
+        ax.lines(self._crop_segments(self.vehicle_segments, viewport), "#000000", width=0.8)
+        ax.lines(self._crop_segments(self.pedestrian_segments, viewport), "#ffaaaa", width=0.6)
+        return fig.png_bytes()
 
     def render_viewport_base64(self, viewport: Viewport, dpi: int = 100) -> str:
         return base64.b64encode(self.render_viewport(viewport, dpi=dpi)).decode("ascii")

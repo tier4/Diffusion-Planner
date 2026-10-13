@@ -46,10 +46,6 @@ import json
 import os
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -67,6 +63,7 @@ from rlvr.autoresearch.tools._psim_centerline_common import (
 from rlvr.autoresearch.tools.eval_centerline_metrics import (
     lat_offset_and_naive_score,
 )
+from scenario_generation.canvas import Figure
 from scenario_generation.transforms import yaw_from_quat
 
 # ---------------------------------------------------------------------------
@@ -400,40 +397,57 @@ def main():
     vmax = max(vmax, 0.5)
 
     def scatter_panel(ax, run, ttl):
-        ax.plot(
-            polyline[:, 0],
-            polyline[:, 1],
-            "-",
-            color="0.7",
-            lw=2.5,
+        ax.lines(
+            [polyline[:, :2]],
+            "#b3b3b3",
+            width=2.5,
             alpha=0.5,
-            zorder=1,
+            z=1,
             label="route centerline",
         )
-        sc = ax.scatter(
-            run["world_xy"][:, 0],
-            run["world_xy"][:, 1],
-            c=np.abs(run["lat"]),
+        ax.markers(
+            run["world_xy"][:, :2],
+            "o",
+            size=np.sqrt(18),
+            values=np.abs(run["lat"]),
             cmap="inferno",
             vmin=0.0,
             vmax=vmax,
-            s=18,
             alpha=0.9,
-            edgecolors="none",
-            zorder=2,
+            z=2,
         )
-        ax.set_title(
+        ax.title(
             f"{ttl}\nmean|lat|={np.mean(np.abs(run['lat'])):.3f}m  "
             f"p95={np.percentile(np.abs(run['lat']), 95):.3f}m  "
             f"max={np.max(np.abs(run['lat'])):.3f}m"
         )
-        ax.set_xlabel("MGRS x [m]")
-        ax.set_ylabel("MGRS y [m]")
+        ax.xlabel("MGRS x [m]")
+        ax.ylabel("MGRS y [m]")
         ax.set_xlim(x_min, x_max)
         ax.set_ylim(y_min, y_max)
-        ax.set_aspect("equal")
-        ax.legend(loc="upper right")
-        return sc
+        ax.equal = True
+        ax.legend("upper right")
+        ax.colorbar("inferno", 0.0, vmax, "|lat| [m]")
+
+    def diff_panel(ax):
+        """The per-bin Δ |lat| along the route polyline, with its colour scale."""
+        ax.lines([polyline[:, :2]], "#d9d9d9", width=2.0, z=1)
+        ax.markers(
+            polyline[valid_diff, :2],
+            "o",
+            size=np.sqrt(80),
+            values=poly_diff[valid_diff],
+            cmap="RdBu_r",
+            vmin=-vlim,
+            vmax=vlim,
+            z=2,
+        )
+        ax.xlabel("MGRS x [m]")
+        ax.ylabel("MGRS y [m]")
+        ax.equal = True
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.colorbar("RdBu_r", -vlim, vlim, "Δ |lat| [m]")
 
     arc_bins, arc_centers, diff_arc = arc_bin_diff(base_c, prism_c, bin_m=5.0)
     poly_arc, _ = polyline_cumulative_arclength(polyline)
@@ -444,92 +458,50 @@ def main():
     vlim = max(float(np.percentile(np.abs(finite), 98)) if finite.size else 1.0, 0.3)
 
     # Two-panel side-by-side
-    fig, axes = plt.subplots(1, 2, figsize=(16, 9), sharex=True, sharey=True)
-    sc_b = scatter_panel(axes[0], base_c, args.baseline_label)
-    sc_p = scatter_panel(axes[1], prism_c, args.prism_label)
-    plt.colorbar(sc_b, ax=axes[0], fraction=0.04, pad=0.02, label="|lat| [m]")
-    plt.colorbar(sc_p, ax=axes[1], fraction=0.04, pad=0.02, label="|lat| [m]")
-    plt.suptitle("Centerline-tracking heatmap (lat from compute_centerline_score_batch)", y=0.98)
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "heatmap_centerline_xy.png", dpi=140)
-    plt.close()
+    fig = Figure((16, 9), dpi=140)
+    ((ax_b, ax_p),) = fig.grid(1, 2)
+    scatter_panel(ax_b, base_c, args.baseline_label)
+    scatter_panel(ax_p, prism_c, args.prism_label)
+    fig.suptitle("Centerline-tracking heatmap (lat from compute_centerline_score_batch)")
+    fig.save(args.out_dir / "heatmap_centerline_xy.png")
 
     # Diff-only
-    fig, ax = plt.subplots(figsize=(11, 11))
-    ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.85", lw=2.0, zorder=1)
-    sc = ax.scatter(
-        polyline[valid_diff, 0],
-        polyline[valid_diff, 1],
-        c=poly_diff[valid_diff],
-        cmap="RdBu_r",
-        vmin=-vlim,
-        vmax=vlim,
-        s=80,
-        edgecolors="none",
-        zorder=2,
-    )
-    ax.set_title(
+    fig = Figure((11, 11), dpi=140)
+    ax = fig.panel()
+    diff_panel(ax)
+    ax.title(
         f"Δ mean |lateral offset|  ({args.prism_label} − {args.baseline_label}), "
         f"5 m arc-length bins\n"
         f"blue = {args.prism_label} better   red = {args.prism_label} worse"
     )
-    ax.set_xlabel("MGRS x [m]")
-    ax.set_ylabel("MGRS y [m]")
-    ax.set_aspect("equal")
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.02, label="Δ |lat| [m]")
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "heatmap_centerline_diff.png", dpi=140)
-    plt.close()
+    fig.save(args.out_dir / "heatmap_centerline_diff.png")
 
     # Combined 3-panel
-    fig, axes = plt.subplots(1, 3, figsize=(22, 11), sharex=True, sharey=True)
-    sc_b = scatter_panel(axes[0], base_c, args.baseline_label)
-    sc_p = scatter_panel(axes[1], prism_c, args.prism_label)
-    plt.colorbar(sc_b, ax=axes[0], fraction=0.04, pad=0.02, label="|lat| [m]")
-    plt.colorbar(sc_p, ax=axes[1], fraction=0.04, pad=0.02, label="|lat| [m]")
-    ax = axes[2]
-    ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.85", lw=2.0, zorder=1)
-    sc = ax.scatter(
-        polyline[valid_diff, 0],
-        polyline[valid_diff, 1],
-        c=poly_diff[valid_diff],
-        cmap="RdBu_r",
-        vmin=-vlim,
-        vmax=vlim,
-        s=80,
-        edgecolors="none",
-        zorder=2,
-    )
-    ax.set_title(
+    fig = Figure((22, 11), dpi=140)
+    ((ax_b, ax_p, ax),) = fig.grid(1, 3)
+    scatter_panel(ax_b, base_c, args.baseline_label)
+    scatter_panel(ax_p, prism_c, args.prism_label)
+    diff_panel(ax)
+    ax.title(
         f"Δ |lat|  ({args.prism_label} − {args.baseline_label})\n"
         f"blue = {args.prism_label} better   red = {args.prism_label} worse\n"
         f"mean Δ|lat| = {np.nanmean(diff_arc):+.3f} m"
     )
-    ax.set_xlabel("MGRS x [m]")
-    ax.set_ylabel("MGRS y [m]")
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_aspect("equal")
-    plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.02, label="Δ |lat| [m]")
-    plt.suptitle(
+    fig.suptitle(
         f"Centerline-tracking comparison — {args.baseline_label} vs {args.prism_label} (psim)",
-        y=0.99,
-        fontsize=14,
+        size=14,
     )
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "heatmap_combined.png", dpi=140)
-    plt.close()
+    fig.save(args.out_dir / "heatmap_combined.png")
 
     # Histogram
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig = Figure((9, 5), dpi=140)
+    ax = fig.panel()
     bins = np.linspace(-2.0, 2.0, 161)
     ax.hist(
         base_c["lat"],
         bins=bins,
         alpha=0.55,
-        color="C0",
+        color="#1f77b4",
         density=True,
         label=f"{args.baseline_label} (n={len(base_c['lat'])}, "
         f"mean|lat|={np.mean(np.abs(base_c['lat'])):.3f}m)",
@@ -538,61 +510,63 @@ def main():
         prism_c["lat"],
         bins=bins,
         alpha=0.55,
-        color="C3",
+        color="#d62728",
         density=True,
         label=f"{args.prism_label} (n={len(prism_c['lat'])}, "
         f"mean|lat|={np.mean(np.abs(prism_c['lat'])):.3f}m)",
     )
-    ax.axvline(0, color="k", lw=0.7)
-    ax.set_xlabel("signed lateral offset [m]   (+ left, − right)")
-    ax.set_ylabel("density")
-    ax.set_title("Lateral offset distribution to route centerline")
-    ax.legend(loc="upper right")
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "histogram_offsets.png", dpi=140)
-    plt.close()
+    ax.vline(0, color="#000000", width=0.7)
+    ax.xlabel("signed lateral offset [m]   (+ left, − right)")
+    ax.ylabel("density")
+    ax.title("Lateral offset distribution to route centerline")
+    ax.legend("upper right")
+    fig.save(args.out_dir / "histogram_offsets.png")
 
     # Time series
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    fig = Figure((12, 6), dpi=140)
+    axes = [row[0] for row in fig.grid(2, 1, hspace=0.15)]
+    t_max = 0.0
     for run, color, label in [
-        (base_c, "C0", args.baseline_label),
-        (prism_c, "C3", args.prism_label),
+        (base_c, "#1f77b4", args.baseline_label),
+        (prism_c, "#d62728", args.prism_label),
     ]:
         if len(run["ts"]) == 0:
             continue
         t = (run["ts"] - run["ts"][0]) / 1e9
-        axes[0].plot(t, run["lat"], color=color, lw=0.7, label=label)
-        axes[1].plot(t, np.abs(run["lat"]), color=color, lw=0.7, label=label)
-    axes[0].set_ylabel("signed lat [m]")
-    axes[0].axhline(0, color="k", lw=0.5)
-    axes[0].legend(loc="upper right")
-    axes[0].set_title("Lateral offset to route centerline vs simulation time")
-    axes[1].set_ylabel("|lat| [m]")
-    axes[1].set_xlabel("time [s] from run start")
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "timeseries.png", dpi=140)
-    plt.close()
+        t_max = max(t_max, float(t[-1]))
+        axes[0].lines([np.stack([t, run["lat"]], 1)], color, width=0.7, label=label)
+        axes[1].lines([np.stack([t, np.abs(run["lat"])], 1)], color, width=0.7, label=label)
+    if t_max > 0.0:
+        for panel in axes:
+            panel.set_xlim(-0.05 * t_max, 1.05 * t_max)
+    axes[0].ylabel("signed lat [m]")
+    axes[0].hline(0, color="#000000", width=0.5)
+    axes[0].legend("upper right")
+    axes[0].title("Lateral offset to route centerline vs simulation time")
+    axes[1].ylabel("|lat| [m]")
+    axes[1].xlabel("time [s] from run start")
+    fig.save(args.out_dir / "timeseries.png")
 
     # |lat| vs longitudinal route progress
-    fig, ax = plt.subplots(figsize=(11, 5))
+    fig = Figure((11, 5), dpi=140)
+    ax = fig.panel()
     for run, color, label in [
-        (base_c, "C0", args.baseline_label),
-        (prism_c, "C3", args.prism_label),
+        (base_c, "#1f77b4", args.baseline_label),
+        (prism_c, "#d62728", args.prism_label),
     ]:
         order = np.argsort(run["lon"])
-        ax.plot(
-            run["lon"][order],
-            np.abs(run["lat"])[order],
-            color=color,
-            lw=0.7,
+        ax.lines(
+            [np.stack([run["lon"][order], np.abs(run["lat"])[order]], 1)],
+            color,
+            width=0.7,
             alpha=0.5,
             label=label,
         )
     arc_max = max(base_c["lon"].max(), prism_c["lon"].max())
     bins = np.linspace(0, arc_max, 50)
     for run, color, label in [
-        (base_c, "C0", args.baseline_label),
-        (prism_c, "C3", args.prism_label),
+        (base_c, "#1f77b4", args.baseline_label),
+        (prism_c, "#d62728", args.prism_label),
     ]:
         idx = np.digitize(run["lon"], bins)
         mu = np.array(
@@ -601,17 +575,18 @@ def main():
                 for i in range(1, len(bins))
             ]
         )
-        ax.plot(
-            0.5 * (bins[1:] + bins[:-1]), mu, color=color, lw=2.0, label=f"{label} (binned mean)"
+        ax.lines(
+            [np.stack([0.5 * (bins[1:] + bins[:-1]), mu], 1)],
+            color,
+            width=2.0,
+            label=f"{label} (binned mean)",
         )
-    ax.set_xlabel("longitudinal arc-length along route centerline [m]")
-    ax.set_ylabel("|lateral offset| [m]")
-    ax.set_title("Lateral tracking error vs route progress")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(args.out_dir / "progress_vs_offset.png", dpi=140)
-    plt.close()
+    ax.xlabel("longitudinal arc-length along route centerline [m]")
+    ax.ylabel("|lateral offset| [m]")
+    ax.title("Lateral tracking error vs route progress")
+    ax.legend("upper right")
+    ax.grid(0.3)
+    fig.save(args.out_dir / "progress_vs_offset.png")
 
     print(f"\nWrote outputs to {args.out_dir}")
 

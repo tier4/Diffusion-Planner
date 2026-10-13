@@ -22,13 +22,8 @@ import math
 import subprocess
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import torch
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
 
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched
@@ -45,6 +40,7 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _draw_agent_box,
 )
 from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
+from scenario_generation.canvas import Figure
 
 BASELINE_COLOR = "#1f77b4"  # blue
 BEST_COLOR = "#d62728"  # red
@@ -118,14 +114,10 @@ def _neighbor_boxes_at(nb_arr, step, idx_dims):
 def _scene_base(ax, polylines, cx, cy, view_half):
     centerlines, lefts, rights, border_polylines, route_polylines, _ = polylines
     if centerlines:
-        ax.add_collection(
-            LineCollection(centerlines, colors=_LANE_COLOR, linewidths=0.6, alpha=0.28, zorder=1)
-        )
+        ax.lines(centerlines, _LANE_COLOR, width=0.6, alpha=0.28, z=1)
     for grp in (lefts, rights):
         if grp:
-            ax.add_collection(
-                LineCollection(grp, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
-            )
+            ax.lines(grp, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
     half = view_half * 1.5
     fb = [
         pl
@@ -139,12 +131,10 @@ def _scene_base(ax, polylines, cx, cy, view_half):
         ).any()
     ]
     if fb:
-        ax.add_collection(
-            LineCollection(fb, colors=_ROAD_BORDER_COLOR, linewidths=2.0, alpha=0.9, zorder=5)
-        )
+        ax.lines(fb, _ROAD_BORDER_COLOR, width=2.0, alpha=0.9, z=5)
     for pl in route_polylines:
         if pl.shape[0] >= 2:
-            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR, lw=2.5, alpha=0.55, zorder=3)
+            ax.lines([pl[:, :2]], _ROUTE_COLOR, width=2.5, alpha=0.55, z=3)
 
 
 def _render_frame(
@@ -154,9 +144,13 @@ def _render_frame(
     # extra_lines: optional list of (xy:(N,2), color, alpha, label|None) static lines
     cx = float(np.mean([e["pose"][0] for e in egos]))
     cy = float(np.mean([e["pose"][1] for e in egos]))
-    fig = Figure(figsize=(11, 11))
-    ax = fig.add_subplot(1, 1, 1)
-    fig.patch.set_facecolor("#f8f8f8")
+    fig = Figure((11, 11), 100, facecolor="#f8f8f8")
+    ax = fig.panel(
+        (0.06, 0.05, 0.92, 0.87),
+        xlim=(cx - view_half, cx + view_half),
+        ylim=(cy - view_half, cy + view_half),
+        equal=True,
+    )
     _scene_base(ax, polylines, cx, cy, view_half)
     if show_nb and neighbor_boxes:
         for nx, ny, nh, nl, nw in neighbor_boxes:
@@ -164,21 +158,19 @@ def _render_frame(
     if extra_lines:
         labeled = False
         for xy, color, alpha, lab in extra_lines:
-            ax.plot(
-                xy[:, 0],
-                xy[:, 1],
-                "-",
-                color=color,
-                lw=1.0,
+            ax.lines(
+                [xy[:, :2]],
+                color,
+                width=1.0,
                 alpha=alpha,
-                zorder=16,
+                z=16,
                 label=(lab if not labeled and lab else None),
             )
             labeled = labeled or bool(lab)
     for e in egos:
         tr = e["trail"]
         if tr.shape[0] > 1:
-            ax.plot(tr[:, 0], tr[:, 1], "-", color=e["color"], lw=1.3, alpha=0.5, zorder=18)
+            ax.lines([tr[:, :2]], e["color"], width=1.3, alpha=0.5, z=18)
         ex, ey, eh = e["pose"]
         _draw_agent_box(
             ax,
@@ -194,23 +186,19 @@ def _render_frame(
             wheelbase=ego_shape[0],
         )
         al = max(ego_shape[1], 2.5)
-        ax.annotate(
-            "",
-            xy=(ex + al * math.cos(eh), ey + al * math.sin(eh)),
-            xytext=(ex, ey),
-            arrowprops=dict(arrowstyle="-|>", color=e["color"], lw=1.2, mutation_scale=10),
-            zorder=22,
+        ax.arrows(
+            np.array([ex, ey]),
+            np.array([ex + al * math.cos(eh), ey + al * math.sin(eh)]),
+            e["color"],
+            width=1.2,
+            head=10,
+            z=22,
         )
-        ax.plot([], [], "-", color=e["color"], lw=2, label=e["label"])
-    ax.legend(fontsize=10, loc="upper left")
-    ax.set_xlim(cx - view_half, cx + view_half)
-    ax.set_ylim(cy - view_half, cy + view_half)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_title(title, fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=100)
-    fig.clf()
+        ax.lines([], e["color"], width=2, label=e["label"])
+    ax.legend("upper left")
+    ax.grid(0.15)
+    ax.title(title, 11)
+    fig.save(out_png)
 
 
 @torch.no_grad()

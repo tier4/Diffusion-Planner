@@ -9,7 +9,6 @@ from multiprocessing import get_context
 from pathlib import Path
 from shutil import rmtree
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
@@ -17,6 +16,9 @@ from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from tqdm import tqdm
 from util_scripts.parse_prediction_results import calc_loss
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values
 
 
 def parse_args():
@@ -137,24 +139,19 @@ def process_one_pair(
     loss_nei = np.sqrt(loss_nei)
     loss_ego_mean = np.mean(loss_ego)
 
-    fig, ax = plt.subplots(1, 2, figsize=(8, 5.5), gridspec_kw={"width_ratios": [2, 1]})
+    fig = Figure((8, 5.5), dpi=100)
+    ax = [fig.panel((0.08, 0.08, 0.55, 0.7)), fig.panel((0.68, 0.08, 0.3, 0.7))]
     visualize_inputs(valid_data_dict, save_path=None, ax=ax[0])
 
     # plot prediction
     # Ego
-    ax[0].plot(
-        prediction[0, :, 0],
-        prediction[0, :, 1],
-        color="orange",
-        label="prediction",
-        linewidth=2,
-    )
+    ax[0].lines([prediction[0, :, :2]], "#ffa500", width=2, label="prediction")
     # 3sec, 5sec, 8sec
     title = f"{valid_data_path.stem.replace('_', ' ')}"
     for timestep in [30, 50, 80]:
         index = timestep - 1
         diff_m = np.sqrt(loss_ego[index, 0] ** 2 + loss_ego[index, 1] ** 2)
-        ax[0].plot(prediction[0, index, 0], prediction[0, index, 1], color="black", marker="x")
+        ax[0].markers(prediction[0, index, :2], "x", size=6, color="#000000")
         if timestep == 30:
             title += (
                 f"\nloss{timestep // 10}sec={diff_m:.2f}[m]\n"
@@ -170,14 +167,9 @@ def process_one_pair(
         neighbor = neighbors[i, -1]
         if np.sum(np.abs(neighbor[:4])).item() < 1e-6:
             continue
-        ax[0].plot(
-            prediction[i + 1, :, 0],
-            prediction[i + 1, :, 1],
-            color="teal",
-            alpha=0.5,
-        )
+        ax[0].lines([prediction[i + 1, :, :2]], "#008080", alpha=0.5)
 
-    ax[0].set_title(title)
+    ax[0].title(title)
 
     # scaling sizes based on loss_values
     loss_values = np.array(loss_ego_position_lat[time_str])
@@ -186,36 +178,25 @@ def process_one_pair(
     clipped_loss_values = np.clip(loss_values, loss_min, loss_max)
     sizes = 10 + (clipped_loss_values - loss_min) / (loss_max - loss_min) * 10
 
-    ax[1].scatter(
-        trajectory_dict_x[time_str],
-        trajectory_dict_y[time_str],
-        c=loss_ego_position_lat[time_str],
-        marker="o",
-        s=sizes,
-        vmin=loss_min,
-        vmax=loss_max,
-    )
-    ax[1].scatter(
-        ego_x,
-        ego_y,
-        color="red",
-        marker="+",
-        s=50,
-    )
-    ax[1].set_xlabel("x[m]")
-    ax[1].set_ylabel("y[m]")
-    ax[1].set_xticks([])
-    ax[1].set_yticks([])
-    ax[1].grid(True)
-    ax[1].set_title("lateral error")
-    ax[1].set_aspect("equal")
+    colors = map_values(loss_ego_position_lat[time_str], "viridis", loss_min, loss_max)
+    for x, y, size, color in zip(
+        trajectory_dict_x[time_str], trajectory_dict_y[time_str], sizes, colors
+    ):
+        ax[1].markers(np.array([x, y]), "o", size=np.sqrt(size), color=color, z=1)
+    ax[1].markers(np.array([ego_x, ego_y]), "+", size=np.sqrt(50), color="#ff0000", z=1)
+    ax[1].xlabel("x[m]")
+    ax[1].ylabel("y[m]")
+    ax[1].xticks([])
+    ax[1].yticks([])
+    ax[1].grid(1.0)
+    ax[1].title("lateral error")
+    ax[1].equal = True
 
-    plt.colorbar(ax[1].collections[0], ax=ax[1])
+    ax[1].colorbar("viridis", loss_min, loss_max)
 
     curr_save_dir = save_dir / location_str / date_str / time_str
     curr_save_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(curr_save_dir / f"{valid_data_path.stem}.png")
-    plt.close()
+    fig.save(curr_save_dir / f"{valid_data_path.stem}.png")
 
 
 def visualize_predictions(

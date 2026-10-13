@@ -26,21 +26,19 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from diffusion_planner.model.guidance.composer import GuidanceComposer  # noqa: E402
-from diffusion_planner.model.guidance.config import (  # noqa: E402
+import numpy as np
+import torch
+from diffusion_planner.model.guidance.composer import GuidanceComposer
+from diffusion_planner.model.guidance.config import (
     GuidanceConfig,
     GuidanceSetConfig,
 )
 
-from guidance_gui.generate_samples import generate_samples  # noqa: E402
-from rlvr.autoresearch.run_experiment import load_npz_data  # noqa: E402
-from rlvr.autoresearch.tools.eval_det_avoidance import load_model  # noqa: E402
+from guidance_gui.generate_samples import generate_samples
+from rlvr.autoresearch.run_experiment import load_npz_data
+from rlvr.autoresearch.tools.eval_det_avoidance import load_model
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 
 
 def _resample_arc(xy: np.ndarray, m: int) -> np.ndarray:
@@ -141,28 +139,24 @@ def scene_metrics(trajs: dict, anchor_indices: list[int], prototypes: np.ndarray
 
 
 def plot_scene(trajs: dict, anchor_indices, prototypes, out_png: Path, title: str):
-    fig, ax = plt.subplots(figsize=(9, 9))
-    cmap = plt.get_cmap("tab20")
+    fig = Figure((9, 9), 110)
+    ax = fig.panel((0.08, 0.06, 0.88, 0.88), equal=True)
     for k, idx in enumerate(anchor_indices):
-        ax.plot(
-            prototypes[idx, :, 0],
-            prototypes[idx, :, 1],
-            "--",
-            color=cmap(k % 20),
-            lw=0.8,
+        ax.lines(
+            [prototypes[idx, :, :2]],
+            qualitative("tab20", k),
+            width=0.8,
             alpha=0.5,
+            dash="dash",
         )
         xy = trajs[f"anchor{idx}"][:, :2]
-        ax.plot(xy[:, 0], xy[:, 1], "-", color=cmap(k % 20), lw=1.6, label=f"anchor{idx}")
-    ax.plot(trajs["det"][:, 0], trajs["det"][:, 1], "k-", lw=2.5, label="det (unguided)")
-    ax.plot(0, 0, "k*", ms=12)
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=7, ncol=2)
-    ax.set_title(title, fontsize=9)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=110)
-    plt.close(fig)
+        ax.lines([xy], qualitative("tab20", k), width=1.6, label=f"anchor{idx}")
+    ax.lines([trajs["det"][:, :2]], "#000000", width=2.5, label="det (unguided)")
+    ax.markers(np.zeros((1, 2)), "*", size=12, color="#000000")
+    ax.grid(0.3)
+    ax.legend("upper right", ncol=2, size=7)
+    ax.title(title, 9)
+    fig.save(out_png)
 
 
 def main():

@@ -41,15 +41,14 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.dimensions import OUTPUT_T
 from diffusion_planner.loss import compute_ego_edge_points, point_to_segment_distance
 from tqdm import tqdm
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values
 
 
 def load_model_for_eval(args):
@@ -148,10 +147,11 @@ def visualize_scene_border(
     ego_traj_np, min_dists_np, data, scene_path, save_path, tag="", rb_crossing=False
 ):
     """Visualize a single scene with border distance annotations."""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    fig = Figure((16, 7), 150)
+    ax, ax2 = fig.grid(1, 2, margins=(0.05, 0.98, 0.09, 0.88), wspace=0.2)[0]
+    ax.equal = True
 
     # Left: map view with trajectory and road borders
-    ax = axes[0]
     ls = data["line_strings"][0].cpu().numpy()  # [N, P, D]
     for i in range(ls.shape[0]):
         pts = ls[i, :, :2]
@@ -160,47 +160,44 @@ def visualize_scene_border(
             continue
         is_border = ls[i, :, 3] > 0.5
         if is_border.any():
-            ax.plot(pts[valid, 0], pts[valid, 1], "r-", linewidth=2, alpha=0.7)
+            ax.lines([pts[valid]], "#ff0000", width=2, alpha=0.7)
         else:
-            ax.plot(pts[valid, 0], pts[valid, 1], "-", color="orange", linewidth=0.5, alpha=0.3)
+            ax.lines([pts[valid]], "#ffa500", width=0.5, alpha=0.3)
 
     # GT trajectory
     gt = data.get("ego_agent_future")
     if gt is not None:
         gt_np = gt[0].cpu().numpy()
-        ax.plot(gt_np[:, 0], gt_np[:, 1], "g-", linewidth=1.5, alpha=0.5, label="GT")
+        ax.lines([gt_np[:, :2]], "#008000", width=1.5, alpha=0.5, label="GT")
 
     # Model trajectory colored by distance
-    colors = plt.cm.RdYlGn(np.clip(min_dists_np / 1.0, 0, 1))
+    colors = map_values(np.clip(min_dists_np / 1.0, 0, 1), "RdYlGn", 0, 1)
     for t in range(len(ego_traj_np) - 1):
-        ax.plot(
-            ego_traj_np[t : t + 2, 0], ego_traj_np[t : t + 2, 1], color=colors[t], linewidth=2.5
-        )
+        ax.lines([ego_traj_np[t : t + 2, :2]], colors[t], width=2.5)
 
     # Mark t=20 (2s) with distance annotation
     if len(min_dists_np) > 20:
-        ax.plot(ego_traj_np[20, 0], ego_traj_np[20, 1], "ko", markersize=8, zorder=5)
-        ax.annotate(
+        ax.markers(ego_traj_np[20, :2], "o", 8, "#000000", z=5)
+        ax.text(
+            tuple(ego_traj_np[20, :2]),
             f"t=2s\n{min_dists_np[20]:.2f}m",
-            xy=(ego_traj_np[20, 0], ego_traj_np[20, 1]),
-            fontsize=8,
+            8,
             ha="left",
-            fontweight="bold",
+            weight="bold",
         )
 
     # Mark overall minimum
     t_min = np.argmin(min_dists_np)
-    ax.plot(ego_traj_np[t_min, 0], ego_traj_np[t_min, 1], "r*", markersize=12, zorder=5)
-    ax.annotate(
+    ax.markers(ego_traj_np[t_min, :2], "*", 12, "#ff0000", z=5)
+    ax.text(
+        tuple(ego_traj_np[t_min, :2]),
         f"min={min_dists_np[t_min]:.2f}m\nt={t_min}",
-        xy=(ego_traj_np[t_min, 0], ego_traj_np[t_min, 1]),
-        fontsize=8,
+        8,
+        "#ff0000",
         ha="left",
-        color="red",
-        fontweight="bold",
+        weight="bold",
     )
 
-    ax.set_aspect("equal")
     title = (
         f"{tag} — {Path(scene_path).stem}\n"
         f"rb_cross={'YES' if rb_crossing else 'no'}  "
@@ -208,8 +205,8 @@ def visualize_scene_border(
     )
     if len(min_dists_np) > 20:
         title += f"  border_t20={min_dists_np[20]:.3f}m"
-    ax.set_title(title)
-    ax.legend(fontsize=8)
+    ax.title(title)
+    ax.legend("upper right")
 
     # Auto-zoom
     pad = 5
@@ -219,22 +216,19 @@ def visualize_scene_border(
     ax.set_ylim(ymin, ymax)
 
     # Right: distance over time
-    ax2 = axes[1]
     timesteps = np.arange(len(min_dists_np)) * 0.1
-    ax2.plot(timesteps, min_dists_np, "b-", linewidth=2)
-    ax2.axhline(y=0.10, color="r", linestyle="--", label="crossing (10cm)")
-    ax2.axhline(y=0.25, color="orange", linestyle="--", label="near (25cm)")
-    ax2.axhline(y=0.40, color="y", linestyle="--", label="wide (40cm)")
-    ax2.set_xlabel("Time (s)")
-    ax2.set_ylabel("Min border distance (m)")
-    ax2.set_title("Distance to road border over time")
-    ax2.legend(fontsize=8)
-    ax2.set_ylim(bottom=0, top=max(2.0, min_dists_np.max() * 1.1))
-    ax2.grid(True, alpha=0.3)
+    ax2.lines([np.stack([timesteps, min_dists_np], 1)], "#0000ff", width=2)
+    ax2.hline(0.10, "#ff0000", width=1.5, dash="dash", label="crossing (10cm)")
+    ax2.hline(0.25, "#ffa500", width=1.5, dash="dash", label="near (25cm)")
+    ax2.hline(0.40, "#bfbf00", width=1.5, dash="dash", label="wide (40cm)")
+    ax2.xlabel("Time (s)")
+    ax2.ylabel("Min border distance (m)")
+    ax2.title("Distance to road border over time")
+    ax2.legend("upper right")
+    ax2.set_ylim(0, max(2.0, min_dists_np.max() * 1.1))
+    ax2.grid(0.3)
 
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.save(save_path)
 
 
 def main():

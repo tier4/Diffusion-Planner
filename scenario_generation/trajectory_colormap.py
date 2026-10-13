@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image, ImageDraw
+
+from scenario_generation.canvas import Figure, font
+from scenario_generation.colormaps import map_values
 
 METRIC_CHOICES = (
     "clearance",
@@ -327,12 +331,6 @@ def render_trajectory_colormap(
     if not any(_METRIC_TRACE_KEYS[metric] in r for r in rows):
         return None
 
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.collections import LineCollection
-
     xy = np.array([r["ego"] for r in rows], dtype=np.float64)
     risk, tick_positions, tick_labels = _risk_and_ticks(
         rows, metric, near_miss_thresh, strong_brake_mps2, centerline_thresh_m
@@ -341,38 +339,39 @@ def render_trajectory_colormap(
     segments = np.concatenate([xy[:-1, None, :], xy[1:, None, :]], axis=1)
     seg_risk = (risk[:-1] + risk[1:]) / 2.0
 
-    # Fixed figure size + fixed axes positions (NOT plt.subplots + bbox_inches="tight"): every
-    # metric's PNG must come out at IDENTICAL pixel dimensions, else W&B's gallery panel (which
-    # stacks a group's 5 metric images in one panel) warns "Images sizes do not match" and lays
-    # them out wrong. The colorbar area on the right is always reserved; binary metrics
-    # (collision/near_miss) simply leave it blank instead of shrinking the plot.
-    fig = plt.figure(figsize=(6.4, 4.8), dpi=dpi, facecolor="white")
-    ax = fig.add_axes([0.06, 0.03, 0.70, 0.84])
-    ax.set_facecolor("white")
-    lc = LineCollection(segments, cmap="turbo", linewidths=4, capstyle="round")
-    lc.set_array(seg_risk)
-    lc.set_clim(0.0, 1.0)
-    ax.add_collection(lc)
+    pad = 5.0
+    # Fixed figure size + fixed axes positions (no cropping): every metric's PNG must come out
+    # at IDENTICAL pixel dimensions, else W&B's gallery panel (which stacks a group's 5 metric
+    # images in one panel) warns "Images sizes do not match" and lays them out wrong. The
+    # colorbar area on the right is always reserved; binary metrics (collision/near_miss)
+    # simply leave it blank instead of shrinking the plot.
+    fig = Figure((6.4, 4.8), float(dpi), facecolor="#ffffff")
+    ax = fig.panel(
+        (0.06, 0.03, 0.70, 0.84),
+        xlim=(xy[:, 0].min() - pad, xy[:, 0].max() + pad),
+        ylim=(xy[:, 1].min() - pad, xy[:, 1].max() + pad),
+        equal=True,
+    )
+    ax.axis_off()
+    seg_colors = map_values(seg_risk, "turbo", 0.0, 1.0)
+    for color in np.unique(seg_colors, axis=0):
+        same = (seg_colors == color).all(axis=1)
+        ax.lines(list(segments[same]), color, width=4, z=2)
+        ax.markers(segments[same].reshape(-1, 2), "o", size=4, color=color, z=2)
 
     if metric in _BINARY_METRICS:
         # A thin line briefly changing color is easy to miss for a rare, instantaneous event —
         # overlay an oversized marker at every step where it actually happened.
         event_xy = xy[risk >= 0.5]
         if event_xy.size:
-            ax.scatter(
-                event_xy[:, 0],
-                event_xy[:, 1],
-                c="red",
-                s=110,
-                zorder=4,
-                edgecolors="black",
-                linewidths=0.8,
+            ax.markers(
+                event_xy, "o", size=110**0.5, color="#ff0000", edge="#000000", edge_width=0.8, z=4
             )
 
     # Start/end markers + text labels so the direction of travel is obvious at a glance
     # without having to trace the (often subtle) color gradient along the line.
-    ax.scatter(xy[0, 0], xy[0, 1], c="black", s=60, zorder=5, edgecolors="white")
-    ax.scatter(xy[-1, 0], xy[-1, 1], c="black", marker="s", s=60, zorder=5, edgecolors="white")
+    ax.markers(xy[0], "o", size=60**0.5, color="#000000", edge="#ffffff", z=5)
+    ax.markers(xy[-1], "s", size=60**0.5, color="#000000", edge="#ffffff", z=5)
     # Anchored to the RIGHT of the point (grows inward/rightward) so a start/end at the far-left
     # edge of the path doesn't push its label off the figure and get clipped. Vertically, a point
     # in the upper half of the trajectory gets its label placed BELOW instead of above — otherwise
@@ -381,45 +380,90 @@ def render_trajectory_colormap(
     y_mid = (xy[:, 1].min() + xy[:, 1].max()) / 2.0
     for label, point in (("start", xy[0]), ("end", xy[-1])):
         upper_half = point[1] > y_mid
-        ax.annotate(
+        ax.text(
+            tuple(point),
             label,
-            point,
-            xytext=(7, -7 if upper_half else 7),
-            textcoords="offset points",
+            9,
+            "#000000",
             ha="left",
             va="top" if upper_half else "bottom",
-            color="black",
-            fontsize=9,
-            fontweight="bold",
-            zorder=6,
-            annotation_clip=False,
+            offset=(7, -7 if upper_half else 7),
+            z=6,
+            weight="bold",
         )
 
-    pad = 5.0
-    ax.set_xlim(xy[:, 0].min() - pad, xy[:, 0].max() + pad)
-    ax.set_ylim(xy[:, 1].min() - pad, xy[:, 1].max() + pad)
-    ax.set_aspect("equal")
-    ax.set_axis_off()
     if title:
-        ax.set_title(f"{title}\nmetric: {metric}", color="black", fontsize=10)
+        ax.title(f"{title}\nmetric: {metric}", 10)
 
+    axis_label = ""
     if metric not in _BINARY_METRICS:
-        cax = fig.add_axes([0.80, 0.12, 0.025, 0.68])  # fixed colorbar slot (reserved always)
-        cbar = fig.colorbar(lc, cax=cax)
-        cbar.set_ticks(tick_positions)
-        cbar.set_ticklabels(tick_labels)
-        cbar.ax.yaxis.set_tick_params(color="black")
-        plt.setp(cbar.ax.get_yticklabels(), color="black")
-        cbar.outline.set_edgecolor("black")
+        _colorbar(fig, tick_positions, tick_labels)
         axis_label = _METRIC_AXIS_LABELS.get(metric, metric)
-        if axis_label:
-            cbar.set_label(axis_label, color="black", fontsize=8)
 
+    image = fig.image()
+    if axis_label:
+        _colorbar_label(image, fig.dpi, tick_labels, axis_label)
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, facecolor="white")  # no bbox_inches -> uniform dimensions across metrics
-    plt.close(fig)
+    image.save(out_png, compress_level=1)
     return out_png
+
+
+_CBAR_RECT = (0.80, 0.12, 0.025, 0.68)  # fixed colorbar slot (reserved always)
+_CBAR_TICK_PT = 3.5
+_CBAR_TICK_PAD_PT = 3.5
+_CBAR_TICK_FONT_PT = 10.0
+_CBAR_LABEL_FONT_PT = 8.0
+_CBAR_LABEL_PAD_PT = 4.0
+
+
+def _colorbar(fig: Figure, tick_positions: list[float], tick_labels: list[str]) -> None:
+    """A turbo scale over [0, 1] in the fixed slot, with ticks and labels on its right."""
+    left, bottom, width, height = _CBAR_RECT
+    cax = fig.panel(_CBAR_RECT, xlim=(0.0, 1.0), ylim=(0.0, 1.0))
+    cax.image(
+        np.linspace(0.0, 1.0, 256)[:, None],
+        extent=(0.0, 1.0, 0.0, 1.0),
+        cmap="turbo",
+        vmin=0.0,
+        vmax=1.0,
+        origin="lower",
+    )
+    cax.xticks([])
+    cax.yticks([])
+    tick_width = _CBAR_TICK_PT / 72.0 / fig.size_in[0]
+    ticks = fig.panel((left + width, bottom, tick_width, height), xlim=(0.0, 1.0), ylim=(0.0, 1.0))
+    ticks.axis_off()
+    ticks.lines([np.array([[0.0, t], [1.0, t]]) for t in tick_positions], "#000000", width=0.8)
+    for t, label in zip(tick_positions, tick_labels):
+        ticks.text(
+            (1.0, t),
+            label,
+            _CBAR_TICK_FONT_PT,
+            ha="left",
+            va="center",
+            offset=(_CBAR_TICK_PAD_PT, 0),
+            coords="axes",
+        )
+
+
+def _colorbar_label(image: Image.Image, dpi: float, tick_labels: list[str], label: str) -> None:
+    """The colorbar's axis label, rotated 90 degrees, right of its tick labels."""
+    left, bottom, width, height = _CBAR_RECT
+    px = dpi / 72.0
+    widest = max(font(_CBAR_TICK_FONT_PT * px).getlength(t) for t in tick_labels)
+    x = (
+        (left + width) * image.width
+        + (_CBAR_TICK_PT + _CBAR_TICK_PAD_PT + _CBAR_LABEL_PAD_PT) * px
+        + widest
+    )
+    face = font(_CBAR_LABEL_FONT_PT * px)
+    l, t, r, b = face.getbbox(label)
+    text = Image.new("RGBA", (int(r - l) + 4, int(b - t) + 4), (0, 0, 0, 0))
+    ImageDraw.Draw(text).text((2 - l, 2 - t), label, fill=(0, 0, 0, 255), font=face)
+    text = text.rotate(90, expand=True)
+    y = (1.0 - bottom - height / 2) * image.height - text.height / 2
+    image.paste(text, (round(x), round(y)), text)
 
 
 def render_trajectory_colormaps(

@@ -9,15 +9,20 @@ import numpy as np
 import torch
 from diffusion_planner.model.guidance.config import GuidanceSetConfig
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from matplotlib.figure import Figure
+from PIL import Image
 
 from guidance_gui.guidance_ui import build_guidance_panel, make_guidance_set_config
 from preference_optimization.utils import (
-    calculate_ade,
     generate_trajectory_pair,
     load_npz_data,
-    should_prune_by_initial_pose,
 )
+from scenario_generation.canvas import Figure, Panel, oriented_box
+
+_GREEN = "#008000"
+_ORANGE = "#ffa500"
+_RED = "#ff0000"
+_GRAY = "#808080"
+_BLUE = "#0000ff"
 
 
 class PreferenceAnnotator:
@@ -86,7 +91,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
+    ) -> tuple[Image.Image, Image.Image, Image.Image, str, str, str, str, str]:
         """Load current sample and generate trajectory pair.
 
         Args:
@@ -207,7 +212,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
+    ) -> tuple[Image.Image, Image.Image, Image.Image, str, str, str, str, str]:
         """Regenerate trajectory pair with current parameters.
 
         Args:
@@ -321,7 +326,7 @@ class PreferenceAnnotator:
 
     def launch_training(
         self,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Launch training."""
         print("Launching training...")
         self.annotation_complete = True
@@ -361,7 +366,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Record preference and move to next sample.
 
         Args:
@@ -466,7 +471,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Record GT as winner (against the deterministic trajectory) and advance to next sample.
 
         The GT trajectory is converted from [T, 3] (x, y, heading) to model format [T, 4]
@@ -614,7 +619,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Jump to a different sample.
 
         Args:
@@ -672,7 +677,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Handle keyboard navigation (left/right arrow keys).
 
         Args:
@@ -717,7 +722,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Jump to the next unlabeled sample.
 
         Args:
@@ -762,7 +767,7 @@ class PreferenceAnnotator:
 
     def update_time_display(
         self, time_step: int, zoom_level: int = 5
-    ) -> tuple[Figure | None, Figure | None, Figure | None]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None]:
         """Redraw visualization for selected time step.
 
         This method only redraws the plots using cached trajectory data.
@@ -860,15 +865,15 @@ class PreferenceAnnotator:
         total_samples = len(self.original_npz_paths)
 
         lines = [
-            f"### Current Sample",
+            "### Current Sample",
             f"**Index:** {self.current_index + 1} / {len(self.npz_paths)}",
             f"**Status:** {status}",
             "",
-            f"### Progress",
+            "### Progress",
             f"**Collected:** {len(self.preferences)} / {self.target_count}",
             f"**Labeled:** {total_labeled} / {total_samples}",
             "",
-            f"### Navigation",
+            "### Navigation",
             f"**Jump Size:** {self.current_jump_size}",
             f"**Filter:** {self.current_filter}",
         ]
@@ -905,7 +910,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Jump directly to a specific sample index.
 
         Args:
@@ -965,7 +970,7 @@ class PreferenceAnnotator:
         initial_yaw_threshold_deg: float = 0.55,
         guidance: GuidanceSetConfig | None = None,
         time_step: int = 40,
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+    ) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None, str, str, str, str, str]:
         """Toggle sample filter between All/Finished/Unfinished.
 
         Args:
@@ -1026,7 +1031,7 @@ class PreferenceAnnotator:
         )
 
     def _draw_vehicle_footprint(
-        self, ax, x: float, y: float, heading: float, color: str, alpha: float = 0.8
+        self, ax: Panel, x: float, y: float, heading: float, color: str, alpha: float = 0.8
     ) -> None:
         """Draw vehicle footprint as a rotated rectangle.
 
@@ -1034,15 +1039,13 @@ class PreferenceAnnotator:
         The vehicle center is computed by offsetting forward by wheel_base/2.
 
         Args:
-            ax: Matplotlib axis to draw on
+            ax: Panel to draw on
             x: Rear axle center x position (trajectory point)
             y: Rear axle center y position (trajectory point)
             heading: Vehicle heading in radians
             color: Fill color for the rectangle
             alpha: Transparency (0-1)
         """
-        import matplotlib.patches as patches
-
         wheel_base = self.ego_shape[0][0]
         length = self.ego_shape[0][1]
         width = self.ego_shape[0][2]
@@ -1055,49 +1058,26 @@ class PreferenceAnnotator:
         center_x = x + (wheel_base / 2) * cos_h
         center_y = y + (wheel_base / 2) * sin_h
 
-        # Compute 4 corners of the rectangle relative to vehicle center
-        # then rotate and translate
-        half_len = length / 2
-        half_wid = width / 2
-
-        # Corners in local frame (before rotation): front-left, front-right, rear-right, rear-left
-        local_corners = [
-            (+half_len, +half_wid),
-            (+half_len, -half_wid),
-            (-half_len, -half_wid),
-            (-half_len, +half_wid),
-        ]
-
-        # Rotate and translate corners to world frame
-        world_corners = []
-        for lx, ly in local_corners:
-            # Rotate by heading
-            wx = center_x + lx * cos_h - ly * sin_h
-            wy = center_y + lx * sin_h + ly * cos_h
-            world_corners.append((wx, wy))
-
-        # Draw filled polygon
-        polygon = patches.Polygon(
-            world_corners,
-            closed=True,
-            facecolor=color,
-            edgecolor="black",
-            alpha=alpha,
-            linewidth=1.5,
-        )
-        ax.add_patch(polygon)
+        corners = oriented_box(center_x, center_y, heading, length, width, length / 2)
+        ax.polygons([corners], fill=color, edge="#000000", width=1.5, alpha=alpha)
 
         # Draw heading indicator (small line from center pointing forward)
         indicator_len = length * 0.3
-        ax.plot(
-            [center_x, center_x + indicator_len * cos_h],
-            [center_y, center_y + indicator_len * sin_h],
-            color="black",
-            linewidth=2,
+        ax.lines(
+            [
+                [
+                    [center_x, center_y],
+                    [center_x + indicator_len * cos_h, center_y + indicator_len * sin_h],
+                ]
+            ],
+            "#000000",
+            width=2,
             alpha=alpha,
         )
 
-    def _create_trajectory_plot(self, time_step: int | None = None, view_range: int = 60) -> Figure:
+    def _create_trajectory_plot(
+        self, time_step: int | None = None, view_range: int = 60
+    ) -> Image.Image:
         """Create trajectory visualization plot.
 
         Args:
@@ -1106,10 +1086,10 @@ class PreferenceAnnotator:
             view_range: View range in meters for the plot (default: 60m)
 
         Returns:
-            Matplotlib Figure with trajectory visualization
+            PIL Image with trajectory visualization
         """
-        fig = Figure(figsize=(10, 11.5))
-        ax = fig.add_subplot(111)
+        fig = Figure((10, 11.5), 100)
+        ax = fig.panel(equal=True)
 
         traj_1_np = np.array(self.trajectory_1)
         traj_2_np = np.array(self.trajectory_2)
@@ -1129,29 +1109,27 @@ class PreferenceAnnotator:
         #   grey    — would be pruned but pruning is OFF (visual indicator only)
         #   red     — actively pruned (pruning is ON, trajectory was flagged)
         if self.is_pruned and self.enable_initial_pruning:
-            stochastic_color = "red"
+            stochastic_color = _RED
             stochastic_label = "Trajectory 2 (Stochastic) ⚠️ PRUNED"
         elif self.is_pruned and not self.enable_initial_pruning:
-            stochastic_color = "gray"
+            stochastic_color = _GRAY
             stochastic_label = "Trajectory 2 (Stochastic) ⚠️ would be pruned"
         else:
-            stochastic_color = "orange"
+            stochastic_color = _ORANGE
             stochastic_label = "Trajectory 2 (Stochastic)"
 
         # Plot full trajectories
-        ax.plot(
-            traj_1_np[:, 0],
-            traj_1_np[:, 1],
-            "g-",
-            linewidth=3,
+        ax.lines(
+            [traj_1_np[:, :2]],
+            _GREEN,
+            width=3,
             alpha=0.7,
             label="Trajectory 1 (Deterministic)",
         )
-        ax.plot(
-            traj_2_np[:, 0],
-            traj_2_np[:, 1],
-            color=stochastic_color,
-            linewidth=3,
+        ax.lines(
+            [traj_2_np[:, :2]],
+            stochastic_color,
+            width=3,
             alpha=0.7,
             label=stochastic_label,
         )
@@ -1165,7 +1143,7 @@ class PreferenceAnnotator:
             x1, y1 = traj_1_np[time_step, 0], traj_1_np[time_step, 1]
             cos1, sin1 = traj_1_np[time_step, 2], traj_1_np[time_step, 3]
             heading1 = np.arctan2(sin1, cos1)
-            self._draw_vehicle_footprint(ax, x1, y1, heading1, color="green", alpha=0.6)
+            self._draw_vehicle_footprint(ax, x1, y1, heading1, color=_GREEN, alpha=0.6)
 
             # Trajectory 2 footprint
             x2, y2 = traj_2_np[time_step, 0], traj_2_np[time_step, 1]
@@ -1174,8 +1152,8 @@ class PreferenceAnnotator:
             self._draw_vehicle_footprint(ax, x2, y2, heading2, color=stochastic_color, alpha=0.6)
 
             # Mark the positions with dots
-            ax.scatter([x1], [y1], c="green", s=50, zorder=10, edgecolors="black")
-            ax.scatter([x2], [y2], c=stochastic_color, s=50, zorder=10, edgecolors="black")
+            ax.markers([x1, y1], "o", np.sqrt(50), _GREEN, edge="#000000", z=10)
+            ax.markers([x2, y2], "o", np.sqrt(50), stochastic_color, edge="#000000", z=10)
 
             # Update title with time info
             time_sec = time_step * 0.1
@@ -1183,24 +1161,23 @@ class PreferenceAnnotator:
             title = f"Trajectory Comparison - Time: {time_sec:.1f}s / {total_time:.1f}s"
             if self.is_pruned:
                 title += f"  ⚠️ PRUNED (pos:{self.initial_displacement:.3f}m, yaw:{self.initial_yaw_diff:.2f}°)"
-            ax.set_title(title)
+            ax.title(title)
         else:
             title = "Trajectory Comparison"
             if self.is_pruned:
                 title += f"  ⚠️ PRUNED (pos:{self.initial_displacement:.3f}m, yaw:{self.initial_yaw_diff:.2f}°)"
-            ax.set_title(title)
+            ax.title(title)
 
-        ax.legend(loc="upper left")
+        ax.legend("upper left")
 
         # Set axis limits centered on midpoint of green trajectory
         half_range = view_range / 2
         ax.set_xlim(center_x - half_range, center_x + half_range)
         ax.set_ylim(center_y - half_range, center_y + half_range)
-        ax.set_aspect("equal")
 
-        return fig
+        return fig.image()
 
-    def _create_velocity_plot(self, time_step: int | None = None) -> Figure:
+    def _create_velocity_plot(self, time_step: int | None = None) -> Image.Image:
         """Create velocity and acceleration comparison plot.
 
         Args:
@@ -1208,13 +1185,12 @@ class PreferenceAnnotator:
                        If None, no time marker is shown.
 
         Returns:
-            Matplotlib Figure with velocity and acceleration subplots
+            PIL Image with velocity and acceleration charts
         """
-        fig = Figure(figsize=(6, 8))
+        fig = Figure((6, 8), 100)
 
         # Create two subplots: velocity (top) and acceleration (bottom)
-        ax_vel = fig.add_subplot(211)
-        ax_acc = fig.add_subplot(212)
+        (ax_vel,), (ax_acc,) = fig.grid(2, 1, margins=(0.15, 0.96, 0.07, 0.95), hspace=0.3)
 
         vel_1 = self._calculate_velocities(self.trajectory_1)
         vel_2 = self._calculate_velocities(self.trajectory_2)
@@ -1228,100 +1204,104 @@ class PreferenceAnnotator:
         time_steps_acc = np.arange(len(acc_1))
 
         # Velocity subplot
-        ax_vel.plot(time_steps_vel, vel_1, "g-", linewidth=2, alpha=0.7, label="Green (Det.)")
-        ax_vel.plot(
-            time_steps_vel, vel_2, color="orange", linewidth=2, alpha=0.7, label="Orange (Stoch.)"
+        ax_vel.lines(
+            [np.stack([time_steps_vel, vel_1], 1)],
+            _GREEN,
+            width=2,
+            alpha=0.7,
+            label="Green (Det.)",
+        )
+        ax_vel.lines(
+            [np.stack([time_steps_vel, vel_2], 1)],
+            _ORANGE,
+            width=2,
+            alpha=0.7,
+            label="Orange (Stoch.)",
         )
         # Add ground truth velocity if available
         if vel_gt is not None:
             time_steps_gt = np.arange(len(vel_gt))
-            ax_vel.plot(
-                time_steps_gt,
-                vel_gt,
-                color="red",
-                linewidth=2,
-                linestyle="--",
+            ax_vel.lines(
+                [np.stack([time_steps_gt, vel_gt], 1)],
+                _RED,
+                width=2,
                 alpha=0.7,
+                dash="dash",
                 label="Ground Truth",
             )
-        ax_vel.set_ylabel("Velocity (km/h)")
+        ax_vel.ylabel("Velocity (km/h)")
         ax_vel.set_ylim(0, 60)
-        ax_vel.set_title("Velocity Comparison")
-        ax_vel.legend(loc="upper right")
-        ax_vel.grid(True, alpha=0.3)
+        ax_vel.title("Velocity Comparison")
+        ax_vel.legend("upper right")
+        ax_vel.grid(0.3)
 
         # Acceleration subplot
-        ax_acc.plot(time_steps_acc, acc_1, "g-", linewidth=2, alpha=0.7, label="Trajectory 1")
-        ax_acc.plot(
-            time_steps_acc, acc_2, color="orange", linewidth=2, alpha=0.7, label="Trajectory 2"
+        ax_acc.lines(
+            [np.stack([time_steps_acc, acc_1], 1)],
+            _GREEN,
+            width=2,
+            alpha=0.7,
+            label="Trajectory 1",
         )
-        ax_acc.set_xlabel("Time Step")
-        ax_acc.set_ylabel("Acceleration (m/s²)")
+        ax_acc.lines(
+            [np.stack([time_steps_acc, acc_2], 1)],
+            _ORANGE,
+            width=2,
+            alpha=0.7,
+            label="Trajectory 2",
+        )
+        ax_acc.xlabel("Time Step")
+        ax_acc.ylabel("Acceleration (m/s²)")
         ax_acc.set_ylim(-2.5, 2.5)
-        ax_acc.set_title("Acceleration Comparison")
-        ax_acc.legend(loc="upper right")
-        ax_acc.grid(True, alpha=0.3)
-        ax_acc.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+        ax_acc.title("Acceleration Comparison")
+        ax_acc.legend("upper right")
+        ax_acc.grid(0.3)
+        ax_acc.hline(0, _GRAY, width=0.5, dash="dash")
 
         # Draw time marker if time_step is provided
         if time_step is not None:
             # Velocity marker
             if 0 <= time_step < len(vel_1):
-                ax_vel.axvline(x=time_step, color="blue", linestyle="--", linewidth=2, alpha=0.8)
+                ax_vel.vline(time_step, _BLUE, width=2, dash="dash", alpha=0.8)
                 # Show current values
                 v1_val = vel_1[time_step]
                 v2_val = vel_2[time_step]
-                ax_vel.scatter(
-                    [time_step], [v1_val], c="green", s=80, zorder=10, edgecolors="black"
-                )
-                ax_vel.scatter(
-                    [time_step], [v2_val], c="orange", s=80, zorder=10, edgecolors="black"
-                )
+                ax_vel.markers([time_step, v1_val], "o", np.sqrt(80), _GREEN, edge="#000000", z=10)
+                ax_vel.markers([time_step, v2_val], "o", np.sqrt(80), _ORANGE, edge="#000000", z=10)
                 # Add ground truth marker if available
                 vgt_val = None
                 if vel_gt is not None and 0 <= time_step < len(vel_gt):
                     vgt_val = vel_gt[time_step]
-                    ax_vel.scatter(
-                        [time_step],
-                        [vgt_val],
-                        c="red",
-                        s=80,
-                        zorder=10,
-                        edgecolors="black",
-                        marker="D",
+                    ax_vel.markers(
+                        [time_step, vgt_val], "D", np.sqrt(80), _RED, edge="#000000", z=10
                     )
 
             # Acceleration marker
             if 0 <= time_step < len(acc_1):
-                ax_acc.axvline(x=time_step, color="blue", linestyle="--", linewidth=2, alpha=0.8)
+                ax_acc.vline(time_step, _BLUE, width=2, dash="dash", alpha=0.8)
                 # Show current values
                 a1_val = acc_1[time_step]
                 a2_val = acc_2[time_step]
-                ax_acc.scatter(
-                    [time_step], [a1_val], c="green", s=80, zorder=10, edgecolors="black"
-                )
-                ax_acc.scatter(
-                    [time_step], [a2_val], c="orange", s=80, zorder=10, edgecolors="black"
-                )
+                ax_acc.markers([time_step, a1_val], "o", np.sqrt(80), _GREEN, edge="#000000", z=10)
+                ax_acc.markers([time_step, a2_val], "o", np.sqrt(80), _ORANGE, edge="#000000", z=10)
 
                 # Add text annotations for current values
                 time_sec = time_step * 0.1
                 if vgt_val is not None:
-                    ax_vel.set_title(
+                    ax_vel.title(
                         f"Velocity @ {time_sec:.1f}s: G={v1_val:.1f}, O={v2_val:.1f}, GT={vgt_val:.1f} km/h"
                     )
                 else:
-                    ax_vel.set_title(
+                    ax_vel.title(
                         f"Velocity @ {time_sec:.1f}s: G={v1_val:.1f} km/h, O={v2_val:.1f} km/h"
                     )
-                ax_acc.set_title(
+                ax_acc.title(
                     f"Acceleration @ {time_sec:.1f}s: G={a1_val:.2f} m/s², O={a2_val:.2f} m/s²"
                 )
 
-        fig.tight_layout()
-        return fig
+        return fig.image()
 
-    def _create_lateral_curvature_plot(self, time_step: int | None = None) -> Figure:
+    def _create_lateral_curvature_plot(self, time_step: int | None = None) -> Image.Image:
         """Create lateral acceleration and curvature comparison plot.
 
         Args:
@@ -1329,13 +1309,12 @@ class PreferenceAnnotator:
                        If None, no time marker is shown.
 
         Returns:
-            Matplotlib Figure with lateral acceleration and curvature subplots
+            PIL Image with lateral acceleration and curvature charts
         """
-        fig = Figure(figsize=(6, 8))
+        fig = Figure((6, 8), 100)
 
         # Create two subplots: lateral acceleration (top) and curvature (bottom)
-        ax_lat = fig.add_subplot(211)
-        ax_curv = fig.add_subplot(212)
+        (ax_lat,), (ax_curv,) = fig.grid(2, 1, margins=(0.15, 0.96, 0.07, 0.95), hspace=0.3)
 
         # Calculate velocities and curvatures
         vel_1 = self._calculate_velocities(self.trajectory_1)
@@ -1355,128 +1334,131 @@ class PreferenceAnnotator:
         time_steps = np.arange(len(curv_1))
 
         # Lateral acceleration subplot
-        ax_lat.plot(time_steps, lat_acc_1, "g-", linewidth=2, alpha=0.7, label="Green (Det.)")
-        ax_lat.plot(
-            time_steps, lat_acc_2, color="orange", linewidth=2, alpha=0.7, label="Orange (Stoch.)"
+        ax_lat.lines(
+            [np.stack([time_steps, lat_acc_1], 1)],
+            _GREEN,
+            width=2,
+            alpha=0.7,
+            label="Green (Det.)",
+        )
+        ax_lat.lines(
+            [np.stack([time_steps, lat_acc_2], 1)],
+            _ORANGE,
+            width=2,
+            alpha=0.7,
+            label="Orange (Stoch.)",
         )
         # Add ground truth lateral acceleration if available
         if lat_acc_gt is not None:
             time_steps_gt = np.arange(len(lat_acc_gt))
-            ax_lat.plot(
-                time_steps_gt,
-                lat_acc_gt,
-                color="red",
-                linewidth=2,
-                linestyle="--",
+            ax_lat.lines(
+                [np.stack([time_steps_gt, lat_acc_gt], 1)],
+                _RED,
+                width=2,
                 alpha=0.7,
+                dash="dash",
                 label="Ground Truth",
             )
-        ax_lat.set_ylabel("Lateral Accel (m/s²)")
+        ax_lat.ylabel("Lateral Accel (m/s²)")
         ax_lat.set_ylim(0, 8)
-        ax_lat.set_title("Lateral Acceleration Comparison")
-        ax_lat.legend(loc="upper right")
-        ax_lat.grid(True, alpha=0.3)
+        ax_lat.title("Lateral Acceleration Comparison")
+        ax_lat.legend("upper right")
+        ax_lat.grid(0.3)
         # Add comfort threshold line (typically 3-4 m/s² is uncomfortable)
-        ax_lat.axhline(y=3.0, color="purple", linestyle=":", linewidth=1, alpha=0.5)
+        ax_lat.hline(3.0, "#800080", width=1, dash="dot", alpha=0.5)
 
         # Curvature subplot
-        ax_curv.plot(time_steps, curv_1, "g-", linewidth=2, alpha=0.7, label="Green (Det.)")
-        ax_curv.plot(
-            time_steps, curv_2, color="orange", linewidth=2, alpha=0.7, label="Orange (Stoch.)"
+        ax_curv.lines(
+            [np.stack([time_steps, curv_1], 1)],
+            _GREEN,
+            width=2,
+            alpha=0.7,
+            label="Green (Det.)",
+        )
+        ax_curv.lines(
+            [np.stack([time_steps, curv_2], 1)],
+            _ORANGE,
+            width=2,
+            alpha=0.7,
+            label="Orange (Stoch.)",
         )
         # Add ground truth curvature if available
         if curv_gt is not None:
             time_steps_gt = np.arange(len(curv_gt))
-            ax_curv.plot(
-                time_steps_gt,
-                curv_gt,
-                color="red",
-                linewidth=2,
-                linestyle="--",
+            ax_curv.lines(
+                [np.stack([time_steps_gt, curv_gt], 1)],
+                _RED,
+                width=2,
                 alpha=0.7,
+                dash="dash",
                 label="Ground Truth",
             )
-        ax_curv.set_xlabel("Time Step")
-        ax_curv.set_ylabel("Curvature (1/m)")
+        ax_curv.xlabel("Time Step")
+        ax_curv.ylabel("Curvature (1/m)")
         ax_curv.set_ylim(-0.2, 0.2)
-        ax_curv.set_title("Curvature Comparison")
-        ax_curv.legend(loc="upper right")
-        ax_curv.grid(True, alpha=0.3)
-        ax_curv.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+        ax_curv.title("Curvature Comparison")
+        ax_curv.legend("upper right")
+        ax_curv.grid(0.3)
+        ax_curv.hline(0, _GRAY, width=0.5, dash="dash")
 
         # Draw time marker if time_step is provided
         if time_step is not None:
             # Lateral acceleration marker
             lat_gt_val = None
             if 0 <= time_step < len(lat_acc_1):
-                ax_lat.axvline(x=time_step, color="blue", linestyle="--", linewidth=2, alpha=0.8)
+                ax_lat.vline(time_step, _BLUE, width=2, dash="dash", alpha=0.8)
                 lat1_val = lat_acc_1[time_step]
                 lat2_val = lat_acc_2[time_step]
-                ax_lat.scatter(
-                    [time_step], [lat1_val], c="green", s=80, zorder=10, edgecolors="black"
+                ax_lat.markers(
+                    [time_step, lat1_val], "o", np.sqrt(80), _GREEN, edge="#000000", z=10
                 )
-                ax_lat.scatter(
-                    [time_step], [lat2_val], c="orange", s=80, zorder=10, edgecolors="black"
+                ax_lat.markers(
+                    [time_step, lat2_val], "o", np.sqrt(80), _ORANGE, edge="#000000", z=10
                 )
                 # Add ground truth marker if available
                 if lat_acc_gt is not None and 0 <= time_step < len(lat_acc_gt):
                     lat_gt_val = lat_acc_gt[time_step]
-                    ax_lat.scatter(
-                        [time_step],
-                        [lat_gt_val],
-                        c="red",
-                        s=80,
-                        zorder=10,
-                        edgecolors="black",
-                        marker="D",
+                    ax_lat.markers(
+                        [time_step, lat_gt_val], "D", np.sqrt(80), _RED, edge="#000000", z=10
                     )
 
             # Curvature marker
             curv_gt_val = None
             if 0 <= time_step < len(curv_1):
-                ax_curv.axvline(x=time_step, color="blue", linestyle="--", linewidth=2, alpha=0.8)
+                ax_curv.vline(time_step, _BLUE, width=2, dash="dash", alpha=0.8)
                 c1_val = curv_1[time_step]
                 c2_val = curv_2[time_step]
-                ax_curv.scatter(
-                    [time_step], [c1_val], c="green", s=80, zorder=10, edgecolors="black"
-                )
-                ax_curv.scatter(
-                    [time_step], [c2_val], c="orange", s=80, zorder=10, edgecolors="black"
+                ax_curv.markers([time_step, c1_val], "o", np.sqrt(80), _GREEN, edge="#000000", z=10)
+                ax_curv.markers(
+                    [time_step, c2_val], "o", np.sqrt(80), _ORANGE, edge="#000000", z=10
                 )
                 # Add ground truth marker if available
                 if curv_gt is not None and 0 <= time_step < len(curv_gt):
                     curv_gt_val = curv_gt[time_step]
-                    ax_curv.scatter(
-                        [time_step],
-                        [curv_gt_val],
-                        c="red",
-                        s=80,
-                        zorder=10,
-                        edgecolors="black",
-                        marker="D",
+                    ax_curv.markers(
+                        [time_step, curv_gt_val], "D", np.sqrt(80), _RED, edge="#000000", z=10
                     )
 
                 # Add text annotations for current values
                 time_sec = time_step * 0.1
                 if lat_gt_val is not None:
-                    ax_lat.set_title(
+                    ax_lat.title(
                         f"Lat.Accel @ {time_sec:.1f}s: G={lat1_val:.2f}, O={lat2_val:.2f}, GT={lat_gt_val:.2f} m/s²"
                     )
                 else:
-                    ax_lat.set_title(
+                    ax_lat.title(
                         f"Lat.Accel @ {time_sec:.1f}s: G={lat1_val:.2f} m/s², O={lat2_val:.2f} m/s²"
                     )
                 if curv_gt_val is not None:
-                    ax_curv.set_title(
+                    ax_curv.title(
                         f"Curvature @ {time_sec:.1f}s: G={c1_val:.3f}, O={c2_val:.3f}, GT={curv_gt_val:.3f} 1/m"
                     )
                 else:
-                    ax_curv.set_title(
+                    ax_curv.title(
                         f"Curvature @ {time_sec:.1f}s: G={c1_val:.3f} 1/m, O={c2_val:.3f} 1/m"
                     )
 
-        fig.tight_layout()
-        return fig
+        return fig.image()
 
     def _calculate_accelerations(self, velocities: np.ndarray) -> np.ndarray:
         """Calculate accelerations from velocity array.
@@ -2000,7 +1982,7 @@ def create_interface(
                 with gr.Row():
                     # Trajectory plot with zoom slider below it
                     with gr.Column():
-                        trajectory_plot = gr.Plot(label="Trajectory Comparison")
+                        trajectory_plot = gr.Image(label="Trajectory Comparison", type="pil")
                         zoom_slider = gr.Slider(
                             minimum=1,
                             maximum=10,
@@ -2008,8 +1990,8 @@ def create_interface(
                             step=1,
                             label="🔍 Zoom (1=100m, 10=10m)",
                         )
-                    velocity_plot = gr.Plot(label="Velocity & Long. Acceleration")
-                    lateral_plot = gr.Plot(label="Lat. Acceleration & Curvature")
+                    velocity_plot = gr.Image(label="Velocity & Long. Acceleration", type="pil")
+                    lateral_plot = gr.Image(label="Lat. Acceleration & Curvature", type="pil")
 
                 # Time slider for visualization control
                 gr.Markdown("## ⏱️ Time Control")
@@ -2758,7 +2740,7 @@ def create_interface(
                         time_step=ts,
                     )
                 )
-                print(f"Navigation complete")
+                print("Navigation complete")
                 return result
             else:
                 print(f"Ignoring key: '{actual_key}'")

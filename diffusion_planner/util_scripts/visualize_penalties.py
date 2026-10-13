@@ -15,10 +15,6 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.loss import (
@@ -30,6 +26,8 @@ from diffusion_planner.loss import (
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from tqdm import tqdm
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,11 +157,10 @@ def process_sample(
     min_dist_np = min_dist.detach().numpy()
 
     # ===== Visualization =====
-    fig = plt.figure(figsize=(14, 10))
-    gs = fig.add_gridspec(2, 2, height_ratios=[2, 1], hspace=0.3, wspace=0.3)
+    fig = Figure((14, 10), dpi=150)
 
     # Top: Map view with trajectory colored by road_border penalty
-    ax_map = fig.add_subplot(gs[0, :])
+    ax_map = fig.panel((0.06, 0.434, 0.91, 0.516))
 
     vis_dict = {}
     for key, value in valid_data.items():
@@ -177,60 +174,58 @@ def process_sample(
 
     # Color trajectory by road_border penalty
     vmax = max(float(rb_pen_np.max()), 0.01)
-    scatter = ax_map.scatter(
-        prediction[0, :, 0],
-        prediction[0, :, 1],
-        c=rb_pen_np,
+    ax_map.markers(
+        prediction[0, :, :2],
+        "o",
+        size=np.sqrt(20),
+        values=rb_pen_np,
         cmap="YlOrRd",
-        s=20,
-        zorder=10,
-        vmin=0,
+        vmin=0.0,
         vmax=vmax,
-        edgecolors="none",
+        z=10,
     )
-    plt.colorbar(scatter, ax=ax_map, label="road_border penalty [m]", shrink=0.6)
+    ax_map.colorbar("YlOrRd", 0.0, vmax, "road_border penalty [m]")
 
     # Draw ego edge points at a few timesteps
     for t_idx in [0, T // 4, T // 2, 3 * T // 4, T - 1]:
         pts = ego_edge_points[0, t_idx].numpy()  # [K, 2]
-        ax_map.scatter(pts[:, 0], pts[:, 1], c="gray", s=5, alpha=0.5, zorder=5)
+        ax_map.markers(pts, "o", size=np.sqrt(5), color="#808080", alpha=0.5, z=5)
 
-    ax_map.set_title(f"Sample {idx}: {valid_data_path.stem}")
+    ax_map.title(f"Sample {idx}: {valid_data_path.stem}")
 
     # Bottom-left: Time-series of penalties
-    ax_pen = fig.add_subplot(gs[1, 0])
-    ax_pen.plot(timesteps, neighbor_pen_np, label="neighbor", alpha=0.8, linewidth=1.5)
-    ax_pen.plot(timesteps, rb_pen_np, label="road_border", alpha=0.8, linewidth=1.5)
-    ax_pen.set_xlabel("Time [s]")
-    ax_pen.set_ylabel("Penalty [m]")
-    ax_pen.legend(loc="upper right", fontsize=8)
-    ax_pen.set_title("Penalties per timestep")
-    ax_pen.grid(True, alpha=0.3)
+    ax_pen = fig.panel((0.06, 0.06, 0.396, 0.258))
+    ax_pen.lines([np.stack([timesteps, neighbor_pen_np], 1)], "#1f77b4", 1.5, 0.8, label="neighbor")
+    ax_pen.lines([np.stack([timesteps, rb_pen_np], 1)], "#ff7f0e", 1.5, 0.8, label="road_border")
+    ax_pen.xlabel("Time [s]")
+    ax_pen.ylabel("Penalty [m]")
+    ax_pen.legend("upper right")
+    ax_pen.title("Penalties per timestep")
+    ax_pen.grid(0.3)
     ax_pen.set_xlim(0, timesteps[-1])
 
     # Bottom-right: Distance to nearest road border
-    ax_dist = fig.add_subplot(gs[1, 1])
+    ax_dist = fig.panel((0.574, 0.06, 0.396, 0.258))
     finite_mask = np.isfinite(min_dist_np)
     if finite_mask.any():
-        ax_dist.plot(
-            timesteps[finite_mask],
-            min_dist_np[finite_mask],
+        ax_dist.lines(
+            [np.stack([timesteps[finite_mask], min_dist_np[finite_mask]], 1)],
+            "#1f77b4",
+            1.5,
             label="min distance",
-            color="tab:blue",
-            linewidth=1.5,
         )
-    ax_dist.axhline(
-        y=road_border_margin,
-        color="red",
-        linestyle="--",
+    ax_dist.hline(
+        road_border_margin,
+        "#ff0000",
+        1,
+        dash="dash",
         label=f"margin ({road_border_margin:.2f}m)",
-        linewidth=1,
     )
-    ax_dist.set_xlabel("Time [s]")
-    ax_dist.set_ylabel("Distance [m]")
-    ax_dist.legend(loc="upper right", fontsize=8)
-    ax_dist.set_title("Distance to nearest road border")
-    ax_dist.grid(True, alpha=0.3)
+    ax_dist.xlabel("Time [s]")
+    ax_dist.ylabel("Distance [m]")
+    ax_dist.legend("upper right")
+    ax_dist.title("Distance to nearest road border")
+    ax_dist.grid(0.3)
     ax_dist.set_xlim(0, timesteps[-1])
     if finite_mask.any():
         y_max = min(float(min_dist_np[finite_mask].max()) * 1.2, 20.0)
@@ -238,10 +233,8 @@ def process_sample(
     else:
         ax_dist.set_ylim(0, road_border_margin * 2)
 
-    plt.tight_layout()
     save_path = save_dir / f"penalty_{idx:08d}.png"
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.save(save_path)
 
     rb_min = float(min_dist_np[finite_mask].min()) if finite_mask.any() else float("inf")
     print(

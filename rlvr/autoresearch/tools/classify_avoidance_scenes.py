@@ -63,14 +63,10 @@ def render_verdict(
     """Scene render for human judgment: det trajectory + stopped-neighbor
     OBBs + verdict; flagged scenes also show the policy-guided trajectory
     (what the policy wants to do instead)."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     from guidance_gui.generate_samples import generate_samples
     from rlvr.autoresearch.tools.ghost_sim_common import extract_stopped_neighbors
     from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base
+    from scenario_generation.canvas import scene_panel
     from scenario_generation.visualize import draw_agent_box
 
     guided = None
@@ -87,31 +83,33 @@ def render_verdict(
             device=device,
         )[0]
 
-    fig, ax = plt.subplots(figsize=(10, 10))
+    span = float(np.abs(det[..., :2]).max()) + 12
+    ax = scene_panel((-12, max(span, 40)), (-span / 2, span / 2), size_in=(10, 10), dpi=110)
     draw_scene_base(ax, scene_path)
     for x, y, h, length, w in extract_stopped_neighbors(scene_path):
-        draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
+        draw_agent_box(ax, x, y, h, length, w, color="#dc143c", alpha=0.5)
     # ego footprint at t0 (ego frame: rear axle at origin, heading 0)
     wb, length, width = args.ego_shape_t
-    draw_agent_box(ax, 0.0, 0.0, 0.0, length, width, color="royalblue", alpha=0.35, wheelbase=wb)
-    ax.plot(det[:, 0], det[:, 1], "-", color="black", lw=2.2, label="baseline det")
+    draw_agent_box(ax, 0.0, 0.0, 0.0, length, width, color="#4169e1", alpha=0.35, wheelbase=wb)
+    ax.lines([det[:, :2]], "#000000", width=2.2, label="baseline det")
     if guided is not None:
-        ax.plot(guided[:, 0], guided[:, 1], "--", color="lime", lw=2.2, label="policy-guided")
+        ax.lines([guided[:, :2]], "#00ff00", width=2.2, dash="dash", label="policy-guided")
     verdict = verdict_label or (
         ("AVOIDANCE [" + "+".join(triggers) + "]") if is_avoid else "normal"
     )
     eta_str = " ".join(f"{h[:3]}={v:+.2f}" for h, v in etas.items())
-    ax.set_title(
+    ax.text(
+        (0.5, 1.0),
         f"{Path(scene_path).stem}\n{verdict}  η: {eta_str}",
-        color=("darkred" if is_avoid else "darkgreen"),
+        12,
+        "#8b0000" if is_avoid else "#006400",
+        ha="center",
+        va="bottom",
+        offset=(0, 6),
+        coords="axes",
     )
-    ax.legend(loc="upper right", fontsize=9)
-    ax.set_aspect("equal")
-    span = float(np.abs(det[..., :2]).max()) + 12
-    ax.set_xlim(-12, max(span, 40))
-    ax.set_ylim(-span / 2, span / 2)
-    fig.savefig(out_png, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    ax.legend("upper right")
+    ax.save(out_png)
 
 
 def classify(

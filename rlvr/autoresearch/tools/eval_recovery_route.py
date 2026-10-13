@@ -137,7 +137,7 @@ def in_process_draw_pool() -> ThreadPoolExecutor:
     """The executor the per-step hook MUST run on: one worker, in this process.
 
     Passing ``draw_pool=None`` makes ``render_segment`` build a **spawn
-    ProcessPoolExecutor** -- right for matplotlib, fatal here. The hook would be
+    ProcessPoolExecutor** -- right for the renderer, fatal here. The hook would be
     pickled by module+qualname, re-imported in a child interpreter, and would
     record its scores in that child's copy of the records, so the parent would
     collect nothing at all (``collect_usage`` raises on exactly that). One

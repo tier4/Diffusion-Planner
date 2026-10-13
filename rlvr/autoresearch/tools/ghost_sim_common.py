@@ -12,15 +12,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from rlvr.autoresearch.tools.recovery_sim import (
@@ -37,6 +32,7 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _route_polylines,
     closed_loop_rollout_with_plans,
 )
+from scenario_generation.canvas import Figure
 
 MODEL_A_COLOR = "#1f77b4"  # blue
 MODEL_B_COLOR = "#d62728"  # red
@@ -164,22 +160,20 @@ def render_ghost_step(
     bx_val, by_val, bh_val = float(b_pose[0]), float(b_pose[1]), float(b_pose[2])
     cx, cy = (ax_val + bx_val) / 2, (ay_val + by_val) / 2
 
-    fig = Figure(figsize=(11, 11))
-    ax = fig.add_subplot(1, 1, 1)
-    fig.patch.set_facecolor("#f8f8f8")
+    fig = Figure((11, 11), 100, facecolor="#f8f8f8")
+    ax = fig.panel(
+        (0.08, 0.06, 0.9, 0.85),
+        xlim=(cx - cfg.view_half_m, cx + cfg.view_half_m),
+        ylim=(cy - cfg.view_half_m, cy + cfg.view_half_m),
+        equal=True,
+    )
 
     if centerlines:
-        ax.add_collection(
-            LineCollection(centerlines, colors=_LANE_COLOR, linewidths=0.6, alpha=0.28, zorder=1)
-        )
+        ax.lines(centerlines, _LANE_COLOR, width=0.6, alpha=0.28, z=1)
     if lefts:
-        ax.add_collection(
-            LineCollection(lefts, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
-        )
+        ax.lines(lefts, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
     if rights:
-        ax.add_collection(
-            LineCollection(rights, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
-        )
+        ax.lines(rights, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
 
     half = cfg.view_half_m * 1.5
     flt_borders = [
@@ -194,15 +188,11 @@ def render_ghost_step(
         ).any()
     ]
     if flt_borders:
-        ax.add_collection(
-            LineCollection(
-                flt_borders, colors=_ROAD_BORDER_COLOR, linewidths=2.0, alpha=0.9, zorder=5
-            )
-        )
+        ax.lines(flt_borders, _ROAD_BORDER_COLOR, width=2.0, alpha=0.9, z=5)
 
     for pl in route_polylines:
         if pl.shape[0] >= 2:
-            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR, lw=2.5, alpha=0.55, zorder=3)
+            ax.lines([pl[:, :2]], _ROUTE_COLOR, width=2.5, alpha=0.55, z=3)
 
     if neighbor_boxes:
         for nx, ny, nh, nl, nw in neighbor_boxes:
@@ -211,15 +201,7 @@ def render_ghost_step(
     if history_mode:
         # Single gray recorded-history ego (model context preamble)
         if history_trail is not None and history_trail.shape[0] > 1:
-            ax.plot(
-                history_trail[:, 0],
-                history_trail[:, 1],
-                "-",
-                color="#555555",
-                lw=1.6,
-                alpha=0.7,
-                zorder=18,
-            )
+            ax.lines([history_trail[:, :2]], "#555555", width=1.6, alpha=0.7, z=18)
         _draw_agent_box(
             ax,
             ax_val,
@@ -233,41 +215,30 @@ def render_ghost_step(
             zorder=20,
             wheelbase=cfg.ego_wheelbase,
         )
-        ax.plot([], [], "-", color="#555555", lw=2, label="ego history (recorded)")
-        ax.legend(fontsize=10, loc="upper left")
-        ax.set_xlim(cx - cfg.view_half_m, cx + cfg.view_half_m)
-        ax.set_ylim(cy - cfg.view_half_m, cy + cfg.view_half_m)
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.15)
+        ax.lines([], "#555555", width=2, label="ego history (recorded)")
+        ax.legend("upper left")
+        ax.grid(0.15)
         title = cfg.subtitle or ""
         if extra_title:
             title = f"{title}\n{extra_title}" if title else extra_title
-        ax.set_title(title, fontsize=11)
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=100)
-        fig.clf()
+        ax.title(title, 11)
+        fig.save(output_path)
         return
 
     if fan_plans:
         for fi, fp in enumerate(fan_plans):
-            ax.plot(
-                fp[:, 0],
-                fp[:, 1],
-                "-",
-                color=cfg.model_b_color,
-                lw=0.8,
+            ax.lines(
+                [fp[:, :2]],
+                cfg.model_b_color,
+                width=0.8,
                 alpha=0.16,
-                zorder=22,
+                z=22,
                 label=(f"{len(fan_plans)} candidates from policy dist" if fi == 0 else None),
             )
     if a_plan is not None and a_plan.shape[0] > 1:
-        ax.plot(
-            a_plan[:, 0], a_plan[:, 1], "-", color=cfg.model_a_color, lw=1.4, alpha=0.45, zorder=24
-        )
+        ax.lines([a_plan[:, :2]], cfg.model_a_color, width=1.4, alpha=0.45, z=24)
     if b_plan is not None and b_plan.shape[0] > 1:
-        ax.plot(
-            b_plan[:, 0], b_plan[:, 1], "-", color=cfg.model_b_color, lw=1.4, alpha=0.45, zorder=24
-        )
+        ax.lines([b_plan[:, :2]], cfg.model_b_color, width=1.4, alpha=0.45, z=24)
 
     _draw_agent_box(
         ax,
@@ -296,19 +267,21 @@ def render_ghost_step(
         wheelbase=cfg.ego_wheelbase,
     )
     arrow_len = max(cfg.ego_length, 2.5)
-    ax.annotate(
-        "",
-        xy=(ax_val + arrow_len * math.cos(ah_val), ay_val + arrow_len * math.sin(ah_val)),
-        xytext=(ax_val, ay_val),
-        arrowprops=dict(arrowstyle="-|>", color=cfg.model_a_color, lw=1.2, mutation_scale=10),
-        zorder=22,
+    ax.arrows(
+        np.array([ax_val, ay_val]),
+        np.array([ax_val + arrow_len * math.cos(ah_val), ay_val + arrow_len * math.sin(ah_val)]),
+        cfg.model_a_color,
+        width=1.2,
+        head=10,
+        z=22,
     )
-    ax.annotate(
-        "",
-        xy=(bx_val + arrow_len * math.cos(bh_val), by_val + arrow_len * math.sin(bh_val)),
-        xytext=(bx_val, by_val),
-        arrowprops=dict(arrowstyle="-|>", color=cfg.model_b_color, lw=1.2, mutation_scale=10),
-        zorder=23,
+    ax.arrows(
+        np.array([bx_val, by_val]),
+        np.array([bx_val + arrow_len * math.cos(bh_val), by_val + arrow_len * math.sin(bh_val)]),
+        cfg.model_b_color,
+        width=1.2,
+        head=10,
+        z=23,
     )
 
     label_a = f"{cfg.model_a_label}  v={a_speed:.1f} m/s"
@@ -319,26 +292,21 @@ def render_ghost_step(
         label_a += f"  lat={lat_a:.2f}m"
         label_b += f"  lat={lat_b:.2f}m"
 
-    ax.plot([], [], "-", color=cfg.model_a_color, lw=2, label=label_a)
-    ax.plot([], [], "-", color=cfg.model_b_color, lw=2, label=label_b)
-    ax.legend(fontsize=9, loc="upper left")
+    ax.lines([], cfg.model_a_color, width=2, label=label_a)
+    ax.lines([], cfg.model_b_color, width=2, label=label_b)
+    ax.legend("upper left")
 
-    ax.set_xlim(cx - cfg.view_half_m, cx + cfg.view_half_m)
-    ax.set_ylim(cy - cfg.view_half_m, cy + cfg.view_half_m)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m, initial ego frame)")
-    ax.set_ylabel("Y (m, initial ego frame)")
+    ax.grid(0.15)
+    ax.xlabel("X (m, initial ego frame)")
+    ax.ylabel("Y (m, initial ego frame)")
 
     title = f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s"
     if cfg.subtitle:
         title = f"{cfg.subtitle}\n{title}"
     if extra_title:
         title += f"\n{extra_title}"
-    ax.set_title(title, fontsize=10)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=100)
-    fig.clf()
+    ax.title(title, 10)
+    fig.save(output_path)
 
 
 def run_ghost_sim(

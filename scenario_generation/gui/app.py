@@ -381,7 +381,7 @@ def build_interface(
                 )
 
                 gr.Markdown("### Generated Scene")
-                scene_plot = gr.Plot(label="Scene View", elem_classes=["scene-plot"])
+                scene_plot = gr.Image(type="pil", label="Scene View", elem_classes=["scene-plot"])
 
         # ===================== EVENT HANDLERS =====================
 
@@ -799,7 +799,7 @@ def build_interface(
                 f"Generated ego + {n_placed} neighbors, {n_lanes} lanes ({rw:.0f}x{rh:.0f}m area)"
             )
 
-            fig = render_scene_figure(scene, focus_agent_id=None, rotation=rot, zoom=zoom)
+            fig = render_scene_figure(scene, focus_agent_id=None, rotation=rot, zoom=zoom).image()
             info = get_agent_info(scene, "ego")
 
             return (
@@ -832,7 +832,7 @@ def build_interface(
                 return gr.update(), "No scene generated"
             scene = pickle.loads(scene_pkl)
             fid = None if focus_id == "All Agents" else focus_id
-            fig = render_scene_figure(scene, focus_agent_id=fid, rotation=rot, zoom=zoom)
+            fig = render_scene_figure(scene, focus_agent_id=fid, rotation=rot, zoom=zoom).image()
             try:
                 info = get_agent_info(scene, fid or "ego")
             except KeyError:

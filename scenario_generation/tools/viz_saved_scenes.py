@@ -22,16 +22,14 @@ import argparse
 import math
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from PIL import Image, ImageDraw
 
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import compute_reward_batch
+from scenario_generation.canvas import Figure, font, rgba
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_render import (
     _ensure_neighbor_future_4col,
@@ -50,6 +48,22 @@ def _score_saved_target(npz_path, reward_config):
         ego_fut = ego_fut[0]
     traj = ego_fut[:, :4].unsqueeze(0)
     return compute_reward_batch(traj, data, reward_config)[0]
+
+
+def _titled(fig, text, size, color):
+    """The composed figure with ``text`` centred in a band above it, in ``color``."""
+    page = fig.image()
+    face = font(size * fig.dpi / 72.0)
+    probe = ImageDraw.Draw(page)
+    left, top, right, bottom = probe.multiline_textbbox((0, 0), text, font=face, align="center")
+    pad = round(face.size * 0.4)
+    band = bottom - top + 2 * pad
+    out = Image.new("RGB", (page.width, page.height + band), rgba(fig.facecolor)[:3])
+    out.paste(page, (0, band))
+    ImageDraw.Draw(out).multiline_text(
+        (page.width / 2, pad - top), text, fill=rgba(color), font=face, anchor="ma", align="center"
+    )
+    return out
 
 
 def _verdict(r):
@@ -128,14 +142,15 @@ def _render_one(npz_path, reward_config, view_half, model=None, model_args=None,
             show_traj_nb=True,
             dim_neighbors=False,
             figsize=(8, 8),
+            dpi=110.0,
         )
         title = (
             f"{Path(npz_path).stem}\n"
             f"GT/target [{'PASS' if ok_t else 'FAIL'}] {sum_t}\n"
             f"model DET [{'PASS' if ok_m else 'FAIL'}] {sum_m}"
         )
-        fig.suptitle(title, fontsize=9, color="#1f9e3a" if ok_t else "#cc2222", y=0.995)
-        return fig, (ok_t, sum_t, flags_t)
+        image = _titled(fig, title, 9, "#1f9e3a" if ok_t else "#cc2222")
+        return image, (ok_t, sum_t, flags_t)
 
     fig = render_scene_at_step(
         scene,
@@ -147,15 +162,16 @@ def _render_one(npz_path, reward_config, view_half, model=None, model_args=None,
         show_traj_nb=True,
         dim_neighbors=False,
         figsize=(8, 8),
+        dpi=110.0,
     )
     verdict = "PASS" if ok_t else "FAIL: " + ", ".join(flags_t)
-    fig.suptitle(
+    image = _titled(
+        fig,
         f"{Path(npz_path).stem}   [{verdict}]   {sum_t}",
-        fontsize=11,
-        color="#1f9e3a" if ok_t else "#cc2222",
-        y=0.99,
+        11,
+        "#1f9e3a" if ok_t else "#cc2222",
     )
-    return fig, (ok_t, sum_t, flags_t)
+    return image, (ok_t, sum_t, flags_t)
 
 
 def main():
@@ -202,12 +218,11 @@ def main():
 
     png_paths, n_pass = [], 0
     for pth in paths:
-        fig, (ok, summary, flags) = _render_one(
+        image, (ok, summary, flags) = _render_one(
             pth, reward_config, args.view_half, model=model, model_args=model_args, device=device
         )
         png = out / f"{pth.stem}.png"
-        fig.savefig(png, dpi=110, bbox_inches="tight")
-        plt.close(fig)
+        image.save(png, compress_level=1)
         png_paths.append(png)
         n_pass += int(ok)
         print(f"{pth.stem}: {'PASS' if ok else 'FAIL(' + ','.join(flags) + ')'}  {summary}")
@@ -216,16 +231,18 @@ def main():
     n = len(png_paths)
     cols = args.cols
     rows = math.ceil(n / cols)
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
-    axes = np.atleast_1d(axes).ravel()
+    fig = Figure((cols * 5, rows * 5), 90.0)
+    axes = [
+        panel
+        for row in fig.grid(rows, cols, margins=(0.01, 0.99, 0.01, 0.99), wspace=0.04, hspace=0.04)
+        for panel in row
+    ]
     for i, png in enumerate(png_paths):
-        axes[i].imshow(plt.imread(png))
-        axes[i].axis("off")
+        axes[i].image(np.asarray(Image.open(png).convert("RGB")))
+        axes[i].axis_off()
     for j in range(n, len(axes)):
-        axes[j].axis("off")
-    fig.tight_layout()
-    fig.savefig(out / "collage.png", dpi=90)
-    plt.close(fig)
+        axes[j].hide()
+    fig.save(out / "collage.png")
 
     print(f"\n{n_pass}/{n} scenes PASS all gates.")
     print(f"Wrote per-scene PNGs + collage.png to {out}")

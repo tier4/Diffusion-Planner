@@ -2,8 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import tqdm
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +31,7 @@ if __name__ == "__main__":
     prev_time = -1
     prev_route_id = -1
     prev_path = None
+    drawn_routes = []
 
     for i, path in tqdm(enumerate(path_list)):
         print(path)
@@ -41,16 +45,16 @@ if __name__ == "__main__":
 
         if (route_id != prev_route_id or time != prev_time) and (i > 0):
             prev_date = prev_path.parent.parent.name
-            plt.title(f"{prev_date}/{prev_path.stem}")
-            plt.scatter(pos_x, pos_y)
-            s = plt.text(pos_x[0], pos_y[0], "S", fontsize=12)
-            g = plt.text(pos_x[-1], pos_y[-1], "G", fontsize=12)
-            plt.axis("equal")
-            plt.savefig(save_dir / f"{prev_date}_{prev_path.stem}.png")
+            drawn_routes.append(np.stack([pos_x, pos_y], 1))
+            ax = Figure((6.4, 4.8), dpi=100).panel(equal=True)
+            ax.title(f"{prev_date}/{prev_path.stem}")
+            for index, route in enumerate(drawn_routes):
+                ax.markers(route, "o", size=6, color=qualitative("tab10", index), z=1)
+            ax.text((pos_x[0], pos_y[0]), "S", 12, z=3)
+            ax.text((pos_x[-1], pos_y[-1]), "G", 12, z=3)
+            ax.save(save_dir / f"{prev_date}_{prev_path.stem}.png")
             pos_x = []
             pos_y = []
-            s.remove()
-            g.remove()
 
         with open(pose_json, "r") as f:
             pose = json.load(f)

@@ -2,8 +2,10 @@ import argparse
 import os
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -46,10 +48,12 @@ if __name__ == "__main__":
 
     save_dir = root_dir / "aggregated_score_graphs_dir"
     save_dir.mkdir(exist_ok=True)
-    plt.plot(epoch_list, score_list, marker=".")
-    plt.xlabel("epoch")
-    plt.ylabel("mean_score")
-    plt.tight_layout()
+    ax = Figure((6.4, 4.8), dpi=100).panel((0.14, 0.12, 0.82, 0.84))
+    points = np.stack([epoch_list, score_list], 1)
+    ax.lines([points], "#1f77b4")
+    ax.markers(points, ".", size=6, color="#1f77b4")
+    ax.xlabel("epoch")
+    ax.ylabel("mean_score")
     save_path = save_dir / "mean_score.png"
-    plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
+    ax.save(save_path)
     print(f"save to {save_path}")

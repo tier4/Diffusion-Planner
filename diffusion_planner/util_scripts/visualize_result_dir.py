@@ -2,8 +2,10 @@ import argparse
 import os
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -51,10 +53,8 @@ if __name__ == "__main__":
         if col == "epoch":
             continue
 
-        plt.figure(figsize=(8, 6))
-        plt.plot(df["epoch"], df[col])
-        plt.xlabel("epoch")
-        plt.ylabel(col)
-        plt.tight_layout()
-        plt.savefig(save_dir / f"{col}.png", bbox_inches="tight", pad_inches=0.1)
-        plt.close()
+        ax = Figure((8, 6), dpi=100).panel((0.12, 0.1, 0.84, 0.86))
+        ax.lines([np.stack([df["epoch"], df[col]], 1)], "#1f77b4")
+        ax.xlabel("epoch")
+        ax.ylabel(col)
+        ax.save(save_dir / f"{col}.png")

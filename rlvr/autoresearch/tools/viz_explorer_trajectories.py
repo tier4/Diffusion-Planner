@@ -24,18 +24,12 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Rectangle
 
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
@@ -43,8 +37,10 @@ from guidance_gui.generate_samples import generate_samples
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_config import GRPOConfig
+from scenario_generation.canvas import Figure, Panel, oriented_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_DASH = {"-": None, "--": "dash", ":": "dot", "-.": "dashdot"}
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +125,7 @@ def load_explorer(
 # ---------------------------------------------------------------------------
 
 
-def draw_borders_and_lanes(ax, npz_path: str):
+def draw_borders_and_lanes(ax: Panel, npz_path: str):
     """Draw road borders (line_strings ch3) and lane boundaries."""
     npz = np.load(npz_path)
 
@@ -144,12 +140,11 @@ def draw_borders_and_lanes(ax, npz_path: str):
             lb, rb = lane[:, 4:6], lane[:, 6:8]
             v = np.abs(pts).sum(axis=1) > 0.1
             if v.sum() > 1:
-                ax.plot((pts + lb)[v, 0], (pts + lb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7)
-                ax.plot((pts + rb)[v, 0], (pts + rb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7)
+                ax.lines([(pts + lb)[v], (pts + rb)[v]], "#bbbbbb", width=0.7, alpha=0.5)
         # Centerline
         valid = np.abs(lane[:, :2]).sum(axis=1) > 0.1
         if valid.sum() > 1:
-            ax.plot(lane[valid, 0], lane[valid, 1], "--", color="#999", alpha=0.3, lw=0.5)
+            ax.lines([lane[valid, :2]], "#999999", width=0.5, alpha=0.3, dash="dash")
 
     # Road borders from line_strings channel 3
     ls = npz["line_strings"]
@@ -160,29 +155,27 @@ def draw_borders_and_lanes(ax, npz_path: str):
         if ls.shape[-1] >= 4 and line[:, 3].max() > 0.5:
             valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=1) > 0.01)
             if valid.sum() > 1:
-                ax.plot(line[valid, 0], line[valid, 1], color="red", lw=3, alpha=0.7, zorder=4)
+                ax.lines([line[valid, :2]], "#ff0000", width=3, alpha=0.7, z=4)
 
     return npz
 
 
-def draw_trajectory(ax, traj, label, color, linestyle="-", zorder=10):
+def draw_trajectory(ax: Panel, traj, label, color, linestyle="-", zorder=10):
     """Draw a trajectory with dots every 3 steps and endpoint footprint."""
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
-    ax.plot(traj[:, 0], traj[:, 1], linestyle, color=color, lw=2, alpha=0.6, zorder=zorder)
-    ax.plot(
-        traj[::3, 0],
-        traj[::3, 1],
+    ax.lines([traj[:, :2]], color, width=2, alpha=0.6, dash=_DASH[linestyle], z=zorder)
+    ax.markers(
+        traj[::3, :2],
         "o",
+        size=3.5,
         color=color,
-        ms=3.5,
         alpha=0.9,
-        mew=0,
-        zorder=zorder + 1,
+        z=zorder + 1,
         label=f"{label} ({pl:.1f}m)",
     )
 
 
-def draw_footprints(ax, traj, color, zorder=8):
+def draw_footprints(ax: Panel, traj, color, zorder=8):
     """Draw ego footprints at regular intervals along trajectory."""
     wb, length, width = 2.75, 4.34, 1.70
     ro = (length - wb) / 2
@@ -193,19 +186,13 @@ def draw_footprints(ax, traj, color, zorder=8):
         hn = np.sqrt(cos_h**2 + sin_h**2)
         if hn > 0.01:
             heading = np.arctan2(sin_h / hn, cos_h / hn)
-            t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-            ax.add_patch(
-                Rectangle(
-                    (-ro, -width / 2),
-                    length,
-                    width,
-                    lw=0.5,
-                    ec=color,
-                    fc=color,
-                    alpha=0.15,
-                    zorder=zorder,
-                    transform=t_rot,
-                )
+            ax.polygons(
+                [oriented_box(cx, cy, heading, length, width, ro)],
+                fill=color,
+                edge=color,
+                width=0.5,
+                alpha=0.15,
+                z=zorder,
             )
 
     # Endpoint footprint (stronger)
@@ -215,19 +202,13 @@ def draw_footprints(ax, traj, color, zorder=8):
     hn = np.sqrt(cos_h**2 + sin_h**2)
     if hn > 0.01:
         heading = np.arctan2(sin_h / hn, cos_h / hn)
-        t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-        ax.add_patch(
-            Rectangle(
-                (-ro, -width / 2),
-                length,
-                width,
-                lw=1.5,
-                ec=color,
-                fc=color,
-                alpha=0.4,
-                zorder=zorder + 1,
-                transform=t_rot,
-            )
+        ax.polygons(
+            [oriented_box(cx, cy, heading, length, width, ro)],
+            fill=color,
+            edge=color,
+            width=1.5,
+            alpha=0.4,
+            z=zorder + 1,
         )
 
 
@@ -390,10 +371,10 @@ def main():
     n = len(results)
     cols = min(args.cols, n)
     rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(8 * cols, 8 * rows))
-    if n == 1:
-        axes = np.array([axes])
-    axes = np.atleast_2d(axes).reshape(-1)
+    fig = Figure((8 * cols, 8 * rows), dpi=150)
+    axes = [
+        p for row in fig.grid(rows, cols, margins=(0.06, 0.97, 0.04, 0.88), equal=True) for p in row
+    ]
 
     for plot_idx, res in enumerate(results):
         ax = axes[plot_idx]
@@ -406,8 +387,8 @@ def main():
 
         # GT trajectory
         gt = npz["ego_agent_future"]
-        ax.plot(gt[:, 0], gt[:, 1], "g-", lw=2, alpha=0.5, zorder=5)
-        ax.plot(gt[::3, 0], gt[::3, 1], "go", ms=3, alpha=0.7, mew=0, zorder=6, label="GT")
+        ax.lines([gt[:, :2]], "#008000", width=2, alpha=0.5, z=5)
+        ax.markers(gt[::3, :2], "o", size=3, color="#008000", alpha=0.7, z=6, label="GT")
 
         # Ego box at origin
         wb, length, width = 2.75, 4.34, 1.70
@@ -415,26 +396,22 @@ def main():
         if es is not None and len(es) >= 3:
             wb, length, width = float(es[0]), float(es[1]), float(es[2])
         ro = (length - wb) / 2
-        ax.add_patch(
-            Rectangle(
-                (-ro, -width / 2),
-                length,
-                width,
-                lw=2,
-                ec="black",
-                fc="#3366cc",
-                alpha=0.9,
-                zorder=20,
-            )
+        ax.polygons(
+            [oriented_box(0.0, 0.0, 0.0, length, width, ro)],
+            fill="#3366cc",
+            edge="#000000",
+            width=2,
+            alpha=0.9,
+            z=20,
         )
 
         # Reference trajectory (blue)
-        draw_trajectory(ax, traj_ref, "Reference", "blue", "-", zorder=10)
-        draw_footprints(ax, traj_ref, "blue", zorder=8)
+        draw_trajectory(ax, traj_ref, "Reference", "#0000ff", "-", zorder=10)
+        draw_footprints(ax, traj_ref, "#0000ff", zorder=8)
 
         # Guided trajectory (red)
-        draw_trajectory(ax, traj_guided, "Explorer-guided", "red", "--", zorder=12)
-        draw_footprints(ax, traj_guided, "red", zorder=11)
+        draw_trajectory(ax, traj_guided, "Explorer-guided", "#ff0000", "--", zorder=12)
+        draw_footprints(ax, traj_guided, "#ff0000", zorder=11)
 
         # Shift arrows at a few timesteps
         T = min(80, traj_ref.shape[0], traj_guided.shape[0])
@@ -443,12 +420,7 @@ def main():
                 dx = traj_guided[t, 0] - traj_ref[t, 0]
                 dy = traj_guided[t, 1] - traj_ref[t, 1]
                 if np.sqrt(dx**2 + dy**2) > 0.05:
-                    ax.annotate(
-                        "",
-                        xy=(traj_guided[t, 0], traj_guided[t, 1]),
-                        xytext=(traj_ref[t, 0], traj_ref[t, 1]),
-                        arrowprops=dict(arrowstyle="->", color="magenta", lw=1.5),
-                    )
+                    ax.arrows(traj_ref[t, :2], traj_guided[t, :2], "#ff00ff", width=1.5)
 
         # Auto-zoom
         all_pts = np.vstack(
@@ -463,67 +435,61 @@ def main():
         half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.15)
-        ax.legend(fontsize=7, loc="upper left")
+        ax.grid(0.15)
+        ax.legend("upper left")
 
         # Annotation with eta values
         lat_cm = res["eta_lat"] * args.lambda_lat * 100
         lon_pct = res["eta_lon"] * args.lambda_lon * 100
-        ax.set_title(
+        ax.title(
             f"[{res['si']}] {res['name'][-25:]}\n"
             f"eta_lat={res['eta_lat']:+.3f} ({lat_cm:+.0f}cm)  "
             f"eta_lon={res['eta_lon']:+.3f} ({lon_pct:+.1f}%)",
-            fontsize=9,
+            9,
         )
 
     # Hide unused axes
     for j in range(n, len(axes)):
-        axes[j].set_visible(False)
+        axes[j].hide()
 
     fig.suptitle(
         "Exploration Policy: Reference (blue) vs Guided (red)\n"
         f"lambda_lat={args.lambda_lat}, lambda_lon={args.lambda_lon}, "
         f"guidance_scale={args.guidance_scale}",
-        fontsize=13,
+        13,
     )
-    fig.tight_layout()
     out_path = args.output_dir / "explorer_trajectories.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(out_path)
     print(f"\nSaved grid: {out_path}")
 
     # Also save individual per-scene images
     for res in results:
-        fig_s, ax_s = plt.subplots(1, 1, figsize=(10, 10))
+        fig_s = Figure((10, 10), dpi=150)
+        ax_s = fig_s.panel(equal=True)
         npz = draw_borders_and_lanes(ax_s, res["npz_path"])
 
         gt = npz["ego_agent_future"]
-        ax_s.plot(gt[:, 0], gt[:, 1], "g-", lw=2, alpha=0.5, zorder=5)
-        ax_s.plot(gt[::3, 0], gt[::3, 1], "go", ms=3, alpha=0.7, mew=0, zorder=6, label="GT")
+        ax_s.lines([gt[:, :2]], "#008000", width=2, alpha=0.5, z=5)
+        ax_s.markers(gt[::3, :2], "o", size=3, color="#008000", alpha=0.7, z=6, label="GT")
 
         es = npz.get("ego_shape", None)
         wb = float(es[0]) if es is not None and len(es) >= 1 else 2.75
         length = float(es[1]) if es is not None and len(es) >= 2 else 4.34
         width = float(es[2]) if es is not None and len(es) >= 3 else 1.70
         ro = (length - wb) / 2
-        ax_s.add_patch(
-            Rectangle(
-                (-ro, -width / 2),
-                length,
-                width,
-                lw=2,
-                ec="black",
-                fc="#3366cc",
-                alpha=0.9,
-                zorder=20,
-            )
+        ax_s.polygons(
+            [oriented_box(0.0, 0.0, 0.0, length, width, ro)],
+            fill="#3366cc",
+            edge="#000000",
+            width=2,
+            alpha=0.9,
+            z=20,
         )
 
-        draw_trajectory(ax_s, res["traj_ref"], "Reference", "blue", "-", zorder=10)
-        draw_footprints(ax_s, res["traj_ref"], "blue", zorder=8)
-        draw_trajectory(ax_s, res["traj_guided"], "Explorer-guided", "red", "--", zorder=12)
-        draw_footprints(ax_s, res["traj_guided"], "red", zorder=11)
+        draw_trajectory(ax_s, res["traj_ref"], "Reference", "#0000ff", "-", zorder=10)
+        draw_footprints(ax_s, res["traj_ref"], "#0000ff", zorder=8)
+        draw_trajectory(ax_s, res["traj_guided"], "Explorer-guided", "#ff0000", "--", zorder=12)
+        draw_footprints(ax_s, res["traj_guided"], "#ff0000", zorder=11)
 
         T = min(80, res["traj_ref"].shape[0], res["traj_guided"].shape[0])
         for t in [10, 20, 35, 55]:
@@ -531,11 +497,8 @@ def main():
                 dx = res["traj_guided"][t, 0] - res["traj_ref"][t, 0]
                 dy = res["traj_guided"][t, 1] - res["traj_ref"][t, 1]
                 if np.sqrt(dx**2 + dy**2) > 0.05:
-                    ax_s.annotate(
-                        "",
-                        xy=(res["traj_guided"][t, 0], res["traj_guided"][t, 1]),
-                        xytext=(res["traj_ref"][t, 0], res["traj_ref"][t, 1]),
-                        arrowprops=dict(arrowstyle="->", color="magenta", lw=1.5),
+                    ax_s.arrows(
+                        res["traj_ref"][t, :2], res["traj_guided"][t, :2], "#ff00ff", width=1.5
                     )
 
         all_pts = np.vstack(
@@ -550,23 +513,20 @@ def main():
         half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
         ax_s.set_xlim(cx - half, cx + half)
         ax_s.set_ylim(cy - half, cy + half)
-        ax_s.set_aspect("equal")
-        ax_s.grid(True, alpha=0.15)
-        ax_s.legend(fontsize=9, loc="upper left")
+        ax_s.grid(0.15)
+        ax_s.legend("upper left")
 
         lat_cm = res["eta_lat"] * args.lambda_lat * 100
         lon_pct = res["eta_lon"] * args.lambda_lon * 100
-        ax_s.set_title(
+        ax_s.title(
             f"Scene {res['si']}: {res['name']}\n"
             f"eta_lat={res['eta_lat']:+.3f} ({lat_cm:+.0f}cm)  "
             f"eta_lon={res['eta_lon']:+.3f} ({lon_pct:+.1f}%)",
-            fontsize=11,
+            11,
         )
 
-        fig_s.tight_layout()
         scene_out = args.output_dir / f"scene_{res['si']:04d}.png"
-        fig_s.savefig(scene_out, dpi=150, bbox_inches="tight")
-        plt.close(fig_s)
+        fig_s.save(scene_out)
         print(f"  Saved: {scene_out}")
 
     print(f"\nDone. {len(results)} scenes visualized in {args.output_dir}")

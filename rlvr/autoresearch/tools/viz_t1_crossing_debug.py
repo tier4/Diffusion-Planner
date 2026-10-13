@@ -21,18 +21,11 @@ import json
 import sys
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 import torch
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Patch
-from matplotlib.patches import Polygon as MplPolygon
 
-from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.calibrate_rb_vs_lane import generate_for_all_scenes
 from rlvr.autoresearch.tools.viz_lane_gate_rank_flip import classify_all_segments
 from rlvr.grpo_config import GRPOConfig
@@ -41,6 +34,7 @@ from rlvr.reward import (
     _build_lane_polygons,
     _classify_outer_boundaries,
 )
+from scenario_generation.canvas import Figure
 
 
 def build_perimeter_world(traj_t, ego_shape):
@@ -131,7 +125,8 @@ def compute_outer_with_outward(data):
 def plot(
     traj_t, data, ego_shape, info, out_path, target_t, scene_name, traj_label, lane_cross_thresh
 ):
-    fig, ax = plt.subplots(figsize=(14, 12))
+    fig = Figure((14, 12), dpi=120)
+    ax = fig.panel((0.125, 0.11, 0.775, 0.75), equal=True)
 
     # Lanes
     lanes = data["lanes"]
@@ -147,12 +142,12 @@ def plot(
         ly = lanes_np[s, v, 1] + lanes_np[s, v, 5]
         rx = lanes_np[s, v, 0] + lanes_np[s, v, 6]
         ry = lanes_np[s, v, 1] + lanes_np[s, v, 7]
-        ax.fill(
-            np.concatenate([lx, rx[::-1]]),
-            np.concatenate([ly, ry[::-1]]),
-            color="lightgray",
+        ax.polygons(
+            [np.stack([np.concatenate([lx, rx[::-1]]), np.concatenate([ly, ry[::-1]])], 1)],
+            fill="#d3d3d3",
+            edge="#d3d3d3",
             alpha=0.3,
-            zorder=1,
+            z=1,
         )
 
     # Intersection-area polygons
@@ -167,15 +162,8 @@ def plot(
             if valid.sum() < 3:
                 continue
             pp = pts[valid, :2]
-            ax.fill(
-                pp[:, 0],
-                pp[:, 1],
-                color="purple",
-                alpha=0.2,
-                zorder=2,
-                label="intersection_area" if i == 0 else None,
-            )
-            ax.plot(pp[:, 0], pp[:, 1], color="purple", linewidth=1.5, alpha=0.6, zorder=3)
+            ax.polygons([pp], fill="#800080", edge="#800080", alpha=0.2, z=2)
+            ax.lines([pp], "#800080", width=1.5, alpha=0.6, z=3)
 
     # Classified segments
     seg_p1, seg_p2, is_outer, is_junction, is_shared = classify_all_segments(lanes)
@@ -184,34 +172,10 @@ def plot(
     o_m = is_outer.cpu().numpy()
     j_m = is_junction.cpu().numpy()
     s_m = is_shared.cpu().numpy()
-    for i in range(p1.shape[0]):
-        if o_m[i]:
-            ax.plot(
-                [p1[i, 0], p2[i, 0]],
-                [p1[i, 1], p2[i, 1]],
-                color="black",
-                linewidth=2.2,
-                alpha=0.9,
-                zorder=5,
-            )
-        elif j_m[i]:
-            ax.plot(
-                [p1[i, 0], p2[i, 0]],
-                [p1[i, 1], p2[i, 1]],
-                color="darkorange",
-                linewidth=2.5,
-                alpha=0.9,
-                zorder=6,
-            )
-        elif s_m[i]:
-            ax.plot(
-                [p1[i, 0], p2[i, 0]],
-                [p1[i, 1], p2[i, 1]],
-                color="steelblue",
-                linewidth=0.7,
-                alpha=0.4,
-                zorder=4,
-            )
+    segments = np.stack([p1, p2], axis=1)
+    ax.lines(list(segments[o_m]), "#000000", width=2.2, alpha=0.9, z=5)
+    ax.lines(list(segments[j_m & ~o_m]), "#ff8c00", width=2.5, alpha=0.9, z=6)
+    ax.lines(list(segments[s_m & ~o_m & ~j_m]), "#4682b4", width=0.7, alpha=0.4, z=4)
 
     # Road border line_strings
     if "line_strings" in data:
@@ -227,7 +191,7 @@ def plot(
                 else (np.abs(pts[:, :2]).sum(axis=-1) > 0.01)
             )
             if v.sum() > 1:
-                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5, alpha=0.75, zorder=5)
+                ax.lines([pts[v, :2]], "#ff0000", width=2.5, alpha=0.75, z=5)
 
     # Ego footprint at target_t
     t_state = traj_t[target_t]  # (4,) x,y,cos,sin
@@ -249,21 +213,11 @@ def plot(
     local_corners = np.array([[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]])
     R = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
     world_corners = np.array([cx, cy]) + local_corners @ R.T
-    ax.add_patch(
-        MplPolygon(
-            world_corners,
-            closed=True,
-            fill=False,
-            edgecolor="darkgreen",
-            linewidth=3,
-            zorder=10,
-            label=f"ego @ t={target_t}",
-        )
-    )
+    ax.polygons([world_corners], edge="#006400", width=3, z=10)
 
     # Full trajectory faint
     tt = traj_t.cpu().numpy()
-    ax.plot(tt[:, 0], tt[:, 1], color="darkgreen", linewidth=1.2, alpha=0.5, zorder=6)
+    ax.lines([tt[:, :2]], "#006400", width=1.2, alpha=0.5, z=6)
 
     # Perimeter points at target_t, colored by signed distance
     device = traj_t.device
@@ -290,53 +244,45 @@ def plot(
     closest_np = closest.gather(1, min_idx[:, None, None].expand(-1, 1, 2)).squeeze(1).cpu().numpy()
 
     # Scatter colored by signed distance: red if > -thresh (crossed), green otherwise
-    for p in range(wp.shape[0]):
-        col = "red" if sd[p] > -lane_cross_thresh else "green"
-        ax.scatter(
-            wp[p, 0],
-            wp[p, 1],
-            c=col,
-            s=55,
-            marker="X" if col == "red" else "o",
-            zorder=11,
-            edgecolors="black",
-            linewidths=0.4,
-        )
+    crossed = sd > -lane_cross_thresh
+    ax.markers(
+        wp[crossed],
+        "X",
+        size=np.sqrt(55),
+        color="#ff0000",
+        edge="#000000",
+        edge_width=0.4,
+        z=11,
+    )
+    ax.markers(
+        wp[~crossed],
+        "o",
+        size=np.sqrt(55),
+        color="#008000",
+        edge="#000000",
+        edge_width=0.4,
+        z=11,
+    )
 
     # Draw line to closest outer segment for the most-"crossed" point
     worst = int(sd.argmax())
-    ax.plot(
-        [wp[worst, 0], closest_np[worst, 0]],
-        [wp[worst, 1], closest_np[worst, 1]],
-        color="red",
-        linewidth=2.5,
-        linestyle="-",
-        zorder=12,
-    )
-    ax.annotate(
+    ax.lines([np.stack([wp[worst], closest_np[worst]])], "#ff0000", width=2.5, z=12)
+    label_xy = wp[worst] + 1.5
+    ax.arrows(label_xy, wp[worst], "#ff0000", width=1.2, z=13)
+    ax.text(
+        tuple(label_xy),
         f"worst signed dist = {sd[worst]:+.3f}m (unsigned {ud[worst]:.3f}m)",
-        xy=(wp[worst, 0], wp[worst, 1]),
-        xytext=(wp[worst, 0] + 1.5, wp[worst, 1] + 1.5),
-        fontsize=10,
+        10,
+        "#ff0000",
+        z=13,
         weight="bold",
-        color="red",
-        arrowprops=dict(arrowstyle="->", color="red", lw=1.2),
-        zorder=13,
     )
 
     # Also highlight the segment NEW method claims ego is "crossing"
     worst_seg_idx = int(min_idx[worst].item())
     ws_p1 = outer_p1[worst_seg_idx].cpu().numpy()
     ws_p2 = outer_p2[worst_seg_idx].cpu().numpy()
-    ax.plot(
-        [ws_p1[0], ws_p2[0]],
-        [ws_p1[1], ws_p2[1]],
-        color="red",
-        linewidth=4,
-        alpha=0.7,
-        zorder=9,
-        label="offending outer segment",
-    )
+    ax.lines([np.stack([ws_p1, ws_p2])], "#ff0000", width=4, alpha=0.7, z=9)
 
     # GT
     gt = data.get("ego_agent_future")
@@ -346,22 +292,13 @@ def plot(
         gt_np = gt.cpu().numpy()
         gt_v = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
         if gt_v.sum() > 1:
-            ax.plot(
-                gt_np[gt_v, 0],
-                gt_np[gt_v, 1],
-                color="gold",
-                linestyle="--",
-                linewidth=2,
-                alpha=0.9,
-                zorder=7,
-            )
+            ax.lines([gt_np[gt_v, :2]], "#ffd700", width=2, alpha=0.9, dash="dash", z=7)
 
     # Zoom to ego + nearest features
     span = 15
     ax.set_xlim(x - span, x + span)
     ax.set_ylim(y - span, y + span)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.25)
+    ax.grid(0.25)
 
     n_cross = int((sd > -lane_cross_thresh).sum())
     title = (
@@ -370,23 +307,19 @@ def plot(
         f"{n_cross}/{wp.shape[0]} perimeter points flagged as 'crossed'\n"
         f"worst signed dist = {sd[worst]:+.4f}m  (crossed if > {-lane_cross_thresh:.2f})"
     )
-    ax.set_title(title, fontsize=11)
+    ax.title(title, 11)
 
-    legend_items = [
-        Patch(facecolor="black", label="classified OUTER edge"),
-        Patch(facecolor="darkorange", label="JUNCTION GAP segment"),
-        Patch(facecolor="steelblue", label="shared boundary"),
-        Patch(facecolor="purple", alpha=0.3, label="intersection_area polygon"),
-        Patch(facecolor="red", label="road border (line_strings)"),
-        Patch(facecolor="darkgreen", label=f"ego footprint @ t={target_t}"),
-        Patch(facecolor="red", edgecolor="black", label="perimeter pt flagged crossed"),
-        Patch(facecolor="green", edgecolor="black", label="perimeter pt OK"),
-    ]
-    ax.legend(handles=legend_items, loc="upper left", fontsize=9)
+    ax.polygons([], fill="#000000", label="classified OUTER edge")
+    ax.polygons([], fill="#ff8c00", label="JUNCTION GAP segment")
+    ax.polygons([], fill="#4682b4", label="shared boundary")
+    ax.polygons([], fill="#800080", label="intersection_area polygon")
+    ax.polygons([], fill="#ff0000", label="road border (line_strings)")
+    ax.polygons([], fill="#006400", label=f"ego footprint @ t={target_t}")
+    ax.polygons([], fill="#ff0000", label="perimeter pt flagged crossed")
+    ax.polygons([], fill="#008000", label="perimeter pt OK")
+    ax.legend("upper left")
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(out_path)
     print(f"Saved {out_path}")
     print(
         f"  Perimeter signed dists: min={sd.min():+.3f}, max={sd.max():+.3f}, mean={sd.mean():+.3f}"

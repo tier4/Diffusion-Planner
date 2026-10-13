@@ -25,10 +25,6 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
@@ -40,28 +36,29 @@ from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base
 from rlvr.reward import _build_ego_bbox_corners, compute_reward_batch
+from scenario_generation.canvas import Figure, Panel
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _draw_ego_obb(ax, xy_yaw_4, ego_shape, color="red", lw=2.0, label=None):
+def _draw_ego_obb(ax: Panel, xy_yaw_4, ego_shape, color="#ff0000", lw=2.0, label=None):
     """Draw a single ego bounding box at given [x, y, cos, sin] pose."""
     traj = torch.tensor(xy_yaw_4, dtype=torch.float32).reshape(1, 1, 4)
     corners = _build_ego_bbox_corners(traj, ego_shape)[0, 0].cpu().numpy()
     corners_closed = np.vstack([corners, corners[:1]])
-    ax.plot(corners_closed[:, 0], corners_closed[:, 1], color=color, lw=lw, label=label, zorder=15)
+    ax.lines([corners_closed], color, width=lw, z=15, label=label)
 
 
-def _draw_gt(ax, path):
+def _draw_gt(ax: Panel, path):
     d = np.load(path, allow_pickle=True)
     gt = d["ego_agent_future"][:, :2]
     valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
     if valid.sum() >= 2:
-        ax.plot(gt[valid, 0], gt[valid, 1], "--", color="black", lw=1.2, alpha=0.6, label="GT")
+        ax.lines([gt[valid]], "#000000", width=1.2, alpha=0.6, dash="dash", label="GT")
 
 
-def _draw_traj(ax, traj, label, color):
-    ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2.0, label=label, zorder=10)
+def _draw_traj(ax: Panel, traj, label, color):
+    ax.lines([traj[:, :2]], color, width=2.0, z=10, label=label)
 
 
 def main():
@@ -141,14 +138,8 @@ def main():
     n = len(offenders)
     cols = min(args.cols, n)
     rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 7 * rows))
-    if rows == 1 and cols == 1:
-        axes = np.array([[axes]])
-    elif rows == 1:
-        axes = axes[None, :]
-    elif cols == 1:
-        axes = axes[:, None]
-    axes_flat = axes.flatten()
+    fig = Figure((7 * cols, 7 * rows), dpi=110)
+    axes_flat = [p for row in fig.grid(rows, cols, equal=True) for p in row]
 
     # Ego shape from first scene (consistent across all scenes)
     data0 = load_npz_data(offenders[0][3], device)
@@ -162,7 +153,7 @@ def main():
         _draw_gt(ax, path)
         _draw_traj(ax, det_traj, f"DET (scene {si})", "#d62728")
         # Ego OBB at t=0 (start)
-        _draw_ego_obb(ax, [0.0, 0.0, 1.0, 0.0], ego_shape, color="blue", lw=1.5, label="ego t=0")
+        _draw_ego_obb(ax, [0.0, 0.0, 1.0, 0.0], ego_shape, color="#0000ff", lw=1.5, label="ego t=0")
         # Ego OBB at the worst step (min rb_dist) — approximate by finding step in
         # det_traj where the ego-to-border distance is smallest. Compute per-step
         # using compute_reward_batch once more with the single traj.
@@ -187,7 +178,12 @@ def main():
         if 0 < worst_t < det_traj.shape[0]:
             pose = det_traj[worst_t]  # [x, y, cos, sin]
             _draw_ego_obb(
-                ax, pose.tolist(), ego_shape, color="red", lw=2.2, label=f"ego t={worst_t} (worst)"
+                ax,
+                pose.tolist(),
+                ego_shape,
+                color="#ff0000",
+                lw=2.2,
+                label=f"ego t={worst_t} (worst)",
             )
 
         # Frame
@@ -196,20 +192,15 @@ def main():
         half = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])) * 0.6 + 8
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        ax.legend(fontsize=6, loc="upper left")
-        ax.set_title(
-            f"scene {si}  rb_min={rb_min_d:.2f}m  worst_t={worst_t}",
-            fontsize=9,
-        )
+        ax.legend("upper left")
+        ax.title(f"scene {si}  rb_min={rb_min_d:.2f}m  worst_t={worst_t}", 9)
 
     for j in range(n, len(axes_flat)):
-        axes_flat[j].axis("off")
+        axes_flat[j].hide()
 
-    fig.tight_layout()
     ckpt_tag = args.lora_dir.name if args.lora_dir else "base"
     out = args.output_dir / f"rb_cross_{ckpt_tag}.png"
-    fig.savefig(out, dpi=110, bbox_inches="tight")
+    fig.save(out)
     print(f"Saved: {out}")
 
 

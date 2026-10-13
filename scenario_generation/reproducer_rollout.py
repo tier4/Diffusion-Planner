@@ -2085,7 +2085,7 @@ def render_segment(
     ego still single-steps at 10 Hz; only the model call is throttled.
 
     ``draw_every``: write a PNG only every N steps (1 = every step). The rollout still single-steps
-    at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
+    at 10 Hz (scoring/advance unaffected); only the frame render is
     throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
     play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
     ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/

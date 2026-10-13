@@ -19,22 +19,17 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.loss import compute_ego_edge_points, point_to_segment_distance
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Rectangle
 
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig, compute_reward_batch
+from scenario_generation.canvas import Figure, Panel, oriented_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -108,7 +103,7 @@ def compute_min_border_dist(traj, data):
         return float("inf")
 
 
-def draw_map(ax, npz_path):
+def draw_map(ax: Panel, npz_path):
     """Draw lanes and road borders."""
     npz = np.load(npz_path)
 
@@ -123,8 +118,7 @@ def draw_map(ax, npz_path):
             lb, rb = lane[:, 4:6], lane[:, 6:8]
             v = np.abs(pts).sum(axis=1) > 0.1
             if v.sum() > 1:
-                ax.plot((pts + lb)[v, 0], (pts + lb)[v, 1], "-", color="#ccc", alpha=0.5, lw=0.7)
-                ax.plot((pts + rb)[v, 0], (pts + rb)[v, 1], "-", color="#ccc", alpha=0.5, lw=0.7)
+                ax.lines([(pts + lb)[v], (pts + rb)[v]], "#cccccc", width=0.7, alpha=0.5)
 
     # Road borders (thick red)
     ls = npz["line_strings"]
@@ -135,14 +129,12 @@ def draw_map(ax, npz_path):
         if ls.shape[-1] >= 4 and line[:, 3].max() > 0.5:
             v = np.abs(line[:, :2]).sum(axis=1) > 0.1
             if v.sum() > 1:
-                ax.plot(line[v, 0], line[v, 1], color="red", lw=3, alpha=0.7, zorder=4)
+                ax.lines([line[v, :2]], "#ff0000", width=3, alpha=0.7, z=4)
 
     # GT
     gt = npz["ego_agent_future"]
-    ax.plot(gt[:, 0], gt[:, 1], "-", color=GT_COLOR, lw=2.5, alpha=0.4, zorder=5)
-    ax.plot(
-        gt[::5, 0], gt[::5, 1], "o", color=GT_COLOR, ms=3, alpha=0.6, mew=0, zorder=6, label="GT"
-    )
+    ax.lines([gt[:, :2]], GT_COLOR, width=2.5, alpha=0.4, z=5)
+    ax.markers(gt[::5, :2], "o", 3, GT_COLOR, alpha=0.6, z=6, label="GT")
 
     # Ego box at t=0
     wb, length, width = 2.75, 4.34, 1.70
@@ -150,15 +142,18 @@ def draw_map(ax, npz_path):
     if es is not None and len(es) >= 3:
         wb, length, width = float(es[0]), float(es[1]), float(es[2])
     ro = (length - wb) / 2
-    ax.add_patch(
-        Rectangle(
-            (-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20
-        )
+    ax.polygons(
+        [oriented_box(0.0, 0.0, 0.0, length, width, ro)],
+        fill="#3366cc",
+        edge="#000000",
+        width=2,
+        alpha=0.9,
+        z=20,
     )
     return npz
 
 
-def draw_trajectory(ax, traj, label, color, npz, show_footprints=True):
+def draw_trajectory(ax: Panel, traj, label, color, npz, show_footprints=True):
     """Draw a trajectory with optional footprints."""
     wb, length, width = 2.75, 4.34, 1.70
     es = npz.get("ego_shape", None)
@@ -167,18 +162,8 @@ def draw_trajectory(ax, traj, label, color, npz, show_footprints=True):
     ro = (length - wb) / 2
 
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
-    ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2.5, alpha=0.6, zorder=10)
-    ax.plot(
-        traj[::5, 0],
-        traj[::5, 1],
-        "o",
-        color=color,
-        ms=3,
-        alpha=0.8,
-        mew=0,
-        zorder=11,
-        label=f"{label}",
-    )
+    ax.lines([traj[:, :2]], color, width=2.5, alpha=0.6, z=10)
+    ax.markers(traj[::5, :2], "o", 3, color, alpha=0.8, z=11, label=f"{label}")
 
     if show_footprints:
         # Footprints every 20 steps
@@ -188,19 +173,13 @@ def draw_trajectory(ax, traj, label, color, npz, show_footprints=True):
             hn = np.sqrt(cos_h**2 + sin_h**2)
             if hn > 0.01:
                 heading = np.arctan2(sin_h / hn, cos_h / hn)
-                t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-                ax.add_patch(
-                    Rectangle(
-                        (-ro, -width / 2),
-                        length,
-                        width,
-                        lw=0.5,
-                        ec=color,
-                        fc=color,
-                        alpha=0.12,
-                        zorder=8,
-                        transform=t_rot,
-                    )
+                ax.polygons(
+                    [oriented_box(cx, cy, heading, length, width, ro)],
+                    fill=color,
+                    edge=color,
+                    width=0.5,
+                    alpha=0.12,
+                    z=8,
                 )
 
         # Endpoint footprint
@@ -210,23 +189,17 @@ def draw_trajectory(ax, traj, label, color, npz, show_footprints=True):
         hn = np.sqrt(cos_h**2 + sin_h**2)
         if hn > 0.01:
             heading = np.arctan2(sin_h / hn, cos_h / hn)
-            t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-            ax.add_patch(
-                Rectangle(
-                    (-ro, -width / 2),
-                    length,
-                    width,
-                    lw=1.5,
-                    ec=color,
-                    fc=color,
-                    alpha=0.35,
-                    zorder=9,
-                    transform=t_rot,
-                )
+            ax.polygons(
+                [oriented_box(cx, cy, heading, length, width, ro)],
+                fill=color,
+                edge=color,
+                width=1.5,
+                alpha=0.35,
+                z=9,
             )
 
 
-def auto_zoom(ax, all_trajs, npz):
+def auto_zoom(ax: Panel, all_trajs, npz):
     """Set axis limits to fit all trajectories + GT."""
     gt = npz["ego_agent_future"][:, :2]
     pts = [gt, np.array([[0, 0]])]
@@ -237,8 +210,7 @@ def auto_zoom(ax, all_trajs, npz):
     half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
     ax.set_xlim(cx - half, cx + half)
     ax.set_ylim(cy - half, cy + half)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
+    ax.grid(0.15)
 
 
 def main():
@@ -311,14 +283,14 @@ def main():
     # Generate comparison grid
     n = len(indices)
     rows = (n + args.cols - 1) // args.cols
-    fig, axes = plt.subplots(rows, args.cols, figsize=(10 * args.cols, 9 * rows))
-    if rows == 1 and args.cols == 1:
-        axes = np.array([[axes]])
-    elif rows == 1:
-        axes = axes[None, :]
-    elif args.cols == 1:
-        axes = axes[:, None]
-    axes_flat = axes.flatten()
+    fig = Figure((10 * args.cols, 9 * rows), 150)
+    axes_flat = [
+        panel
+        for row in fig.grid(
+            rows, args.cols, margins=(0.05, 0.98, 0.04, 1 - 0.9 / (9 * rows)), equal=True
+        )
+        for panel in row
+    ]
 
     for plot_idx, si in enumerate(indices):
         if plot_idx >= len(axes_flat):
@@ -351,24 +323,22 @@ def main():
             title_parts.append(f"{name}: {'CROSS' if r.rb_crossing else f'd={min_d:.2f}m'}")
 
         auto_zoom(ax, all_trajs, npz)
-        ax.legend(fontsize=7, loc="upper left")
-        ax.set_title(f"[{si}] {Path(npz_path).stem[:40]}\n" + " | ".join(title_parts), fontsize=7)
+        ax.legend("upper left")
+        ax.title(f"[{si}] {Path(npz_path).stem[:40]}\n" + " | ".join(title_parts), 7)
 
     for j in range(len(indices), len(axes_flat)):
-        axes_flat[j].set_visible(False)
+        axes_flat[j].hide()
 
     # Color legend in suptitle
     model_names = ["Baseline (gray)"] + [
         f"{n} ({MODEL_COLORS[i]})" for i, (n, _, _) in enumerate(model_specs)
     ]
     fig.suptitle(
-        "Multi-model comparison — " + ", ".join(model_names) + f"\nGT (green), Road borders (red)",
-        fontsize=12,
+        "Multi-model comparison — " + ", ".join(model_names) + "\nGT (green), Road borders (red)",
+        12,
     )
-    fig.tight_layout()
     out = out_dir / "model_comparison.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(out)
     print(f"\nSaved: {out}")
 
 

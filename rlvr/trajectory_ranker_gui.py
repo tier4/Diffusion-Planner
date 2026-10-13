@@ -36,13 +36,11 @@ from dataclasses import replace as dc_replace
 from pathlib import Path
 
 import gradio as gr
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from matplotlib.figure import Figure
 
 from guidance_gui.generate_samples import generate_samples
 from guidance_gui.visualization import (
@@ -60,8 +58,14 @@ from rlvr.reward import (
     compute_group_advantages,
     compute_reward_batch,
 )
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values
 
-_DIVERGING_CMAP = plt.get_cmap("RdYlGn")
+
+def _rank_color(rank_frac: float) -> np.ndarray:
+    """RdYlGn colour of a rank fraction in [0, 1]."""
+    return map_values(np.array([rank_frac]), "RdYlGn", 0.0, 1.0)[0]
+
 
 _DEFAULT_PROTOTYPES_PATH = str(Path(__file__).parent / "prototypes_k16.npy")
 
@@ -445,9 +449,10 @@ class TrajectoryRanker:
         time_step: int = 40,
         view_range: float = 60.0,
         selected_idx: int = 0,
+        dpi: float = 100.0,
     ) -> Figure:
-        fig = Figure(figsize=(10, 11.5))
-        ax = fig.add_subplot(111)
+        fig = Figure((10, 11.5), dpi)
+        ax = fig.panel(equal=True)
 
         if self.current_data is None:
             return fig
@@ -475,15 +480,13 @@ class TrajectoryRanker:
                 valid = np.linalg.norm(pts, axis=-1) > 1e-3
                 if valid.sum() < 2:
                     continue
-                ax.plot(
-                    pts[valid, 0],
-                    pts[valid, 1],
-                    "-",
-                    color="#ff7f0e",
-                    lw=2.2,
+                ax.lines(
+                    [pts[valid]],
+                    "#ff7f0e",
+                    width=2.2,
                     alpha=0.9,
                     label="ROUTE centerline" if not route_label_done else None,
-                    zorder=8,
+                    z=8,
                 )
                 route_label_done = True
 
@@ -511,87 +514,62 @@ class TrajectoryRanker:
             )
             is_det_baseline = st.is_deterministic and not has_guidance
             if is_det_baseline:
-                color = "dodgerblue"
+                color = "#1e90ff"
                 lw = 3.0
                 alpha = 1.0
-                linestyle = "--"
+                linestyle = "dash"
                 prefix = ">> " if is_selected else ""
                 label = f"{prefix}#{i + 1} R={self.reward_breakdowns[i].total:.1f} [DET]"
             else:
-                color = _DIVERGING_CMAP(rank_frac)
+                color = _rank_color(rank_frac)
                 lw = 1.0 + 2.5 * rank_frac
                 alpha = 0.3 + 0.7 * rank_frac
-                linestyle = "-"
+                linestyle = None
                 prefix = ">> " if is_selected else ""
                 label = f"{prefix}#{i + 1} R={self.reward_breakdowns[i].total:.1f} ({st.label})"
 
             # Selected trajectory: white outline underneath
             if is_selected:
-                ax.plot(
-                    traj[:, 0],
-                    traj[:, 1],
-                    color="white",
-                    linewidth=lw + 4,
-                    alpha=0.9,
-                    linestyle=linestyle,
-                    zorder=8,
-                )
-                ax.plot(
-                    traj[:, 0],
-                    traj[:, 1],
-                    color="black",
-                    linewidth=lw + 2,
-                    alpha=0.7,
-                    linestyle=linestyle,
-                    zorder=9,
-                )
+                ax.lines([traj[:, :2]], "#ffffff", width=lw + 4, alpha=0.9, dash=linestyle, z=8)
+                ax.lines([traj[:, :2]], "#000000", width=lw + 2, alpha=0.7, dash=linestyle, z=9)
 
-            ax.plot(
-                traj[:, 0],
-                traj[:, 1],
-                color=color,
-                linewidth=lw,
+            ax.lines(
+                [traj[:, :2]],
+                color,
+                width=lw,
                 alpha=alpha,
-                linestyle=linestyle,
+                dash=linestyle,
                 label=label,
-                zorder=10 if is_selected else 5,
+                z=10 if is_selected else 5,
             )
 
             # Selected trajectory: star marker at time_step
             if is_selected and 0 <= time_step < len(traj):
-                ax.scatter(
-                    [traj[time_step, 0]],
-                    [traj[time_step, 1]],
+                ax.markers(
+                    traj[time_step, :2],
+                    "*",
+                    size=np.sqrt(200),
                     color=color,
-                    s=200,
-                    zorder=15,
-                    edgecolors="black",
-                    linewidths=2,
-                    marker="*",
+                    edge="#000000",
+                    edge_width=2,
+                    z=15,
                 )
             elif ranks[i] >= N - 3 and 0 <= time_step < len(traj):
-                ax.scatter(
-                    [traj[time_step, 0]],
-                    [traj[time_step, 1]],
-                    color=color,
-                    s=80,
-                    zorder=10,
-                    edgecolors="black",
-                    marker="D",
+                ax.markers(
+                    traj[time_step, :2], "D", size=np.sqrt(80), color=color, edge="#000000", z=10
                 )
 
             rb = self.reward_breakdowns[i]
             if rb.collision_step is not None and 0 <= rb.collision_step < len(traj):
                 ct = rb.collision_step
-                ax.scatter(
-                    [traj[ct, 0]],
-                    [traj[ct, 1]],
+                ax.markers(
+                    traj[ct, :2],
+                    "X",
+                    size=np.sqrt(100),
                     color="red",
-                    s=100,
-                    zorder=12,
-                    edgecolors="darkred",
-                    linewidths=1.5,
-                    marker="X",
+                    edge="darkred",
+                    edge_width=1.5,
+                    z=12,
                 )
 
         if "ego_agent_future" in data_cpu:
@@ -601,17 +579,10 @@ class TrajectoryRanker:
             gt = np.array(gt).reshape(-1, 3)
             valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
             if np.any(valid):
-                ax.plot(
-                    gt[valid, 0],
-                    gt[valid, 1],
-                    "k--",
-                    linewidth=2,
-                    alpha=0.6,
-                    label="GT",
-                )
+                ax.lines([gt[valid, :2]], "#000000", width=2, alpha=0.6, dash="dash", label="GT")
 
-        ax.legend(loc="upper left", fontsize=5.5, ncol=2)
-        ax.set_title(f"Scene {self.current_index + 1} / {len(self.npz_paths)}")
+        ax.legend("upper left", ncol=2, size=5.5)
+        ax.title(f"Scene {self.current_index + 1} / {len(self.npz_paths)}")
 
         ref = self.sampled_trajectories[0].trajectory
         cx = (ref[0, 0] + ref[-1, 0]) / 2
@@ -619,13 +590,11 @@ class TrajectoryRanker:
         half = view_range / 2
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
         return fig
 
     def _create_speed_curvature_plot(self, selected_idx: int = 0) -> Figure:
-        fig = Figure(figsize=(8, 6))
-        ax_speed = fig.add_subplot(211)
-        ax_curv = fig.add_subplot(212)
+        fig = Figure((8, 6), 100)
+        (ax_speed,), (ax_curv,) = fig.grid(2, 1, margins=(0.1, 0.97, 0.09, 0.94), hspace=0.35)
 
         if not self.sampled_trajectories or self.current_data is None:
             return fig
@@ -652,11 +621,11 @@ class TrajectoryRanker:
             is_sel = idx == selected_idx
 
             if is_sel:
-                color = "blue"
+                color = "#0000ff"
                 lw = 2.5
             else:
                 rank_frac = (N - 1 - plot_i) / max(N - 1, 1)
-                color = _DIVERGING_CMAP(rank_frac)
+                color = _rank_color(rank_frac)
                 lw = 1.8
 
             vel = _calculate_velocities(traj, ego_state) / 3.6  # km/h -> m/s
@@ -665,21 +634,14 @@ class TrajectoryRanker:
             all_curvs.append(curv)
             t = np.arange(len(vel))
             sel_tag = " [SEL]" if is_sel else ""
-            ax_speed.plot(
-                t,
-                vel,
-                color=color,
-                linewidth=lw,
+            ax_speed.lines(
+                [np.stack([t, vel], 1)],
+                color,
+                width=lw,
                 alpha=0.8,
                 label=f"#{idx + 1} {st.label}{sel_tag}",
             )
-            ax_curv.plot(
-                np.arange(len(curv)),
-                curv,
-                color=color,
-                linewidth=lw,
-                alpha=0.8,
-            )
+            ax_curv.lines([np.stack([np.arange(len(curv)), curv], 1)], color, width=lw, alpha=0.8)
 
         if "ego_agent_future" in data_cpu:
             ego_future = np.array(data_cpu["ego_agent_future"]).reshape(-1, 3)
@@ -688,22 +650,22 @@ class TrajectoryRanker:
             if gt_vel is not None:
                 gt_vel_ms = gt_vel / 3.6  # km/h -> m/s
                 all_speeds.append(gt_vel_ms)
-                ax_speed.plot(
-                    np.arange(len(gt_vel_ms)),
-                    gt_vel_ms,
-                    "k--",
-                    linewidth=2,
+                ax_speed.lines(
+                    [np.stack([np.arange(len(gt_vel_ms)), gt_vel_ms], 1)],
+                    "#000000",
+                    width=2,
                     alpha=0.7,
+                    dash="dash",
                     label="GT",
                 )
             if gt_curv is not None:
                 all_curvs.append(gt_curv)
-                ax_curv.plot(
-                    np.arange(len(gt_curv)),
-                    gt_curv,
-                    "k--",
-                    linewidth=2,
+                ax_curv.lines(
+                    [np.stack([np.arange(len(gt_curv)), gt_curv], 1)],
+                    "#000000",
+                    width=2,
                     alpha=0.7,
+                    dash="dash",
                 )
 
         # Auto-scale y-axes with 10% padding
@@ -712,23 +674,22 @@ class TrajectoryRanker:
             v_min, v_max = float(all_v.min()), float(all_v.max())
             v_pad = max(0.5, (v_max - v_min) * 0.1)
             ax_speed.set_ylim(max(0, v_min - v_pad), v_max + v_pad)
-        ax_speed.set_ylabel("Speed (m/s)")
-        ax_speed.set_title("Speed (top-3 + selected)")
-        ax_speed.legend(loc="upper right", fontsize=7)
-        ax_speed.grid(True, alpha=0.3)
+        ax_speed.ylabel("Speed (m/s)")
+        ax_speed.title("Speed (top-3 + selected)")
+        ax_speed.legend("upper right", size=7)
+        ax_speed.grid(0.3)
 
         if all_curvs:
             all_c = np.concatenate(all_curvs)
             c_min, c_max = float(all_c.min()), float(all_c.max())
             c_pad = max(0.01, (c_max - c_min) * 0.1)
             ax_curv.set_ylim(c_min - c_pad, c_max + c_pad)
-        ax_curv.set_ylabel("Curvature (1/m)")
-        ax_curv.set_xlabel("Time step")
-        ax_curv.set_title("Curvature (top-3 + selected)")
-        ax_curv.grid(True, alpha=0.3)
-        ax_curv.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+        ax_curv.ylabel("Curvature (1/m)")
+        ax_curv.xlabel("Time step")
+        ax_curv.title("Curvature (top-3 + selected)")
+        ax_curv.grid(0.3)
+        ax_curv.hline(0, "#808080", width=0.5, dash="dash")
 
-        fig.tight_layout()
         return fig
 
     def _format_reward_table(self, selected_idx: int = 0) -> str:
@@ -812,9 +773,11 @@ class TrajectoryRanker:
 
         save_idx = len(self.saved_scenes)
         view_range = 100 - (int(zoom) - 1) * 90 / 9
-        fig = self._create_trajectory_plot(time_step=int(time_step), view_range=view_range)
+        fig = self._create_trajectory_plot(
+            time_step=int(time_step), view_range=view_range, dpi=150.0
+        )
         img_path = save_path / f"scene_{save_idx}_idx{self.current_index}.png"
-        fig.savefig(str(img_path), dpi=150, bbox_inches="tight")
+        fig.save(img_path)
 
         scene_data = {
             "scene_index": self.current_index,
@@ -1001,7 +964,7 @@ def build_interface(
 
             # --- Center content ---
             with gr.Column(scale=2):
-                traj_plot = gr.Plot(label="Trajectories")
+                traj_plot = gr.Image(label="Trajectories", type="pil")
                 reward_table = gr.Markdown("")
                 with gr.Row():
                     btn_save = gr.Button("Save Scene", size="sm")
@@ -1013,7 +976,7 @@ def build_interface(
                     )
                     save_status = gr.Markdown("")
                 with gr.Accordion("Speed & Curvature Plots", open=False):
-                    speed_curv_plot = gr.Plot(label="Speed & Curvature")
+                    speed_curv_plot = gr.Image(label="Speed & Curvature", type="pil")
                 sample_info = gr.Markdown("Scene -- / --")
 
                 # GRPO Training Controls
@@ -1320,7 +1283,7 @@ def build_interface(
             table = ranker._format_reward_table(selected_idx=int(sel_idx))
             sc_fig = ranker._create_speed_curvature_plot(selected_idx=int(sel_idx))
             info = f"Scene {ranker.current_index + 1} / {len(ranker.npz_paths)}"
-            return traj_fig, table, sc_fig, info
+            return traj_fig.image(), table, sc_fig.image(), info
 
         def _dropdown_choices():
             return _format_dropdown_choices(ranker.slot_configs, ranker.reward_breakdowns)
@@ -1580,7 +1543,7 @@ def build_interface(
                     return (
                         "No groups queued. Accept some scenes first.",
                         _grpo_epoch_counter[0],
-                        f"0 groups queued",
+                        "0 groups queued",
                     )
 
                 trainer.beta = float(beta_val)
@@ -1610,7 +1573,7 @@ def build_interface(
                 ]
                 if drift:
                     log_lines.append(f"- {drift}")
-                log_lines.append(f"\nQueue cleared.")
+                log_lines.append("\nQueue cleared.")
 
                 return ("\n".join(log_lines), epoch, "0 groups queued")
 

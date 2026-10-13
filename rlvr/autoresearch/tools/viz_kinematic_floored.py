@@ -12,15 +12,10 @@ import json
 import os
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 import torch
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Polygon as MplPolygon
 
 from rlvr.autoresearch.tools.calibrate_rb_vs_lane import generate_for_all_scenes
 from rlvr.grpo_config import GRPOConfig
@@ -29,6 +24,7 @@ from rlvr.reward import (
     _build_sg_diff_kernel,
     compute_kinematic_gate,
 )
+from scenario_generation.canvas import Figure
 
 
 def sg_yaw_and_speed(traj, dt=0.1, window=11):
@@ -57,7 +53,8 @@ def sg_yaw_and_speed(traj, dt=0.1, window=11):
 
 
 def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_prefix):
-    fig, ax = plt.subplots(figsize=(12, 11))
+    fig = Figure((12, 11), dpi=110)
+    ax = fig.panel((0.125, 0.11, 0.775, 0.73), equal=True)
 
     # Lanes
     lanes = data["lanes"]
@@ -73,15 +70,16 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
         ly = lanes_np[s, v, 1] + lanes_np[s, v, 5]
         rx = lanes_np[s, v, 0] + lanes_np[s, v, 6]
         ry = lanes_np[s, v, 1] + lanes_np[s, v, 7]
-        ax.fill(
-            np.concatenate([lx, rx[::-1]]),
-            np.concatenate([ly, ry[::-1]]),
-            color="lightgreen",
+        ax.polygons(
+            [np.stack([np.concatenate([lx, rx[::-1]]), np.concatenate([ly, ry[::-1]])], 1)],
+            fill="#90ee90",
+            edge="#90ee90",
             alpha=0.12,
-            zorder=1,
+            z=1,
         )
-        ax.plot(lx, ly, color="steelblue", linewidth=0.5, alpha=0.35, zorder=3)
-        ax.plot(rx, ry, color="steelblue", linewidth=0.5, alpha=0.35, zorder=3)
+        ax.lines(
+            [np.stack([lx, ly], 1), np.stack([rx, ry], 1)], "#4682b4", width=0.5, alpha=0.35, z=3
+        )
 
     # Intersection polygons
     if "polygons" in data:
@@ -95,7 +93,7 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
             if valid.sum() < 3:
                 continue
             pp = pts[valid, :2]
-            ax.fill(pp[:, 0], pp[:, 1], color="purple", alpha=0.2, zorder=2)
+            ax.polygons([pp], fill="#800080", edge="#800080", alpha=0.2, z=2)
 
     # Road borders
     if "line_strings" in data:
@@ -111,7 +109,7 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
                 else (np.abs(pts[:, :2]).sum(axis=-1) > 0.01)
             )
             if v.sum() > 1:
-                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5, alpha=0.75, zorder=4)
+                ax.lines([pts[v, :2]], "#ff0000", width=2.5, alpha=0.75, z=4)
 
     # Trajectory footprints
     t_np = traj.cpu().numpy()
@@ -139,11 +137,9 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
         local = np.array([[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]])
         R = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
         corners = np.array([cx, cy]) + local @ R.T
-        color = "red" if t == draw_ts[0] else ("darkred" if t == (T - 1) else "black")
-        ax.add_patch(
-            MplPolygon(corners, closed=True, fill=False, edgecolor=color, linewidth=1.3, zorder=7)
-        )
-    ax.plot(t_np[:, 0], t_np[:, 1], color="black", linewidth=1.3, alpha=0.8, zorder=6)
+        color = "#ff0000" if t == draw_ts[0] else ("#8b0000" if t == (T - 1) else "#000000")
+        ax.polygons([corners], edge=color, width=1.3, z=7)
+    ax.lines([t_np[:, :2]], "#000000", width=1.3, alpha=0.8, z=6)
 
     # Mark timesteps where gate fires
     abs_vio = yaw_rate > rcfg.max_yaw_rate
@@ -152,17 +148,8 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
     kappa_cap = rcfg.kinematic_margin * float(np.tan(rcfg.max_steer)) / max(wb_g, 1e-3)
     curv_vio = yaw_rate > kappa_cap * speed_align
     any_vio = abs_vio | curv_vio
-    for t in np.where(any_vio)[0]:
-        ax.scatter(
-            t_np[t, 0],
-            t_np[t, 1],
-            c="orange",
-            s=120,
-            marker="X",
-            edgecolors="black",
-            linewidths=1.2,
-            zorder=11,
-        )
+    vio_xy = t_np[np.where(any_vio)[0], :2]
+    ax.markers(vio_xy, "X", size=np.sqrt(120), color="orange", edge="black", edge_width=1.2, z=11)
 
     # GT
     gt = data.get("ego_agent_future")
@@ -172,15 +159,7 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
         gt_np = gt.cpu().numpy()
         gt_v = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
         if gt_v.sum() > 1:
-            ax.plot(
-                gt_np[gt_v, 0],
-                gt_np[gt_v, 1],
-                color="gold",
-                linestyle="--",
-                linewidth=2,
-                alpha=0.9,
-                zorder=6,
-            )
+            ax.lines([gt_np[gt_v, :2]], "#ffd700", width=2, alpha=0.9, dash="dash", z=6)
 
     # Zoom
     cx_t = (t_np[:, 0].min() + t_np[:, 0].max()) / 2
@@ -188,8 +167,7 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
     span = max(t_np[:, 0].max() - t_np[:, 0].min(), t_np[:, 1].max() - t_np[:, 1].min()) / 2 + 6
     ax.set_xlim(cx_t - span, cx_t + span)
     ax.set_ylim(cy_t - span, cy_t + span)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.25)
+    ax.grid(0.25)
     max_curv_speed_col = np.where(speed_align > 0.1, yaw_rate / speed_align.clip(min=0.1), 0.0)
     # Recompute κ_max from config (ego_shape is passed into the caller; use wheelbase from the caller's frame)
     wb_g = getattr(plot_floored, "_wb", 4.76)
@@ -200,10 +178,8 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
         f"max SG curvature = {max_curv_speed_col.max():.3f} /m (cap {kappa_cap:.3f} @ wb={wb_g:.2f})\n"
         f"abs-yaw violations: {int(abs_vio.sum())}, curv violations: {int(curv_vio.sum())}"
     )
-    ax.set_title(title, fontsize=10)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    ax.title(title, 10)
+    fig.save(out_path)
 
 
 def main():

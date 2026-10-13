@@ -39,14 +39,11 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from rlvr.reward import _build_sg_diff_kernel
+from scenario_generation.canvas import Figure
 from scenario_generation.tools._heatmap_common import (
     build_route_polyline,
     load_route,
@@ -423,17 +420,19 @@ def plot_compare(route_obj, pts, arc, base, model, metric, stat, out_png, args):
     if allv.size == 0:
         return
     vmin, vmax = float(np.nanmin(allv)), float(np.nanmax(allv))
-    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    fig = Figure((16, 8), 110)
+    axes = [
+        fig.panel((0.05, 0.07, 0.40, 0.85), equal=True),
+        fig.panel((0.50, 0.07, 0.40 / 0.86, 0.85), equal=True),
+    ]
     plot_route_heatmap(
         axes[0], pts, segs, bvals, f"baseline {metric} {stat}", vmin, vmax, "inferno"
     )
     plot_route_heatmap(
         axes[1], pts, segs, mvals, f"{args.label} {metric} {stat}", vmin, vmax, "inferno"
     )
-    sm = plt.cm.ScalarMappable(cmap="inferno", norm=plt.Normalize(vmin=vmin, vmax=vmax))
-    fig.colorbar(sm, ax=axes, fraction=0.04)
-    fig.savefig(out_png, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    axes[1].colorbar("inferno", vmin, vmax)
+    fig.save(out_png)
     print(f"  wrote {out_png}")
 
 

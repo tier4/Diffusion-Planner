@@ -3,30 +3,33 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 
-from scenario_generation.simulate import _save_and_close
+from scenario_generation.canvas import Figure
 
 
-class TestSaveAndClose:
+def _line_figure(size: tuple[float, float] = (4, 4)) -> Figure:
+    """A one-panel figure with a diagonal line."""
+    fig = Figure(size, 100.0)
+    fig.panel().lines([np.array([[0.0, 0.0], [1.0, 1.0]])], "#1f77b4")
+    return fig
+
+
+class TestSave:
     def test_creates_file(self, tmp_path):
-        fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-        ax.plot([0, 1], [0, 1])
         out = tmp_path / "test.png"
-        _save_and_close(fig, out)
+        _line_figure().save(out)
 
         assert out.exists()
         assert out.stat().st_size > 0
 
-    def test_figure_cleared(self, tmp_path):
-        fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-        ax.plot([0, 1], [0, 1])
-        _save_and_close(fig, tmp_path / "test.png")
+    def test_size_matches_dpi(self, tmp_path):
+        out = tmp_path / "test.png"
+        _line_figure((4, 3)).save(out)
 
-        assert len(fig.get_axes()) == 0
+        assert Image.open(out).size == (400, 300)
 
 
 class TestParallelSaves:
@@ -35,39 +38,36 @@ class TestParallelSaves:
         n = 10
         figs = []
         for i in range(n):
-            fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-            ax.plot(np.random.randn(20), np.random.randn(20), "o")
-            ax.set_title(f"Figure {i}")
-            fig.tight_layout()
+            fig = Figure((4, 4), 100.0)
+            ax = fig.panel()
+            ax.markers(np.random.randn(20, 2), "o")
+            ax.title(f"Figure {i}")
             figs.append(fig)
 
         paths = [tmp_path / f"fig_{i:02d}.png" for i in range(n)]
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_save_and_close, fig, path) for fig, path in zip(figs, paths)]
+            futures = [pool.submit(fig.save, path) for fig, path in zip(figs, paths)]
             for f in futures:
                 f.result()
 
         for p in paths:
             assert p.exists(), f"{p} not created"
             assert p.stat().st_size > 100, f"{p} too small ({p.stat().st_size} bytes)"
+            Image.open(p).verify()
 
     def test_different_sizes(self, tmp_path):
         """Figures with different sizes save correctly in parallel."""
         sizes = [(4, 4), (8, 6), (10, 10), (3, 3)]
-        figs = []
-        for w, h in sizes:
-            fig, ax = plt.subplots(1, 1, figsize=(w, h))
-            ax.plot([0, 1], [0, 1])
-            figs.append(fig)
+        figs = [_line_figure(size) for size in sizes]
 
         paths = [tmp_path / f"fig_{i}.png" for i in range(len(sizes))]
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_save_and_close, fig, path) for fig, path in zip(figs, paths)]
+            futures = [pool.submit(fig.save, path) for fig, path in zip(figs, paths)]
             for f in futures:
                 f.result()
 
-        for p in paths:
+        for p, (w, h) in zip(paths, sizes):
             assert p.exists()
-            assert p.stat().st_size > 0
+            assert Image.open(p).size == (w * 100, h * 100)

@@ -20,24 +20,26 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_sampler import SamplerConfig
 from rlvr.grpo_sampler_batched import generate_diverse_group_batched
 from rlvr.reward import RewardConfig, compute_lane_departure_penalty, compute_reward_batch
+from scenario_generation.canvas import Figure, oriented_box
+from scenario_generation.colormaps import map_values
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _rank_color(rank: int, K: int) -> str:
+    """``#rrggbb`` of ``rank`` on RdYlGn_r over ``[0, K - 1]`` (green = best)."""
+    r, g, b = map_values(np.array(rank / max(K - 1, 1)), "RdYlGn_r", 0.0, 1.0)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def generate_and_score(model, model_args, npz_path, K, reward_config, sampler_config):
@@ -97,9 +99,9 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
     K = len(results)
 
     # Layout: trajectory plot on left (60%), table on right (40%)
-    ax_map = fig.add_axes([0.02, 0.05, 0.55, 0.88])
-    ax_tbl = fig.add_axes([0.60, 0.05, 0.38, 0.88])
-    ax_tbl.axis("off")
+    ax_map = fig.panel((0.02, 0.05, 0.55, 0.88), equal=True)
+    ax_tbl = fig.panel((0.60, 0.05, 0.38, 0.88), xlim=(0.0, 1.0), ylim=(0.0, 1.0))
+    ax_tbl.axis_off()
 
     wb, length, width = 2.75, 4.34, 1.70
     es = npz.get("ego_shape", None)
@@ -118,12 +120,8 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
             lb, rb = lane[:, 4:6], lane[:, 6:8]
             v = np.abs(pts).sum(axis=1) > 0.1
             if v.sum() > 1:
-                ax_map.plot(
-                    (pts + lb)[v, 0], (pts + lb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7
-                )
-                ax_map.plot(
-                    (pts + rb)[v, 0], (pts + rb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7
-                )
+                ax_map.lines([(pts + lb)[v]], "#bbbbbb", width=0.7, alpha=0.5)
+                ax_map.lines([(pts + rb)[v]], "#bbbbbb", width=0.7, alpha=0.5)
 
     # Draw road borders (red)
     ls = npz["line_strings"]
@@ -134,28 +132,36 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
         if ls.shape[-1] >= 4 and line[:, 3].max() > 0.5:
             valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=1) > 0.01)
             if valid.sum() > 1:
-                ax_map.plot(line[valid, 0], line[valid, 1], color="red", lw=3, alpha=0.7, zorder=4)
+                ax_map.lines([line[valid, :2]], "#ff0000", width=3, alpha=0.7, z=4)
 
     # Draw GT (green dashed)
     gt = npz["ego_agent_future"]
-    ax_map.plot(
-        gt[:, 0], gt[:, 1], "g--", lw=2.5, alpha=0.6, zorder=5, label=f"GT ({gt_path_len:.1f}m)"
+    ax_map.lines(
+        [gt[:, :2]],
+        "#008000",
+        width=2.5,
+        alpha=0.6,
+        dash="dash",
+        z=5,
+        label=f"GT ({gt_path_len:.1f}m)",
     )
 
     # Ego box at origin
-    ax_map.add_patch(
-        Rectangle(
-            (-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20
-        )
+    ax_map.polygons(
+        [oriented_box(0.0, 0.0, 0.0, length, width, ro)],
+        fill="#3366cc",
+        edge="#000000",
+        width=2,
+        alpha=0.9,
+        z=20,
     )
 
     # Color map: rank 1=dark green, rank K=dark red
-    cmap = plt.cm.RdYlGn_r  # reversed: green=low index=best rank
     all_pts = [gt[:, :2], np.array([[0, 0]])]
 
     for rank, r in enumerate(results):
         traj = r["traj"]
-        color = cmap(rank / max(K - 1, 1))
+        color = _rank_color(rank, K)
         alpha = 0.8 if rank < 3 else (0.5 if rank < 8 else 0.3)
         lw = 2.5 if rank < 3 else 1.2
 
@@ -163,13 +169,9 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
         rb = "RB!" if r["rb_crossing"] else ""
         label = f"#{rank + 1} {r['total']:+.0f} {lc}{rb}" if rank < 5 else None
 
-        ax_map.plot(
-            traj[:, 0], traj[:, 1], "-", color=color, lw=lw, alpha=alpha, zorder=10 - rank * 0.1
-        )
+        ax_map.lines([traj[:, :2]], color, width=lw, alpha=alpha, z=10 - rank * 0.1)
         if rank < 5:
-            ax_map.plot(
-                traj[-1, 0], traj[-1, 1], "o", color=color, ms=6, alpha=0.9, zorder=15, label=label
-            )
+            ax_map.markers(traj[-1, :2], "o", size=6, color=color, alpha=0.9, z=15, label=label)
 
         # Endpoint footprint for top 3
         if rank < 3:
@@ -179,19 +181,13 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
             hn = np.sqrt(cos_h**2 + sin_h**2)
             if hn > 0.01:
                 heading = np.arctan2(sin_h / hn, cos_h / hn)
-                t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax_map.transData
-                ax_map.add_patch(
-                    Rectangle(
-                        (-ro, -width / 2),
-                        length,
-                        width,
-                        lw=1,
-                        ec=color,
-                        fc=color,
-                        alpha=0.25,
-                        zorder=8,
-                        transform=t_rot,
-                    )
+                ax_map.polygons(
+                    [oriented_box(float(cx), float(cy), float(heading), length, width, ro)],
+                    fill=color,
+                    edge=color,
+                    width=1,
+                    alpha=0.25,
+                    z=8,
                 )
 
         all_pts.append(traj[:, :2])
@@ -202,9 +198,8 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
     half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
     ax_map.set_xlim(cx - half, cx + half)
     ax_map.set_ylim(cy - half, cy + half)
-    ax_map.set_aspect("equal")
-    ax_map.grid(True, alpha=0.15)
-    ax_map.legend(loc="upper left", fontsize=7, framealpha=0.8)
+    ax_map.grid(0.15)
+    ax_map.legend("upper left")
 
     # Count in-lane and stopped
     n_in = sum(1 for r in results if not r["lane_crossing"])
@@ -214,10 +209,10 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
     in_mean = np.mean(in_totals) if in_totals else float("nan")
     out_mean = np.mean(out_totals) if out_totals else float("nan")
 
-    ax_map.set_title(
+    ax_map.title(
         f"Scene {scene_idx} [{tag}] — {n_in}/{K} in-lane, {n_stopped} stopped\n"
         f"IN={in_mean:+.1f} vs OUT={out_mean:+.1f}  GT={gt_path_len:.1f}m",
-        fontsize=10,
+        10,
     )
 
     # Reward breakdown table
@@ -228,25 +223,16 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
     y = 0.97
     for j, h in enumerate(headers):
         x = sum(col_widths[:j]) + col_widths[j] / 2
-        ax_tbl.text(
-            x,
-            y,
-            h,
-            fontsize=7,
-            fontweight="bold",
-            ha="center",
-            va="top",
-            transform=ax_tbl.transAxes,
-        )
+        ax_tbl.text((x, y), h, 7, ha="center", va="top", weight="bold")
     y -= 0.02
-    ax_tbl.plot([0, 1], [y, y], color="black", lw=0.5, transform=ax_tbl.transAxes, clip_on=False)
+    ax_tbl.lines([np.array([[0.0, y], [1.0, y]])], "#000000", width=0.5)
 
     for rank, r in enumerate(results):
         y -= 0.055
         if y < 0.0:
             break
 
-        color = cmap(rank / max(K - 1, 1))
+        color = _rank_color(rank, K)
         lc = "OUT" if r["lane_crossing"] else "IN"
         rb = "X" if r["rb_crossing"] else ""
         stopped = r["path_len"] < 1.0
@@ -273,40 +259,27 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
             bg_color = "#fff3cc"  # light yellow for out-of-lane
 
         # Draw background row highlight
-        ax_tbl.fill_between(
-            [0, 1],
-            y - 0.025,
-            y + 0.03,
-            color=bg_color,
-            alpha=0.5,
-            transform=ax_tbl.transAxes,
-            clip_on=False,
-        )
+        ax_tbl.fill_between(np.array([0.0, 1.0]), y - 0.025, y + 0.03, color=bg_color, alpha=0.5)
 
         for j, val in enumerate(row):
             x = sum(col_widths[:j]) + col_widths[j] / 2
-            fw = "bold" if rank < 3 else "normal"
             ax_tbl.text(
-                x,
-                y,
+                (x, y),
                 val,
-                fontsize=6.5,
+                6.5,
+                color if rank < 5 else "#555555",
                 ha="center",
                 va="center",
-                fontweight=fw,
-                color=color if rank < 5 else "#555",
-                transform=ax_tbl.transAxes,
+                weight="bold" if rank < 3 else "normal",
             )
 
     # Legend at bottom of table
     y_leg = max(y - 0.06, 0.01)
     ax_tbl.text(
-        0.0,
-        y_leg,
+        (0.0, y_leg),
         "Green=in-lane  Yellow=out-of-lane  Red=stopped (<1m)",
-        fontsize=6,
-        color="#666",
-        transform=ax_tbl.transAxes,
+        6,
+        "#666666",
     )
 
 
@@ -402,12 +375,11 @@ def main():
             model, model_args, scenes[si], args.K, rcfg, sampler_cfg
         )
 
-        fig = plt.figure(figsize=(18, 10))
+        fig = Figure((18, 10), 150)
         draw_grpo_scene(fig, results, scenes[si], si, gt_path_len, args.tag)
 
         fname = out / f"scene_{si:03d}.png"
-        fig.savefig(fname, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        fig.save(fname)
         print(f"  Saved: {fname}")
 
         # Print quick summary

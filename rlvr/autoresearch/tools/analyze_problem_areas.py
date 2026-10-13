@@ -26,10 +26,6 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -38,6 +34,7 @@ from rlvr.autoresearch.run_experiment import DEVICE, load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.closed_loop.batched_rollout import _batched_generate
 from rlvr.reward import RewardConfig, compute_reward_batch
+from scenario_generation.canvas import Figure
 
 
 def parse_args():
@@ -211,89 +208,91 @@ def main():
         )
 
     # Generate summary figure (distributions + per-bag counts + scatter)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle(f"Problem Area Analysis — {args.tag} ({n} scenes)", fontsize=14)
+    fig = Figure((18, 10), dpi=150)
+    axes = fig.grid(2, 3)
+    fig.suptitle(f"Problem Area Analysis — {args.tag} ({n} scenes)", size=14)
 
     # 1. Reward distribution
     rewards = [r["total_reward"] for r in results]
-    axes[0, 0].hist(rewards, bins=50, color="steelblue", edgecolor="black")
-    axes[0, 0].axvline(
-        np.mean(rewards), color="red", linestyle="--", label=f"mean={np.mean(rewards):.1f}"
+    axes[0][0].hist(rewards, bins=50, color="#4682b4", edge="#000000")
+    axes[0][0].vline(
+        np.mean(rewards), color="#ff0000", dash="dash", label=f"mean={np.mean(rewards):.1f}"
     )
-    axes[0, 0].set_title("Total Reward Distribution")
-    axes[0, 0].set_xlabel("Reward")
-    axes[0, 0].legend()
+    axes[0][0].title("Total Reward Distribution")
+    axes[0][0].xlabel("Reward")
+    axes[0][0].legend()
 
     # 2. RB min distance distribution
-    axes[0, 1].hist(rb_dists, bins=50, color="coral", edgecolor="black")
-    axes[0, 1].axvline(
+    axes[0][1].hist(rb_dists, bins=50, color="#ff7f50", edge="#000000")
+    axes[0][1].vline(
         eval_config.rb_near_thresh,
-        color="orange",
-        linestyle="--",
+        color="#ffa500",
+        dash="dash",
         label=f"near ({eval_config.rb_near_thresh:.2f}m)",
     )
-    axes[0, 1].axvline(
+    axes[0][1].vline(
         eval_config.rb_cross_thresh,
-        color="red",
-        linestyle="--",
+        color="#ff0000",
+        dash="dash",
         label=f"cross ({eval_config.rb_cross_thresh:.2f}m)",
     )
-    axes[0, 1].set_title("Road Border Min Distance")
-    axes[0, 1].set_xlabel("Distance (m)")
-    axes[0, 1].legend()
+    axes[0][1].title("Road Border Min Distance")
+    axes[0][1].xlabel("Distance (m)")
+    axes[0][1].legend()
 
     # 3. Path length distribution
     path_lens = [r["path_length"] for r in results]
-    axes[0, 2].hist(path_lens, bins=50, color="forestgreen", edgecolor="black")
-    axes[0, 2].axvline(1.0, color="red", linestyle="--", label="stopped (<1m)")
-    axes[0, 2].set_title("Path Length Distribution")
-    axes[0, 2].set_xlabel("Path (m)")
-    axes[0, 2].legend()
+    axes[0][2].hist(path_lens, bins=50, color="#228b22", edge="#000000")
+    axes[0][2].vline(1.0, color="#ff0000", dash="dash", label="stopped (<1m)")
+    axes[0][2].title("Path Length Distribution")
+    axes[0][2].xlabel("Path (m)")
+    axes[0][2].legend()
 
     # 4. Per-bag problem counts
     bag_names = sorted(by_bag.keys())
     bag_rb = [sum(1 for r in by_bag[b] if r["rb_crossing"]) for b in bag_names]
     bag_ld = [sum(1 for r in by_bag[b] if r["lane_crossing"]) for b in bag_names]
     bag_col = [sum(1 for r in by_bag[b] if r["collision_step"] is not None) for b in bag_names]
-    x = range(len(bag_names))
+    x = np.arange(len(bag_names))
     w = 0.25
-    axes[1, 0].bar([i - w for i in x], bag_rb, w, label="RB cross", color="red")
-    axes[1, 0].bar(x, bag_ld, w, label="Lane dep", color="orange")
-    axes[1, 0].bar([i + w for i in x], bag_col, w, label="Collision", color="purple")
-    axes[1, 0].set_xticks(x)
-    axes[1, 0].set_xticklabels(bag_names, rotation=45, ha="right", fontsize=8)
-    axes[1, 0].set_title("Problems per Bag")
-    axes[1, 0].legend()
+    axes[1][0].bars(x - w, bag_rb, w, label="RB cross", color="#ff0000")
+    axes[1][0].bars(x, bag_ld, w, label="Lane dep", color="#ffa500")
+    axes[1][0].bars(x + w, bag_col, w, label="Collision", color="#800080")
+    axes[1][0].xticks(x, bag_names)
+    axes[1][0].tick_style(size=8, xrotation=45)
+    axes[1][0].title("Problems per Bag")
+    axes[1][0].legend()
 
     # 5. Heading change vs rb_dist scatter
     headings = [r["heading_change"] for r in results]
     colors = [
-        "red" if r["rb_crossing"] else ("orange" if r["lane_crossing"] else "blue") for r in results
+        "#ff0000" if r["rb_crossing"] else ("#ffa500" if r["lane_crossing"] else "#0000ff")
+        for r in results
     ]
-    axes[1, 1].scatter(headings, rb_dists, c=colors, alpha=0.5, s=10)
-    axes[1, 1].set_xlabel("Heading Change (rad)")
-    axes[1, 1].set_ylabel("RB Min Dist (m)")
-    axes[1, 1].set_title("Heading vs Border Distance")
-    axes[1, 1].axhline(eval_config.rb_near_thresh, color="orange", linestyle="--", alpha=0.5)
+    axes[1][1].markers(
+        np.stack([headings, rb_dists], 1), "o", size=np.sqrt(10), color=colors, alpha=0.5
+    )
+    axes[1][1].xlabel("Heading Change (rad)")
+    axes[1][1].ylabel("RB Min Dist (m)")
+    axes[1][1].title("Heading vs Border Distance")
+    axes[1][1].hline(eval_config.rb_near_thresh, color="#ffa500", dash="dash", alpha=0.5)
 
     # 6. Problem scene reward distribution
     reward_at_rb = [r["total_reward"] for r in results if r["rb_crossing"]]
     if reward_at_rb:
-        axes[1, 2].hist(reward_at_rb, bins=30, color="red", alpha=0.5, label="RB cross")
+        axes[1][2].hist(reward_at_rb, bins=30, color="#ff0000", alpha=0.5, label="RB cross")
     reward_at_ld = [r["total_reward"] for r in results if r["lane_crossing"]]
     if reward_at_ld:
-        axes[1, 2].hist(reward_at_ld, bins=30, color="orange", alpha=0.5, label="Lane dep")
+        axes[1][2].hist(reward_at_ld, bins=30, color="#ffa500", alpha=0.5, label="Lane dep")
     reward_at_col = [r["total_reward"] for r in results if r["collision_step"] is not None]
     if reward_at_col:
-        axes[1, 2].hist(reward_at_col, bins=30, color="purple", alpha=0.5, label="Collision")
-    axes[1, 2].set_title("Problem Scene Reward Distribution")
-    axes[1, 2].set_xlabel("Reward")
-    axes[1, 2].legend()
+        axes[1][2].hist(reward_at_col, bins=30, color="#800080", alpha=0.5, label="Collision")
+    axes[1][2].title("Problem Scene Reward Distribution")
+    axes[1][2].xlabel("Reward")
+    axes[1][2].legend()
 
-    plt.tight_layout()
     fig_path = os.path.join(args.output_dir, f"{args.tag}_histograms.png")
-    plt.savefig(fig_path, dpi=150)
-    plt.close()
+    fig.save(fig_path)
     print(f"\nSaved summary figure: {fig_path}")
 
     # Save top-K problem scenes

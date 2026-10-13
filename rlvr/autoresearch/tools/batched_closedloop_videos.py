@@ -217,9 +217,6 @@ def _render_one(job):
         model_path,
         policy_dir,
     ) = job
-    import matplotlib
-
-    matplotlib.use("Agg")
     from rlvr.autoresearch.tools.ghost_sim_common import (
         GhostSimConfig,
         extract_stopped_neighbors,
@@ -349,7 +346,7 @@ def main():
         ro_base, _ = batched_closed_loop(
             model, margs, datas, device, n_steps=args.steps, chunk=args.chunk
         )
-        print(f"[phase1] explorer leg")
+        print("[phase1] explorer leg")
         ro_gui, eta_logs = batched_closed_loop(
             model,
             margs,

@@ -21,16 +21,10 @@ Usage:
 import argparse
 import os
 import sys
-
-import matplotlib
-import numpy as np
-import torch
-
-matplotlib.use("Agg")
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
+import numpy as np
+import torch
 
 _repo_root = os.path.join(os.path.dirname(__file__), "..")
 _dp_root = os.path.join(_repo_root, "diffusion_planner")
@@ -46,6 +40,9 @@ from diffusion_planner.model.guidance import (
     build,
     list_available,
 )
+
+from scenario_generation.canvas import Figure, Panel
+from scenario_generation.colormaps import map_values, qualitative
 
 # ======================================================================
 # Synthetic data builders
@@ -416,7 +413,7 @@ def test_longitudinal_on_curve():
     cfg2 = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 1.0, "eta_lon": -1.0})
     fn2 = build(cfg2)
     r_opposite = fn2._compute(x_on_ref, inputs).item()
-    assert r_opposite < r_on_ref, f"Opposite target should have more penalty"
+    assert r_opposite < r_on_ref, "Opposite target should have more penalty"
     print(
         f"  PASS  test_longitudinal_on_curve: r_match={r_on_ref:.4f}, r_opposite={r_opposite:.2f}"
     )
@@ -483,8 +480,8 @@ def test_composer_integration():
     assert "lateral" in rewards, f"Missing 'lateral' in rewards: {rewards.keys()}"
     assert "longitudinal" in rewards, f"Missing 'longitudinal' in rewards: {rewards.keys()}"
     assert "total" in rewards, f"Missing 'total' in rewards: {rewards.keys()}"
-    assert rewards["lateral"].item() < 0, f"Lateral should penalize 1m offset"
-    assert rewards["longitudinal"].item() < 0, f"Longitudinal should penalize off-target"
+    assert rewards["lateral"].item() < 0, "Lateral should penalize 1m offset"
+    assert rewards["longitudinal"].item() < 0, "Longitudinal should penalize off-target"
     print(
         f"  PASS  test_composer_integration: "
         f"lateral={rewards['lateral'].item():.2f}, "
@@ -541,41 +538,30 @@ def visualize_lateral_test(
     view_range=40,
 ):
     """Visualize deterministic vs lateral-guided trajectories."""
-    fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+    fig = Figure((12, 12), 150)
+    ax = fig.panel((0.07, 0.05, 0.9, 0.9), equal=True)
     _draw_scene(ax, npz_data, view_range)
 
     # GT
     ego_future = npz_data["ego_agent_future"]
-    ax.plot(ego_future[:, 0], ego_future[:, 1], "g-", linewidth=2, alpha=0.7, label="GT future")
+    ax.lines([ego_future[:, :2]], "#008000", width=2, alpha=0.7, label="GT future")
 
     # Deterministic baseline
-    ax.plot(det_traj[:, 0], det_traj[:, 1], "k-", linewidth=2.5, label="Deterministic", zorder=10)
-    ax.plot(det_traj[-1, 0], det_traj[-1, 1], "ko", markersize=5, zorder=11)
+    ax.lines([det_traj[:, :2]], "#000000", width=2.5, label="Deterministic", z=10)
+    ax.markers(det_traj[-1, :2], "o", 5, "#000000", z=11)
 
     # Lateral guided trajectories with color gradient
-    cmap = plt.cm.coolwarm
     offsets = sorted(guided_trajs.keys())
+    colors = map_values(np.arange(len(offsets)) / max(len(offsets) - 1, 1), "coolwarm", 0, 1)
     for i, offset in enumerate(offsets):
         traj = guided_trajs[offset]
-        color = cmap(i / max(len(offsets) - 1, 1))
-        ax.plot(
-            traj[:, 0],
-            traj[:, 1],
-            color=color,
-            linewidth=2,
-            alpha=0.85,
-            label=f"lateral={offset:+.1f}m",
-            zorder=9,
-        )
-        ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
+        color = colors[i]
+        ax.lines([traj[:, :2]], color, width=2, alpha=0.85, label=f"lateral={offset:+.1f}m", z=9)
+        ax.markers(traj[-1, :2], "o", 4, color, z=10)
 
-    ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title(
-        "Lateral Guidance Test: perpendicular offsets from deterministic reference", fontsize=10
-    )
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    ax.legend("upper left")
+    ax.title("Lateral Guidance Test: perpendicular offsets from deterministic reference", 10)
+    fig.save(save_path)
     print(f"  Saved: {save_path}")
 
 
@@ -587,43 +573,33 @@ def visualize_longitudinal_test(
     view_range=40,
 ):
     """Visualize deterministic vs longitudinal-guided trajectories."""
-    fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+    fig = Figure((12, 12), 150)
+    ax = fig.panel((0.07, 0.05, 0.9, 0.9), equal=True)
     _draw_scene(ax, npz_data, view_range)
 
     # GT
     ego_future = npz_data["ego_agent_future"]
-    ax.plot(ego_future[:, 0], ego_future[:, 1], "g-", linewidth=2, alpha=0.7, label="GT future")
+    ax.lines([ego_future[:, :2]], "#008000", width=2, alpha=0.7, label="GT future")
 
     # Deterministic baseline
-    ax.plot(det_traj[:, 0], det_traj[:, 1], "k-", linewidth=2.5, label="Deterministic", zorder=10)
-    ax.plot(det_traj[-1, 0], det_traj[-1, 1], "ko", markersize=5, zorder=11)
+    ax.lines([det_traj[:, :2]], "#000000", width=2.5, label="Deterministic", z=10)
+    ax.markers(det_traj[-1, :2], "o", 5, "#000000", z=11)
 
     # Longitudinal guided trajectories
-    cmap = plt.cm.RdYlGn
     shifts = sorted(guided_trajs.keys())
+    colors = map_values(np.arange(len(shifts)) / max(len(shifts) - 1, 1), "RdYlGn", 0, 1)
     for i, shift in enumerate(shifts):
         traj = guided_trajs[shift]
-        color = cmap(i / max(len(shifts) - 1, 1))
+        color = colors[i]
         _eta = max(-1.0, min(1.0, float(shift) / 8.0))
-        ax.plot(
-            traj[:, 0],
-            traj[:, 1],
-            color=color,
-            linewidth=2,
-            alpha=0.85,
-            label=f"η_lon={_eta:+.2f}",
-            zorder=9,
-        )
-        ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
+        ax.lines([traj[:, :2]], color, width=2, alpha=0.85, label=f"η_lon={_eta:+.2f}", z=9)
+        ax.markers(traj[-1, :2], "o", 4, color, z=10)
 
-    ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title(
-        "Longitudinal Guidance Test: velocity scaling (Eq. 3) from deterministic reference",
-        fontsize=10,
+    ax.legend("upper left")
+    ax.title(
+        "Longitudinal Guidance Test: velocity scaling (Eq. 3) from deterministic reference", 10
     )
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(save_path)
     print(f"  Saved: {save_path}")
 
 
@@ -635,36 +611,29 @@ def visualize_combined_test(
     view_range=40,
 ):
     """Visualize combined lateral+longitudinal guidance."""
-    fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+    fig = Figure((12, 12), 150)
+    ax = fig.panel((0.07, 0.05, 0.9, 0.9), equal=True)
     _draw_scene(ax, npz_data, view_range)
 
     ego_future = npz_data["ego_agent_future"]
-    ax.plot(ego_future[:, 0], ego_future[:, 1], "g-", linewidth=2, alpha=0.7, label="GT future")
+    ax.lines([ego_future[:, :2]], "#008000", width=2, alpha=0.7, label="GT future")
 
-    ax.plot(det_traj[:, 0], det_traj[:, 1], "k-", linewidth=2.5, label="Deterministic", zorder=10)
+    ax.lines([det_traj[:, :2]], "#000000", width=2.5, label="Deterministic", z=10)
 
-    colors = plt.cm.Set1(np.linspace(0, 1, len(combined_trajs)))
+    colors = [
+        qualitative("Set1", min(int(v * 9), 8)) for v in np.linspace(0, 1, len(combined_trajs))
+    ]
     for i, (label, traj) in enumerate(combined_trajs.items()):
-        ax.plot(
-            traj[:, 0],
-            traj[:, 1],
-            color=colors[i],
-            linewidth=2,
-            alpha=0.85,
-            label=label,
-            zorder=9,
-        )
-        ax.plot(traj[-1, 0], traj[-1, 1], "o", color=colors[i], markersize=4, zorder=10)
+        ax.lines([traj[:, :2]], colors[i], width=2, alpha=0.85, label=label, z=9)
+        ax.markers(traj[-1, :2], "o", 4, colors[i], z=10)
 
-    ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title("Combined Lateral + Longitudinal Guidance", fontsize=10)
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    ax.legend("upper left")
+    ax.title("Combined Lateral + Longitudinal Guidance", 10)
+    fig.save(save_path)
     print(f"  Saved: {save_path}")
 
 
-def _draw_scene(ax, npz_data, view_range):
+def _draw_scene(ax: Panel, npz_data, view_range):
     """Draw lane boundaries, road borders, route, polygons, ego past."""
     # Lane boundaries
     lanes = npz_data["lanes"]
@@ -681,10 +650,9 @@ def _draw_scene(ax, npz_data, view_range):
             lane_lines.append(np.column_stack([lx, ly]))
             lane_lines.append(np.column_stack([rx, ry]))
         else:
-            ax.plot(lane[:, 0], lane[:, 1], color="lightgray", linewidth=0.5, alpha=0.4)
+            ax.lines([lane[:, :2]], "#d3d3d3", width=0.5, alpha=0.4)
     if lane_lines:
-        lc = LineCollection(lane_lines, colors="lightgray", alpha=0.4, linewidths=0.8)
-        ax.add_collection(lc)
+        ax.lines(lane_lines, "#d3d3d3", width=0.8, alpha=0.4)
 
     # Route
     route = npz_data["route_lanes"]
@@ -692,7 +660,7 @@ def _draw_scene(ax, npz_data, view_range):
         r = route[i]
         if np.abs(r[:, :2]).sum() < 1e-6:
             continue
-        ax.plot(r[:, 0], r[:, 1], color="olive", linewidth=1.5, linestyle="--", alpha=0.5)
+        ax.lines([r[:, :2]], "#808000", width=1.5, alpha=0.5, dash="dash")
 
     # Road borders and stop lines
     if "line_strings" in npz_data:
@@ -703,9 +671,9 @@ def _draw_scene(ax, npz_data, view_range):
             if np.abs(line[:, :2]).sum() < 1e-6:
                 continue
             if has_types and line[:, 3].max() > 0.5:
-                ax.plot(line[:, 0], line[:, 1], color="red", linewidth=2.5, alpha=0.9, zorder=5)
+                ax.lines([line[:, :2]], "#ff0000", width=2.5, alpha=0.9, z=5)
             elif has_types and line[:, 2].max() > 0.5:
-                ax.plot(line[:, 0], line[:, 1], color="orange", linewidth=1.5, alpha=0.7)
+                ax.lines([line[:, :2]], "#ffa500", width=1.5, alpha=0.7)
 
     # Polygons
     if "polygons" in npz_data:
@@ -714,11 +682,11 @@ def _draw_scene(ax, npz_data, view_range):
             p = polys[i]
             if np.abs(p[:, :2]).sum() < 1e-6:
                 continue
-            ax.fill(p[:, 0], p[:, 1], color="lightgray", alpha=0.3, edgecolor="gray", linewidth=0.5)
+            ax.polygons([p[:, :2]], fill="#d3d3d3", edge="#808080", width=0.5, alpha=0.3)
 
     # Ego past
     ego_past = npz_data["ego_agent_past"]
-    ax.plot(ego_past[:, 0], ego_past[:, 1], "b-", linewidth=1.5, alpha=0.4, label="Ego past")
+    ax.lines([ego_past[:, :2]], "#0000ff", width=1.5, alpha=0.4, label="Ego past")
 
     # Ego car shape
     ego_shape = npz_data.get("ego_shape", None)
@@ -734,14 +702,13 @@ def _draw_scene(ax, npz_data, view_range):
                 [-ro, -width / 2],
             ]
         )
-        ax.fill(corners[:, 0], corners[:, 1], color="blue", alpha=0.6, zorder=12)
+        ax.polygons([corners], fill="#0000ff", alpha=0.6, z=12)
     else:
-        ax.plot(0, 0, "bs", markersize=8, zorder=12)
+        ax.markers(np.zeros(2), "s", 8, "#0000ff", z=12)
 
     ax.set_xlim(-view_range, view_range)
     ax.set_ylim(-view_range, view_range)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.2)
+    ax.grid(0.2)
 
 
 def compute_lateral_displacement(det_traj, guided_traj):

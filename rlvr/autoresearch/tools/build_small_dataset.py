@@ -372,11 +372,9 @@ def render_selected(
     no lanelet2). Renders the CANONICALIZED output NPZ (also validates it loads)."""
     if frac <= 0:
         return
-    import matplotlib
+    from PIL import Image
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    from scenario_generation.canvas import Figure
     from scenario_generation.npz_loader import from_npz
     from scenario_generation.render_npz_dir import _ego_future_to_predictions
     from scenario_generation.replay import save_step_figure
@@ -416,27 +414,28 @@ def render_selected(
                 pngs.append(png)
             except Exception as e:
                 print(f"[build] render FAIL {out_npz}: {type(e).__name__}: {e}", flush=True)
-        # collage grid — cosmetic only; never let a matplotlib hiccup abort a
+        # collage grid — cosmetic only; never let a render hiccup abort a
         # build whose NPZs + manifests are already written.
         if pngs:
-            fig = None
             try:
                 ncol = min(4, len(pngs))
                 nrow = (len(pngs) + ncol - 1) // ncol
-                fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 4 * nrow))
-                axes = np.atleast_1d(axes).ravel()
+                fig = Figure((4 * ncol, 4 * nrow), 80)
+                axes = [
+                    ax
+                    for row in fig.grid(
+                        nrow, ncol, margins=(0.01, 0.99, 0.01, 0.95), wspace=0.04, hspace=0.04
+                    )
+                    for ax in row
+                ]
                 for ax in axes:
-                    ax.axis("off")
+                    ax.axis_off()
                 for ax, png in zip(axes, pngs):
-                    ax.imshow(plt.imread(png))
+                    ax.image(np.asarray(Image.open(png).convert("RGB")))
                 fig.suptitle(bucket)
-                fig.tight_layout()
-                fig.savefig(os.path.join(render_dir, f"collage__{safe}.png"), dpi=80)
+                fig.save(os.path.join(render_dir, f"collage__{safe}.png"))
             except Exception as e:
                 print(f"[build] collage FAIL {bucket}: {type(e).__name__}: {e}", flush=True)
-            finally:
-                if fig is not None:
-                    plt.close(fig)
     print(f"[build] renders -> {render_dir}", flush=True)
 
 

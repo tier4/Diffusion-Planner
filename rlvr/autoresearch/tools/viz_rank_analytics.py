@@ -12,11 +12,10 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
+
+from scenario_generation.canvas import GRID_COLOR, Figure, Panel, nice_ticks, rgba
+from scenario_generation.colormaps import qualitative
 
 # Category colors. Includes the experimental categories emitted by
 # rlvr.rank_analytics.get_category() so they don't get dropped from plots.
@@ -45,6 +44,12 @@ _CAT_ORDER = [
 ]
 
 
+def _y_grid(ax: Panel, low: float, high: float, alpha: float = 0.3) -> None:
+    """Horizontal grid lines only, at the round y ticks of ``[low, high]``."""
+    for y in nice_ticks(low, high):
+        ax.hline(y, color=GRID_COLOR, width=0.8, alpha=alpha, z=0.5)
+
+
 def load_summary(run_dir: Path) -> dict:
     path = run_dir / "rank_analytics_summary.json"
     if not path.exists():
@@ -69,31 +74,34 @@ def plot_category_stacked_area(summary: dict, output_dir: Path) -> None:
     if len(epochs) < 2:
         return
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig = Figure((10, 5), dpi=150)
+    ax = fig.panel()
     y_stacks = {cat: [] for cat in _CAT_ORDER}
     for ep in epochs:
         rates = trends[str(ep)]
         for cat in _CAT_ORDER:
             y_stacks[cat].append(rates.get(cat, 0) * 100)
 
-    y_arrays = [np.array(y_stacks[cat]) for cat in _CAT_ORDER]
-    ax.stackplot(
-        epochs,
-        *y_arrays,
-        labels=[cat.replace("_", " ").title() for cat in _CAT_ORDER],
-        colors=[_CAT_COLORS[cat] for cat in _CAT_ORDER],
-        alpha=0.85,
-    )
-    ax.set_xlabel("Epoch", fontsize=12)
-    ax.set_ylabel("Win Rate (%)", fontsize=12)
-    ax.set_title("Guidance Category Win Rates Over Training", fontsize=14)
-    ax.legend(loc="upper right", fontsize=10)
+    bottom = np.zeros(len(epochs))
+    for cat in _CAT_ORDER:
+        top = bottom + np.array(y_stacks[cat])
+        ax.fill_between(
+            np.array(epochs, dtype=np.float64),
+            top,
+            bottom,
+            color=_CAT_COLORS[cat],
+            alpha=0.85,
+            label=cat.replace("_", " ").title(),
+        )
+        bottom = top
+    ax.xlabel("Epoch")
+    ax.ylabel("Win Rate (%)")
+    ax.title("Guidance Category Win Rates Over Training", size=14)
+    ax.legend("upper right", size=10)
     ax.set_xlim(epochs[0], epochs[-1])
     ax.set_ylim(0, 100)
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / "category_rates_over_epochs.png", dpi=150)
-    plt.close(fig)
+    _y_grid(ax, 0, 100)
+    fig.save(output_dir / "category_rates_over_epochs.png")
     print(f"  Saved category_rates_over_epochs.png")
 
 
@@ -122,28 +130,33 @@ def plot_config_heatmap(summary: dict, output_dir: Path) -> None:
         for i, lbl in enumerate(all_labels):
             matrix[i, j] = rates.get(lbl, 0) * 100
 
-    fig, ax = plt.subplots(figsize=(max(10, len(epochs) * 0.8), max(6, len(all_labels) * 0.4)))
-    im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd", vmin=0)
-    ax.set_xticks(range(len(epochs)))
-    ax.set_xticklabels([str(e) for e in epochs], fontsize=9)
-    ax.set_yticks(range(len(all_labels)))
-    ax.set_yticklabels(all_labels, fontsize=9)
-    ax.set_xlabel("Epoch", fontsize=12)
-    ax.set_ylabel("Generation Config", fontsize=12)
-    ax.set_title("Config Win Rate Heatmap (%)", fontsize=14)
+    n_rows, n_cols = matrix.shape
+    vmax = float(matrix.max())
+    fig = Figure((max(10, len(epochs) * 0.8), max(6, len(all_labels) * 0.4)), dpi=150)
+    ax = fig.panel((0.25, 0.11, 0.6, 0.8), xlim=(-0.5, n_cols - 0.5), ylim=(n_rows - 0.5, -0.5))
+    ax.image(
+        matrix,
+        extent=(-0.5, n_cols - 0.5, n_rows - 0.5, -0.5),
+        cmap="YlOrRd",
+        vmin=0.0,
+        vmax=max(vmax, 1e-12),
+    )
+    ax.xticks(range(len(epochs)), [str(e) for e in epochs])
+    ax.yticks(range(len(all_labels)), all_labels)
+    ax.xlabel("Epoch")
+    ax.ylabel("Generation Config")
+    ax.title("Config Win Rate Heatmap (%)", size=14)
 
     # Annotate cells with values
     for i in range(len(all_labels)):
         for j in range(len(epochs)):
             val = matrix[i, j]
             if val > 0:
-                color = "white" if val > 20 else "black"
-                ax.text(j, i, f"{val:.0f}", ha="center", va="center", fontsize=8, color=color)
+                color = "#ffffff" if val > 20 else "#000000"
+                ax.text((j, i), f"{val:.0f}", size=8, color=color, ha="center", va="center")
 
-    fig.colorbar(im, ax=ax, label="Win Rate (%)", shrink=0.8)
-    fig.tight_layout()
-    fig.savefig(output_dir / "config_heatmap.png", dpi=150)
-    plt.close(fig)
+    ax.colorbar("YlOrRd", 0.0, max(vmax, 1e-12), "Win Rate (%)")
+    fig.save(output_dir / "config_heatmap.png")
     print(f"  Saved config_heatmap.png")
 
 
@@ -167,26 +180,26 @@ def plot_dominant_components(epoch_data: list[dict], output_dir: Path) -> None:
         for j, comp in enumerate(all_comps):
             matrix[i, j] = d["summary"]["dominant_components"].get(comp, 0) / total * 100
 
-    comp_colors = plt.cm.Set2(np.linspace(0, 1, n_comp))
+    comp_colors = [qualitative("Set2", min(int(v * 8), 7)) for v in np.linspace(0, 1, n_comp)]
 
-    fig, ax = plt.subplots(figsize=(max(10, n_ep * 0.8), 5))
+    fig = Figure((max(10, n_ep * 0.8), 5), dpi=150)
+    ax = fig.panel()
     x = np.arange(n_ep)
     bar_width = 0.8 / n_comp
 
     for j, comp in enumerate(all_comps):
         offset = (j - n_comp / 2 + 0.5) * bar_width
-        ax.bar(x + offset, matrix[:, j], bar_width, label=comp, color=comp_colors[j])
+        ax.bars(x + offset, matrix[:, j], bar_width, label=comp, color=comp_colors[j])
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(e) for e in epochs], fontsize=9)
-    ax.set_xlabel("Epoch", fontsize=12)
-    ax.set_ylabel("Frequency (%)", fontsize=12)
-    ax.set_title("Dominant Reward Component Per Epoch", fontsize=14)
-    ax.legend(fontsize=9, ncol=min(n_comp, 4))
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / "dominant_components.png", dpi=150)
-    plt.close(fig)
+    y_max = float(matrix.max()) * 1.05 if matrix.size and matrix.max() > 0 else 1.0
+    ax.set_ylim(0, y_max)
+    ax.xticks(x, [str(e) for e in epochs])
+    ax.xlabel("Epoch")
+    ax.ylabel("Frequency (%)")
+    ax.title("Dominant Reward Component Per Epoch", size=14)
+    ax.legend("upper right", ncol=min(n_comp, 4), size=9)
+    _y_grid(ax, 0, y_max)
+    fig.save(output_dir / "dominant_components.png")
     print(f"  Saved dominant_components.png")
 
 
@@ -226,34 +239,28 @@ def plot_scene_heatmap(summary: dict, output_dir: Path) -> None:
                 continue
             matrix[i, epoch_to_col[ep]] = cat_to_int.get(entry["category"], unknown_idx)
 
-    from matplotlib.colors import BoundaryNorm, ListedColormap
+    palette = np.array([rgba(_CAT_COLORS[c]) for c in _CAT_ORDER], dtype=np.float64) / 255.0
+    filled = np.isfinite(matrix)
+    image = np.zeros((*matrix.shape, 4))
+    image[filled] = palette[matrix[filled].astype(int)]
 
-    cmap = ListedColormap([_CAT_COLORS[c] for c in _CAT_ORDER])
-    bounds = [-0.5] + [i + 0.5 for i in range(len(_CAT_ORDER))]
-    norm = BoundaryNorm(bounds, cmap.N)
+    n_rows, n_cols = matrix.shape
+    fig = Figure((max(10, len(epochs) * 0.8), max(8, len(scenes) * 0.25)), dpi=150)
+    ax = fig.panel((0.2, 0.11, 0.75, 0.8), xlim=(-0.5, n_cols - 0.5), ylim=(n_rows - 0.5, -0.5))
+    ax.image(image, extent=(-0.5, n_cols - 0.5, n_rows - 0.5, -0.5))
 
-    fig, ax = plt.subplots(figsize=(max(10, len(epochs) * 0.8), max(8, len(scenes) * 0.25)))
-    im = ax.imshow(matrix, aspect="auto", cmap=cmap, norm=norm, interpolation="nearest")
-
-    ax.set_xticks(range(len(epochs)))
-    ax.set_xticklabels([str(e) for e in epochs], fontsize=9)
-    ax.set_yticks(range(len(scenes)))
-    ax.set_yticklabels([s[:25] for s in scenes], fontsize=7)
-    ax.set_xlabel("Epoch", fontsize=12)
-    ax.set_ylabel("Scene", fontsize=12)
-    ax.set_title("Per-Scene Winner Category Over Training", fontsize=14)
+    ax.xticks(range(len(epochs)), [str(e) for e in epochs])
+    ax.yticks(range(len(scenes)), [s[:25] for s in scenes])
+    ax.xlabel("Epoch")
+    ax.ylabel("Scene")
+    ax.title("Per-Scene Winner Category Over Training", size=14)
 
     # Legend
-    from matplotlib.patches import Patch
+    for cat in _CAT_ORDER:
+        ax.polygons([], fill=_CAT_COLORS[cat], label=cat.replace("_", " ").title())
+    ax.legend("upper right")
 
-    legend_elements = [
-        Patch(facecolor=_CAT_COLORS[cat], label=cat.replace("_", " ").title()) for cat in _CAT_ORDER
-    ]
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
-
-    fig.tight_layout()
-    fig.savefig(output_dir / "scene_evolution_heatmap.png", dpi=150)
-    plt.close(fig)
+    fig.save(output_dir / "scene_evolution_heatmap.png")
     print(f"  Saved scene_evolution_heatmap.png")
 
 

@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+
+from scenario_generation.canvas import Figure
 
 # Fixed colours for the two egos. RGB hex.
 PRIMARY_COLOR = "#1f77b4"  # blue, fully opaque box for the primary sim
@@ -82,23 +82,17 @@ def _draw_oriented_box(
     )
     rot = np.array([[c, -s], [s, c]])
     corners = corners_local @ rot.T + np.array([x, y])
-    ax.fill(corners[:, 0], corners[:, 1], color=color, alpha=alpha * 0.35, zorder=zorder)
-    ax.plot(
-        corners[:, 0],
-        corners[:, 1],
-        color=color,
-        lw=lw,
-        alpha=alpha,
-        zorder=zorder + 1,
-        label=label,
-    )
+    ax.polygons([corners[:4]], fill=color, alpha=alpha * 0.35, z=zorder)
+    ax.lines([corners], color, width=lw, alpha=alpha, z=zorder + 1, label=label)
     arrow_len = max(length * 0.6, 2.0)
-    ax.annotate(
-        "",
-        xy=(x + arrow_len * c, y + arrow_len * s),
-        xytext=(x, y),
-        arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, mutation_scale=12, alpha=alpha),
-        zorder=zorder + 2,
+    ax.arrows(
+        np.array([x, y]),
+        np.array([x + arrow_len * c, y + arrow_len * s]),
+        color,
+        width=lw,
+        head=12,
+        alpha=alpha,
+        z=zorder + 2,
     )
 
 
@@ -113,7 +107,7 @@ def _draw_polylines(
     for pl in polys_world:
         if pl.shape[0] < 2:
             continue
-        ax.plot(pl[:, 0], pl[:, 1], "-", color=color, lw=lw, alpha=alpha, zorder=zorder)
+        ax.lines([pl[:, :2]], color, width=lw, alpha=alpha, z=zorder)
 
 
 def _extract_polylines_from_tensor(
@@ -216,10 +210,8 @@ def _render_one_step(
 
     # Fixed-size figure with FIXED axes margins (NOT tight_layout) to avoid
     # per-frame grid-size jitter. Figure size in inches × dpi = pixel size.
-    fig = Figure(figsize=(10, 10), dpi=100)
-    fig.patch.set_facecolor("#f8f8f8")
-    fig.subplots_adjust(left=0.06, right=0.98, bottom=0.06, top=0.92)
-    ax = fig.add_subplot(1, 1, 1)
+    fig = Figure((10, 10), 100, facecolor="#f8f8f8")
+    ax = fig.panel((0.06, 0.06, 0.92, 0.86), equal=True)
 
     _draw_polylines(ax, lane_polys_world, color=LANE_COLOR, lw=0.7, alpha=0.55, zorder=2)
     _draw_polylines(ax, border_polys_world, color=BORDER_COLOR, lw=1.6, alpha=0.85, zorder=3)
@@ -231,15 +223,15 @@ def _render_one_step(
         col = _TL_COLOUR.get(tl)
         if col is None:
             continue
-        ax.plot(poly[:, 0], poly[:, 1], "-", color=col, lw=2.2, alpha=0.85, zorder=6)
+        ax.lines([poly], col, width=2.2, alpha=0.85, z=6)
         mid = poly[len(poly) // 2]
-        ax.scatter([mid[0]], [mid[1]], s=70, c=col, edgecolors="black", linewidths=0.6, zorder=7)
+        ax.markers(mid, "o", size=math.sqrt(70), color=col, edge="#000000", edge_width=0.6, z=7)
     # Same for the route (signals along the ego's planned path).
     for poly, tl in zip(route_polys_world, route_tl_states):
         col = _TL_COLOUR.get(tl)
         if col is None:
             continue
-        ax.plot(poly[:, 0], poly[:, 1], "-", color=col, lw=3.2, alpha=0.95, zorder=6)
+        ax.lines([poly], col, width=3.2, alpha=0.95, z=6)
 
     # Trail: last 30 steps of each ego (if available — caller passes them in
     # the pose dicts as `trail`).
@@ -247,10 +239,10 @@ def _render_one_step(
     ghost_trail = ghost_pose.get("trail")
     if primary_trail is not None and len(primary_trail) > 1:
         pt = np.asarray(primary_trail)
-        ax.plot(pt[:, 0], pt[:, 1], "-", color=PRIMARY_COLOR, lw=1.4, alpha=0.5, zorder=5)
+        ax.lines([pt[:, :2]], PRIMARY_COLOR, width=1.4, alpha=0.5, z=5)
     if ghost_trail is not None and len(ghost_trail) > 1:
         gt = np.asarray(ghost_trail)
-        ax.plot(gt[:, 0], gt[:, 1], "--", color=GHOST_COLOR, lw=1.4, alpha=0.5, zorder=5)
+        ax.lines([gt[:, :2]], GHOST_COLOR, width=1.4, alpha=0.5, dash="dash", z=5)
 
     # Both ego boxes.
     _draw_oriented_box(
@@ -281,7 +273,7 @@ def _render_one_step(
     )
 
     # Connecting line between the two ego centers.
-    ax.plot([px, gx], [py, gy], "k:", lw=1.0, alpha=0.55, zorder=18)
+    ax.lines([np.array([[px, py], [gx, gy]])], "#000000", width=1.0, alpha=0.55, dash="dot", z=18)
 
     # Choose viewport center.
     if center_mode == "primary":
@@ -306,11 +298,10 @@ def _render_one_step(
 
     ax.set_xlim(cx - view_h, cx + view_h)
     ax.set_ylim(cy - view_h, cy + view_h)
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, alpha=0.15)
-    ax.tick_params(labelsize=8)
-    ax.set_xlabel("X (m)", fontsize=9)
-    ax.set_ylabel("Y (m)", fontsize=9)
+    ax.grid(0.15)
+    ax.tick_style(size=8)
+    ax.xlabel("X (m)")
+    ax.ylabel("Y (m)")
 
     # Diff metrics.
     dx = gx - px
@@ -328,11 +319,10 @@ def _render_one_step(
         f"sep={dist:.2f} m   lat={lateral:+.2f} m   lon={longitudinal:+.2f} m   "
         f"v_p={speed_p:.1f} m/s   v_g={speed_g:.1f} m/s"
     )
-    ax.set_title(title, fontsize=10, family="monospace")
-    ax.legend(loc="upper left", fontsize=9, framealpha=0.85)
+    ax.title(title, 10, family="mono")
+    ax.legend("upper left")
 
-    fig.savefig(out_path, dpi=100)
-    fig.clf()
+    fig.save(out_path)
 
     return {
         "step": step,

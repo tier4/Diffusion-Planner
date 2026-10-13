@@ -12,21 +12,15 @@ Launch:
 from __future__ import annotations
 
 import argparse
-import io
 import math
 from pathlib import Path
 
 import gradio as gr
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
-from matplotlib.patches import Rectangle
 
 import guidance_gui.custom_guidance  # noqa: F401 -- registers the collision_swerve guidance
+from scenario_generation.canvas import Figure
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
 from scenario_generation.scene_render import (
@@ -376,17 +370,6 @@ def _traj_cos_sin_to_xyh(traj: np.ndarray) -> np.ndarray:
     """Convert (T, 4) [x,y,cos_h,sin_h] to (T, 3) [x,y,heading_rad]."""
     heading = np.arctan2(traj[:, 3], traj[:, 2])
     return np.column_stack([traj[:, :2], heading])
-
-
-def _fig_to_pil(fig: matplotlib.figure.Figure):
-    """Convert matplotlib Figure to PIL Image."""
-    from PIL import Image
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return Image.open(buf)
 
 
 def _transform_point_between_steps(
@@ -1362,8 +1345,9 @@ def build_interface(
                 show_traj_rb=traj_rb,
                 show_traj_nb=traj_nb,
                 nb_pred_trajs=nb_pred_trajs,
+                dpi=120.0,
             )
-            img = _fig_to_pil(fig)
+            img = fig.image()
             info = f"Step **{step}** / **{len(seq) - 1}** | Branch: `{tree.active_branch}`"
             if branch.fork_timestep is not None:
                 info += f" | Forked from parent step {branch.fork_timestep}"
@@ -3945,8 +3929,9 @@ def build_interface(
                     dim_neighbors=hide_nb,
                     map_border_polylines=map_borders,
                     ego_world_pose=ego_wp,
+                    dpi=120.0,
                 )
-                img = _fig_to_pil(fig)
+                img = fig.image()
                 info = f"Step **{s}** / **{max_s}** | Branch: `{tree.active_branch}` | ▶ Playing"
                 yield img, info, s
                 elapsed = time.monotonic() - t0
@@ -4213,14 +4198,11 @@ def _modifications_md(tree: SceneTree, branch_id: str) -> str:
 
 def _empty_image(text: str = "No scene loaded"):
     """Create a placeholder image."""
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    fig.patch.set_facecolor("#f0f0f0")
-    ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=16, color="#888")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.axis("off")
-    img = _fig_to_pil(fig)
-    return img
+    fig = Figure((10.0, 10.0), 120.0, facecolor="#f0f0f0")
+    ax = fig.panel((0.0, 0.0, 1.0, 1.0), xlim=(0, 1), ylim=(0, 1), facecolor="#f0f0f0")
+    ax.axis_off()
+    ax.text((0.5, 0.5), text, 16, "#888888", ha="center", va="center")
+    return fig.image()
 
 
 def build_demo_from_paths(

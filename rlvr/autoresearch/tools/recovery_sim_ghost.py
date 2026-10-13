@@ -29,13 +29,8 @@ import math
 import subprocess
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import torch
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
 
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.ghost_sim_common import (
@@ -55,15 +50,14 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _apply_perturbation,
     _build_segments,
     _draw_agent_box,
-    _ego_obb_corners,
     _lane_polylines,
-    _nearest_border_point,
     _point_to_segments_dist,
     _road_border_polylines,
     _route_polylines,
     closed_loop_rollout_with_plans,
 )
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
+from scenario_generation.canvas import Figure
 
 _BASELINE_COLOR = "#1f77b4"  # blue
 _PRISM_COLOR = "#d62728"  # red
@@ -111,23 +105,21 @@ def _render_ghost_step(
     px, py, ph = float(pr_pose[0]), float(pr_pose[1]), float(pr_pose[2])
     cx, cy = (bx + px) / 2, (by + py) / 2
 
-    fig = Figure(figsize=(11, 11))
-    ax = fig.add_subplot(1, 1, 1)
-    fig.patch.set_facecolor("#f8f8f8")
+    fig = Figure((11, 11), 100, facecolor="#f8f8f8")
+    ax = fig.panel(
+        (0.08, 0.06, 0.9, 0.83),
+        xlim=(cx - view_half_m, cx + view_half_m),
+        ylim=(cy - view_half_m, cy + view_half_m),
+        equal=True,
+    )
 
     # Lane network
     if centerlines:
-        ax.add_collection(
-            LineCollection(centerlines, colors=_LANE_COLOR, linewidths=0.6, alpha=0.28, zorder=1)
-        )
+        ax.lines(centerlines, _LANE_COLOR, width=0.6, alpha=0.28, z=1)
     if lefts:
-        ax.add_collection(
-            LineCollection(lefts, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
-        )
+        ax.lines(lefts, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
     if rights:
-        ax.add_collection(
-            LineCollection(rights, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
-        )
+        ax.lines(rights, _LANE_BORDER_COLOR, width=1.1, alpha=0.7, z=2)
 
     # Road borders (AABB-filtered)
     half = view_half_m * 1.5
@@ -143,16 +135,12 @@ def _render_ghost_step(
         ).any()
     ]
     if flt_borders:
-        ax.add_collection(
-            LineCollection(
-                flt_borders, colors=_ROAD_BORDER_COLOR, linewidths=2.0, alpha=0.9, zorder=5
-            )
-        )
+        ax.lines(flt_borders, _ROAD_BORDER_COLOR, width=2.0, alpha=0.9, z=5)
 
     # Route polylines
     for pl in route_polylines:
         if pl.shape[0] >= 2:
-            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR, lw=2.5, alpha=0.55, zorder=3)
+            ax.lines([pl[:, :2]], _ROUTE_COLOR, width=2.5, alpha=0.55, z=3)
 
     # Stopped neighbor OBBs
     if neighbor_boxes:
@@ -161,13 +149,9 @@ def _render_ghost_step(
 
     # Plans (faded thin)
     if bl_plan is not None and bl_plan.shape[0] > 1:
-        ax.plot(
-            bl_plan[:, 0], bl_plan[:, 1], "-", color=_BASELINE_COLOR, lw=1.4, alpha=0.45, zorder=24
-        )
+        ax.lines([bl_plan[:, :2]], _BASELINE_COLOR, width=1.4, alpha=0.45, z=24)
     if pr_plan is not None and pr_plan.shape[0] > 1:
-        ax.plot(
-            pr_plan[:, 0], pr_plan[:, 1], "-", color=_PRISM_COLOR, lw=1.4, alpha=0.45, zorder=24
-        )
+        ax.lines([pr_plan[:, :2]], _PRISM_COLOR, width=1.4, alpha=0.45, z=24)
 
     # Ego footprints + arrows (ego is rear-axle referenced)
     _draw_agent_box(
@@ -197,19 +181,21 @@ def _render_ghost_step(
         wheelbase=ego_wheelbase,
     )
     al = max(ego_length, 2.5)
-    ax.annotate(
-        "",
-        xy=(bx + al * math.cos(bh), by + al * math.sin(bh)),
-        xytext=(bx, by),
-        arrowprops=dict(arrowstyle="-|>", color=_BASELINE_COLOR, lw=1.2, mutation_scale=10),
-        zorder=22,
+    ax.arrows(
+        np.array([bx, by]),
+        np.array([bx + al * math.cos(bh), by + al * math.sin(bh)]),
+        _BASELINE_COLOR,
+        width=1.2,
+        head=10,
+        z=22,
     )
-    ax.annotate(
-        "",
-        xy=(px + al * math.cos(ph), py + al * math.sin(ph)),
-        xytext=(px, py),
-        arrowprops=dict(arrowstyle="-|>", color=_PRISM_COLOR, lw=1.2, mutation_scale=10),
-        zorder=23,
+    ax.arrows(
+        np.array([px, py]),
+        np.array([px + al * math.cos(ph), py + al * math.sin(ph)]),
+        _PRISM_COLOR,
+        width=1.2,
+        head=10,
+        z=23,
     )
 
     # Per-model lateral offsets
@@ -225,30 +211,23 @@ def _render_ghost_step(
     )
 
     # Legend
-    ax.plot(
+    ax.lines(
         [],
-        [],
-        "-",
-        color=_BASELINE_COLOR,
-        lw=2,
+        _BASELINE_COLOR,
+        width=2,
         label=f"{baseline_label}  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m",
     )
-    ax.plot(
+    ax.lines(
         [],
-        [],
-        "-",
-        color=_PRISM_COLOR,
-        lw=2,
+        _PRISM_COLOR,
+        width=2,
         label=f"{trained_label}  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m",
     )
-    ax.legend(fontsize=9, loc="upper left")
+    ax.legend("upper left")
 
-    ax.set_xlim(cx - view_half_m, cx + view_half_m)
-    ax.set_ylim(cy - view_half_m, cy + view_half_m)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m, initial ego frame)")
-    ax.set_ylabel("Y (m, initial ego frame)")
+    ax.grid(0.15)
+    ax.xlabel("X (m, initial ego frame)")
+    ax.ylabel("Y (m, initial ego frame)")
     title = (
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  "
         f"perturb={perturbation_label}  init lat={init_lateral:.2f}m\n"
@@ -259,10 +238,8 @@ def _render_ghost_step(
     )
     if title_prefix:
         title = f"{title_prefix}\n{title}"
-    ax.set_title(title, fontsize=10)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=100)
-    fig.clf()
+    ax.title(title, 10)
+    fig.save(output_path)
 
 
 def main() -> None:
@@ -303,7 +280,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[ghost-sim] loading 2 models...")
+    print("[ghost-sim] loading 2 models...")
     bl_model, bl_args = _load_model(args.baseline_model, args.baseline_lora, device)
     pr_model, pr_args = _load_model(args.prism_model, args.prism_lora, device)
     title_prefix = "\n".join(
@@ -334,7 +311,7 @@ def main() -> None:
     print(f"  perturbation: {perturb_label}  init_lat={init_lat:.2f}m")
 
     # Two rollouts
-    print(f"[ghost-sim] rollout (baseline)...")
+    print("[ghost-sim] rollout (baseline)...")
     bl = closed_loop_rollout_with_plans(
         bl_model,
         bl_args,
@@ -343,7 +320,7 @@ def main() -> None:
         advance_k=args.advance_k,
         sg_smooth=not args.no_sg_smooth,
     )
-    print(f"[ghost-sim] rollout (PRiSM)...")
+    print("[ghost-sim] rollout (PRiSM)...")
     pr = closed_loop_rollout_with_plans(
         pr_model,
         pr_args,

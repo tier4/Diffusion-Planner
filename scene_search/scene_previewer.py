@@ -1,22 +1,19 @@
 """Batch thumbnail generation using visualize_inputs().
 
-Renders every Nth scene in a batch as a small matplotlib figure for the GUI.
+Renders every Nth scene in a batch as a small canvas figure for the GUI.
 """
 
 import io
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from matplotlib.figure import Figure
 from PIL import Image
 
+from scenario_generation.canvas import Figure
 from scene_search.batch_search import Batch
 
 
@@ -50,14 +47,12 @@ def render_single_thumbnail(
 ) -> Figure:
     """Render a single scene thumbnail using visualize_inputs().
 
-    Returns a matplotlib Figure.
+    Returns a canvas Figure.
     """
     data = _load_npz_as_viz_data(npz_path)
-    fig = Figure(figsize=figsize, dpi=dpi)
-    ax = fig.add_subplot(111)
+    fig = Figure(figsize, float(dpi))
+    ax = fig.panel((0.1, 0.08, 0.87, 0.87), equal=True)
     visualize_inputs(data, save_path=None, ax=ax, view_ranges=[view_range])
-    ax.set_aspect("equal")
-    fig.tight_layout(pad=0.5)
     return fig
 
 
@@ -78,13 +73,7 @@ def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
         fw, fh, dpi = THUMB_SIZE
     try:
         fig = render_single_thumbnail(npz_path, view_range=view_range, figsize=(fw, fh), dpi=dpi)
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
-        buf.seek(0)
-        return (idx, buf.read(), label)
+        return (idx, fig.png_bytes(), label)
     except Exception as e:
         return (idx, None, f"{label} (error: {e})")
 

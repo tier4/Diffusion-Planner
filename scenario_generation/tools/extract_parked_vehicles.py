@@ -45,10 +45,10 @@ LABEL_TO_NAME = {
     LABEL_TRAILER: "trailer",
 }
 NAME_TO_COLOR = {
-    "car": "tab:blue",
-    "truck": "tab:orange",
-    "bus": "tab:red",
-    "trailer": "tab:purple",
+    "car": "#1f77b4",
+    "truck": "#ff7f0e",
+    "bus": "#d62728",
+    "trailer": "#9467bd",
 }
 
 
@@ -325,9 +325,9 @@ def _visualize(
     viz_path: Path,
 ) -> None:
     import lanelet2
-    import matplotlib.patches as mpatches
-    import matplotlib.pyplot as plt
     from autoware_lanelet2_extension_python.projection import MGRSProjector
+
+    from scenario_generation.canvas import Figure
 
     if not parked_vehicles:
         print("No parked vehicles to visualize.")
@@ -344,19 +344,21 @@ def _visualize(
     y_min = min(ys.min(), ego_positions[:, 1].min()) - pad
     y_max = max(ys.max(), ego_positions[:, 1].max()) + pad
 
-    fig, ax = plt.subplots(figsize=(20, 20))
+    fig = Figure((20.0, 20.0), 150.0)
+    ax = fig.panel((0.05, 0.04, 0.93, 0.93), xlim=(x_min, x_max), ylim=(y_min, y_max), equal=True)
+    bounds = []
     for ll in lanelet_map.laneletLayer:
         for bound in (ll.leftBound, ll.rightBound):
             bxs = [p.x for p in bound]
             bys = [p.y for p in bound]
             if any(x_min <= x <= x_max and y_min <= y <= y_max for x, y in zip(bxs, bys)):
-                ax.plot(bxs, bys, color="gray", linewidth=0.5, alpha=0.7)
+                bounds.append(np.stack([bxs, bys], 1))
+    ax.lines(bounds, "#808080", width=0.5, alpha=0.7)
 
-    ax.plot(
-        ego_positions[:, 0],
-        ego_positions[:, 1],
-        color="tab:green",
-        linewidth=1.0,
+    ax.lines(
+        [ego_positions[:, :2]],
+        "#2ca02c",
+        width=1.0,
         alpha=0.6,
         label="ego trajectory",
     )
@@ -371,33 +373,26 @@ def _visualize(
         corners = _obb_corners(cx, cy, yaw, v["dimensions"]["x"], v["dimensions"]["y"])
         label = name if name not in seen_labels else None
         seen_labels.add(name)
-        edge_color = "red" if "merged_count" in v else "black"
+        edge_color = "#ff0000" if "merged_count" in v else "#000000"
         lw = 1.2 if "merged_count" in v else 0.5
-        polygon = mpatches.Polygon(
-            corners,
-            closed=True,
-            facecolor=color,
-            edgecolor=edge_color,
-            linewidth=lw,
+        ax.polygons(
+            [corners],
+            fill=color,
+            edge=edge_color,
+            width=lw,
             alpha=0.7,
             label=label,
         )
-        ax.add_patch(polygon)
         head_x = cx + v["dimensions"]["x"] * 0.5 * math.cos(yaw)
         head_y = cy + v["dimensions"]["x"] * 0.5 * math.sin(yaw)
-        ax.plot([cx, head_x], [cy, head_y], color="black", linewidth=0.5)
+        ax.lines([np.array([[cx, cy], [head_x, head_y]])], "#000000", width=0.5)
 
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_aspect("equal")
-    ax.set_xlabel("map x [m]")
-    ax.set_ylabel("map y [m]")
-    ax.set_title(f"Parked vehicles ({len(parked_vehicles)})")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(viz_path, dpi=150)
-    plt.close(fig)
+    ax.xlabel("map x [m]")
+    ax.ylabel("map y [m]")
+    ax.title(f"Parked vehicles ({len(parked_vehicles)})")
+    ax.legend("upper right")
+    ax.grid(0.3)
+    fig.save(viz_path)
     print(f"Visualization saved to {viz_path}")
 
 

@@ -17,11 +17,9 @@ import random
 from pathlib import Path
 
 import gradio as gr
-import matplotlib.cm as cm
 import numpy as np
 import torch
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from matplotlib.figure import Figure
 
 from guidance_gui.generate_samples import generate_samples
 from guidance_gui.guidance_ui import (
@@ -32,8 +30,8 @@ from guidance_gui.guidance_ui import (
 from preference_optimization.annotation_gui import PreferenceAnnotator
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
-
-_CMAP = cm.get_cmap("tab10")
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 
 
 class PlaygroundAnnotator(PreferenceAnnotator):
@@ -140,48 +138,40 @@ class PlaygroundAnnotator(PreferenceAnnotator):
     # Override: N coloured trajectories instead of green / orange pair
     # ------------------------------------------------------------------
     def _create_trajectory_plot(self, time_step=None, view_range=60):
-        fig = Figure(figsize=(10, 11.5))
-        ax = fig.add_subplot(111)
+        fig = Figure((10, 11.5), 100)
+        ax = fig.panel(equal=True)
 
         data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
         visualize_inputs(data_cpu, save_path=None, ax=ax, view_ranges=[120])
 
         samples = self.all_samples
         if samples is None:
-            return fig
+            return fig.image()
 
         ref = samples[0]
         cx = (ref[0, 0] + ref[-1, 0]) / 2
         cy = (ref[0, 1] + ref[-1, 1]) / 2
 
         for i, traj in enumerate(samples):
-            color = _CMAP(i % 10)
-            ax.plot(
-                traj[:, 0], traj[:, 1], color=color, linewidth=2.5, alpha=0.8, label=f"Sample {i}"
-            )
+            color = qualitative("tab10", i)
+            ax.lines([traj[:, :2]], color, width=2.5, alpha=0.8, label=f"Sample {i}")
             if time_step is not None and 0 <= time_step < len(traj):
-                ax.scatter(
-                    [traj[time_step, 0]],
-                    [traj[time_step, 1]],
-                    color=color,
-                    s=60,
-                    zorder=10,
-                    edgecolors="black",
+                ax.markers(
+                    traj[time_step, :2], "o", size=np.sqrt(60), color=color, edge="#000000", z=10
                 )
 
         if "ego_agent_future" in self.current_data:
             gt = self.current_data["ego_agent_future"].cpu().numpy()[0]  # (80, 3)
             valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
             if np.any(valid):
-                ax.plot(gt[valid, 0], gt[valid, 1], "k--", linewidth=2, alpha=0.6, label="GT")
+                ax.lines([gt[valid, :2]], "#000000", width=2, alpha=0.6, dash="dash", label="GT")
 
-        ax.legend(loc="upper left", fontsize=8)
-        ax.set_title(f"Sample {self.current_index + 1} / {len(self.npz_paths)}")
+        ax.legend("upper left")
+        ax.title(f"Sample {self.current_index + 1} / {len(self.npz_paths)}")
         half = view_range / 2
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        return fig
+        return fig.image()
 
 
 # ---------------------------------------------------------------------------
@@ -218,11 +208,11 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
                 panel = build_guidance_panel(annotator.prototypes_path or _DEFAULT_PROTOTYPES_PATH)
 
             with gr.Column(scale=2):
-                traj_plot = gr.Plot(label="Trajectories")
+                traj_plot = gr.Image(label="Trajectories", type="pil")
                 with gr.Accordion("Speed & Curvature Plots", open=False):
                     with gr.Row():
-                        vel_plot = gr.Plot(label="Speed & Acceleration")
-                        lat_plot = gr.Plot(label="Lateral Curvature")
+                        vel_plot = gr.Image(label="Speed & Acceleration", type="pil")
+                        lat_plot = gr.Image(label="Lateral Curvature", type="pil")
                 sample_info = gr.Markdown("Sample — / —")
 
         # ---- helpers ----

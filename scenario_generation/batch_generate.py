@@ -20,10 +20,6 @@ import pickle
 import time
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -104,8 +100,7 @@ def _save_scene(scene: SceneContext, scene_dir: Path, snippet_name: str) -> None
         json.dump(info, f, indent=2)
 
     fig = render_scene_figure(scene)
-    fig.savefig(scene_dir / "initial.png", dpi=100, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(scene_dir / "initial.png")
 
 
 def run_batch(

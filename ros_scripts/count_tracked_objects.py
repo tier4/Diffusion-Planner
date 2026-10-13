@@ -15,18 +15,17 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import numpy as np
 import rosbag2_py
 import yaml
 from autoware_perception_msgs.msg import ObjectClassification, TrackedObjects
-from matplotlib.patches import Polygon as MplPolygon
 from nav_msgs.msg import Odometry
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
+
+from scenario_generation.canvas import Figure, Panel
 
 # ObjectClassification label constants
 # 0=UNKNOWN, 1=CAR, 2=TRUCK, 3=BUS, 4=TRAILER, 5=MOTORCYCLE, 6=BICYCLE, 7=PEDESTRIAN
@@ -217,40 +216,33 @@ def process_frame(
 
 
 def draw_frame(
-    ax: plt.Axes,
+    ax: Panel,
     frame: FrameResult,
     half_range: float,
     range_m: float,
 ):
     """1フレーム分のXY散布図を描画する。オブジェクトは回転長方形。"""
-    ax.set_aspect("equal")
+    ax.equal = True
 
     # 範囲の四角
-    rect = plt.Rectangle(
-        (frame.ego_x - half_range, frame.ego_y - half_range),
-        range_m,
-        range_m,
-        linewidth=1,
-        edgecolor="blue",
-        facecolor="lightblue",
-        alpha=0.15,
+    x0, y0 = frame.ego_x - half_range, frame.ego_y - half_range
+    rect = np.array(
+        [[x0, y0], [x0 + range_m, y0], [x0 + range_m, y0 + range_m], [x0, y0 + range_m]]
     )
-    ax.add_patch(rect)
+    ax.polygons([rect], fill="#add8e6", edge="#0000ff", width=1, alpha=0.15, z=1)
 
     # オブジェクトを長方形で描画
     drawn_categories: set[str] = set()
     for obj in frame.objects:
         corners = make_box_corners(obj.x, obj.y, obj.yaw, obj.length, obj.width)
-        polygon = MplPolygon(
-            corners,
-            closed=True,
-            facecolor=CATEGORY_COLORS[obj.category],
-            edgecolor="black",
-            linewidth=0.5,
+        ax.polygons(
+            [corners],
+            fill=CATEGORY_COLORS[obj.category],
+            edge="#000000",
+            width=0.5,
             alpha=0.6,
-            zorder=3,
+            z=3,
         )
-        ax.add_patch(polygon)
         drawn_categories.add(obj.category)
 
     # 自車を長方形で描画
@@ -261,44 +253,29 @@ def draw_frame(
         frame.ego_length,
         frame.ego_width,
     )
-    ego_polygon = MplPolygon(
-        ego_corners,
-        closed=True,
-        facecolor="red",
-        edgecolor="black",
-        linewidth=1.0,
-        alpha=0.8,
-        zorder=4,
-    )
-    ax.add_patch(ego_polygon)
+    ax.polygons([ego_corners], fill="#ff0000", edge="#000000", width=1.0, alpha=0.8, z=4)
 
     # 凡例用ダミーパッチ
-    legend_handles = [
-        mpatches.Patch(facecolor="red", edgecolor="black", label="Ego"),
-    ]
+    ax.polygons([], fill="#ff0000", label="Ego")
     for cat in CATEGORY_ORDER:
         if cat not in drawn_categories:
             continue
         cnt = frame.category_counts[cat]
-        legend_handles.append(
-            mpatches.Patch(
-                facecolor=CATEGORY_COLORS[cat], edgecolor="black", label=f"{cat} ({cnt})"
-            )
-        )
-    ax.legend(handles=legend_handles, loc="upper right", fontsize=7)
+        ax.polygons([], fill=CATEGORY_COLORS[cat], label=f"{cat} ({cnt})")
+    ax.legend("upper right")
 
     ax.set_xlim(frame.ego_x - half_range - 10, frame.ego_x + half_range + 10)
     ax.set_ylim(frame.ego_y - half_range - 10, frame.ego_y + half_range + 10)
-    ax.grid(True, alpha=0.3)
-    ax.set_xlabel("X [m]")
-    ax.set_ylabel("Y [m]")
+    ax.grid(0.3)
+    ax.xlabel("X [m]")
+    ax.ylabel("Y [m]")
 
     count_text = ", ".join(
         f"{cat}: {frame.category_counts[cat]}"
         for cat in CATEGORY_ORDER
         if frame.category_counts[cat] > 0
     )
-    ax.set_title(f"t={frame.t_sec:.1f}s | total={frame.total_in_range} ({count_text})")
+    ax.title(f"t={frame.t_sec:.1f}s | total={frame.total_in_range} ({count_text})")
 
 
 def main():
@@ -414,7 +391,8 @@ def main():
     # --- 静的な可視化 (時系列 + ヒストグラム) ---
     timestamps = [f.t_sec for f in frames]
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+    fig = Figure((16, 5), dpi=150)
+    axes = fig.grid(1, 2, margins=(0.05, 0.98, 0.12, 0.9), wspace=0.15)[0]
 
     # 時系列グラフ (カテゴリ別 stacked)
     ax = axes[0]
@@ -427,12 +405,12 @@ def main():
             timestamps, bottom, bottom + arr, alpha=0.6, color=CATEGORY_COLORS[cat], label=cat
         )
         bottom = bottom + arr
-    ax.plot(timestamps, total_counts, color="black", linewidth=0.8, label="total", alpha=0.7)
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Number of TrackedObjects")
-    ax.set_title(f"TrackedObject count over time (range={range_m}m)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.lines([np.stack([timestamps, total_counts], 1)], "#000000", 0.8, 0.7, z=2, label="total")
+    ax.xlabel("Time [s]")
+    ax.ylabel("Number of TrackedObjects")
+    ax.title(f"TrackedObject count over time (range={range_m}m)")
+    ax.legend("upper right")
+    ax.grid(0.3)
 
     # ヒストグラム (カテゴリ別 stacked)
     ax = axes[1]
@@ -447,26 +425,31 @@ def main():
         hist_labels.append(cat)
         hist_colors.append(CATEGORY_COLORS[cat])
     bin_max = int(total_counts.max()) + 2
-    ax.hist(
-        hist_data,
-        bins=range(0, bin_max),
-        stacked=True,
-        label=hist_labels,
-        color=hist_colors,
-        edgecolor="black",
-        alpha=0.7,
-    )
-    ax.set_xlabel(f"Number of TrackedObjects (in {range_m}m)")
-    ax.set_ylabel("Frequency")
-    ax.set_title("Distribution of TrackedObject count")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    edges = np.arange(0, bin_max)
+    hist_base = np.zeros(len(edges) - 1)
+    for arr, label, color in zip(hist_data, hist_labels, hist_colors):
+        counts, _ = np.histogram(arr, bins=edges)
+        ax.bars(
+            (edges[:-1] + edges[1:]) / 2,
+            counts,
+            np.diff(edges),
+            hist_base,
+            color,
+            edge="#000000",
+            alpha=0.7,
+            label=label,
+        )
+        hist_base = hist_base + counts
+    ax.set_ylim(0, max(float(hist_base.max()), 1.0) * 1.05)
+    ax.xlabel(f"Number of TrackedObjects (in {range_m}m)")
+    ax.ylabel("Frequency")
+    ax.title("Distribution of TrackedObject count")
+    ax.legend("upper right")
+    ax.grid(0.3)
 
-    plt.tight_layout()
     summary_path = save_dir / f"tracked_objects_count_{bag_name}.png"
-    plt.savefig(summary_path, dpi=150)
+    fig.save(summary_path)
     print(f"\nSaved summary: {summary_path}")
-    plt.close(fig)
 
     # --- 動画生成 ---
     if args.no_video:
@@ -482,11 +465,10 @@ def main():
     )
 
     for i, frame in enumerate(tqdm(selected_frames, desc="Rendering frames")):
-        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        ax = Figure((8, 8), dpi=100).panel()
         draw_frame(ax, frame, half_range, range_m)
         frame_path = frames_dir / f"frame_{i:06d}.png"
-        fig.savefig(frame_path, dpi=100)
-        plt.close(fig)
+        ax.save(frame_path)
 
     print(f"Saved {len(selected_frames)} frames to: {frames_dir}")
 

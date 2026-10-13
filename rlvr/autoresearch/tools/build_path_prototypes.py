@@ -23,13 +23,12 @@ import importlib.util
 import json
 from pathlib import Path
 
-import matplotlib
+import numpy as np
+import torch
+from tqdm import tqdm
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from tqdm import tqdm  # noqa: E402
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 
 
 def _load_torch_kmeans():
@@ -113,26 +112,21 @@ def load_path_features(paths, num_points, min_arc, max_samples, seed):
 
 def plot_path_prototypes(prototypes, counts, output_png):
     K = prototypes.shape[0]
-    cmap = plt.get_cmap("tab20")
     frac = np.sqrt(counts / max(counts.max(), 1))
-    fig, ax = plt.subplots(figsize=(9, 9))
+    fig = Figure((9, 9), 120)
+    ax = fig.panel((0.08, 0.06, 0.88, 0.88), equal=True)
     for k in range(K):
-        ax.plot(
-            prototypes[k, :, 0],
-            prototypes[k, :, 1],
-            "-",
-            color=cmap(k % 20),
-            lw=0.8 + 2.4 * frac[k],
+        ax.lines(
+            [prototypes[k, :, :2]],
+            qualitative("tab20", k),
+            width=0.8 + 2.4 * frac[k],
             label=f"{k} (n={int(counts[k])})",
         )
-    ax.plot(0, 0, "k*", ms=14)
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=7, ncol=2)
-    ax.set_title(f"{K} path prototypes (arc-length resampled, speed-free)")
-    fig.tight_layout()
-    fig.savefig(output_png, dpi=120)
-    plt.close(fig)
+    ax.markers(np.zeros((1, 2)), "*", size=14, color="#000000")
+    ax.grid(0.3)
+    ax.legend("upper right", ncol=2, size=7)
+    ax.title(f"{K} path prototypes (arc-length resampled, speed-free)")
+    fig.save(output_png)
 
 
 def main():

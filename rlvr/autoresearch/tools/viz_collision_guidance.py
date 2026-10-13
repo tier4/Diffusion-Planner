@@ -60,6 +60,7 @@ from rlvr.grpo_trainer_batched import (
     get_generation_config_labels_for_variant,
 )
 from rlvr.reward import compute_static_collision_penalty
+from scenario_generation.canvas import Figure, oriented_box
 
 
 @torch.no_grad()
@@ -148,14 +149,8 @@ def _draw_scene_figure(
     output_path: Path,
     title: str,
 ) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.transforms as mtransforms
-    from matplotlib.patches import Rectangle
-
-    fig, ax = plt.subplots(1, 1, figsize=(11, 10))
+    fig = Figure((11, 10), dpi=130)
+    ax = fig.panel(equal=True)
 
     # Lane network + road borders.
     lanes = np.asarray(data_np["lanes"]) if "lanes" in data_np else None
@@ -169,9 +164,7 @@ def _draw_scene_figure(
                 line = ls[i]
                 valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=-1) > 0.01)
                 if valid.sum() > 1:
-                    ax.plot(
-                        line[valid, 0], line[valid, 1], color="#dd2222", lw=2.0, alpha=0.5, zorder=3
-                    )
+                    ax.lines([line[valid, :2]], "#dd2222", width=2.0, alpha=0.5, z=3)
 
     # Stopped-NPC OBBs (from real NPZ — any neighbor whose future shows ~no motion).
     nb_past = np.asarray(data_np["neighbor_agents_past"])
@@ -202,19 +195,13 @@ def _draw_scene_figure(
         heading = math.atan2(sin_h, cos_h)
         width = float(nb_past[i, -1, 6])
         length = float(nb_past[i, -1, 7])
-        t_rot = mtransforms.Affine2D().rotate(heading).translate(xy0[0], xy0[1]) + ax.transData
-        ax.add_patch(
-            Rectangle(
-                (-length / 2, -width / 2),
-                length,
-                width,
-                lw=1.2,
-                ec="#cc6600",
-                fc="#ffb366",
-                alpha=0.75,
-                zorder=14,
-                transform=t_rot,
-            )
+        ax.polygons(
+            [oriented_box(xy0[0], xy0[1], heading, length, width, length / 2)],
+            fill="#ffb366",
+            edge="#cc6600",
+            width=1.2,
+            alpha=0.75,
+            z=14,
         )
 
     # Ego box at t=0 (predictions are ego-centric so t=0 is origin).
@@ -223,19 +210,13 @@ def _draw_scene_figure(
         es = es[0]
     ego_wb, ego_L, ego_W = float(es[0]), float(es[1]), float(es[2])
     cog0 = (ego_wb / 2.0, 0.0)
-    t_rot0 = mtransforms.Affine2D().rotate(0.0).translate(cog0[0], cog0[1]) + ax.transData
-    ax.add_patch(
-        Rectangle(
-            (-ego_L / 2, -ego_W / 2),
-            ego_L,
-            ego_W,
-            lw=2.0,
-            ec="#3366cc",
-            fc="#3366cc",
-            alpha=0.30,
-            zorder=18,
-            transform=t_rot0,
-        )
+    ax.polygons(
+        [oriented_box(cog0[0], cog0[1], 0.0, ego_L, ego_W, ego_L / 2)],
+        fill="#3366cc",
+        edge="#3366cc",
+        width=2.0,
+        alpha=0.30,
+        z=18,
     )
 
     # Slot-category colour scheme so the 16 trajectories are readable:
@@ -278,14 +259,12 @@ def _draw_scene_figure(
     for k in range(K):
         cat = _slot_category(k)
         xy = trajs_np[k, :, :2]
-        ax.plot(
-            xy[:, 0],
-            xy[:, 1],
-            "-",
-            color=cat_color[cat],
-            lw=cat_lw[cat],
+        ax.lines(
+            [xy],
+            cat_color[cat],
+            width=cat_lw[cat],
             alpha=cat_alpha[cat],
-            zorder=26 if cat in ("det", "col") else (22 if cat == "clspd" else 20),
+            z=26 if cat in ("det", "col") else (22 if cat == "clspd" else 20),
         )
 
     # Build neighbor tensors once so we can cheaply re-score each slot to
@@ -361,50 +340,35 @@ def _draw_scene_figure(
         cx_k, cy_k = trajs_np[k, t_star, :2]
         cog_k = (cx_k + math.cos(h_k) * ego_wb / 2.0, cy_k + math.sin(h_k) * ego_wb / 2.0)
         zone_k = _zone_for(d_star)
-        t_rot_k = mtransforms.Affine2D().rotate(h_k).translate(cog_k[0], cog_k[1]) + ax.transData
         ec = cat_color[cat]
-        ax.add_patch(
-            Rectangle(
-                (-ego_L / 2, -ego_W / 2),
-                ego_L,
-                ego_W,
-                lw=1.8,
-                ec=ec,
-                fc=_ZONE_COLORS[zone_k],
-                alpha=0.35,
-                zorder=28,
-                transform=t_rot_k,
-            )
+        ax.polygons(
+            [oriented_box(cog_k[0], cog_k[1], h_k, ego_L, ego_W, ego_L / 2)],
+            fill=_ZONE_COLORS[zone_k],
+            edge=ec,
+            width=1.8,
+            alpha=0.35,
+            z=28,
         )
-        ax.annotate(
+        ax.text(
+            (cog_k[0], cog_k[1]),
             f"#{k} {slot_labels[k]}  d={d_star:.2f} @t={t_star}",
-            xy=(cog_k[0], cog_k[1]),
-            fontsize=6,
-            color=ec,
+            6,
+            ec,
             ha="center",
             va="center",
-            xytext=(0, -10 if (k % 2) else 10),
-            textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor=ec, alpha=0.9),
-            zorder=29,
+            offset=(0, -10 if (k % 2) else 10),
+            box={"face": "#ffffff", "edge": ec, "alpha": 0.9, "pad": 0.12},
+            z=29,
         )
 
     # Legend for slot categories (trajectory colours).
-    from matplotlib.lines import Line2D
-
-    legend_handles = [
-        Line2D([0], [0], color=SLOT_DET_COLOR, lw=2.0, label="det (slot 0)"),
-        Line2D(
-            [0],
-            [0],
-            color=SLOT_COL_COLOR,
-            lw=2.0,
-            label=f"collision-guided ({len(collision_slots)} slots)",
-        ),
-        Line2D([0], [0], color=SLOT_CLSPD_COLOR, lw=1.2, label="other CL+SPD guided"),
-        Line2D([0], [0], color=SLOT_NOISE_COLOR, lw=0.7, label="noise / random"),
-    ]
-    ax.legend(handles=legend_handles, loc="upper left", fontsize=7, framealpha=0.9)
+    ax.lines([], SLOT_DET_COLOR, width=2.0, label="det (slot 0)")
+    ax.lines(
+        [], SLOT_COL_COLOR, width=2.0, label=f"collision-guided ({len(collision_slots)} slots)"
+    )
+    ax.lines([], SLOT_CLSPD_COLOR, width=1.2, label="other CL+SPD guided")
+    ax.lines([], SLOT_NOISE_COLOR, width=0.7, label="noise / random")
+    ax.legend("upper left")
 
     # Summary: how many of the 16, and specifically of the 4 collision slots, cleared.
     n_safe = sum(1 for s in scores if s["zone"] == "safe")
@@ -445,21 +409,18 @@ def _draw_scene_figure(
     )
     ax.set_xlim(cx - half, cx + half)
     ax.set_ylim(cy - half, cy + half)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_title(
+    ax.grid(0.15)
+    ax.xlabel("X (m)")
+    ax.ylabel("Y (m)")
+    ax.title(
         f"{title}\n"
         f"16-gen: {n_safe}/{K} safe, {n_cross}/{K} cross.  "
         f"Collision slots (slots {sorted(collision_slots)}): "
         f"{col_safe}/{len(collision_slots)} safe, {col_cross}/{len(collision_slots)} cross.  "
         f"best d (any slot)={best_d:.2f} m  best d (col slot)={best_col_d:.2f} m",
-        fontsize=9,
+        9,
     )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=130, bbox_inches="tight")
-    plt.close(fig)
+    fig.save(output_path)
 
 
 def main() -> None:

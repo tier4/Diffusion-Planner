@@ -22,36 +22,33 @@ Example (8 samples, 12 scenes, with synthetic collider augmentation):
 
 import argparse
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.cm as cm  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
-from diffusion_planner.grpo_utils import (  # noqa: E402
+import numpy as np
+import torch
+from diffusion_planner.grpo_epoch import _neighbor_future_world
+from diffusion_planner.grpo_utils import (
     compute_collision_reward,
     compute_group_advantages,
     expand_batch,
     sample_group,
 )
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner  # noqa: E402
-from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
-from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
-from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.neighbor_db import (
     DEFAULT_NEIGHBOR_DB_PATH,
     NeighborPatternDB,
 )
-from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
-from diffusion_planner.utils.visualize_input import (  # noqa: E402
+from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
+from diffusion_planner.utils.visualize_input import (
     draw_lanes,
     draw_polygons_and_lines,
     draw_route,
     draw_static_objects,
 )
-from matplotlib.colors import Normalize  # noqa: E402
-from torch.utils.data import default_collate  # noqa: E402
+from torch.utils.data import default_collate
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import map_values
 
 # Column layout of a neighbor past row (see loss.py).
 _PAST_X, _PAST_Y, _PAST_COS, _PAST_SIN = 0, 1, 2, 3
@@ -296,7 +293,31 @@ def draw_footprints(ax, traj_xyhead, length, width, color, stride, alpha=0.35, l
         if x == 0.0 and y == 0.0:
             continue
         corners = _bbox_corners(x, y, cos, sin, length, width)
-        ax.plot(corners[:, 0], corners[:, 1], "-", color=color, lw=lw, alpha=alpha, zorder=3)
+        ax.lines([corners], color, lw, alpha, z=3)
+
+
+def figure_legend(fig, rect, entries, ncol, size=8):
+    """A framed legend of ``(label, color, width, dash)`` line entries in ``ncol`` columns at ``rect``."""
+    nrow = int(np.ceil(len(entries) / ncol))
+    panel = fig.panel(rect, xlim=(0, ncol), ylim=(0, nrow), frame=False)
+    panel.polygons(
+        [np.array([[0, 0], [ncol, 0], [ncol, nrow], [0, nrow]])],
+        fill="#ffffff",
+        edge="#cccccc",
+        alpha=0.85,
+        z=0,
+    )
+    for k, (label, color, width, dash) in enumerate(entries):
+        col, row = k % ncol, k // ncol
+        y = nrow - row - 0.5
+        panel.lines([np.array([[col + 0.04, y], [col + 0.2, y]])], color, width, dash=dash)
+        panel.text((col + 0.24, y), label, size, va="center")
+
+
+def gray(level: float) -> str:
+    """A matplotlib grey level string such as ``"0.4"`` as ``#rrggbb``."""
+    v = round(level * 255)
+    return f"#{v:02x}{v:02x}{v:02x}"
 
 
 def diversity_metrics(samples_xy):
@@ -402,15 +423,14 @@ def main():
     r_lo, r_hi = float(r_all.min()), float(r_all.max())
     if r_hi - r_lo < 1e-6:
         r_lo, r_hi = r_lo - 1.0, r_hi + 1.0
-    reward_norm = Normalize(vmin=r_lo, vmax=r_hi)
-    reward_cmap = plt.get_cmap("RdYlGn")
-
     # --- plot ---
     cols = min(4, S)
     rows = int(np.ceil(S / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 6 * rows))
-    axes = np.atleast_1d(axes).ravel()
-    cmap = plt.get_cmap("turbo")
+    fig = Figure((6 * cols, 6 * rows), dpi=120)
+    right = 0.93 if v.color_by_reward else 0.98
+    grid = fig.grid(rows, cols, margins=(0.05, right, 0.04, 0.9), wspace=0.2, hspace=0.25)
+    axes = [panel for row in grid for panel in row]
+    legend_entries = []
 
     for s in range(S):
         ax = axes[s]
@@ -424,8 +444,8 @@ def main():
             if not np.any(past != 0.0):
                 continue
             is_injected = injected_mask[s, p]
-            box_color = "magenta" if is_injected else "0.5"
-            fut_color = "magenta" if is_injected else "0.75"
+            box_color = "#ff00ff" if is_injected else gray(0.5)
+            fut_color = "#ff00ff" if is_injected else gray(0.75)
             box_lw = 1.4 if is_injected else 0.8
             cur = past[-1]
             corners = _bbox_corners(
@@ -436,25 +456,21 @@ def main():
                 cur[_PAST_LENGTH],
                 cur[_PAST_WIDTH],
             )
-            ax.plot(
-                corners[:, 0],
-                corners[:, 1],
-                "-",
-                color=box_color,
-                lw=box_lw,
-                alpha=0.9 if is_injected else 0.7,
-                zorder=3.5 if is_injected else 2,
+            ax.lines(
+                [corners],
+                box_color,
+                box_lw,
+                0.9 if is_injected else 0.7,
+                z=3.5 if is_injected else 2,
             )
             fut = _nonzero_rows(neigh_future[s, p, :, :2])
             if fut.shape[0] > 0:
-                ax.plot(
-                    fut[:, 0],
-                    fut[:, 1],
-                    "-",
-                    color=fut_color,
-                    lw=1.2 if is_injected else 0.8,
-                    alpha=0.9 if is_injected else 0.6,
-                    zorder=3.5 if is_injected else 2,
+                ax.lines(
+                    [fut],
+                    fut_color,
+                    1.2 if is_injected else 0.8,
+                    0.9 if is_injected else 0.6,
+                    z=3.5 if is_injected else 2,
                 )
 
         # ego length/width for the footprint boxes
@@ -464,7 +480,9 @@ def main():
         gt = _nonzero_rows(ego_future_gt[s, :, :2])
         if gt.shape[0] > 0:
             gt_lbl = "GT ego" if not v.show_gt_reward else f"GT ego (r={gt_rewards[s]:.1f})"
-            ax.plot(gt[:, 0], gt[:, 1], "k--", lw=2.0, label=gt_lbl if s == 0 else None, zorder=5)
+            ax.lines([gt], "#000000", 2.0, dash="dash", z=5)
+            if s == 0:
+                legend_entries.append((gt_lbl, "#000000", 2.0, "dash"))
         if v.show_footprint:
             gt_full = ego_future_gt[s]  # [T, 3] (x, y, heading)
             gt_xyh = np.stack(
@@ -476,7 +494,7 @@ def main():
                 gt_xyh,
                 ego_len,
                 ego_wid,
-                "black",
+                "#000000",
                 v.footprint_stride,
                 alpha=0.3,
                 mode=v.footprint_mode,
@@ -486,20 +504,12 @@ def main():
         for i in range(n):
             traj = ego_samples[s, i]  # [T, 4] (x, y, cos, sin)
             if v.color_by_reward:
-                color = reward_cmap(reward_norm(rewards[s, i]))
+                color = map_values(rewards[s, i], "RdYlGn", r_lo, r_hi)
             else:
-                color = cmap(i / max(n - 1, 1))
-            sample_lbl = f"sample {i}" if (s == 0 and not v.color_by_reward) else None
-            ax.plot(
-                traj[:, 0],
-                traj[:, 1],
-                "-",
-                color=color,
-                lw=1.5,
-                alpha=0.85,
-                label=sample_lbl,
-                zorder=4,
-            )
+                color = map_values(i / max(n - 1, 1), "turbo", 0.0, 1.0)
+            if s == 0 and not v.color_by_reward:
+                legend_entries.append((f"sample {i}", color, 1.5, None))
+            ax.lines([traj[:, :2]], color, 1.5, 0.85, z=4)
             if v.show_footprint:
                 draw_footprints(
                     ax,
@@ -514,34 +524,32 @@ def main():
             if v.annotate_reward:
                 end = _nonzero_rows(traj[:, :2])
                 if end.shape[0] > 0:
-                    ax.annotate(
+                    ax.text(
+                        (end[-1, 0], end[-1, 1]),
                         f"r={rewards[s, i]:.1f}\na={advantages[s, i]:+.2f}",
-                        xy=(end[-1, 0], end[-1, 1]),
-                        fontsize=6,
-                        color="black",
+                        6,
+                        "#000000",
                         ha="center",
                         va="center",
-                        zorder=7,
-                        bbox=dict(
-                            boxstyle="round,pad=0.1", fc="white", ec=color, lw=0.8, alpha=0.7
-                        ),
+                        box={"face": "#ffffff", "edge": color, "alpha": 0.7, "pad": 0.1},
+                        z=7,
                     )
 
         # current ego box at the origin (its actual shape and heading)
         ego_cur = raw_np["ego_current_state"][s]  # [10]: x, y, cos, sin, ...
         ego_box = _bbox_corners(ego_cur[0], ego_cur[1], ego_cur[2], ego_cur[3], ego_len, ego_wid)
-        ax.plot(ego_box[:, 0], ego_box[:, 1], "-", color="black", lw=2.0, zorder=6)
-        ax.plot(0, 0, "k*", ms=10, zorder=6)
+        ax.lines([ego_box], "#000000", 2.0, z=6)
+        ax.markers(np.zeros(2), "*", size=10, color="#000000", z=6)
         ep, path = diversity_metrics(ego_samples[s, :, :, :2])
         best_i = int(np.argmax(rewards[s]))
         gt_str = f" GT={gt_rewards[s]:.1f}" if v.show_gt_reward else ""
-        ax.set_title(
+        ax.title(
             f"scene #{idx[s]}  reward[{rewards[s].min():.1f},{rewards[s].max():.1f}]"
             f" best#{best_i}{gt_str}\nendpoint_spread={ep:.2f}m  path_spread={path:.2f}m",
-            fontsize=9,
+            9,
         )
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, alpha=0.3)
+        ax.equal = True
+        ax.grid(0.3)
 
         # zoom to the ego region so the sample diversity is visible (far neighbors clipped).
         if v.zoom_margin > 0:
@@ -556,20 +564,15 @@ def main():
             ax.set_ylim(lo[1], hi[1])
 
     for ax in axes[S:]:
-        ax.axis("off")
+        ax.axis_off()
 
-    handles, labels = axes[0].get_legend_handles_labels()
-    proxies = [
-        plt.Line2D([0], [0], color="magenta", lw=1.4, label="injected collider"),
-        plt.Line2D([0], [0], color="0.5", lw=0.8, label="scene neighbor"),
+    legend_entries += [
+        ("injected collider", "#ff00ff", 1.4, None),
+        ("scene neighbor", gray(0.5), 0.8, None),
     ]
-    fig.legend(
-        handles + proxies,
-        labels + [p.get_label() for p in proxies],
-        loc="upper right",
-        fontsize=8,
-        ncol=2,
-    )
+    legend_rows = int(np.ceil(len(legend_entries) / 2))
+    legend_height = legend_rows * 0.3 / (6 * rows)
+    figure_legend(fig, (0.7, 0.965 - legend_height, 0.28, legend_height), legend_entries, 2)
     all_ep = np.mean([diversity_metrics(ego_samples[s, :, :, :2])[0] for s in range(S)])
     mean_reward = float(rewards.mean())
     mean_best = float(rewards.max(axis=1).mean())  # mean over scenes of the per-group best
@@ -578,14 +581,14 @@ def main():
         f"GRPO samples & reward: N={n} per scene, noise_scale={v.grpo_noise_scale}, "
         f"aug={v.aug_mode}  |  mean reward={mean_reward:.2f}, mean best-of-group={mean_best:.2f}"
         f"{gt_str}  |  mean endpoint_spread={all_ep:.2f}m",
-        fontsize=12,
+        12,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
     if v.color_by_reward:
-        sm = cm.ScalarMappable(norm=reward_norm, cmap=reward_cmap)
-        cbar = fig.colorbar(sm, ax=axes.tolist(), fraction=0.02, pad=0.01)
-        cbar.set_label("collision reward  (higher = fewer/less-severe collisions)", fontsize=9)
-    fig.savefig(v.output_path, dpi=120)
+        anchor = fig.panel((right + 0.002, 0.04, 0.0001, 0.86), frame=False)
+        anchor.colorbar(
+            "RdYlGn", r_lo, r_hi, "collision reward  (higher = fewer/less-severe collisions)"
+        )
+    fig.save(v.output_path)
     print(f"Saved {S} scenes to {v.output_path}")
     print(
         f"  mean reward={mean_reward:.3f}  mean best-of-group={mean_best:.3f}"

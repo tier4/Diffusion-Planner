@@ -23,10 +23,6 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -43,6 +39,7 @@ from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, writ
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base, draw_traj
 from rlvr.reward import compute_reward_batch
+from scenario_generation.canvas import Figure
 
 
 def _load_model_with_lora(model_path, lora_path, device):
@@ -279,7 +276,8 @@ def main():
             if args.no_viz:
                 continue
 
-            fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+            fig = Figure((12, 12), dpi=120)
+            ax = fig.panel(equal=True)
             draw_scene_base(ax, sp, draw_stopped_neighbors=False)
             _draw_current_neighbors(ax, sp)
             if gt_np is not None:
@@ -302,12 +300,10 @@ def main():
             half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 6
             ax.set_xlim(cx - half, cx + half)
             ax.set_ylim(cy - half, cy + half)
-            ax.set_aspect("equal")
-            ax.legend(fontsize=9, loc="upper left")
-            ax.set_title(f"{name}", fontsize=10)
+            ax.legend("upper left")
+            ax.title(f"{name}", 10)
 
-            fig.savefig(out_dir / f"{name}.png", dpi=120, bbox_inches="tight")
-            plt.close(fig)
+            fig.save(out_dir / f"{name}.png")
 
     # --- Aggregate stats ---
     def _to_score_list(results):
@@ -349,14 +345,8 @@ def main():
         n = len(scored_paths)
         cols = args.collage_cols
         rows = (n + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(8 * cols, 8 * rows))
-        if rows == 1 and cols == 1:
-            axes = np.array([[axes]])
-        elif rows == 1:
-            axes = axes[None, :]
-        elif cols == 1:
-            axes = axes[:, None]
-        axes_flat = axes.flatten()
+        fig = Figure((8 * cols, 8 * rows), dpi=80)
+        axes_flat = [p for row in fig.grid(rows, cols, equal=True) for p in row]
 
         for si, sp in enumerate(scored_paths):
             if si >= len(axes_flat):
@@ -380,16 +370,13 @@ def main():
             half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 6
             ax.set_xlim(cx - half, cx + half)
             ax.set_ylim(cy - half, cy + half)
-            ax.set_aspect("equal")
-            ax.legend(fontsize=7, loc="upper left")
-            ax.set_title(f"[{si}] {results_a[si]['scene']}", fontsize=8)
+            ax.legend("upper left")
+            ax.title(f"[{si}] {results_a[si]['scene']}", 8)
 
         for j in range(n, len(axes_flat)):
-            axes_flat[j].axis("off")
+            axes_flat[j].hide()
 
-        fig.tight_layout()
-        fig.savefig(out_dir / "collage.png", dpi=80, bbox_inches="tight")
-        plt.close(fig)
+        fig.save(out_dir / "collage.png")
         print(f"Saved collage: {out_dir / 'collage.png'}")
 
     # --- Save JSON ---

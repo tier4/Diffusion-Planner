@@ -3,13 +3,15 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import rosbag2_py
 import yaml
 from diffusion_planner_ros.utils import parse_timestamp
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
+
+from scenario_generation.canvas import Figure
+from scenario_generation.colormaps import qualitative
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,8 +129,10 @@ if __name__ == "__main__":
     output_dir = bag_root_dir.parent.parent / "route_visualization" / date_str
     output_dir.mkdir(parents=True, exist_ok=True)
     for time_str, data in data_dict.items():
-        plt.figure(figsize=(8, 6))
-        plt.scatter(all_pos_x, all_pos_y, s=0.1, color="gray")
+        ax = Figure((8, 6), dpi=100).panel((0.1, 0.1, 0.62, 0.84), equal=True)
+        ax.markers(
+            np.stack([all_pos_x, all_pos_y], 1), "o", size=np.sqrt(0.1), color="#808080", z=1
+        )
         if len(data[f"kinematic_state_time"]) == 0:
             continue
         kinematic_state_time = data[f"kinematic_state_time"][0]
@@ -137,14 +141,16 @@ if __name__ == "__main__":
         kinematic_state_time = np.array(data[f"kinematic_state_time"])
         kinematic_state_time = (kinematic_state_time - first_time) / 1e9
         # kinematic_state_timeで色を変える
-        plt.scatter(
-            data[f"pos_x"],
-            data[f"pos_y"],
-            c=kinematic_state_time,
+        ax.markers(
+            np.stack([data[f"pos_x"], data[f"pos_y"]], 1),
+            "o",
+            size=6,
+            values=kinematic_state_time,
             cmap="viridis",
+            z=1,
         )
-        plt.colorbar(label="time [sec]", orientation="horizontal", location="bottom", pad=0.1)
-        plt.title(f"{time_str}")
+        ax.colorbar("viridis", kinematic_state_time.min(), kinematic_state_time.max(), "time [sec]")
+        ax.title(f"{time_str}")
         for i in range(100000):
             if f"route{i}" not in data:
                 break
@@ -157,16 +163,27 @@ if __name__ == "__main__":
             goal_y = goal_pose["py"]
             time = route["time"]
             diff_time = (time - first_time) / 1e9
-            plt.scatter(start_x, start_y, label=f"{diff_time:.1f}sec: start pose{i}", marker="x")
-            plt.scatter(goal_x, goal_y, label=f"{diff_time:.1f}sec: goal pose{i}", marker="x")
+            ax.markers(
+                np.array([start_x, start_y]),
+                "x",
+                size=6,
+                color=qualitative("tab10", 2 * i),
+                z=1,
+                label=f"{diff_time:.1f}sec: start pose{i}",
+            )
+            ax.markers(
+                np.array([goal_x, goal_y]),
+                "x",
+                size=6,
+                color=qualitative("tab10", 2 * i + 1),
+                z=1,
+                label=f"{diff_time:.1f}sec: goal pose{i}",
+            )
 
-        plt.xlabel("x")
-        plt.ylabel("y")
-        plt.legend(loc="upper left", bbox_to_anchor=(1, 1))
-        plt.axis("equal")
-        plt.grid()
-        plt.tight_layout()
+        ax.xlabel("x")
+        ax.ylabel("y")
+        ax.legend("upper left")
+        ax.grid(1.0)
         save_path = output_dir / f"{time_str}.png"
         print(f"Saving to {save_path}")
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0.05)
-        plt.close()
+        ax.save(save_path)

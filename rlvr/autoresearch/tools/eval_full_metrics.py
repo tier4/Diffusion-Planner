@@ -126,12 +126,8 @@ def _load(model_path, lora_path, device):
 
 def render_scenes(rows_a, trajs_a, label_a, rows_b, trajs_b, label_b, out_dir):
     """Per-scene PNGs of the det trajectory(ies) on each scene, using the canonical renderers."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base, draw_traj
+    from scenario_generation.canvas import Figure
 
     viz_dir = Path(out_dir) / "scenes"
     viz_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +138,8 @@ def render_scenes(rows_a, trajs_a, label_a, rows_b, trajs_b, label_b, out_dir):
         ta = trajs_a.get(sp)
         if ta is None:
             continue
-        fig, ax = plt.subplots(1, 1, figsize=(11, 11))
+        fig = Figure((11, 11), 110)
+        ax = fig.panel((0.07, 0.05, 0.9, 0.9), equal=True)
         draw_scene_base(ax, sp)
         draw_traj(ax, ta, f"{label_a} (sc={ra['sc_min_dist']:.2f}m)", "#1f77b4", sp)
         pts = [ta[:, :2], np.zeros((1, 2))]
@@ -156,11 +153,9 @@ def render_scenes(rows_a, trajs_a, label_a, rows_b, trajs_b, label_b, out_dir):
         half = max(np.ptp(allp[:, 0]), np.ptp(allp[:, 1])) * 0.6 + 6
         ax.set_xlim(cx - half, cx + half)
         ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        ax.legend(fontsize=9, loc="upper left")
-        ax.set_title(name, fontsize=10)
-        fig.savefig(viz_dir / f"{name}.png", dpi=110, bbox_inches="tight")
-        plt.close(fig)
+        ax.legend("upper left")
+        ax.title(name, 10)
+        fig.save(viz_dir / f"{name}.png")
     print(f"  rendered {len(rows_a)} scene PNGs -> {viz_dir}")
 
 
