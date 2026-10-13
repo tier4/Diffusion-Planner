@@ -5,7 +5,6 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
     "einops",
     "gradio",
-    "matplotlib",
     "natsort",
     "numpy>=1.26,<2",
     "onnx",

@@ -8,7 +8,7 @@ onnxsim>=0.4.36
 onnxruntime-gpu==1.23.2
 einops
 gradio>=4.0.0
-matplotlib>=3.7.0
+pillow>=12.2.0
 peft
 scipy>=1.7.0
 shapely>=2.0
