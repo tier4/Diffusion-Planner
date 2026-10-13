@@ -35,7 +35,8 @@ PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.open_loop \
 ```
 
 Results include `summary.json` and per-sample scores under `details/`. Omit
-`--no-visualization` to also save prediction images.
+`--no-visualization` to also save prediction images; `--draw-workers` sets how many
+processes draw them (default 8).
 
 ## Closed-loop
 

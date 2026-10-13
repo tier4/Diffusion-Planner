@@ -1,4 +1,4 @@
-"""PIL raster canvas for ego-frame scene images: supersampled, clipped to a square view."""
+"""PIL drawing of native-H5 scenes: a supersampled canvas clipped to a square ego-frame view."""
 
 from __future__ import annotations
 
@@ -11,6 +11,20 @@ SUPERSAMPLE = 2
 POINT_PX = 120.0 / 72.0
 GRID_COLOR = "#b0b0b0"
 TEXT_COLOR = (0, 0, 0)
+VISUALIZATION_SIZE_PX = 960
+VISUALIZATION_HALF_M = 60.0
+VISUALIZATION_GRID_M = 20.0
+VISUALIZATION_KEYS = (
+    "lanes",
+    "route_lanes",
+    "road_borders",
+    "stop_lines",
+    "intersection_area",
+    "ego_agent_past",
+    "ego_agent_future",
+    "neighbor_agents_past",
+    "goal_pose",
+)
 
 
 def rgba(color: str, alpha: float = 1.0) -> tuple[int, int, int, int]:
@@ -224,3 +238,58 @@ class SceneCanvas:
         self._legend()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.image.reduce(SUPERSAMPLE).save(path, compress_level=1)
+
+
+def _valid_points(values: np.ndarray) -> np.ndarray:
+    """Return a geometry row without H5's all-zero padding points."""
+    return values[np.any(values != 0, axis=-1)]
+
+
+def _valid_rows(geometries: np.ndarray, minimum: int = 1) -> list[np.ndarray]:
+    """Every native H5 geometry with at least ``minimum`` non-padding points."""
+    rows = [_valid_points(geometry) for geometry in geometries]
+    return [row for row in rows if len(row) >= minimum]
+
+
+def visualize_h5_prediction(
+    frame: dict[str, np.ndarray], prediction: np.ndarray, save_path: Path, title: str
+) -> None:
+    """Save one native-H5 scene without connecting zero-padded geometry to the origin."""
+    canvas = SceneCanvas(VISUALIZATION_SIZE_PX, VISUALIZATION_HALF_M, VISUALIZATION_GRID_M, title)
+    areas = _valid_rows(frame["intersection_area"], minimum=3)
+    canvas.polygons([area[:, :2] for area in areas], "#6b7280", 0.15)
+    for lanes, color, label in (
+        (frame["lanes"], "#9ca3af", "Lanes"),
+        (frame["route_lanes"], "#00a6d6", "Route"),
+    ):
+        rows = _valid_rows(lanes)
+        canvas.polylines([row[:, :2] for row in rows], color, 0.75, 1.2, label=label)
+        edges = [row[:, :2] + row[:, offset : offset + 2] for row in rows for offset in (2, 4)]
+        canvas.polylines(edges, color, 0.35, 0.8)
+
+    for geometries, color, label in (
+        (frame["road_borders"], "#dc2626", "Road border"),
+        (frame["stop_lines"], "#f59e0b", "Stop line"),
+    ):
+        rows = _valid_rows(geometries)
+        canvas.polylines([row[:, :2] for row in rows], color, 1.0, 1.0, label=label)
+
+    for points, color, label in (
+        (frame["ego_agent_past"], "#fb923c", "Ego history"),
+        (frame["ego_agent_future"], "#111827", "Ground truth"),
+    ):
+        lines = [_valid_points(points)[:, :2]]
+        canvas.polylines(lines, color, 1.0, 1.5, dash=(3.7, 1.6), label=label)
+    neighbors = frame["neighbor_agents_past"]
+    valid = np.square(neighbors[..., 2]) + np.square(neighbors[..., 3]) > 0.5
+    canvas.polylines(
+        [track[mask, :2] for track, mask in zip(neighbors, valid)], "#64748b", 0.35, 0.8
+    )
+
+    canvas.polylines([prediction[:, :2]], "#f97316", 1.0, 2.0, label="New DP output")
+    canvas.marker(np.zeros(2), "^", "#dc2626", "Ego")
+    canvas.marker(prediction[-1, :2], "x", "#000000", "Prediction end")
+    goal = frame["goal_pose"]
+    if np.linalg.norm(goal[:2]) <= 100.0:
+        canvas.marker(goal[:2], "*", "#2563eb", "Goal", size=8.9)
+    canvas.save(save_path)

@@ -12,11 +12,8 @@ from new_dp_h5_eval.model import (
     legacy_feedback_turn_logits,
     seeded_initial_noise,
 )
-from new_dp_h5_eval.open_loop import (
-    VISUALIZATION_SIZE_PX,
-    metric_view,
-    visualize_h5_prediction,
-)
+from new_dp_h5_eval.open_loop import metric_view
+from new_dp_h5_eval.render import VISUALIZATION_SIZE_PX, finite_runs, visualize_h5_prediction
 from new_dp_h5_eval.transforms import recenter_frame_to_pose
 from scenario_generation.reproducer_rollout import _ego_state_from_frame
 
@@ -197,8 +194,6 @@ def test_closed_loop_labels_name_manifests_that_share_a_stem():
 
 
 def test_finite_runs_split_a_polyline_at_non_finite_points():
-    from new_dp_h5_eval.render import finite_runs
-
     points = np.array([[0, 0], [1, 0], [np.nan, 0], [2, 0], [3, np.inf], [4, 0], [5, 0]])
     runs = finite_runs(points)
     assert [run.tolist() for run in runs] == [[[0, 0], [1, 0]], [[2, 0]], [[4, 0], [5, 0]]]
