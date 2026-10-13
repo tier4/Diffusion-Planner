@@ -20,6 +20,18 @@ MODEL=/path/to/ml_planner.onnx
 OUTPUT=/path/to/evaluation_results
 ```
 
+## Ego dimensions
+
+Native H5 stores `ego_shape` as `[base_link_to_front, length, width]`, while the scorers
+shared with the NPZ evaluation need `[wheelbase, length, width]`: the closed-loop MPC
+tracker, road-border and object boxes and renderer, and the open-loop object-avoidance box.
+Both runners therefore read each shard's `project_id` and take the wheelbase from
+`--vehicle_params`, a per-project json with `ego_wheel_base`, `ego_front_overhang`,
+`ego_length` and `ego_width`. It defaults to the meta repository's
+`dataset/data_converter_param.json`, the table both dataset converters read; pass it
+explicitly when this repository is checked out on its own. A shard whose `ego_shape` does not
+match its project's entry is rejected. The model input keeps the native `ego_shape`.
+
 ## Open-loop
 
 The manifest maps metric names to `h5_path` / `frame_index` references. The Parquet
