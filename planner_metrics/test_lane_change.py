@@ -503,3 +503,95 @@ def test_lane_tolerance_uses_the_half_width_on_the_side_the_gt_went():
 
     assert leftward.details["lane_change"]["lane_tolerance_m"].item() == pytest.approx(1.0)
     assert rightward.details["lane_change"]["lane_tolerance_m"].item() == pytest.approx(3.0)
+
+
+def _polyline_lane(points: list[tuple[float, float]], samples: int = 20) -> torch.Tensor:
+    """A lanelet through ``points``, resampled evenly by arc length to ``samples`` points."""
+    corners = torch.tensor(points)
+    lengths = (corners[1:] - corners[:-1]).norm(dim=-1)
+    stations = torch.cat([torch.zeros(1), lengths.cumsum(0)])
+    lane = torch.zeros(samples, 13)
+    for row, station in enumerate(torch.linspace(0.0, float(stations[-1]), samples)):
+        piece = int((stations[1:-1] <= station).sum())
+        fraction = (station - stations[piece]) / lengths[piece]
+        lane[row, :2] = corners[piece] + fraction * (corners[piece + 1] - corners[piece])
+    lane[:, 5] = _HALF_WIDTH
+    lane[:, 7] = -_HALF_WIDTH
+    return lane
+
+
+def _parallel_turn_lane_fork(fork_x: float) -> list[torch.Tensor]:
+    """A through lane and a right-turn lane leaving one lanelet at ``fork_x``.
+
+    The turn lane runs alongside the through lane for 50 m before it bends off,
+    and its first lanelet deviates LESS from the arriving heading (2.9 deg to the
+    right) than the through lane's (4.3 deg to the left): only where the lanes
+    go further on tells them apart.
+    """
+    return [
+        _polyline_lane([(fork_x, 0.0), (fork_x + 20.0, 1.5)]),  # through, first lanelet
+        _polyline_lane([(fork_x + 20.0, 1.5), (fork_x + 140.0, 1.5)]),
+        _polyline_lane([(fork_x, 0.0), (fork_x + 20.0, -1.0)]),  # turn lane, first lanelet
+        _polyline_lane([(fork_x + 20.0, -1.0), (fork_x + 50.0, -1.0)]),
+        _polyline_lane([(fork_x + 50.0, -1.0), (fork_x + 60.0, -6.0), (fork_x + 65.0, -40.0)]),
+    ]
+
+
+def _gt_into_the_turn_lane(fork_x: float, distance: float = 60.0) -> torch.Tensor:
+    """A GT from the origin along the turn lane of ``_parallel_turn_lane_fork``."""
+    gt = torch.zeros(1, _STEPS, 4)
+    x = torch.linspace(0.0, distance, _STEPS)
+    gt[0, :, 0] = x
+    gt[0, :, 1] = -((x - fork_x) / 20.0).clamp(0.0, 1.0)
+    return gt
+
+
+def test_source_lane_chains_the_through_lane_past_a_turn_lane_running_alongside_it():
+    """Taking the branch of a lane split (a turn lane) is a lane change: the source
+    lane must run on along the through lane, not into the branch the GT takes."""
+    fork_x = 10.0
+    lanes = torch.stack(
+        [_polyline_lane([(-40.0, 0.0), (fork_x, 0.0)]), *_parallel_turn_lane_fork(fork_x)]
+    )
+    gt = _gt_into_the_turn_lane(fork_x)
+
+    source = reconstruct_source_lane(lanes, torch.zeros(2), 80.0, 1.0)
+    assert list(dict.fromkeys(source.owners.tolist())) == [0, 1, 2]
+
+    result = _evaluate(gt.clone(), gt, lanes)
+    details = result.details["lane_change"]
+    # 1.5 m left of the GT's path to its right of the through lane.
+    assert details["gt_lateral_shift_m"].item() == pytest.approx(-2.5, abs=0.05)
+    assert details["gt_lane_change_detected"].item() == 1.0
+    assert result.scores["success_rate_percent"].item() == 100.0
+    # A prediction that stays on the through lane did not take the branch.
+    stays = gt.clone()
+    stays[0, :, 1] = (stays[0, :, 0] - fork_x).clamp(0.0, 20.0) * 1.5 / 20.0
+    assert _evaluate(stays, gt, lanes).scores["success_rate_percent"].item() == 0.0
+
+
+def test_source_lane_prefers_the_through_lane_when_the_ego_sits_on_a_split():
+    fork_x = -1.0
+    lanes = torch.stack(_parallel_turn_lane_fork(fork_x))
+
+    source = reconstruct_source_lane(lanes, torch.zeros(2), 80.0, 1.0)
+
+    assert source.index == 0
+    assert list(dict.fromkeys(source.owners.tolist())) == [0, 1]
+
+
+def test_fork_branches_that_both_run_on_are_told_apart_by_their_direction():
+    """Two lanes that both run on as far as the map reaches are a tie on reach; the
+    one leaving closer to the arriving heading is the straight one, as before."""
+    fork_x = 10.0
+    lanes = torch.stack(
+        [
+            _polyline_lane([(-40.0, 0.0), (fork_x, 0.0)]),
+            _polyline_lane([(fork_x, 0.0), (fork_x + 20.0, 3.0), (fork_x + 120.0, 3.0)]),
+            _polyline_lane([(fork_x, 0.0), (fork_x + 120.0, -0.5)]),
+        ]
+    )
+
+    source = reconstruct_source_lane(lanes, torch.zeros(2), 80.0, 1.0)
+
+    assert list(dict.fromkeys(source.owners.tolist())) == [0, 2]
