@@ -5,6 +5,17 @@ from __future__ import annotations
 import numpy as np
 
 
+def legacy_ego_shape(frame: dict[str, np.ndarray]) -> np.ndarray:
+    """The legacy ``[wheelbase, length, width]`` of a native ``[base_link_to_front, length, width]``.
+
+    The legacy footprint puts the box centre ``wheelbase / 2`` ahead of base_link; the native
+    centre is ``base_link_to_front - length / 2`` ahead, so the legacy wheelbase is
+    ``2 * base_link_to_front - length``.
+    """
+    base_link_to_front, length, width = (float(v) for v in frame["ego_shape"][:3])
+    return np.array([2.0 * base_link_to_front - length, length, width], dtype=np.float32)
+
+
 def legacy_lanes(frame: dict[str, np.ndarray]) -> np.ndarray:
     """Build the legacy 8-column lane geometry used by the shared metrics.
 

@@ -56,6 +56,17 @@ def test_metric_view_uses_native_shape_and_label_without_broadcast_guessing():
     assert view["ego_agent_future"].shape == (80, 4)
 
 
+def test_legacy_ego_shape_places_the_footprint_where_the_native_shape_puts_it():
+    from new_dp_h5_eval.metric_compat import legacy_ego_shape
+
+    base_link_to_front, length, width = 3.8, 4.9, 1.9
+    wheelbase, out_length, out_width = legacy_ego_shape(
+        {"ego_shape": np.array([base_link_to_front, length, width], np.float32)}
+    )
+    np.testing.assert_allclose(wheelbase / 2.0, base_link_to_front - length / 2.0, rtol=1e-6)
+    np.testing.assert_allclose([out_length, out_width], [length, width])
+
+
 def test_legacy_route_metric_view_derives_tangent_and_maps_red():
     route = np.zeros((1, 3, 6), np.float32)
     route[0, :, :2] = [[1, 1], [2, 1], [3, 1]]

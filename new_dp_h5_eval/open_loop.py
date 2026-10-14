@@ -18,7 +18,7 @@ from diffusion_planner.scenario_based_open_loop.open_loop import METRICS
 from planner_metrics.scene_data import extract_metric_scene_data
 
 from .dataset import H5FrameIndex
-from .metric_compat import legacy_lanes
+from .metric_compat import legacy_ego_shape, legacy_lanes
 from .model import NewDpOnnxRunner
 from .render import render_view, save_prediction_png
 
@@ -71,7 +71,7 @@ def metric_view(frame: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         "lanes": legacy_lanes(frame),
         "neighbor_agents_future": frame["neighbor_agents_future"],
         "neighbor_agents_past": packed,
-        "ego_shape": frame["ego_shape"],
+        "ego_shape": legacy_ego_shape(frame),
     }
     return {key: torch.from_numpy(value) for key, value in raw.items()}
 

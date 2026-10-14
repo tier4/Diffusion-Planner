@@ -699,6 +699,10 @@ def _seed_state(
     else:
         raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
     ego_shape = np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    if getattr(tl, "native_h5", False):
+        from new_dp_h5_eval.metric_compat import legacy_ego_shape
+
+        ego_shape = legacy_ego_shape(tl.npz(start))
     wheelbase = float(ego_shape[0])
     # Closed-loop turn indicators: seed from the recorded frame, then feed the model's own
     # prediction back each step (phasing the seed out) — the model context never carries the

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .metric_compat import legacy_lanes, legacy_route_lanes
+from .metric_compat import legacy_ego_shape, legacy_lanes, legacy_route_lanes
 
 VISUALIZATION_HALF_M = 60.0
 GROUND_TRUTH_COLOR = "#111827"
@@ -23,6 +23,7 @@ def render_view(frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     view["line_strings"] = lines[None]
     view["metric_lanes"] = legacy_lanes(frame)[None]
     view["metric_route_lanes"] = legacy_route_lanes(frame)[None]
+    view["metric_ego_shape"] = legacy_ego_shape(frame)[None]
     speed, yaw_rate = frame["ego_agent_past"][-1, 4], frame["ego_agent_past"][-1, 5]
     view["ego_current_state"] = np.array(
         [[0.0, 0.0, 1.0, 0.0, speed, 0.0, 0.0, 0.0, 0.0, yaw_rate]], dtype=np.float32
@@ -39,7 +40,7 @@ def save_prediction_png(
     _draw_step(
         view,
         prediction,
-        view["ego_shape"][0],
+        view["metric_ego_shape"][0],
         path,
         title_prefix=title,
         view_half_m=VISUALIZATION_HALF_M,
