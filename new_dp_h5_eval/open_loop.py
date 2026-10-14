@@ -21,6 +21,12 @@ from .dataset import H5FrameIndex
 from .metric_compat import legacy_lanes
 from .model import NewDpOnnxRunner
 from .render import render_view, save_prediction_png
+from .vehicle import (
+    VehicleDimensions,
+    add_vehicle_params_argument,
+    sim_ego_shape,
+    vehicle_params_from_args,
+)
 
 DRAW_QUEUE_PER_WORKER = 4
 
@@ -44,11 +50,14 @@ DEFAULT_PARAMETERS = {
 }
 
 
-def metric_view(frame: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
+def metric_view(frame: dict[str, np.ndarray], ego_shape: np.ndarray) -> dict[str, torch.Tensor]:
     """Build only the legacy-shaped fields required by the unchanged scorers.
 
-    Every value comes directly from a native field. The packed neighbor tensor is
-    never returned to the model; columns unused by metrics remain zero.
+    Every value comes directly from a native field, except ``ego_shape``: the scorers read
+    ``[wheelbase, length, width]``, not the frame's native ``[base_link_to_front, length,
+    width]``, so the caller passes the scoring shape from ``vehicle.sim_ego_shape``. The
+    packed neighbor tensor is never returned to the model; columns unused by metrics remain
+    zero.
     """
     ego_past = frame["ego_agent_past"]
     current = np.zeros(10, dtype=np.float32)
@@ -71,14 +80,41 @@ def metric_view(frame: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         "lanes": legacy_lanes(frame),
         "neighbor_agents_future": frame["neighbor_agents_future"],
         "neighbor_agents_past": packed,
-        "ego_shape": frame["ego_shape"],
+        "ego_shape": ego_shape,
     }
     return {key: torch.from_numpy(value) for key, value in raw.items()}
 
 
-def _stack_metric_views(frames: list[dict[str, np.ndarray]]) -> dict[str, torch.Tensor]:
-    views = [metric_view(frame) for frame in frames]
+def _stack_metric_views(
+    frames: list[dict[str, np.ndarray]], ego_shapes: list[np.ndarray]
+) -> dict[str, torch.Tensor]:
+    views = [metric_view(frame, shape) for frame, shape in zip(frames, ego_shapes)]
     return {key: torch.stack([view[key] for view in views]) for key in views[0]}
+
+
+def _scoring_ego_shapes(
+    dataset: H5FrameIndex,
+    resolved: dict[str, list[tuple[dict, int]]],
+    vehicle_params: dict[str, VehicleDimensions],
+) -> dict[int, np.ndarray]:
+    """Scoring ``[wheelbase, length, width]`` per index row (see ``vehicle.py``).
+
+    Each shard is checked once, over all of its frames, before any inference runs.
+    """
+    by_shard: dict[Path, np.ndarray] = {}
+    shapes: dict[int, np.ndarray] = {}
+    for samples in resolved.values():
+        for _, index in samples:
+            path = dataset.shard_path(index)
+            if path not in by_shard:
+                by_shard[path] = sim_ego_shape(
+                    dataset.ego_shapes(path),
+                    dataset.project_id(path),
+                    vehicle_params,
+                    source=str(path),
+                )
+            shapes[index] = by_shard[path]
+    return shapes
 
 
 def _resolve_matrix(matrix_path: Path, dataset: H5FrameIndex) -> dict[str, list[tuple[dict, int]]]:
@@ -158,6 +194,8 @@ def run(
     providers: list[str] | None = None,
     visualize: bool = True,
     draw_workers: int = 8,
+    *,
+    vehicle_params: dict[str, VehicleDimensions],
 ) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     runner = NewDpOnnxRunner(str(onnx_path), providers)
@@ -173,6 +211,7 @@ def run(
         unknown = set(resolved).difference(METRICS)
         if unknown:
             raise ValueError(f"Unsupported metrics: {sorted(unknown)}")
+        scoring_shapes = _scoring_ego_shapes(dataset, resolved, vehicle_params)
         for metric_name, samples in resolved.items():
             totals: dict[str, float] = defaultdict(float)
             details: list[dict] = []
@@ -181,9 +220,10 @@ def run(
                     frames, [seed + seed_cursor + offset + i for i in range(len(chunk))]
                 )
                 ego_prediction = torch.from_numpy(trajectories[:, 0])
+                metric_shapes = [scoring_shapes[index] for _, index in chunk]
                 evaluation = METRICS[metric_name](
                     ego_prediction,
-                    extract_metric_scene_data(_stack_metric_views(frames)),
+                    extract_metric_scene_data(_stack_metric_views(frames, metric_shapes)),
                     DEFAULT_PARAMETERS[metric_name],
                 )
                 for key, values in evaluation.scores.items():
@@ -199,7 +239,7 @@ def run(
                         drawing.append(
                             draw.submit(
                                 save_prediction_png,
-                                render_view(frames[i]),
+                                render_view(frames[i], scoring_shapes[row_index]),
                                 trajectories[i, 0],
                                 png_path,
                                 stem,
@@ -234,7 +274,9 @@ def main() -> None:
     parser.add_argument("--provider", action="append", dest="providers")
     parser.add_argument("--no-visualization", action="store_false", dest="visualize")
     parser.add_argument("--draw-workers", type=int, default=8)
+    add_vehicle_params_argument(parser)
     args = parser.parse_args()
+    vehicle_params = vehicle_params_from_args(parser, args)
     print(
         json.dumps(
             run(
@@ -247,6 +289,7 @@ def main() -> None:
                 args.providers,
                 args.visualize,
                 args.draw_workers,
+                vehicle_params=vehicle_params,
             ),
             indent=2,
         )

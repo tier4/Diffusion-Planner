@@ -103,6 +103,23 @@ class H5FrameIndex:
             raise ValueError("unexpected native ego/neighbor feature width")
         return result
 
+    def shard_path(self, index: int) -> Path:
+        """Resolved path of the shard holding row ``index``."""
+        return self._resolve_h5_path(self.rows[index]["h5_path"])
+
+    def project_id(self, path: Path) -> str:
+        """``project_id`` attribute of a shard returned by ``shard_path``."""
+        project_id = self._open(path).attrs.get("project_id")
+        if isinstance(project_id, bytes):
+            project_id = project_id.decode()
+        if not project_id:
+            raise ValueError(f"native H5 shard has no project_id attribute: {path}")
+        return str(project_id)
+
+    def ego_shapes(self, path: Path) -> np.ndarray:
+        """Every frame's native ``ego_shape`` row of a shard returned by ``shard_path``."""
+        return np.asarray(self._open(path)["frames"]["ego_shape"])
+
     def _open(self, path: Path) -> h5py.File:
         cached = self._files.pop(path, None)
         if cached is not None:

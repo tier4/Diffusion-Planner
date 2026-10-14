@@ -47,7 +47,8 @@ def test_metric_view_uses_native_shape_and_label_without_broadcast_guessing():
         "ego_shape": np.array([2.7, 4.8, 1.9], np.float32),
     }
     frame["lanes"][0, 0] = [1, 2, 3, 4, 5, 6]
-    view = metric_view(frame)
+    # The scoring shape is handed through unchanged; this test is about neighbor columns.
+    view = metric_view(frame, frame["ego_shape"])
     neighbors = view["neighbor_agents_past"].numpy()
     np.testing.assert_array_equal(neighbors[:, 0, 6:8], frame["agent_shape"])
     np.testing.assert_array_equal(neighbors[:, -1, 8:11], frame["agent_label"])
@@ -146,12 +147,14 @@ def test_native_build_input_exposes_live_ego_dynamics_to_the_renderer():
     class Timeline:
         native_h5 = True
         poses = np.array([[0.0, 0.0, 0.0]])
+        sim_ego_shape = np.array([2.7, 4.8, 1.9], np.float32)
 
         def npz(self, _index):
             return frame
 
     dyn = _EgoDyn(speed=6.0, accel=0.5, yaw_rate=0.2, steering=0.05)
     recen, _ = build_input_np(Timeline(), 0, np.zeros(3), np.zeros((PAST, 5)), dyn)
+    np.testing.assert_allclose(recen["metric_ego_shape"], [[2.7, 4.8, 1.9]], rtol=0, atol=1e-6)
     ego = nl._extract_ego_agent({k: v[0] for k, v in recen.items()}, 2.7, 4.8, 1.9)
     assert np.isclose(ego.past_velocities[-1, 0], 6.0)
     assert np.isclose(ego.yaw_rate, 0.2) and np.isclose(ego.steering_angle, 0.05)

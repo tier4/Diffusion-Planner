@@ -2,7 +2,8 @@
 closed-loop Perception Reproducer.
 
 A *route* is a sequence of consecutive 10 Hz frames from one bag (grouped by the
-shared filename prefix, e.g. ``<bag-time>_<frameidx>.npz``). Each frame carries:
+shared filename prefix, e.g. ``<bag-time>_<frameidx>.npz``, or
+``<bag-time>_<timestamp_ns>.npz`` from the selected-timestamp exporter). Each frame carries:
 
 * the **model-input arrays** baked by the converter (neighbors, lanes, route,
   polygons, line_strings, traffic-in-lanes, goal, ego_shape, turn_indicators) —
@@ -41,7 +42,8 @@ from scipy.spatial import cKDTree
 from scenario_generation.perf_timer import Timers
 from scenario_generation.transforms import yaw_from_quat
 
-# Trailing integer in "<prefix>_<frameidx>" filenames (zero-padded frame index).
+# Trailing integer in "<prefix>_<frameidx>" (zero-padded frame index) or
+# "<prefix>_<timestamp_ns>" filenames.
 _FRAME_IDX_RE = re.compile(r"_(\d+)$")
 
 # Keys the reproducer actually consumes. .npz is a zip whose members decompress
@@ -68,7 +70,13 @@ _NEEDED_KEYS = (
 
 
 def _frame_index(npz_path: Path) -> int:
-    """Parse the trailing zero-padded frame index from the filename stem."""
+    """Parse the trailing integer from the filename stem.
+
+    It is a zero-padded frame index (``13-42-45_0000000000000031``) or, for frames written by
+    the selected-timestamp exporter, the frame timestamp in nanoseconds
+    (``09-42-22_1776387369838338599``). Both sort chronologically; ``_frame_times_s`` turns
+    either into seconds.
+    """
     m = _FRAME_IDX_RE.search(npz_path.stem)
     if m is None:
         raise ValueError(
@@ -77,10 +85,66 @@ def _frame_index(npz_path: Path) -> int:
     return int(m.group(1))
 
 
+# Trailing numbers at or above this are nanosecond timestamps (current epoch times are ~1.8e18),
+# far above any frame index and far below any timestamp of a real recording.
+_NS_TIMESTAMP_MIN = 10**15
+# Frames of a bag are 10 Hz apart, so the typical (median) step between index-like names is
+# a few frames. A median step above 10^6 frames (~28 h) means a nanosecond clock this reader
+# does not recognise, which must not be read as indices (that is how every recorded speed
+# became ~0 before). Single large steps are legitimate: parse_rosbag.py concatenates
+# ``<seq_id:08d><frame:08d>``, so a bag with several sequences jumps by ~1e8 between them.
+_MAX_TYPICAL_INDEX_STEP = 10**6
+
+
+def _uses_ns_timestamps(frame_indices: np.ndarray) -> bool:
+    """Whether ``_frame_index`` values are nanosecond timestamps rather than frame indices."""
+    idx = np.asarray(frame_indices, dtype=np.int64)
+    if idx.size == 0:
+        return False
+    is_ns = idx >= _NS_TIMESTAMP_MIN
+    if is_ns.all():
+        return True
+    if is_ns.any():
+        raise ValueError(
+            "frame names mix frame indices and nanosecond timestamps "
+            f"(first {int(idx[0])}, last {int(idx[-1])})"
+        )
+    if idx.size > 1:
+        typical = float(np.median(np.diff(idx)))
+        if typical > _MAX_TYPICAL_INDEX_STEP:
+            raise ValueError(
+                f"frame indices step by {typical:.0f} (median, > {_MAX_TYPICAL_INDEX_STEP}); the "
+                "names look like timestamps of an unknown clock rather than frame indices"
+            )
+    return False
+
+
+def _frame_times_s(frame_indices: np.ndarray, base_dt: float = 0.1) -> np.ndarray:
+    """Recorded time of each frame in seconds, from ``_frame_index`` values.
+
+    Frame indices give ``index * base_dt`` (gaps keep their index distance), exactly as
+    before timestamp names existed; nanosecond timestamps give seconds from the first frame.
+    """
+    idx = np.asarray(frame_indices, dtype=np.int64)
+    if _uses_ns_timestamps(idx):
+        return (idx - idx[0]).astype(np.float64) * 1e-9
+    return idx.astype(np.float64) * base_dt
+
+
+def _frame_dts_s(frame_indices: np.ndarray, base_dt: float = 0.1) -> np.ndarray:
+    """Seconds between consecutive frames; a repeated frame name counts as one frame."""
+    idx = np.asarray(frame_indices, dtype=np.int64)
+    steps = np.diff(idx)
+    if _uses_ns_timestamps(idx):
+        return np.where(steps > 0, steps.astype(np.float64) * 1e-9, base_dt)
+    return np.maximum(steps, 1).astype(np.float64) * base_dt
+
+
 def route_prefix(npz_path: Path) -> str:
     """Route key = filename stem with the trailing '_<frameidx>' removed.
 
-    e.g. '13-42-45_0000000000000031' -> '13-42-45'; 'AAAA_0' would also collapse
+    e.g. '13-42-45_0000000000000031' -> '13-42-45' (likewise
+    '09-42-22_1776387369838338599' -> '09-42-22'); 'AAAA_0' would also collapse
     to 'AAAA' (multi-bag routes that share a prefix group together).
     """
     return _FRAME_IDX_RE.sub("", npz_path.stem)
@@ -139,6 +203,11 @@ class RouteTimeline:
     Poses are loaded eagerly (cheap: one small JSON per frame). The bulky NPZ
     model-input arrays are loaded lazily and cached, so a 60 s segment touches at
     most ~600 NPZs and memory stays bounded.
+
+    ``frame_indices`` holds the trailing filename integers (frame indices or nanosecond
+    timestamps); ``frame_times_s`` holds the recorded frame times derived from them. Use only
+    differences of ``frame_times_s``: its origin is index 0 for index names and the first frame
+    for timestamp names.
     """
 
     def __init__(
@@ -164,8 +233,13 @@ class RouteTimeline:
             self.poses = poses
             self.kdtree = cKDTree(poses[:, :2])
 
+        # Recorded time of each frame in seconds, from the frame names.
+        try:
+            self.frame_times_s = _frame_times_s(self.frame_indices)
+        except ValueError as exc:
+            raise ValueError(f"{self.npz_paths[0].parent}: {exc}") from exc
         # Recorded ego speed per frame, derived from pose deltas. Gap-aware: the
-        # real dt between two stored frames is (Δframe_index * 0.1 s), so skipped
+        # real dt between two stored frames comes from frame_times_s, so skipped
         # frames don't inflate the speed. Used by the cursor's speed-gap guard.
         self.speeds = self._compute_speeds()
 
@@ -188,8 +262,7 @@ class RouteTimeline:
         if n < 2:
             return speeds
         dxy = np.linalg.norm(np.diff(self.poses[:, :2], axis=0), axis=1)
-        didx = np.maximum(np.diff(self.frame_indices), 1).astype(np.float64)
-        seg_speed = dxy / (didx * base_dt)
+        seg_speed = dxy / _frame_dts_s(self.frame_indices, base_dt)
         speeds[:-1] = seg_speed
         speeds[-1] = seg_speed[-1]
         return speeds

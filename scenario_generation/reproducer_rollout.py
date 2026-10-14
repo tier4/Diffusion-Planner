@@ -284,6 +284,8 @@ def build_input_np(
         recen["metric_lanes"] = legacy_lanes(recen0)[None]
         route33 = legacy_route_lanes(recen0)
         recen["metric_route_lanes"] = route33[None]
+        # Scoring-only [wheelbase, length, width]; the native ego_shape stays the model input.
+        recen["metric_ego_shape"] = _sim_ego_shape(tl, idx)[None]
         return recen, neighbors_live
 
     base = _npz_to_model_base(tl.npz(idx))
@@ -653,6 +655,25 @@ def _goal_xy_from_npz_goal(tl: RouteTimeline, idx: int, fallback_idx: int) -> np
     )
 
 
+def _sim_ego_shape(tl, start: int) -> np.ndarray:
+    """``[wheelbase, length, width]`` for the tracker, the footprint checks and the renderer.
+
+    NPZ frames store ``ego_shape`` in that layout. Native H5 frames store
+    ``[base_link_to_front, length, width]``, so a native timeline supplies the converted
+    ``sim_ego_shape`` (``new_dp_h5_eval/vehicle.py``). The model input is built from the frame
+    and keeps the native value.
+    """
+    if getattr(tl, "native_h5", False):
+        shape = getattr(tl, "sim_ego_shape", None)
+        if shape is None:
+            raise ValueError(
+                "native H5 timeline has no sim_ego_shape; construct it with vehicle_params so the "
+                "reproducer uses the real wheelbase instead of base_link_to_front"
+            )
+        return np.asarray(shape, dtype=np.float32).reshape(-1)[:3]
+    return np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+
+
 def _seed_state(
     tl,
     start,
@@ -698,7 +719,7 @@ def _seed_state(
         goal_xy = _goal_xy_from_npz_goal(tl, start, end - 1)
     else:
         raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
-    ego_shape = np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    ego_shape = _sim_ego_shape(tl, start)
     wheelbase = float(ego_shape[0])
     # Closed-loop turn indicators: seed from the recorded frame, then feed the model's own
     # prediction back each step (phasing the seed out) — the model context never carries the
@@ -989,7 +1010,14 @@ def _gt_accels(tl: RouteTimeline) -> np.ndarray:
         w = _GT_ACCEL_SMOOTH_FRAMES
         pad = np.pad(np.asarray(tl.speeds, dtype=np.float64), (w // 2, w // 2), mode="edge")
         smooth = np.convolve(pad, np.ones(w) / w, mode="valid")
-        t = np.asarray(tl.frame_indices, dtype=np.float64) * DT
+        # NPZ timelines carry the recorded frame times (frame names may be nanosecond
+        # timestamps rather than indices); other timelines fall back to index * DT.
+        times = getattr(tl, "frame_times_s", None)
+        t = (
+            np.asarray(times, dtype=np.float64)
+            if times is not None
+            else np.asarray(tl.frame_indices, dtype=np.float64) * DT
+        )
         acc = np.gradient(smooth, t)
     tl._gt_accels_cache = acc
     return acc
@@ -3534,7 +3562,11 @@ def _dump_precollision_window(
     # barely advanced) — that's not a recoverable approach, so drop it (nothing to learn).
     first_np = live_by_step[start_k][3]
     nb0 = np.asarray(first_np["neighbor_agents_past"])[0, :, -1, :]
-    es0 = np.asarray(first_np["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    es0 = (
+        _sim_ego_shape(tl, seg_start)
+        if getattr(tl, "native_h5", False)
+        else np.asarray(first_np["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    )
     c0 = _min_clearance_any(nb0, es0, "cpu")
     if c0 <= collision_thresh:
         print(
