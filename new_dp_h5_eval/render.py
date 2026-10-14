@@ -14,9 +14,7 @@ GROUND_TRUTH_COLOR = "#111827"
 
 def render_view(frame: dict[str, np.ndarray], ego_shape: np.ndarray) -> dict[str, np.ndarray]:
     """The recorded frame in the batched layout the step renderer reads: legacy lanes, road
-    borders as line strings and the recorded ego state, ego at the origin. ``ego_shape`` is the
-    scoring ``[wheelbase, length, width]`` (``vehicle.sim_ego_shape``), so the drawn footprint
-    matches the one the metrics score."""
+    borders as line strings and the recorded ego state, ego at the origin."""
     view = {key: np.asarray(value)[None] for key, value in frame.items()}
     view["ego_shape"] = np.asarray(ego_shape, dtype=np.float32)[None]
     borders = frame["road_borders"]
