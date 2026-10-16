@@ -33,13 +33,14 @@ from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.transforms import yaw_from_quat
 
+from .h5_frames import NativeFrames
 from .model import (
     NewDpOnnxRunner,
     decode_onnx_outputs,
     legacy_feedback_turn_logits,
     seeded_initial_noise,
 )
-from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
+from .schema import H5_FORMAT, H5_MIN_FORMAT_VERSION, MODEL_INPUT_NAMES
 from .vehicle import VehicleDimensions, sim_ego_shape
 
 
@@ -66,7 +67,7 @@ class NativeH5RouteTimeline(RouteTimeline):
         try:
             if self._h5.attrs.get("format") != H5_FORMAT:
                 raise ValueError(f"unexpected H5 format: {self.h5_path}")
-            if int(self._h5.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
+            if int(self._h5.attrs.get("format_version", -1)) < H5_MIN_FORMAT_VERSION:
                 raise ValueError(f"unsupported H5 format version: {self.h5_path}")
             metadata = self._h5["metadata"]
             format_version = int(self._h5.attrs["format_version"])
@@ -80,7 +81,8 @@ class NativeH5RouteTimeline(RouteTimeline):
                 raise ValueError(
                     f"closed-loop H5 missing pose metadata {sorted(missing)}: {self.h5_path}"
                 )
-            missing = set(MODEL_INPUT_NAMES).difference(self._h5["frames"].keys())
+            self._frames = NativeFrames(self._h5)
+            missing = set(MODEL_INPUT_NAMES).difference(self._frames.keys())
             if missing:
                 raise ValueError(
                     f"closed-loop H5 missing model fields {sorted(missing)}: {self.h5_path}"
@@ -99,8 +101,20 @@ class NativeH5RouteTimeline(RouteTimeline):
                     project_id = project_id.decode()
                 if not project_id:
                     raise ValueError(f"closed-loop H5 has no project_id attribute: {self.h5_path}")
+                # A packed row is one chunk, so check the range's ends rather than reading
+                # every row of it; the converter writes ego_shape once per shard.
+                native_shapes = (
+                    np.concatenate(
+                        [
+                            self._frames.column("ego_shape", start, start + 1),
+                            self._frames.column("ego_shape", stop - 1, stop),
+                        ]
+                    )
+                    if self._frames.packed
+                    else self._frames.column("ego_shape", start, stop)
+                )
                 self.sim_ego_shape = sim_ego_shape(
-                    self._h5["frames"]["ego_shape"][start:stop],
+                    native_shapes,
                     str(project_id),
                     vehicle_params,
                     source=str(self.h5_path),
@@ -174,11 +188,7 @@ class NativeH5RouteTimeline(RouteTimeline):
                 return cached
         row = int(self._rows[idx])
         with self.timers("timeline_load_h5"):
-            frames = self._h5["frames"]
-            missing = set(MODEL_INPUT_NAMES).difference(frames.keys())
-            if missing:
-                raise ValueError(f"native H5 missing model fields: {sorted(missing)}")
-            data = {key: np.asarray(value[row]) for key, value in frames.items()}
+            data = self._frames.row(row)
         with self._cache_lock:
             self._npz_cache[idx] = data
             self._npz_cache.move_to_end(idx)
@@ -250,6 +260,7 @@ class ReproducerOnnxModel:
     def __call__(self, data: dict[str, torch.Tensor]):
         device = data["ego_agent_past"].device
         feed = {key: data[key].detach().cpu().numpy() for key in MODEL_INPUT_NAMES}
+        self.runner.check_frame(feed)
         batch = feed["ego_agent_past"].shape[0]
         noise = seeded_initial_noise([self.seed + self.calls + i for i in range(batch)])
         self.calls += batch

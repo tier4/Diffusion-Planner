@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from .metric_compat import legacy_lanes, legacy_route_lanes
+from .schema import EgoPastLayout
 
 VISUALIZATION_HALF_M = 60.0
 GROUND_TRUTH_COLOR = "#111827"
@@ -24,10 +25,13 @@ def render_view(frame: dict[str, np.ndarray], ego_shape: np.ndarray) -> dict[str
     view["line_strings"] = lines[None]
     view["metric_lanes"] = legacy_lanes(frame)[None]
     view["metric_route_lanes"] = legacy_route_lanes(frame)[None]
-    speed, yaw_rate = frame["ego_agent_past"][-1, 4], frame["ego_agent_past"][-1, 5]
-    view["ego_current_state"] = np.array(
-        [[0.0, 0.0, 1.0, 0.0, speed, 0.0, 0.0, 0.0, 0.0, yaw_rate]], dtype=np.float32
-    )
+    ego = frame["ego_agent_past"][-1]
+    layout = EgoPastLayout.of(ego.shape[-1])
+    current = np.array([[0.0, 0.0, 1.0, 0.0, ego[4], 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    if layout.steering is not None:
+        current[0, 8] = ego[layout.steering]
+    current[0, 9] = ego[layout.yaw_rate]
+    view["ego_current_state"] = current
     return view
 
 

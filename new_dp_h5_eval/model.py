@@ -109,12 +109,31 @@ class NewDpOnnxRunner:
             raise ValueError(
                 f"ONNX input mismatch; missing={expected - actual}, extra={actual - expected}"
             )
+        # The widths that differ between models with and without steering (7/4 and 6/3).
+        self.feature_widths = {
+            item.name: item.shape[-1]
+            for item in self.session.get_inputs()
+            if item.name in ("ego_agent_past", "ego_shape") and isinstance(item.shape[-1], int)
+        }
+
+    def check_frame(self, frame: dict[str, np.ndarray]) -> None:
+        """Fail with the reason when a frame's format does not match the graph's inputs."""
+        for name, width in self.feature_widths.items():
+            got = np.shape(frame[name])[-1]
+            if got != width:
+                raise ValueError(
+                    f"ONNX {name} takes width {width}, but the dataset frame has {got}; "
+                    "a model with steering and wheel base (7/4) needs data that carries them, "
+                    "one without (6/3) data that does not"
+                )
 
     def predict(
         self, frames: list[dict[str, np.ndarray]], seeds: list[int]
     ) -> tuple[np.ndarray, np.ndarray]:
         if len(frames) != len(seeds) or not frames:
             raise ValueError("frames and seeds must have the same non-zero length")
+        for frame in frames:
+            self.check_frame(frame)
         normalized = [normalize_frame(frame) for frame in frames]
         feed = {
             key: np.stack([np.asarray(f[key], dtype=np.float32) for f in normalized])

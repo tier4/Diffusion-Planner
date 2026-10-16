@@ -21,6 +21,7 @@ from .dataset import H5FrameIndex
 from .metric_compat import legacy_lanes
 from .model import NewDpOnnxRunner
 from .render import render_view, save_prediction_png
+from .schema import EgoPastLayout
 from .vehicle import (
     VehicleDimensions,
     add_vehicle_params_argument,
@@ -60,9 +61,12 @@ def metric_view(frame: dict[str, np.ndarray], ego_shape: np.ndarray) -> dict[str
     zero.
     """
     ego_past = frame["ego_agent_past"]
+    layout = EgoPastLayout.of(ego_past.shape[-1])
     current = np.zeros(10, dtype=np.float32)
     current[:5] = ego_past[-1, :5]
-    current[9] = ego_past[-1, 5]
+    if layout.steering is not None:
+        current[8] = ego_past[-1, layout.steering]
+    current[9] = ego_past[-1, layout.yaw_rate]
 
     neighbor_pose = frame["neighbor_agents_past"]
     if frame["agent_shape"].shape != (neighbor_pose.shape[0], 2):

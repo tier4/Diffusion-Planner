@@ -10,7 +10,8 @@ import hdf5plugin  # noqa: F401 - registers the zstd HDF5 filter
 import numpy as np
 import pyarrow.parquet as pq
 
-from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
+from .h5_frames import NativeFrames
+from .schema import H5_FORMAT, H5_MIN_FORMAT_VERSION, MODEL_INPUT_NAMES, EgoPastLayout
 
 
 class H5FrameIndex:
@@ -24,11 +25,13 @@ class H5FrameIndex:
         if missing:
             raise ValueError(f"H5 index missing columns: {sorted(missing)}")
         self.rows = table.to_pylist()
-        self._files: OrderedDict[Path, h5py.File] = OrderedDict()
+        self._files: OrderedDict[Path, tuple[h5py.File, NativeFrames]] = OrderedDict()
         self._capacity = file_capacity
         self._by_frame: dict[tuple[str, int], int] = {}
+        self._frames_by_shard: dict[Path, list[int]] = {}
         for i, row in enumerate(self.rows):
             path = self._resolve_h5_path(row["h5_path"])
+            self._frames_by_shard.setdefault(path, []).append(int(row["frame_index"]))
             key = (str(path), int(row["frame_index"]))
             if key in self._by_frame:
                 raise ValueError(f"Duplicate H5 frame in index: {key}")
@@ -85,22 +88,22 @@ class H5FrameIndex:
     def frame(self, index: int) -> dict[str, np.ndarray]:
         row = self.rows[index]
         path = self._resolve_h5_path(row["h5_path"])
-        file = self._open(path)
+        file, frames = self._open(path)
         frame_index = int(row["frame_index"])
         if not 0 <= frame_index < int(file.attrs["num_frames"]):
             raise IndexError(f"frame_index {frame_index} outside {path}")
-        frames = file["frames"]
         missing = sorted(set(MODEL_INPUT_NAMES).difference(frames.keys()))
         if missing:
             raise ValueError(f"H5 frame is missing native model fields: {missing} ({path})")
-        result = {key: np.asarray(value[frame_index]) for key, value in frames.items()}
+        result = frames.row(frame_index)
         neighbors = result["neighbor_agents_past"]
         if result["agent_shape"].shape != (neighbors.shape[0], 2):
             raise ValueError("agent_shape must match neighbor_agents_past slots")
         if result["agent_label"].shape != (neighbors.shape[0], 3):
             raise ValueError("agent_label must match neighbor_agents_past slots")
-        if result["ego_agent_past"].shape[-1] != 6 or neighbors.shape[-1] != 4:
-            raise ValueError("unexpected native ego/neighbor feature width")
+        EgoPastLayout.of(result["ego_agent_past"].shape[-1])
+        if neighbors.shape[-1] != 4:
+            raise ValueError("unexpected native neighbor feature width")
         return result
 
     def shard_path(self, index: int) -> Path:
@@ -109,7 +112,7 @@ class H5FrameIndex:
 
     def project_id(self, path: Path) -> str:
         """``project_id`` attribute of a shard returned by ``shard_path``."""
-        project_id = self._open(path).attrs.get("project_id")
+        project_id = self._open(path)[0].attrs.get("project_id")
         if isinstance(project_id, bytes):
             project_id = project_id.decode()
         if not project_id:
@@ -117,10 +120,18 @@ class H5FrameIndex:
         return str(project_id)
 
     def ego_shapes(self, path: Path) -> np.ndarray:
-        """Every frame's native ``ego_shape`` row of a shard returned by ``shard_path``."""
-        return np.asarray(self._open(path)["frames"]["ego_shape"])
+        """Native ``ego_shape`` rows of a shard returned by ``shard_path``.
 
-    def _open(self, path: Path) -> h5py.File:
+        Every frame of a ``frames/`` shard; of a packed shard, only the indexed frames, since
+        reading one packed tensor reads the whole row.
+        """
+        frames = self._open(path)[1]
+        if not frames.packed:
+            return frames.column("ego_shape")
+        rows = sorted(self._frames_by_shard[path])
+        return np.stack([frames.row(index)["ego_shape"] for index in rows])
+
+    def _open(self, path: Path) -> tuple[h5py.File, NativeFrames]:
         cached = self._files.pop(path, None)
         if cached is not None:
             self._files[path] = cached
@@ -129,19 +140,23 @@ class H5FrameIndex:
         if file.attrs.get("format") != H5_FORMAT:
             file.close()
             raise ValueError(f"Unexpected H5 format: {path}")
-        if int(file.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
+        if int(file.attrs.get("format_version", -1)) < H5_MIN_FORMAT_VERSION:
             file.close()
             raise ValueError(f"Unsupported H5 format version: {path}")
-        if "frames" not in file or "num_frames" not in file.attrs:
+        try:
+            if "num_frames" not in file.attrs:
+                raise ValueError(f"Incomplete native H5 shard: {path}")
+            opened = (file, NativeFrames(file))
+        except BaseException:
             file.close()
-            raise ValueError(f"Incomplete native H5 shard: {path}")
-        self._files[path] = file
+            raise
+        self._files[path] = opened
         while len(self._files) > self._capacity:
-            self._files.popitem(last=False)[1].close()
-        return file
+            self._files.popitem(last=False)[1][0].close()
+        return opened
 
     def close(self) -> None:
-        for file in self._files.values():
+        for file, _ in self._files.values():
             file.close()
         self._files.clear()
 

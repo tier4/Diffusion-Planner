@@ -18,6 +18,7 @@ meta repository).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,8 @@ import numpy as np
 DEFAULT_VEHICLE_PARAMS = (
     Path(__file__).resolve().parents[2] / "dataset" / "data_converter_param.json"
 )
+# Below this speed the yaw rate no longer determines the steering angle; hold the last one.
+KINEMATIC_STEERING_MIN_SPEED_MPS = 1.0
 _REQUIRED_KEYS = ("ego_wheel_base", "ego_front_overhang", "ego_length", "ego_width")
 # float32 storage in the H5 rounds the table values by well under a millimetre.
 _SHAPE_ATOL_M = 1e-3
@@ -105,7 +108,8 @@ def sim_ego_shape(
     *,
     source: str,
 ) -> np.ndarray:
-    """Return ``[wheelbase, length, width]`` for native ``[base_link_to_front, length, width]``.
+    """Return ``[wheelbase, length, width]`` for native ``[base_link_to_front, length, width]``
+    (a 4-column one also carries ``wheel_base``).
 
     ``native_shapes`` holds the shard's per-frame ``ego_shape`` rows. Every row must match the
     project's table entry, so a shard converted with other dimensions fails here instead of
@@ -117,14 +121,29 @@ def sim_ego_shape(
             f"{source}: project_id {project_id!r} has no ego dimensions in the vehicle params "
             f"(known: {', '.join(sorted(vehicles))}); pass --vehicle_params with an entry for it"
         )
-    rows = np.asarray(native_shapes, dtype=np.float64).reshape(-1, 3)
-    expected = np.array([vehicle.base_link_to_front, vehicle.length, vehicle.width])
+    native = np.asarray(native_shapes, dtype=np.float64)
+    width = native.shape[-1] if native.ndim else 0
+    if width not in (3, 4):
+        raise ValueError(f"{source}: native ego_shape has {width} columns; expected 3 or 4")
+    rows = native.reshape(-1, width)
+    expected = [vehicle.base_link_to_front, vehicle.length, vehicle.width]
+    if width == 4:
+        expected.append(vehicle.wheel_base)
+    expected = np.array(expected)
     bad = ~np.all(np.abs(rows - expected) <= _SHAPE_ATOL_M, axis=1)
     if bad.any():
         first = int(np.flatnonzero(bad)[0])
         raise ValueError(
             f"{source}: ego_shape row {first} is {rows[first].tolist()}, but project "
-            f"{project_id!r} has [base_link_to_front, length, width] = {expected.tolist()} in the "
+            f"{project_id!r} has {expected.tolist()} in the "
             f"vehicle params; the shard and the vehicle params disagree"
         )
     return np.array([vehicle.wheel_base, vehicle.length, vehicle.width], dtype=np.float32)
+
+
+def kinematic_steering(wheelbase: float, speed: float, yaw_rate: float, previous: float) -> float:
+    """Front-wheel angle of a kinematic bicycle turning at ``yaw_rate``, for an ego moved
+    without a steering state of its own."""
+    if abs(speed) < KINEMATIC_STEERING_MIN_SPEED_MPS:
+        return previous
+    return math.atan(wheelbase * yaw_rate / speed)

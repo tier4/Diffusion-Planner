@@ -497,7 +497,7 @@ def run_scenario_sim_rollout(
                     cfg.scene,
                     ego_name,
                 )
-                observer.observe(ti_report)
+                observer.observe(ti_report, ego_state)
 
             # Replan every ``replan_interval`` ticks; consume the cached plan in between.
             if cached_plan_ego is None or step % cfg.replan_interval == 0:

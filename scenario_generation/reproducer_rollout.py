@@ -211,6 +211,25 @@ def _live_ego_past(ego_hist_world: np.ndarray, live_pose: np.ndarray) -> np.ndar
     return out[None]
 
 
+# Native ``ego_hist`` rows are ``[x, y, yaw, speed, yaw_rate, steering]`` in the world frame.
+_HIST_STEERING = 5
+
+
+def _tracker_reports_steering(tracker) -> bool:
+    from scenario_generation.mpc_tracker import PerfectTracker
+
+    return not isinstance(tracker, PerfectTracker)
+
+
+def _recorded_steering(tl, idx: int, previous: float) -> float:
+    """The recorded steering of frame ``idx``, or ``previous`` when its format has none."""
+    from new_dp_h5_eval.schema import EgoPastLayout
+
+    ep = np.asarray(tl.npz(idx)["ego_agent_past"])
+    layout = EgoPastLayout.of(ep.shape[-1])
+    return previous if layout.steering is None else float(ep[-1, layout.steering])
+
+
 @dataclass
 class _EgoDyn:
     speed: float
@@ -253,20 +272,25 @@ def build_input_np(
             np.asarray([math.cos(dyaw), math.sin(dyaw)], dtype=np.float32),
         )
         recen = {key: np.asarray(value)[None] for key, value in recen0.items()}
-        live4 = _live_ego_past(ego_hist_world, live_pose)[0]
-        live6 = np.zeros((PAST, 6), dtype=np.float32)
-        live6[:, :4] = live4
+        from new_dp_h5_eval.schema import EGO_SPEED_COLUMN, EgoPastLayout
+
+        layout = EgoPastLayout.of(np.shape(frame["ego_agent_past"])[-1])
+        live = np.zeros((PAST, layout.width), dtype=np.float32)
+        live[:, :4] = _live_ego_past(ego_hist_world, live_pose)[0]
+        columns = [EGO_SPEED_COLUMN, layout.yaw_rate]
         if ego_hist_world.shape[1] >= 5:
-            live6[:, 4:6] = ego_hist_world[-PAST:, 3:5]
+            live[:, columns] = ego_hist_world[-PAST:, 3:5]
         elif len(ego_hist_world) > 1:
             delta = np.diff(ego_hist_world[-PAST:, :], axis=0)
             speeds = np.linalg.norm(delta[:, :2], axis=1) / DT
             yaw_rates = np.arctan2(np.sin(delta[:, 2]), np.cos(delta[:, 2])) / DT
-            live6[1:, 4] = speeds[-(PAST - 1) :]
-            live6[1:, 5] = yaw_rates[-(PAST - 1) :]
-            live6[0, 4:6] = live6[1, 4:6]
-        live6[-1, 4], live6[-1, 5] = dyn.speed, dyn.yaw_rate
-        recen["ego_agent_past"] = live6[None]
+            live[1:, EGO_SPEED_COLUMN] = speeds[-(PAST - 1) :]
+            live[1:, layout.yaw_rate] = yaw_rates[-(PAST - 1) :]
+            live[0, columns] = live[1, columns]
+        if layout.steering is not None:
+            live[:, layout.steering] = ego_hist_world[-PAST:, _HIST_STEERING]
+        live[-1, EGO_SPEED_COLUMN], live[-1, layout.yaw_rate] = dyn.speed, dyn.yaw_rate
+        recen["ego_agent_past"] = live[None]
         # Never fed to ONNX (MODEL_INPUT_NAMES filter); the HUD/renderer reads the live
         # speed/accel/steer/yaw_rate from it, as in the NPZ path below.
         recen["ego_current_state"] = _live_ego_current(dyn)
@@ -630,11 +654,25 @@ def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.n
         axis=-1,
     )
     if getattr(tl, "native_h5", False):
+        from new_dp_h5_eval.schema import EGO_SPEED_COLUMN, EgoPastLayout
+
+        layout = EgoPastLayout.of(ep.shape[-1])
         local_yaw = np.arctan2(ep[:, 3], ep[:, 2])
-        ego_hist = np.column_stack([hist_xy, local_yaw + pose[2], ep[:, 4], ep[:, 5]]).astype(
-            np.float64
+        steering = ep[:, layout.steering] if layout.steering is not None else np.zeros(len(ep))
+        ego_hist = np.column_stack(
+            [
+                hist_xy,
+                local_yaw + pose[2],
+                ep[:, EGO_SPEED_COLUMN],
+                ep[:, layout.yaw_rate],
+                steering,
+            ]
+        ).astype(np.float64)
+        return (
+            pose,
+            ego_hist,
+            _EgoDyn(speed=float(ep[-1, EGO_SPEED_COLUMN]), yaw_rate=float(ep[-1, layout.yaw_rate])),
         )
-        return pose, ego_hist, _EgoDyn(speed=float(ep[-1, 4]), yaw_rate=float(ep[-1, 5]))
     ego_hist = np.column_stack([hist_xy, ep[:, 2] + pose[2]]).astype(np.float64)
     return pose, ego_hist, _EgoDyn(speed=float(tl.speeds[idx]))
 
@@ -1232,9 +1270,20 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
         )
         s.live_pose = new_pose
         if getattr(s.tl, "native_h5", False):
-            native_state = np.asarray(
-                [*s.live_pose, s.dyn.speed, s.dyn.yaw_rate], dtype=np.float64
-            )[None]
+            state = [*s.live_pose, s.dyn.speed, s.dyn.yaw_rate]
+            if s.ego_hist.shape[1] > _HIST_STEERING:
+                from new_dp_h5_eval.vehicle import kinematic_steering
+
+                previous = float(s.ego_hist[-1, _HIST_STEERING])
+                if was_warmup:
+                    s.dyn.steering = _recorded_steering(s.tl, tgt, previous)
+                elif override is not None or not _tracker_reports_steering(s.tracker):
+                    s.dyn.steering = kinematic_steering(
+                        float(s.ego_shape[0]), s.dyn.speed, s.dyn.yaw_rate, previous
+                    )
+                # The current state the renderer and saved scenes read agrees with the history.
+                state.append(s.dyn.steering)
+            native_state = np.asarray(state, dtype=np.float64)[None]
             s.ego_hist = np.vstack([s.ego_hist[1:], native_state])
         else:
             s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])

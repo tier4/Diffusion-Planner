@@ -1,7 +1,7 @@
 # New DP native-H5 evaluation
 
 Evaluate a new-DP sampler ONNX using the shared open-loop metrics and closed-loop
-reproducer. The reader supports native H5 versions 4 and 5. Models receive native
+reproducer. The reader supports native H5 version 4 and later. Models receive native
 H5 tensors; the evaluator adapts lane geometry and ground truth for the shared
 scorers.
 
@@ -31,6 +31,19 @@ Both runners therefore read each shard's `project_id` and take the wheelbase fro
 `dataset/data_converter_param.json`, the table both dataset converters read; pass it
 explicitly when this repository is checked out on its own. A shard whose `ego_shape` does not
 match its project's entry is rejected. The model input keeps the native `ego_shape`.
+
+## Steering and wheel base
+
+Data for models that read steering inserts `steering_tire_angle` as column 5 of
+`ego_agent_past` (`yaw_rate` moves to column 6) and appends `wheel_base` to `ego_shape`. A shard
+may also store each frame as one row of `frames_packed`, laid out by the `packed_frame_layout`
+attribute, instead of a `frames/` group; both layouts are read. A model's `ego_agent_past` /
+`ego_shape` widths (7/4 or 6/3) must match the data's.
+
+In closed loop the live ego history carries the steering the model reads: the recorded value
+while warming up, the MPC tracker's front-wheel angle, and for a placed ego (perfect tracker,
+cached plans), which has no steering state, the kinematic angle `atan(wheelbase * yaw_rate /
+speed)`, held below 1 m/s.
 
 ## Open-loop
 
@@ -78,7 +91,7 @@ the shared closed-loop evaluator; see `--help` for the available arguments.
 Closed-loop data must declare a 0.1 s frame interval and have strictly increasing
 timestamps. The reader retains timestamp jitter and gaps without inserting
 frames; dataset generation determines which recordings are usable. Version 4
-poses use `ego_x,ego_y,ego_yaw`; version 5 uses map-frame
+poses use `ego_x,ego_y,ego_yaw`; later versions use map-frame
 `x,y,z,qx,qy,qz,qw`, from which the evaluator derives planar position and yaw.
 
 ## Recompute pass fields

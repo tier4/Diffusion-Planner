@@ -89,3 +89,25 @@ def test_plan_offset_counts_from_the_plan():
     # A plan made off the grid (after an unstick teleport at step 12) starts from its first pose
     # and is kept for a full interval.
     assert [_plan_offset(k, 13, REPLAN) for k in range(13, 22)] == [*range(8), None]
+
+
+def test_placed_ego_history_derives_steering_from_its_turn():
+    """With a steering column, a placed ego, which has no steering state of its own,
+    records the kinematic front-wheel angle of the turn it made."""
+    import math
+
+    wheelbase, radius, speed = 4.0, 20.0, 5.0
+
+    def on_circle(t):
+        heading = speed * t / radius
+        return np.array([radius * math.sin(heading), radius * (1 - math.cos(heading)), heading])
+
+    s = _placed_state(np.zeros((31, 6), dtype=np.float64))
+    s.ego_shape = np.array([wheelbase, 7.0, 2.4], dtype=np.float32)
+    s.ego_hist[:, :3] = [on_circle(-i * DT) for i in range(30, -1, -1)]
+    s.live_pose = s.ego_hist[-1, :3].copy()
+    for k in range(12):
+        override = (on_circle((k + 1) * DT), on_circle((k + 5) * DT))  # ahead: half window
+        _advance_step(s, np.zeros((80, 4)), k, "cpu", Timers(), override=override)
+    assert math.isclose(s.ego_hist[-1, 5], math.atan(wheelbase / radius), rel_tol=0.02)
+    assert s.dyn.steering == s.ego_hist[-1, 5]
