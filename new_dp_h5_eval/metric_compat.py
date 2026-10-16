@@ -10,13 +10,21 @@ def legacy_lanes(frame: dict[str, np.ndarray]) -> np.ndarray:
 
     Native H5 lanes are ``xy + left-offset + right-offset``.  The legacy
     geometry helper reads the offsets from columns 4:6 and 6:8, leaving its
-    unused tangent columns 2:4 as zero.
+    unused tangent columns 2:4 as zero.  The current traffic-light state goes in the old
+    one-hot columns 8:13 (green, yellow, red, white, none) so renderers can colour lanes.
     """
     native = frame["lanes"]
-    out = np.zeros((*native.shape[:-1], 8), dtype=np.float32)
+    out = np.zeros((*native.shape[:-1], 13), dtype=np.float32)
     out[..., :2] = native[..., :2]
     out[..., 4:6] = native[..., 2:4]
     out[..., 6:8] = native[..., 4:6]
+    if "lane_traffic_light_past" in frame:
+        tl = frame["lane_traffic_light_past"][:, -1]
+        out[..., 8] = tl[:, None, 0]
+        out[..., 9] = tl[:, None, 1]
+        out[..., 10] = tl[:, None, 2]
+        out[..., 11] = tl[:, None, 4]
+        out[..., 12] = tl[:, None, 3]
     return out
 
 
