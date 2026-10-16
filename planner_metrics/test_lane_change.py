@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from planner_metrics.lane_change import evaluate_lane_change_with_details
+from planner_metrics.lane_change import evaluate_lane_change_with_details, lane_change_decision
 from planner_metrics.source_lane import _nearest_lane_index, reconstruct_source_lane
 
 _PARAMETERS = {"horizon_seconds": 8.0}
@@ -372,6 +372,45 @@ def test_lane_change_time_counts_the_first_future_point_as_one_timestep():
     result = _evaluate(prediction, gt)
 
     assert result.details["lane_change"]["lane_change_time_s"].item() == pytest.approx(0.1)
+
+
+def test_lane_change_decision_reads_the_crossing_time_from_the_given_time_axis():
+    """Closed loop passes sim times that are not (i+1)*dt; the decision must use them."""
+    predicted = torch.tensor([[0.0, -1.0, -2.0, -3.5], [0.0, 0.0, 0.0, 0.0]])
+    decision = lane_change_decision(
+        predicted,
+        torch.tensor([[0.0, -3.5], [0.0, -3.5]]),
+        torch.full((2,), _HALF_WIDTH),
+        torch.full((2,), _HALF_WIDTH),
+        torch.tensor([True, True]),
+        1.0,
+        torch.tensor([0.0, 0.3, 0.7, 1.5]),
+        9.0,
+    )
+
+    assert decision["lane_change_time_s"].tolist() == pytest.approx([0.7, 9.0])
+    assert decision["gt_direction"].tolist() == [-1.0, -1.0]
+
+
+def test_lane_change_decision_leaves_the_verdicts_ungated():
+    """An unscorable sample still reports its raw verdicts; gating is the caller's call."""
+    predicted = torch.tensor([[0.0, -3.5]])
+    gt = torch.tensor([[0.0, -3.5]])
+    decision = lane_change_decision(
+        predicted,
+        gt,
+        torch.full((1,), _HALF_WIDTH),
+        torch.full((1,), _HALF_WIDTH),
+        torch.tensor([False]),  # heading-rejected source lane
+        1.0,
+        torch.tensor([0.1, 0.2]),
+        0.2,
+    )
+
+    assert not decision["scorable"].item()
+    assert decision["gt_lane_change_detected"].item()
+    assert decision["left_source_lane"].item() and decision["reached_gt_lane"].item()
+    assert decision["completion_ratio"].item() == 1.0
 
 
 def test_gt_that_never_moves_sideways_is_not_a_lane_change():

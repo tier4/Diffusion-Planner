@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .config_cli import cli
@@ -42,3 +43,22 @@ class ScenarioOpenLoopConfig:
     scenario_lane_change_horizon_seconds: float = 8.0
     scenario_lane_change_minimum_lateral_shift_m: float = 1.0
     scenario_lane_change_chain_tolerance_m: float = 1.0
+
+
+def scenario_metric_parameters(args, labels: Iterable[str]) -> dict[str, dict[str, object]]:
+    """Group ``scenario_<label>_<parameter>`` fields of ``args`` by label.
+
+    For each label, fields named ``scenario_<label>_<parameter>`` are collected under
+    the shorter ``<parameter>`` key. Shared by the open-loop runner and the post-hoc
+    closed-loop scenario metrics so both read the same thresholds.
+    """
+    values = vars(args)
+    parameters: dict[str, dict[str, object]] = {}
+    for label in labels:
+        prefix = f"scenario_{label}_"
+        parameters[label] = {
+            field_name[len(prefix) :]: value
+            for field_name, value in values.items()
+            if field_name.startswith(prefix)
+        }
+    return parameters

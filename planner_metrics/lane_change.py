@@ -145,6 +145,92 @@ def compute_lane_change_components_batch(
 
 
 @torch.no_grad()
+def lane_change_decision(
+    predicted_lateral_offset_m: torch.Tensor,
+    gt_lateral_offset_m: torch.Tensor,
+    lane_half_width_left_m: torch.Tensor,
+    lane_half_width_right_m: torch.Tensor,
+    source_lane_heading_aligned: torch.Tensor,
+    minimum_lateral_shift_m: float,
+    time_at_index_s: torch.Tensor,
+    no_change_time_s: float,
+) -> dict[str, torch.Tensor]:
+    """Decide a lane change from lateral offsets against the source lane.
+
+    Shared by the open-loop scorer above and the closed-loop one
+    (``scenario_generation/scenario_metrics/geometry.py::score_lane_change``).
+    Offsets are ``(N, T_pred)`` and ``(N, T_gt)`` (lengths may differ: only the
+    GT's first and last readings are used), signed positive to the left; half
+    widths and the heading-aligned flag (bool) are ``(N,)``.
+    ``time_at_index_s`` (``(T_pred,)`` or ``(N, T_pred)``) is the time reported
+    when the prediction first leaves the source lane at that index, and
+    ``no_change_time_s`` the time reported when it never does.
+
+    ``scorable`` combines the two preconditions, but the verdicts
+    (``left_source_lane``, ``reached_gt_lane``, ``completion_ratio``,
+    ``lane_change_time_s``) are NOT gated on it: the caller decides what an
+    unscorable sample reports (open loop fails it, closed loop marks it not
+    applicable).
+    """
+    predicted, gt = predicted_lateral_offset_m, gt_lateral_offset_m
+    initial_shift, gt_shift, predicted_shift = gt[:, 0], gt[:, -1], predicted[:, -1]
+
+    # +1 when the GT moved left of the source lane, -1 when right. The floor
+    # keeps a map with zeroed boundary offsets from making `crossed` trivially
+    # true and `reached` impossible.
+    direction = (gt_shift >= initial_shift).to(gt.dtype) * 2 - 1
+    half_width = torch.where(direction > 0, lane_half_width_left_m, lane_half_width_right_m)
+    lane_tolerance = half_width.clamp(min=minimum_lateral_shift_m)
+    # A substituted floor is indistinguishable in the output from a genuinely
+    # narrow lane, so record which one it was.
+    tolerance_from_map = half_width >= minimum_lateral_shift_m
+
+    # The verdicts only mean something under both preconditions. An oncoming
+    # reference lane reverses the lateral readings, so a mirrored one would
+    # score as a success. And `detected` needs BOTH halves: ending up outside
+    # the source lane is also true of an ego that STARTS outside it and drives
+    # dead straight, so the GT must have moved sideways too.
+    gt_progress = gt_shift - initial_shift
+    moved = direction * gt_progress > minimum_lateral_shift_m
+    detected = moved & (direction * gt_shift > lane_tolerance)
+    scorable = source_lane_heading_aligned & detected
+    signed_progress = direction[:, None] * predicted  # (N, T), positive towards the GT's side
+    crossed = signed_progress[:, -1] > lane_tolerance
+    reached = (predicted_shift - gt_shift).abs() <= lane_tolerance
+
+    beyond = signed_progress > lane_tolerance[:, None]
+    first_beyond = (
+        time_at_index_s.expand_as(predicted)
+        .gather(1, beyond.to(torch.int8).argmax(dim=1, keepdim=True))
+        .squeeze(1)
+    )
+    change_time = torch.where(beyond.any(dim=1), first_beyond, no_change_time_s)
+
+    # Closeness to the GT's lateral target, measured from where the ego
+    # started: an overshoot then reads as far from complete as no motion does.
+    predicted_progress = predicted_shift - initial_shift
+    completion = 1 - (predicted_progress - gt_progress).abs() / gt_progress.abs().clamp(
+        min=minimum_lateral_shift_m
+    )
+
+    return {
+        "scorable": scorable,
+        "gt_lane_change_detected": detected,
+        "left_source_lane": crossed,
+        "reached_gt_lane": reached,
+        "completion_ratio": completion.clamp(0, 1),
+        "final_lateral_offset_error_m": (predicted_shift - gt_shift).abs(),
+        "lane_change_time_s": change_time,
+        "predicted_lateral_shift_m": predicted_shift,
+        "gt_lateral_shift_m": gt_shift,
+        "initial_lateral_offset_m": initial_shift,
+        "gt_direction": direction,
+        "lane_tolerance_m": lane_tolerance,
+        "lane_tolerance_from_map": tolerance_from_map,
+    }
+
+
+@torch.no_grad()
 def evaluate_lane_change_with_details(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
@@ -180,55 +266,34 @@ def evaluate_lane_change_with_details(
         timestep_seconds=_PREDICTION_TIMESTEP_SECONDS,
     )
     components = compute_lane_change_components_batch(ego_trajs, data, steps, chain_tolerance_m)
-    predicted = components["predicted_lateral_offset_m"]  # (N, T)
     gt = components["gt_lateral_offset_m"]  # (N, T)
-    initial_shift, gt_shift, predicted_shift = gt[:, 0], gt[:, -1], predicted[:, -1]
-
-    # +1 when the GT moved left of the source lane, -1 when right. The floor
-    # keeps a map with zeroed boundary offsets from making `crossed` trivially
-    # true and `reached` impossible.
-    direction = (gt_shift >= initial_shift).to(gt.dtype) * 2 - 1
-    half_width = torch.where(
-        direction > 0,
-        components["lane_half_width_left_m"],
-        components["lane_half_width_right_m"],
-    )
-    lane_tolerance = half_width.clamp(min=minimum_lateral_shift_m)
-    # A substituted floor is indistinguishable in the output from a genuinely
-    # narrow lane, so record which one it was.
-    tolerance_from_map = half_width >= minimum_lateral_shift_m
-
-    # Everything below is gated on both preconditions. An oncoming reference
-    # lane reverses the lateral readings, so a mirrored one would score as a
-    # success. And `detected` needs BOTH halves: ending up outside the source
-    # lane is also true of an ego that STARTS outside it and drives dead
-    # straight, so the GT must have moved sideways too.
-    aligned = components["source_lane_heading_aligned"] > 0.5
-    gt_progress = gt_shift - initial_shift
-    moved = direction * gt_progress > minimum_lateral_shift_m
-    detected = moved & (direction * gt_shift > lane_tolerance)
-    scorable = aligned & detected
-    signed_progress = direction[:, None] * predicted  # (N, T), positive towards the GT's side
-    crossed = scorable & (signed_progress[:, -1] > lane_tolerance)
-    reached = scorable & ((predicted_shift - gt_shift).abs() <= lane_tolerance)
-
     # Prediction index i is the pose at t=(i+1)*dt; a sample that never leaves
     # the source lane reports the full horizon.
-    beyond = signed_progress > lane_tolerance[:, None]
-    first_beyond = (
-        beyond.to(torch.int8).argmax(dim=1).to(gt.dtype) + 1
-    ) * _PREDICTION_TIMESTEP_SECONDS
-    change_time = torch.where(
-        scorable & beyond.any(dim=1), first_beyond, steps * _PREDICTION_TIMESTEP_SECONDS
+    horizon_s = steps * _PREDICTION_TIMESTEP_SECONDS
+    decision = lane_change_decision(
+        components["predicted_lateral_offset_m"],
+        gt,
+        components["lane_half_width_left_m"],
+        components["lane_half_width_right_m"],
+        components["source_lane_heading_aligned"] > 0.5,
+        minimum_lateral_shift_m,
+        (torch.arange(steps, device=gt.device).to(gt.dtype) + 1) * _PREDICTION_TIMESTEP_SECONDS,
+        horizon_s,
     )
-
-    # Closeness to the GT's lateral target, measured from where the ego
-    # started: an overshoot then reads as far from complete as no motion does.
-    predicted_progress = predicted_shift - initial_shift
-    completion = 1 - (predicted_progress - gt_progress).abs() / gt_progress.abs().clamp(
-        min=minimum_lateral_shift_m
-    )
-    completion = torch.where(scorable, completion.clamp(0, 1), 0.0)
+    # Every verdict is gated on both preconditions (see lane_change_decision): an
+    # unscorable sample fails, completes nothing and reports the full horizon.
+    scorable = decision["scorable"]
+    detected = decision["gt_lane_change_detected"]
+    crossed = scorable & decision["left_source_lane"]
+    reached = scorable & decision["reached_gt_lane"]
+    change_time = torch.where(scorable, decision["lane_change_time_s"], horizon_s)
+    completion = torch.where(scorable, decision["completion_ratio"], 0.0)
+    predicted_shift = decision["predicted_lateral_shift_m"]
+    gt_shift = decision["gt_lateral_shift_m"]
+    initial_shift = decision["initial_lateral_offset_m"]
+    direction = decision["gt_direction"]
+    lane_tolerance = decision["lane_tolerance_m"]
+    tolerance_from_map = decision["lane_tolerance_from_map"]
 
     to_score = gt.dtype
     return MetricEvaluation(
@@ -237,7 +302,7 @@ def evaluate_lane_change_with_details(
             "lane_change": {
                 "gt_lane_change_detected": detected.to(to_score),
                 "completion_ratio": completion,
-                "final_lateral_offset_error_m": (predicted_shift - gt_shift).abs(),
+                "final_lateral_offset_error_m": decision["final_lateral_offset_error_m"],
                 "lane_change_time_s": change_time,
                 "predicted_lateral_shift_m": predicted_shift,
                 "gt_lateral_shift_m": gt_shift,
@@ -259,4 +324,5 @@ def evaluate_lane_change_with_details(
 __all__ = [
     "compute_lane_change_components_batch",
     "evaluate_lane_change_with_details",
+    "lane_change_decision",
 ]

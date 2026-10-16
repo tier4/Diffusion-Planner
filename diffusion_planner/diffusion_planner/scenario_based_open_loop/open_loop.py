@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from diffusion_planner.config.scenario_open_loop_config import scenario_metric_parameters
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from planner_metrics.arrival import evaluate_arrival_with_details
 from planner_metrics.centerline import evaluate_centerline_with_details
@@ -46,16 +47,7 @@ def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
     ``<parameter>`` key. This keeps metric configuration in ``TrainConfig``
     without requiring a second metric-to-parameter mapping here.
     """
-    values = vars(args)
-    parameters: dict[str, dict[str, object]] = {}
-    for metric_name in METRICS:
-        prefix = f"scenario_{metric_name}_"
-        parameters[metric_name] = {
-            field_name[len(prefix) :]: value
-            for field_name, value in values.items()
-            if field_name.startswith(prefix)
-        }
-    return parameters
+    return scenario_metric_parameters(args, METRICS)
 
 
 def _load_json_object(path: str, label: str) -> dict:
