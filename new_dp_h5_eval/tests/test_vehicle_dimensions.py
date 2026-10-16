@@ -5,6 +5,7 @@ Covers the closed-loop reproducer and the open-loop object-avoidance scorer.
 
 import json
 import sys
+import types
 from types import SimpleNamespace
 
 import h5py
@@ -14,8 +15,9 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
+from new_dp_h5_eval import closed_loop as native
 from new_dp_h5_eval import open_loop, run_all_groups_closed_loop
-from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
+from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline, plan_optimizer_for_project
 from new_dp_h5_eval.dataset import H5FrameIndex
 from new_dp_h5_eval.open_loop import _scoring_ego_shapes, metric_view
 from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
@@ -25,8 +27,10 @@ from new_dp_h5_eval.vehicle import (
     load_vehicle_params,
     sim_ego_shape,
 )
+from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig, RolloutParams
 from scenario_generation.metrics.road_border import score_road_border_step
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.reproducer_rollout import _seed_state, _sim_ego_shape
 
 # Erga as in dataset/data_converter_param.json of the meta repository.
@@ -354,3 +358,137 @@ def test_runners_stop_when_the_vehicle_params_are_missing(
         main()
     assert exc.value.code == 2
     assert "--vehicle_params" in capsys.readouterr().err
+
+
+VEHICLE_A = {
+    "ego_wheel_base": 3.0,
+    "ego_front_overhang": 1.0,
+    "ego_length": 5.0,
+    "ego_width": 2.0,
+}
+VEHICLE_A_NATIVE = [4.0, 5.0, 2.0]
+VEHICLE_B = {
+    "ego_wheel_base": 2.0,
+    "ego_front_overhang": 0.5,
+    "ego_length": 3.0,
+    "ego_width": 1.5,
+}
+VEHICLE_B_NATIVE = [2.5, 3.0, 1.5]
+PROJECT_VEHICLES = {"project_a": "vehicle_a", "project_b": "vehicle_b"}
+
+
+def _optimizer_config(vehicle: str, wheel_base: float) -> PlanOptimizerConfig:
+    return PlanOptimizerConfig(
+        param_yaml=f"{vehicle}/ml_planner.param.yaml",
+        vehicle_yaml=f"{vehicle}/vehicle_info.param.yaml",
+        vehicle={"wheel_base": wheel_base, "wheel_tread": 2.0},
+    )
+
+
+def _per_vehicle_optimizers() -> dict[str, PlanOptimizerConfig]:
+    return {"vehicle_a": _optimizer_config("a", 3.0), "vehicle_b": _optimizer_config("b", 2.0)}
+
+
+def _two_vehicles(tmp_path):
+    return load_vehicle_params(
+        _write_params(tmp_path / "params.json", {"project_a": VEHICLE_A, "project_b": VEHICLE_B})
+    )
+
+
+@pytest.mark.parametrize(
+    "project, optimizers, message",
+    [
+        ("unknown", _per_vehicle_optimizers(), "not in the project vehicle map"),
+        # A config placed under the wrong vehicle.
+        ("project_a", {"vehicle_a": _optimizer_config("b", 2.0)}, "wheel_base 2.0"),
+    ],
+)
+def test_plan_optimizer_for_project_rejects(tmp_path, project, optimizers, message):
+    with pytest.raises(ValueError, match=message):
+        plan_optimizer_for_project(
+            project, PROJECT_VEHICLES, optimizers, _two_vehicles(tmp_path), source="s"
+        )
+
+
+def test_each_route_rolls_out_with_its_vehicles_optimizer(tmp_path, monkeypatch):
+    from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
+
+    routes = [
+        {
+            "route_id": "route_a",
+            "h5_path": str(
+                _write_route(tmp_path / "a.h5", ego_shape=VEHICLE_A_NATIVE, project_id="project_a")
+            ),
+        },
+        {
+            "route_id": "route_b",
+            "h5_path": str(
+                _write_route(tmp_path / "b.h5", ego_shape=VEHICLE_B_NATIVE, project_id="project_b")
+            ),
+        },
+    ]
+    seen = {}
+
+    def fake_render_segment(model, model_args, tl, start, end, png_dir, **kwargs):
+        seen[tl.project_id] = kwargs["plan_optimizer"]
+        return {}
+
+    monkeypatch.setattr(native, "render_segment", fake_render_segment)
+    params = native.rollout_params_from_closed_loop_config(
+        ClosedLoopConfig(device="cpu"), drop_objects=False, draw_every=None, plan_optimizer=None
+    )
+    evaluator = native.NativeH5FullRouteClosedLoopEvaluation(
+        model=None,
+        model_args=None,
+        config=ClosedLoopEvalConfig(
+            out_dir=tmp_path / "out", params=params, fps=10.0, verbose=False, profile=False
+        ),
+        routes=routes,
+        vehicle_params=_two_vehicles(tmp_path),
+        plan_optimizers=_per_vehicle_optimizers(),
+        project_vehicles=PROJECT_VEHICLES,
+        seg_len=100,
+        ddp_rank=0,
+        ddp_world_size=1,
+    )
+    for job in evaluator.discover_jobs():
+        evaluator.run_job(job, frames_root=tmp_path / "frames")
+    assert seen["project_a"].vehicle["wheel_base"] == 3.0
+    assert seen["project_b"].vehicle["wheel_base"] == 2.0
+    assert evaluator.config.params.plan_optimizer is None
+
+
+def test_closed_loop_runner_stops_on_a_route_without_its_vehicles_config(
+    tmp_path, monkeypatch, capsys
+):
+    module = types.ModuleType("ml_planner_optimizer")
+    module.__file__ = str(tmp_path / "install/lib/python3.10/site-packages/ml_planner_optimizer.so")
+    monkeypatch.setitem(sys.modules, "ml_planner_optimizer", module)
+    root = tmp_path / "configs" / "vehicle_a"
+    root.mkdir(parents=True)
+    (root / "ml_planner.param.yaml").write_text("")
+    (root / "vehicle_info.param.yaml").write_text(
+        "/**:\n  ros__parameters:\n    wheel_base: 3.0\n    wheel_tread: 1.6\n"
+    )
+    shard = _write_route(tmp_path / "b.h5", ego_shape=VEHICLE_B_NATIVE, project_id="project_b")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"site": [str(shard)]}))
+    vehicle_map = tmp_path / "project_vehicle_map.json"
+    vehicle_map.write_text(json.dumps(PROJECT_VEHICLES))
+    _two_vehicles(tmp_path)
+    argv = [
+        "runner",
+        "--closed_loop_h5_root", str(manifest),
+        "--model_path", "m.onnx",
+        "--out_root", str(tmp_path / "out"),
+        "--vehicle_params", str(tmp_path / "params.json"),
+        "--project_vehicle_map", str(vehicle_map),
+        "--plan_optimizer",
+        "--plan_optimizer_config_dir", str(tmp_path / "configs"),
+    ]  # fmt: skip
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as exc:
+        run_all_groups_closed_loop.main()
+    assert exc.value.code == 2
+    assert "no plan optimizer config for vehicle 'vehicle_b'" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()

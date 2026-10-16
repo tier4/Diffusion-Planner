@@ -40,10 +40,15 @@ class PlanOptimizerConfig:
         a missing module or file fails before any rollout starts."""
         if not args.plan_optimizer:
             return None
+        return cls.from_dir(Path(args.plan_optimizer_config_dir))
+
+    @classmethod
+    def from_dir(cls, config_dir: Path) -> PlanOptimizerConfig:
+        """One vehicle's config: ``vehicle_info.param.yaml`` and an optional
+        ``ml_planner.param.yaml`` directly in ``config_dir``."""
         import ml_planner_optimizer  # noqa: PLC0415 - only a rollout that asks for it needs it
         import yaml  # noqa: PLC0415
 
-        config_dir = Path(args.plan_optimizer_config_dir)
         # The installed default sits under the prefix of the module, <prefix>/lib/python3.X/
         # site-packages/<module>.so. Under colcon --symlink-install that file links into the
         # build tree, so the path as imported is tried before the resolved one.
@@ -60,6 +65,29 @@ class PlanOptimizerConfig:
         ((_, node),) = yaml.safe_load(vehicle_yaml.read_text()).items()
         vehicle = {k: float(v) for k, v in node["ros__parameters"].items()}
         return cls(param_yaml, vehicle_yaml, vehicle)
+
+
+def per_vehicle_configs_from_args(
+    args: argparse.Namespace,
+) -> dict[str, PlanOptimizerConfig] | None:
+    """``{vehicle: config}`` when ``--plan_optimizer_config_dir`` holds one directory per
+    vehicle rather than one vehicle's files; None when the optimizer is off or it holds one
+    vehicle, which ``PlanOptimizerConfig.from_args`` reads."""
+    if not args.plan_optimizer:
+        return None
+    root = Path(args.plan_optimizer_config_dir)
+    if (root / "vehicle_info.param.yaml").is_file():
+        return None
+    configs = {
+        path.name: PlanOptimizerConfig.from_dir(path)
+        for path in sorted(root.iterdir())
+        if (path / "vehicle_info.param.yaml").is_file()
+    }
+    if not configs:
+        raise FileNotFoundError(
+            f"{root} holds neither vehicle_info.param.yaml nor a directory per vehicle with one"
+        )
+    return configs
 
 
 class PlanOptimizer:
@@ -87,6 +115,7 @@ class PlanOptimizer:
         )
         self._optimizer.set_road_borders(borders)
         self._param_yaml = str(config.param_yaml)
+        self._vehicle_yaml = str(config.vehicle_yaml)
         self._last: tuple[float, np.ndarray] | None = None  # (sim_time, front wheel angle)
         self._cycles: list[dict] = []
 
@@ -130,6 +159,7 @@ class PlanOptimizer:
         ms = [c["solve_time_ms"] for c in cycles if "solve_time_ms" in c] or [0.0]
         return {
             "param_yaml": self._param_yaml,
+            "vehicle_yaml": self._vehicle_yaml,
             "calls": len(cycles),
             "failures": len(failed),
             "failures_without_plan": sum(c["no_plan"] for c in failed),

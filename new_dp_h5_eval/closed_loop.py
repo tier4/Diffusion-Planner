@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +42,48 @@ from .model import (
 )
 from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 from .vehicle import VehicleDimensions, sim_ego_shape
+
+# float32 storage and the yaml's rounding stay well under a millimetre.
+_WHEEL_BASE_ATOL_M = 1e-3
+
+
+def h5_project_id(h5: h5py.File, source: Path) -> str:
+    project_id = h5.attrs.get("project_id")
+    if isinstance(project_id, bytes):
+        project_id = project_id.decode()
+    if not project_id:
+        raise ValueError(f"closed-loop H5 has no project_id attribute: {source}")
+    return str(project_id)
+
+
+def plan_optimizer_for_project(
+    project_id: str,
+    project_vehicles: dict[str, str],
+    plan_optimizers: dict[str, PlanOptimizerConfig],
+    vehicle_params: dict[str, VehicleDimensions],
+    *,
+    source: str,
+) -> PlanOptimizerConfig:
+    """The config of the vehicle ``project_id`` drives. Its wheel base must be the one the
+    converter table gives the project, so a config placed under the wrong vehicle fails."""
+    vehicle = project_vehicles.get(project_id)
+    if vehicle is None:
+        raise ValueError(f"{source}: project_id {project_id!r} is not in the project vehicle map")
+    config = plan_optimizers.get(vehicle)
+    if config is None:
+        raise ValueError(
+            f"{source}: no plan optimizer config for vehicle {vehicle!r} of project "
+            f"{project_id!r} (have: {', '.join(sorted(plan_optimizers))})"
+        )
+    dimensions = vehicle_params.get(project_id)
+    if dimensions is None:
+        raise ValueError(f"{source}: project_id {project_id!r} has no ego dimensions")
+    if abs(config.vehicle["wheel_base"] - dimensions.wheel_base) > _WHEEL_BASE_ATOL_M:
+        raise ValueError(
+            f"{source}: {config.vehicle_yaml} has wheel_base {config.vehicle['wheel_base']}, but "
+            f"project {project_id!r} has {dimensions.wheel_base} in the vehicle params"
+        )
+    return config
 
 
 class NativeH5RouteTimeline(RouteTimeline):
@@ -93,15 +136,12 @@ class NativeH5RouteTimeline(RouteTimeline):
             self._rows = np.arange(start, stop, dtype=np.int64)
             self.frame_indices = self._rows.copy()
             self.sim_ego_shape = None
+            self.project_id = None
             if vehicle_params is not None:
-                project_id = self._h5.attrs.get("project_id")
-                if isinstance(project_id, bytes):
-                    project_id = project_id.decode()
-                if not project_id:
-                    raise ValueError(f"closed-loop H5 has no project_id attribute: {self.h5_path}")
+                self.project_id = h5_project_id(self._h5, self.h5_path)
                 self.sim_ego_shape = sim_ego_shape(
                     self._h5["frames"]["ego_shape"][start:stop],
-                    str(project_id),
+                    self.project_id,
                     vehicle_params,
                     source=str(self.h5_path),
                 )
@@ -279,11 +319,18 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
         *args,
         routes: list[dict],
         vehicle_params: dict[str, VehicleDimensions],
+        plan_optimizers: dict[str, PlanOptimizerConfig] | None = None,
+        project_vehicles: dict[str, str] | None = None,
         **kwargs,
     ) -> None:
+        """With ``plan_optimizers`` (``{vehicle: config}``), each route's rollout takes the config
+        of the vehicle its project drives, looked up in ``project_vehicles``, in place of
+        ``params.plan_optimizer``."""
         super().__init__(*args, npz_root="native_h5", **kwargs)
         self.routes = routes
         self.vehicle_params = vehicle_params
+        self.plan_optimizers = plan_optimizers
+        self.project_vehicles = project_vehicles or {}
         self._routes_by_id = {str(route["route_id"]): route for route in routes}
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
@@ -316,9 +363,21 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
             timers=timers,
             vehicle_params=self.vehicle_params,
         )
+        params = self.config.params
         rows: list[dict] = []
         video_mp4s: list[Path] = []
         try:
+            if self.plan_optimizers is not None:
+                params = replace(
+                    params,
+                    plan_optimizer=plan_optimizer_for_project(
+                        timeline.project_id,
+                        self.project_vehicles,
+                        self.plan_optimizers,
+                        self.vehicle_params,
+                        source=str(h5_path),
+                    ),
+                )
             for start, end in timeline.iter_segments(job.seg_len):
                 png_dir = frames_root / f"{job.route_key}_{start}_{end}"
                 metrics = render_segment(
@@ -328,20 +387,20 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                     start,
                     end,
                     png_dir,
-                    **self.config.params.render_kwargs(),
+                    **params.render_kwargs(),
                     draw_pool=draw_pool,
                     timers=timers,
                 )
-                if self.config.params.colormap_metrics:
+                if params.colormap_metrics:
                     from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 
                     render_trajectory_colormaps(
                         png_dir,
                         self.out_dir,
                         f"{job.route_key}_{start}_{end}",
-                        metrics=self.config.params.colormap_metrics,
-                        near_miss_thresh=self.config.params.near_miss_thresh,
-                        strong_brake_mps2=self.config.params.strong_brake_mps2,
+                        metrics=params.colormap_metrics,
+                        near_miss_thresh=params.near_miss_thresh,
+                        strong_brake_mps2=params.strong_brake_mps2,
                         title=f"{job.route_key} [{start},{end}]",
                     )
                 self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
@@ -375,7 +434,11 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
 
 
 def rollout_params_from_closed_loop_config(
-    cfg, *, drop_objects: bool, draw_every: int | None
+    cfg,
+    *,
+    drop_objects: bool,
+    draw_every: int | None,
+    plan_optimizer: PlanOptimizerConfig | None,
 ) -> RolloutParams:
     """Map the project's single ClosedLoopConfig source of truth to native H5 rollout params."""
     return RolloutParams(
@@ -413,5 +476,5 @@ def rollout_params_from_closed_loop_config(
         # Native-H5 evaluation has no separate media toggle.  Keep its rendering
         # output consistent with the regular closed-loop evaluator.
         colormap_metrics=tuple(cfg.closed_loop_colormap_metrics),
-        plan_optimizer=PlanOptimizerConfig.from_args(cfg),
+        plan_optimizer=plan_optimizer,
     )

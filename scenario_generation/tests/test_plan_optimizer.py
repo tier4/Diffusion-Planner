@@ -164,3 +164,36 @@ def test_reproducer_feeds_its_input_borders_and_goal_in_the_map_frame(config_dir
     assert gh == pytest.approx(3 * np.pi / 2)
     assert recorder.ego == pytest.approx((100.0, 50.0, np.pi / 2, 3.0))
     assert xy.shape == (80, 2) and h.shape == (80,)
+
+
+def _vehicle_dir(path, wheel_base):
+    path.mkdir(parents=True)
+    doc = {"/**": {"ros__parameters": {**VEHICLE, "wheel_base": wheel_base}}}
+    (path / "vehicle_info.param.yaml").write_text(yaml.safe_dump(doc))
+    return path
+
+
+@pytest.mark.usefixtures("installed")
+def test_per_vehicle_configs_read_one_directory_per_vehicle(tmp_path, config_dir):
+    root = tmp_path / "configs"
+    _vehicle_dir(root / "vehicle_a", 3.0)
+    _vehicle_dir(root / "vehicle_b", 2.5)
+    (root / "PROVENANCE.txt").write_text("")
+    args = _args("--plan_optimizer", "--plan_optimizer_config_dir", str(root))
+    configs = po.per_vehicle_configs_from_args(args)
+    assert sorted(configs) == ["vehicle_a", "vehicle_b"]
+    assert configs["vehicle_a"].vehicle["wheel_base"] == 3.0
+    assert configs["vehicle_a"].vehicle_yaml == root / "vehicle_a" / "vehicle_info.param.yaml"
+    # One vehicle's directory and the switch off are left to from_args.
+    single = _args("--plan_optimizer", "--plan_optimizer_config_dir", str(config_dir))
+    assert po.per_vehicle_configs_from_args(single) is None
+    assert po.per_vehicle_configs_from_args(_args()) is None
+
+
+@pytest.mark.usefixtures("installed")
+def test_per_vehicle_configs_reject_a_directory_without_any_vehicle(tmp_path):
+    root = tmp_path / "configs"
+    (root / "empty").mkdir(parents=True)
+    args = _args("--plan_optimizer", "--plan_optimizer_config_dir", str(root))
+    with pytest.raises(FileNotFoundError, match="directory per vehicle"):
+        po.per_vehicle_configs_from_args(args)
