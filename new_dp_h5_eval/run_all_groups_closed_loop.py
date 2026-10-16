@@ -13,7 +13,7 @@ import math
 import os
 import time
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
@@ -83,12 +83,33 @@ def _write_groups_manifest(out_dir: Path, summaries: dict[str, dict]) -> None:
     (out_dir / "groups.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+def group_dir_name(group_name: str) -> str:
+    """Directory and route-id name of a manifest group: its last path component.
+
+    Lap manifests key groups as ``<sensor config>/<site>``. Used verbatim, the ``/`` nests the
+    output one level deeper than the per-label layout and carries the prefix into every route id,
+    which then also nests the media files. Pass conditions keep looking up the full group name.
+    """
+    name = PurePosixPath(group_name).name
+    if name in ("", ".", ".."):
+        raise ValueError(f"group name {group_name!r} has no usable last component")
+    return name
+
+
 def _load_groups(manifest: Path) -> dict[str, list[dict]]:
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{manifest} must map group names to H5 route entries")
     groups: dict[str, list[dict]] = {}
+    dir_names: dict[str, str] = {}
     for group_name, entries in payload.items():
+        dir_name = group_dir_name(str(group_name))
+        if dir_name in dir_names:
+            raise ValueError(
+                f"{manifest}: groups {dir_names[dir_name]!r} and {group_name!r} "
+                f"would both be written to {dir_name!r}"
+            )
+        dir_names[dir_name] = str(group_name)
         if not isinstance(entries, list):
             raise ValueError(f"{manifest}: group {group_name!r} must be a list")
         routes = []
@@ -119,7 +140,7 @@ def _load_groups(manifest: Path) -> dict[str, list[dict]]:
             relative_id = os.path.relpath(resolved_path, manifest.parent.resolve())
             path_id = hashlib.sha1(relative_id.encode()).hexdigest()[:12]
             route["route_id"] = (
-                f"{group_name}__{resolved_path.parent.name}__{path_id}"
+                f"{dir_name}__{resolved_path.parent.name}__{path_id}"
                 f"__{route.get('frame_start', 0)}_{route.get('frame_stop', 'end')}"
             )
             routes.append(route)
@@ -208,8 +229,8 @@ def main() -> int:
     evaluators: dict[str, NativeH5FullRouteClosedLoopEvaluation] = {}
     for manifest, mode, label in zip(args.closed_loop_h5_root, modes, labels):
         for group_name, routes in _load_groups(manifest).items():
-            group_out = out_root / label / group_name
-            key = f"{label}/{group_name}"
+            group_out = out_root / label / group_dir_name(group_name)
+            key = f"{label}/{group_dir_name(group_name)}"
             evaluators[key] = NativeH5FullRouteClosedLoopEvaluation(
                 model,
                 model_args(),

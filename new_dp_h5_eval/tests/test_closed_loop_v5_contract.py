@@ -10,7 +10,7 @@ import pytest
 
 from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
 from new_dp_h5_eval.dataset import H5FrameIndex
-from new_dp_h5_eval.run_all_groups_closed_loop import _load_groups
+from new_dp_h5_eval.run_all_groups_closed_loop import _load_groups, group_dir_name
 from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
 
 
@@ -76,6 +76,25 @@ def test_manifest_distinguishes_windows_and_passes_selection_metadata(tmp_path):
         json.dumps({"departure": [entries[0], {**entries[0], "h5_path": str(shard)}]})
     )
     with pytest.raises(ValueError, match="duplicate H5 route identities"):
+        _load_groups(manifest)
+
+
+def test_lap_group_keyed_by_sensor_config_names_routes_by_site(tmp_path):
+    (tmp_path / "frames.h5").touch()
+    manifest = tmp_path / "routes.json"
+    manifest.write_text(json.dumps({"qPy9gLsy/2700_Sakaide_DP": ["frames.h5"]}))
+    routes = _load_groups(manifest)["qPy9gLsy/2700_Sakaide_DP"]
+    assert routes[0]["route_id"].startswith("2700_Sakaide_DP__")
+    assert "/" not in routes[0]["route_id"]
+    assert group_dir_name("qPy9gLsy/2700_Sakaide_DP") == "2700_Sakaide_DP"
+    assert group_dir_name("departure") == "departure"
+
+
+def test_rejects_groups_that_share_a_site_name(tmp_path):
+    (tmp_path / "frames.h5").touch()
+    manifest = tmp_path / "routes.json"
+    manifest.write_text(json.dumps({"a/site": ["frames.h5"], "b/site": ["frames.h5"]}))
+    with pytest.raises(ValueError, match="would both be written to 'site'"):
         _load_groups(manifest)
 
 
