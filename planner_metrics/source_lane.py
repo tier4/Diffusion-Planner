@@ -9,6 +9,7 @@ successors that chain onto it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -25,6 +26,18 @@ _MIN_SOURCE_HEADING_ALIGNMENT = 0.8
 # Lanelets whose centerline distance from the ego differs by less than this are
 # a tie (typically two branches of a fork starting at the same point).
 _SOURCE_DISTANCE_TIE_M = 0.1
+# At a fork, the straight continuation is the branch whose lanes run on
+# farthest without a lanelet bending off: one whose overall direction deviates
+# more than this from where its predecessor ended (a 90 deg turn lanelet's does
+# by ~45 deg; a lanelet following a road's curve, by half its own bend). A turn
+# lane can run parallel to the through lane for tens of meters before it bends
+# off, so the branches' own directions cannot tell them apart.
+_STRAIGHT_MAX_DEVIATION_DEG = 15.0
+# How far ahead that reach is followed. Lanes on beyond this make no difference.
+_STRAIGHT_REACH_LIMIT_M = 150.0
+# Branches whose reaches differ by less than this are a tie (both cut off by the
+# edge of the lane tensor, typically), left to the branches' own directions.
+_STRAIGHT_REACH_TIE_M = 10.0
 
 
 @dataclass(frozen=True)
@@ -114,8 +127,80 @@ def _lane_half_widths(lane: torch.Tensor) -> tuple[float, float]:
     )
 
 
+def _successor_map(
+    centerlines: dict[int, torch.Tensor], chain_tolerance_m: float
+) -> dict[int, list[int]]:
+    """Return each lanelet's endpoint-chained successors (first point on its last)."""
+    indices = list(centerlines)
+    starts = torch.stack([centerlines[i][0] for i in indices])
+    ends = torch.stack([centerlines[i][-1] for i in indices])
+    chained = torch.cdist(ends, starts) <= chain_tolerance_m
+    return {
+        index: [indices[j] for j in torch.nonzero(chained[row]).squeeze(-1).tolist() if j != row]
+        for row, index in enumerate(indices)
+    }
+
+
+def _straight_reach(
+    centerlines: dict[int, torch.Tensor],
+    successors: dict[int, list[int]],
+    first: int,
+    heading: torch.Tensor,
+    used: set[int],
+) -> float:
+    """Return how far the lanes from the start of ``first`` run on without bending off.
+
+    ``heading`` is the direction the lane arrives at ``first`` in. Followed
+    through any chained successors (the longest way wins), stopping at the first
+    lanelet whose overall direction deviates more than
+    ``_STRAIGHT_MAX_DEVIATION_DEG`` from where its predecessor ended, and at
+    ``_STRAIGHT_REACH_LIMIT_M``. A turn lane's reach ends where it bends off; the
+    through lane's runs on, through the road's own curves.
+    """
+    min_alignment = math.cos(math.radians(_STRAIGHT_MAX_DEVIATION_DEG))
+    best = 0.0
+    stack = [(first, heading, 0.0, frozenset(used | {first}))]
+    while stack and best < _STRAIGHT_REACH_LIMIT_M:
+        index, arriving, before, seen = stack.pop()
+        centerline = centerlines[index]
+        chord = centerline[-1] - centerline[0]
+        if float(arriving @ chord) < min_alignment * float(chord.norm()) * float(arriving.norm()):
+            best = max(best, before)
+            continue
+        total = before + float((centerline[1:] - centerline[:-1]).norm(dim=-1).sum())
+        best = max(best, total)
+        if total >= _STRAIGHT_REACH_LIMIT_M:
+            continue
+        tail_p1, tail_p2 = _polyline_segments(centerline)
+        leaving = tail_p2[-1] - tail_p1[-1]
+        stack.extend(
+            (successor, leaving, total, seen | {successor})
+            for successor in successors[index]
+            if successor not in seen
+        )
+    return min(best, _STRAIGHT_REACH_LIMIT_M)
+
+
+def _longest_reaching(
+    candidates: list[int],
+    centerlines: dict[int, torch.Tensor],
+    successors: dict[int, list[int]],
+    heading: torch.Tensor,
+    used: set[int],
+) -> set[int]:
+    """Return the branches of a fork that run on (nearly) farthest along ``heading``."""
+    reach = {
+        index: _straight_reach(centerlines, successors, index, heading, used)
+        for index in candidates
+    }
+    longest = max(reach.values())
+    return {index for index, value in reach.items() if value >= longest - _STRAIGHT_REACH_TIE_M}
+
+
 def _nearest_lane_index(
-    point: torch.Tensor, centerlines: dict[int, torch.Tensor]
+    point: torch.Tensor,
+    centerlines: dict[int, torch.Tensor],
+    successors: dict[int, list[int]] | None = None,
 ) -> tuple[int, bool]:
     """Return ``(index, heading_aligned)`` for the lanelet the ego is travelling on at ``point``.
 
@@ -123,8 +208,9 @@ def _nearest_lane_index(
     tangent's x-component), which rejects oncoming lanelets and the crossing
     road's turn lanelet that sweeps through the ego position at 45-70 deg --
     often closer to the ego than its own lane's centerline. The nearest of the
-    survivors wins; a tie within ``_SOURCE_DISTANCE_TIE_M`` goes to the one
-    running most along the ego heading, i.e. the straight branch of a fork.
+    survivors wins; a tie within ``_SOURCE_DISTANCE_TIE_M`` goes to the
+    straight branch of a fork: the one whose lanes run on farthest along the ego
+    heading (given ``successors``), then the one running most along it.
     With no survivors the nearest lanelet is returned as ``heading_aligned=
     False`` for the caller to surface.
 
@@ -157,6 +243,11 @@ def _nearest_lane_index(
         return nearest[1], False
     nearest_distance = min(distance for distance, _, _ in candidates)
     tied = [c for c in candidates if c[0] <= nearest_distance + _SOURCE_DISTANCE_TIE_M]
+    if successors is not None and len(tied) > 1:
+        reaching = _longest_reaching(
+            [c[2] for c in tied], centerlines, successors, torch.tensor([1.0, 0.0]).to(point), set()
+        )
+        tied = [c for c in tied if c[2] in reaching]
     return max(tied, key=lambda c: c[1])[2], True
 
 
@@ -174,19 +265,24 @@ def _arc_length_behind(path: torch.Tensor, point: torch.Tensor) -> float:
 
 def _build_source_lane_path(
     centerlines: dict[int, torch.Tensor],
+    successors: dict[int, list[int]],
     source_index: int,
     reference_point: torch.Tensor,
     required_length_m: float,
-    chain_tolerance_m: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Extend the source lanelet forward through its endpoint-chained successors.
 
     Two lanelets chain when the successor's first point coincides with the
     current tail -- that is how lanelet2 successor links survive into the NPZ,
-    which carries no explicit connectivity. At a fork the branch whose OVERALL
-    direction best matches the current heading wins, not the one whose initial
-    tangent does: a turn lanelet leaves the fork tangent to the straight one,
-    so their first segments are indistinguishable.
+    which carries no explicit connectivity. At a fork the straight
+    continuation wins: the branch whose lanes run on farthest along the current
+    heading (``_straight_reach``), then among those the one whose OVERALL
+    direction best matches it. Neither the initial tangent nor the first
+    lanelet's direction alone tells a turn lane from the through lane: a turn
+    lanelet leaves the fork tangent to the straight one, and a turn lane can
+    run alongside it for tens of meters before it bends off, its first lanelet
+    even pointing closer to the heading. Chaining such a branch would make the
+    branch the source lane, and a GT taking it would never leave it.
 
     The budget is measured AHEAD OF THE EGO. Lanelets are resampled to a fixed
     point count regardless of length, so the ego often sits deep inside a long
@@ -208,16 +304,23 @@ def _build_source_lane_path(
         tail_direction = tail_p2[-1] - tail_p1[-1]
         tail_direction = tail_direction / tail_direction.norm()
 
-        best_index, best_alignment = -1, 0.0
-        for index, centerline in centerlines.items():
-            if index in used or float((centerline[0] - path[-1]).norm()) > chain_tolerance_m:
+        alignments = {}
+        for index in successors[int(owners[-1])]:
+            if index in used:
                 continue
+            centerline = centerlines[index]
             overall = centerline[-1] - centerline[0]
             alignment = float(tail_direction @ overall) / max(
                 float(overall.norm()), _SEGMENT_MIN_LENGTH
             )
-            if alignment > best_alignment:
-                best_alignment, best_index = alignment, index
+            if alignment > 0.0:
+                alignments[index] = alignment
+        if len(alignments) > 1:
+            reaching = _longest_reaching(
+                list(alignments), centerlines, successors, tail_direction, used
+            )
+            alignments = {index: a for index, a in alignments.items() if index in reaching}
+        best_index = max(alignments, key=alignments.get) if alignments else -1
         if best_index < 0:
             break
         used.add(best_index)
@@ -240,10 +343,11 @@ def reconstruct_source_lane(
     ``lanes`` is one scene's ``(S, P, D>=8)`` lane tensor.
     """
     centerlines = _scene_centerlines(lanes)
+    successors = _successor_map(centerlines, chain_tolerance_m)
     reference_point = reference_point.to(lanes)
-    index, heading_aligned = _nearest_lane_index(reference_point, centerlines)
+    index, heading_aligned = _nearest_lane_index(reference_point, centerlines, successors)
     path, owners = _build_source_lane_path(
-        centerlines, index, reference_point, required_length_m, chain_tolerance_m
+        centerlines, successors, index, reference_point, required_length_m
     )
     return SourceLane(path=path, owners=owners, index=index, heading_aligned=heading_aligned)
 
