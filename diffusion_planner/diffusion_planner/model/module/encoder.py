@@ -20,6 +20,23 @@ CLASS_TYPE_TURN_INDICATOR = 9
 CLASS_TYPE_NUM = 10
 
 
+def one_hot_turn_indicators(turn_indicators):
+    """One-hot encode TurnIndicatorsReport codes.
+
+    Args:
+        turn_indicators: (B, T) report codes (0=unset, 1=DISABLE, 2=ENABLE_LEFT, 3=ENABLE_RIGHT)
+    Returns:
+        (B, T * TURN_INDICATOR_INPUT_ONE_HOT_DIM) flattened one-hot
+
+    Comparison-based instead of F.one_hot so the ONNX graph stays simple and
+    out-of-range codes become all-zero rows instead of erroring.
+    """
+    x = turn_indicators.float()
+    classes = torch.arange(TURN_INDICATOR_INPUT_ONE_HOT_DIM, device=x.device, dtype=x.dtype)
+    one_hot = (x.unsqueeze(-1) == classes).to(x.dtype)
+    return one_hot.flatten(1)
+
+
 def add_class_type(x, class_type):
     """
     Add class type to the input tensor.
@@ -122,7 +139,7 @@ class Encoder(nn.Module):
             hidden_dim=config.hidden_dim,
         )
         self.turn_indicator_encoder = FloatsEncoder(
-            num_float=INPUT_T,
+            num_float=INPUT_T * TURN_INDICATOR_INPUT_ONE_HOT_DIM,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
@@ -206,8 +223,9 @@ class Encoder(nn.Module):
         ego_shape = inputs["ego_shape"]  # (B, D=3)
 
         # turn indicator
-        turn_indicator = inputs["turn_indicators"][:, :-1]  # (B, T)
-        turn_indicator = turn_indicator.float()
+        turn_indicator = one_hot_turn_indicators(
+            inputs["turn_indicators"][:, :-1]
+        )  # (B, T * TURN_INDICATOR_INPUT_ONE_HOT_DIM)
         if not self.use_turn_indicators:
             turn_indicator = torch.zeros_like(turn_indicator)
 
