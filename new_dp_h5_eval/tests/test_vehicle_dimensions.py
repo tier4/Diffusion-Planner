@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
+from new_dp_h5_eval import closed_loop as native
 from new_dp_h5_eval import open_loop, run_all_groups_closed_loop
 from new_dp_h5_eval.closed_loop import NativeH5RouteTimeline
 from new_dp_h5_eval.dataset import H5FrameIndex
@@ -25,8 +26,10 @@ from new_dp_h5_eval.vehicle import (
     load_vehicle_params,
     sim_ego_shape,
 )
+from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig
 from scenario_generation.metrics.road_border import score_road_border_step
 from scenario_generation.perf_timer import Timers
+from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.reproducer_rollout import _seed_state, _sim_ego_shape
 
 # Erga as in dataset/data_converter_param.json of the meta repository.
@@ -354,3 +357,73 @@ def test_runners_stop_when_the_vehicle_params_are_missing(
         main()
     assert exc.value.code == 2
     assert "--vehicle_params" in capsys.readouterr().err
+
+
+# Two made-up vehicles; the native ego length is wheel base + front overhang.
+VEHICLE_A = {"ego_wheel_base": 3.0, "ego_front_overhang": 1.0, "ego_length": 5.0, "ego_width": 2.0}
+VEHICLE_B = {"ego_wheel_base": 2.0, "ego_front_overhang": 0.5, "ego_length": 3.0, "ego_width": 1.5}
+NATIVE = {"project_a": [4.0, 5.0, 2.0], "project_b": [2.5, 3.0, 1.5]}
+PROJECT_VEHICLES = {"project_a": "vehicle_a", "project_b": "vehicle_b"}
+OPTIMIZERS = {
+    v: PlanOptimizerConfig(f"{v}/ml.yaml", f"{v}/vehicle.yaml", {"wheel_base": wb})
+    for v, wb in (("vehicle_a", 3.0), ("vehicle_b", 2.0))
+}
+
+
+def _optimizers_seen(tmp_path, monkeypatch, optimizers):
+    """Roll out one route of each project and return the optimizer config each one got."""
+    from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
+
+    tmp_path.mkdir(exist_ok=True)
+    seen = {}
+
+    def fake_render_segment(model, model_args, tl, start, end, png_dir, **kwargs):
+        seen[tl.project_id] = kwargs["plan_optimizer"]
+        return {}
+
+    monkeypatch.setattr(native, "render_segment", fake_render_segment)
+    monkeypatch.setattr(
+        PlanOptimizerConfig, "from_dir", classmethod(lambda cls, path: optimizers[path.name])
+    )
+    evaluator = native.NativeH5FullRouteClosedLoopEvaluation(
+        model=None,
+        model_args=None,
+        config=ClosedLoopEvalConfig(
+            tmp_path / "out",
+            native.rollout_params_from_closed_loop_config(
+                ClosedLoopConfig(device="cpu"), drop_objects=False, draw_every=None
+            ),
+            10.0,
+            verbose=False,
+            profile=False,
+        ),
+        routes=[
+            {
+                "route_id": p,
+                "h5_path": str(_write_route(tmp_path / f"{p}.h5", ego_shape=s, project_id=p)),
+            }
+            for p, s in NATIVE.items()
+        ],
+        vehicle_params=load_vehicle_params(
+            _write_params(
+                tmp_path / "params.json", {"project_a": VEHICLE_A, "project_b": VEHICLE_B}
+            )
+        ),
+        plan_optimizer_root=tmp_path / "configs",
+        project_vehicles=PROJECT_VEHICLES,
+        seg_len=100,
+        ddp_rank=0,
+        ddp_world_size=1,
+    )
+    for job in evaluator.discover_jobs():
+        evaluator.run_job(job, frames_root=tmp_path / "frames")
+    return seen
+
+
+def test_each_route_rolls_out_with_its_vehicles_optimizer(tmp_path, monkeypatch):
+    seen = _optimizers_seen(tmp_path, monkeypatch, OPTIMIZERS)
+    assert seen == {p: OPTIMIZERS[v] for p, v in PROJECT_VEHICLES.items()}
+    # A config placed under the wrong vehicle.
+    wrong = {**OPTIMIZERS, "vehicle_a": OPTIMIZERS["vehicle_b"]}
+    with pytest.raises(ValueError, match="wheel_base 2.0"):
+        _optimizers_seen(tmp_path / "wrong", monkeypatch, wrong)

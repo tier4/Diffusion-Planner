@@ -192,7 +192,8 @@ class ClosedLoopConfig:
     plan_optimizer_config_dir: Optional[str] = cli(
         "with --plan_optimizer: a directory holding the vehicle's vehicle_info.param.yaml and, "
         "optionally, an ml_planner.param.yaml to use instead of the installed one, which leaves "
-        "road border avoidance off",
+        "road border avoidance off. Native H5 closed loop reads <dir>/<vehicle>/ instead, the "
+        "vehicle each route's project drives in dataset/project_vehicle_map.json",
         default=None,
         path=True,
     )

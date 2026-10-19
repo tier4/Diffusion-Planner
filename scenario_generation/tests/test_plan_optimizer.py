@@ -130,6 +130,7 @@ def test_a_failed_solve_keeps_the_tracked_plan(config_dir):
     # Steering is read off the last solution, which the failure did not replace.
     assert recorder.steers == pytest.approx([0.0, 0.0, 0.02, 0.08])
     s = optimizer.summary()
+    assert s["vehicle_yaml"] == str(config_dir / "vehicle_info.param.yaml")
     assert (s["calls"], s["failures"], s["failures_without_plan"]) == (4, 2, 1)
     assert s["border_shifted"] is True and s["border_shift_rate"] == 1.0
     assert s["border_shifted_cycles"] == 4 and s["border_shifted_points"] == 12

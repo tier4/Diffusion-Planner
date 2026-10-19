@@ -40,10 +40,15 @@ class PlanOptimizerConfig:
         a missing module or file fails before any rollout starts."""
         if not args.plan_optimizer:
             return None
+        return cls.from_dir(Path(args.plan_optimizer_config_dir))
+
+    @classmethod
+    def from_dir(cls, config_dir: Path) -> PlanOptimizerConfig:
+        """One vehicle's config: ``vehicle_info.param.yaml`` and an optional
+        ``ml_planner.param.yaml`` directly in ``config_dir``."""
         import ml_planner_optimizer  # noqa: PLC0415 - only a rollout that asks for it needs it
         import yaml  # noqa: PLC0415
 
-        config_dir = Path(args.plan_optimizer_config_dir)
         # The installed default sits under the prefix of the module, <prefix>/lib/python3.X/
         # site-packages/<module>.so. Under colcon --symlink-install that file links into the
         # build tree, so the path as imported is tried before the resolved one.
@@ -87,6 +92,7 @@ class PlanOptimizer:
         )
         self._optimizer.set_road_borders(borders)
         self._param_yaml = str(config.param_yaml)
+        self._vehicle_yaml = str(config.vehicle_yaml)
         self._last: tuple[float, np.ndarray] | None = None  # (sim_time, front wheel angle)
         self._cycles: list[dict] = []
 
@@ -130,6 +136,7 @@ class PlanOptimizer:
         ms = [c["solve_time_ms"] for c in cycles if "solve_time_ms" in c] or [0.0]
         return {
             "param_yaml": self._param_yaml,
+            "vehicle_yaml": self._vehicle_yaml,
             "calls": len(cycles),
             "failures": len(failed),
             "failures_without_plan": sum(c["no_plan"] for c in failed),
