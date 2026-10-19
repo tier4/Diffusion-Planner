@@ -194,3 +194,14 @@ def test_both_layouts_load_identical_route_and_index_frames(tmp_path, packed):
         np.testing.assert_array_equal(route.frame_indices, [1, 2])
     finally:
         route.close()
+
+
+def test_lap_group_slash_does_not_become_a_route_filename_directory(tmp_path):
+    shard = tmp_path / "frames.h5"
+    _write_route(shard)
+    manifest = tmp_path / "routes.json"
+    manifest.write_text(json.dumps({"project/map": [shard.name], "project%2Fmap": [shard.name]}))
+    groups = _load_groups(manifest)
+    ids = [routes[0]["route_id"] for routes in groups.values()]
+    assert all("/" not in route_id for route_id in ids)
+    assert len(set(ids)) == 2
