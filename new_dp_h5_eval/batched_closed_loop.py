@@ -669,7 +669,7 @@ def job_segments(
     timelines: list[NativeH5RouteTimeline],
     timers: Timers,
 ) -> list[Segment]:
-    """Open ``job``'s route, appending its timeline to ``timelines``, and set up each of its segments with a started trace."""
+    """Open ``job``'s route, appending its timeline to ``timelines``, and set up each of its segments with a started trace and, with the plan optimizer on, the optimizer of the route's vehicle."""
     params = evaluator.config.params
     route = evaluator._routes_by_id[job.job_id]
     timeline = NativeH5RouteTimeline(
@@ -680,6 +680,8 @@ def job_segments(
         vehicle_params=evaluator.vehicle_params,
     )
     timelines.append(timeline)
+    if evaluator.plan_optimizer_root is not None:
+        params = replace(params, plan_optimizer=evaluator._plan_optimizer(timeline))
     evaluator.rolled_out[job.job_id] = []
     segments = []
     spans = list(timeline.iter_segments(job.seg_len))
