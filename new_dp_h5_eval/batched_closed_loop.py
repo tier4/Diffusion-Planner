@@ -745,13 +745,14 @@ def run_batched(
 
 
 def roll_out_jobs(model, work, evaluators, params, frames_root, draw_pool, timers) -> None:
-    """Roll out one batch of ``(evaluator key, job)`` routes, hand their metrics over and release their files."""
+    """Roll out one batch of ``(evaluator key, job)`` routes, hand their metrics over and release their files; routes too short to hold a segment keep their empty results, as the reproducer backend skips them."""
     timelines: list[NativeH5RouteTimeline] = []
     segments: list[Segment] = []
     try:
         for key, job in work:
             segments += job_segments(evaluators[key], key, job, frames_root, timelines, timers)
-        BatchedRollout(model, segments, params, draw_pool, timers).run()
+        if segments:
+            BatchedRollout(model, segments, params, draw_pool, timers).run()
         for segment in segments:
             hand_over(segment)
     finally:

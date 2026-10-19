@@ -237,6 +237,33 @@ def test_batched_rollout_reproduces_the_reproducer(
             ), (e.get("k"), key)
 
 
+def test_a_route_too_short_for_a_segment_is_skipped_like_the_reproducer(route, tmp_path):
+    """A one-frame selection yields no segment: the reproducer skips the route, and the batched backend leaves it without results instead of failing."""
+    path, vehicles, params = route
+    timeline = NativeH5RouteTimeline(path, 0, 1, vehicle_params=vehicles)
+    try:
+        assert not list(timeline.iter_segments(100000))
+    finally:
+        timeline.close()
+    evaluator = BatchedNativeH5Evaluation(
+        StraightPlanner(5.0),
+        model_args(),
+        config=ClosedLoopEvalConfig(
+            out_dir=tmp_path / "out", params=params, fps=10.0, verbose=False, profile=False
+        ),
+        routes=[
+            {"h5_path": str(path), "route_id": "group__route", "frame_start": 0, "frame_stop": 1}
+        ],
+        vehicle_params=vehicles,
+        seg_len=100000,
+        ddp_rank=0,
+        ddp_world_size=1,
+    )
+    job = FullRouteRouteJob(job_id="group__route", route_key="group__route", seg_len=100000)
+    run_batched(StraightPlanner(5.0), {"group": [job]}, {"group": evaluator}, tmp_path, None)
+    assert evaluator.rolled_out["group__route"] == []
+
+
 def test_drawn_segments_leave_one_video_and_no_frames(route, tmp_path):
     """With drawing on, each segment's frames are encoded into its video as soon as it ends."""
     path, vehicles, params = route
