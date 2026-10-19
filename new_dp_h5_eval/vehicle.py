@@ -27,6 +27,7 @@ import numpy as np
 DEFAULT_VEHICLE_PARAMS = (
     Path(__file__).resolve().parents[2] / "dataset" / "data_converter_param.json"
 )
+DEFAULT_PROJECT_VEHICLE_MAP = DEFAULT_VEHICLE_PARAMS.with_name("project_vehicle_map.json")
 _REQUIRED_KEYS = ("ego_wheel_base", "ego_front_overhang", "ego_length", "ego_width")
 # float32 storage in the H5 rounds the table values by well under a millimetre.
 _SHAPE_ATOL_M = 1e-3
@@ -96,6 +97,25 @@ def vehicle_params_from_args(parser, args) -> dict[str, VehicleDimensions]:
         return load_vehicle_params(args.vehicle_params)
     except (OSError, ValueError) as exc:
         parser.error(f"cannot read --vehicle_params {args.vehicle_params}: {exc}")
+
+
+def add_project_vehicle_map_argument(parser) -> None:
+    parser.add_argument(
+        "--project_vehicle_map",
+        type=Path,
+        default=DEFAULT_PROJECT_VEHICLE_MAP,
+        help="{project_id: vehicle}, which picks each route's directory when "
+        "--plan_optimizer_config_dir holds one per vehicle (default: the meta repository's "
+        "dataset/project_vehicle_map.json).",
+    )
+
+
+def load_project_vehicle_map(path: str | Path) -> dict[str, str]:
+    path = Path(path).expanduser()
+    entries = json.loads(path.read_text())
+    if not isinstance(entries, dict) or not all(isinstance(v, str) for v in entries.values()):
+        raise ValueError(f"{path}: expected a json object of project id -> vehicle name")
+    return {str(project): vehicle for project, vehicle in entries.items()}
 
 
 def sim_ego_shape(

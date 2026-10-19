@@ -31,7 +31,12 @@ from .closed_loop import (
     model_args,
     rollout_params_from_closed_loop_config,
 )
-from .vehicle import add_vehicle_params_argument, vehicle_params_from_args
+from .vehicle import (
+    add_project_vehicle_map_argument,
+    add_vehicle_params_argument,
+    load_project_vehicle_map,
+    vehicle_params_from_args,
+)
 
 
 def _write_groups_manifest(out_dir: Path, summaries: dict[str, dict]) -> None:
@@ -171,6 +176,7 @@ def main() -> int:
     parser.add_argument("--closed_loop_draw_workers", type=int, default=4)
     add_vehicle_params_argument(parser)
     add_plan_optimizer_argument(parser)
+    add_project_vehicle_map_argument(parser)
     args = parser.parse_args()
     vehicle_params = vehicle_params_from_args(parser, args)
 
@@ -192,6 +198,15 @@ def main() -> int:
         plan_optimizer_config_dir=args.plan_optimizer_config_dir,
     )
     cfg.closed_loop_draw_workers = args.closed_loop_draw_workers
+    plan_optimizer_root = project_vehicles = None
+    if cfg.plan_optimizer:
+        if not cfg.plan_optimizer_config_dir:
+            parser.error("--plan_optimizer needs --plan_optimizer_config_dir")
+        plan_optimizer_root = Path(cfg.plan_optimizer_config_dir)
+        try:
+            project_vehicles = load_project_vehicle_map(args.project_vehicle_map)
+        except (OSError, ValueError) as exc:
+            parser.error(f"cannot read --project_vehicle_map: {exc}")
     rank, local_rank, world_size = ddp.ddp_setup_universal(True, cfg)
     if cfg.device.startswith("cuda"):
         import torch
@@ -227,6 +242,8 @@ def main() -> int:
                 ),
                 routes=routes,
                 vehicle_params=vehicle_params,
+                plan_optimizer_root=plan_optimizer_root,
+                project_vehicles=project_vehicles,
                 seg_len=cfg.closed_loop_seg_len,
                 ddp_rank=rank,
                 ddp_world_size=world_size,
