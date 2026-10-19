@@ -66,7 +66,7 @@ scenario-generation = { workspace = true }
 scene-search = { workspace = true }
 guidance-gui = { workspace = true }
 tag-toolkit = { workspace = true }
-t4-e2e-devkit = { git = "https://github.com/tier4/e2e-devkit", rev = "e062e23e4f5e515d7ee31b6ab53bb734ec3d7859" }
+t4-e2e-devkit = { git = "https://github.com/tier4/e2e-devkit", rev = "96a11c37e0eedd5a678335bc1442389e1df5b77d" }
 
 [tool.pytest.ini_options]
 markers = [
