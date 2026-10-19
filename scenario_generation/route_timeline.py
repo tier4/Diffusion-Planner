@@ -304,6 +304,10 @@ class RouteTimeline:
                 self._npz_cache.popitem(last=False)  # evict least-recently-used
         return data
 
+    def recorded_turn_indicator(self, idx: int) -> int:
+        """The recorded turn indicator of frame ``idx``."""
+        return int(np.asarray(self.npz(idx)["turn_indicators"]).reshape(-1)[-1])
+
     def neighbor_last(self, idx: int) -> np.ndarray:
         """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, 11)) for a frame.
 

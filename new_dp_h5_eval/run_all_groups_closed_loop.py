@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -152,6 +153,35 @@ def resolve_labels(manifests: list[Path], modes: list[str], labels: list[str] | 
     return resolved
 
 
+def _run_reproducer(model, assignments, evaluators, cfg, out_root: Path, rank: int) -> dict:
+    """Let each evaluator roll out and record its own segments, one at a time."""
+    return {key: evaluator.run(assignments[key]) for key, evaluator in evaluators.items()}
+
+
+def _backend(name: str):
+    """The evaluator class and the run function of closed-loop backend ``name``."""
+    if name == "batched":
+        from .batched_closed_loop import BatchedNativeH5Evaluation
+
+        return BatchedNativeH5Evaluation, _run_batched
+    return NativeH5FullRouteClosedLoopEvaluation, _run_reproducer
+
+
+def _run_batched(model, assignments, evaluators, cfg, out_root: Path, rank: int) -> dict:
+    """Roll every assigned segment out in one batch, then let each evaluator record its own."""
+    from scenario_generation.render_pool import render_pool
+
+    from .batched_closed_loop import run_batched
+
+    with (
+        tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
+        render_pool(cfg.closed_loop_draw_workers) as draw_pool,
+    ):
+        timing = run_batched(model, assignments, evaluators, Path(frames_root), draw_pool)
+        (out_root / f"batched_timing_{rank}.json").write_text(json.dumps(timing, indent=2))
+        return {key: evaluator.run(assignments[key]) for key, evaluator in evaluators.items()}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--closed_loop_h5_root", type=Path, nargs="+", required=True)
@@ -169,6 +199,13 @@ def main() -> int:
     parser.add_argument("--provider", action="append", dest="providers")
     parser.add_argument("--closed_loop_pass_conditions", default="")
     parser.add_argument("--closed_loop_draw_workers", type=int, default=4)
+    parser.add_argument(
+        "--closed_loop_backend",
+        choices=("reproducer", "batched"),
+        default="reproducer",
+        help="'batched' rolls every segment of every input out at once on the e2e-devkit "
+        "batched simulator, with the same scoring, traces, videos and summaries",
+    )
     add_vehicle_params_argument(parser)
     add_plan_optimizer_argument(parser)
     args = parser.parse_args()
@@ -205,12 +242,13 @@ def main() -> int:
         save_config(cfg, out_root, "closed_loop_config.json")
 
     model = ReproducerOnnxModel(args.model_path, args.providers)
+    evaluator_class, run_evaluators = _backend(args.closed_loop_backend)
     evaluators: dict[str, NativeH5FullRouteClosedLoopEvaluation] = {}
     for manifest, mode, label in zip(args.closed_loop_h5_root, modes, labels):
         for group_name, routes in _load_groups(manifest).items():
             group_out = out_root / label / group_name
             key = f"{label}/{group_name}"
-            evaluators[key] = NativeH5FullRouteClosedLoopEvaluation(
+            evaluators[key] = evaluator_class(
                 model,
                 model_args(),
                 config=ClosedLoopEvalConfig(
@@ -242,7 +280,7 @@ def main() -> int:
         assignments[key].append(job)
 
     started = time.perf_counter()
-    partials = {key: evaluator.run(assignments[key]) for key, evaluator in evaluators.items()}
+    partials = run_evaluators(model, assignments, evaluators, cfg, out_root, rank)
     if world_size > 1:
         torch.distributed.barrier()
         if rank == 0:

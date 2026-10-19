@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -152,6 +153,9 @@ class NativeH5RouteTimeline(RouteTimeline):
         self._sidecar_paths = self.npz_paths
         self.kdtree = cKDTree(self.poses[:, :2])
         self.speeds = self._compute_native_speeds()
+        self._turn_indicators = np.asarray(
+            self._h5["frames"]["turn_indicators"][start:stop, -1], dtype=np.int64
+        )
         self._npz_cache: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
         self._npz_cache_max = 128
         self._cache_lock = threading.Lock()
@@ -185,6 +189,10 @@ class NativeH5RouteTimeline(RouteTimeline):
             while len(self._npz_cache) > self._npz_cache_max:
                 self._npz_cache.popitem(last=False)
         return data
+
+    def recorded_turn_indicator(self, idx: int) -> int:
+        """The recorded turn indicator of frame ``idx``, read once with the route."""
+        return int(self._turn_indicators[idx])
 
     def neighbor_last(self, idx: int) -> np.ndarray:
         frame = self.npz(idx)
@@ -247,11 +255,14 @@ class ReproducerOnnxModel:
         self.seed = int(seed)
         self.calls = 0
 
-    def __call__(self, data: dict[str, torch.Tensor]):
+    def __call__(self, data: dict[str, torch.Tensor], seeds: list[int] | None = None):
+        """Plan a batch; each row's sampler noise comes from ``seeds`` when given, else from the running call count."""
         device = data["ego_agent_past"].device
         feed = {key: data[key].detach().cpu().numpy() for key in MODEL_INPUT_NAMES}
         batch = feed["ego_agent_past"].shape[0]
-        noise = seeded_initial_noise([self.seed + self.calls + i for i in range(batch)])
+        if seeds is None:
+            seeds = [self.seed + self.calls + i for i in range(batch)]
+        noise = seeded_initial_noise(seeds)
         self.calls += batch
         feed["initial_noise"] = noise
         trajectory, logits3 = self.runner.session.run(None, feed)
@@ -316,8 +327,7 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
             timers=timers,
             vehicle_params=self.vehicle_params,
         )
-        rows: list[dict] = []
-        video_mp4s: list[Path] = []
+        result = JobRunResult(extras={"timers": timers})
         try:
             for start, end in timeline.iter_segments(job.seg_len):
                 png_dir = frames_root / f"{job.route_key}_{start}_{end}"
@@ -332,46 +342,68 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                     draw_pool=draw_pool,
                     timers=timers,
                 )
-                if self.config.params.colormap_metrics:
-                    from scenario_generation.trajectory_colormap import render_trajectory_colormaps
-
-                    render_trajectory_colormaps(
-                        png_dir,
-                        self.out_dir,
-                        f"{job.route_key}_{start}_{end}",
-                        metrics=self.config.params.colormap_metrics,
-                        near_miss_thresh=self.config.params.near_miss_thresh,
-                        strong_brake_mps2=self.config.params.strong_brake_mps2,
-                        title=f"{job.route_key} [{start},{end}]",
-                    )
-                self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
-                row = {
-                    "route": job.route_key,
-                    **{
-                        key: route[key]
-                        for key in ("anchors", "segment_start_ns", "segment_end_ns")
-                        if key in route
-                    },
-                    **metrics,
-                }
-                if self.config.pass_condition is not None:
-                    row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
-                if segments_file is not None:
-                    segments_file.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
-                    segments_file.flush()
-                    if digest_file is not None:
-                        side = tdigest_sidecar_row(row)
-                        if side is not None:
-                            digest_file.write(json.dumps(side, default=float) + "\n")
-                            digest_file.flush()
-                rows.append(row)
-                if any(png_dir.glob("*.png")):
-                    segment_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-                    build_mp4(png_dir, segment_mp4, self.config.fps)
-                    video_mp4s.append(segment_mp4)
+                self.record_segment(
+                    result, job, (start, end), png_dir, metrics, segments_file, digest_file
+                )
         finally:
             timeline.close()
-        return JobRunResult(rows=rows, video_mp4s=video_mp4s, extras={"timers": timers})
+        return result
+
+    def record_segment(
+        self,
+        result: JobRunResult,
+        job: FullRouteRouteJob,
+        span: tuple[int, int],
+        png_dir: Path,
+        metrics: dict,
+        segments_file=None,
+        digest_file=None,
+        video: Path | None = None,
+    ) -> None:
+        """Turn one rolled-out segment into its artifacts: colormaps, trace, pass verdict, ``segments.jsonl`` row and video, using ``video`` when it was already encoded."""
+        route = self._routes_by_id[job.job_id]
+        key = f"{job.route_key}_{span[0]}_{span[1]}"
+        if self.config.params.colormap_metrics:
+            from scenario_generation.trajectory_colormap import render_trajectory_colormaps
+
+            render_trajectory_colormaps(
+                png_dir,
+                self.out_dir,
+                key,
+                metrics=self.config.params.colormap_metrics,
+                near_miss_thresh=self.config.params.near_miss_thresh,
+                strong_brake_mps2=self.config.params.strong_brake_mps2,
+                title=f"{job.route_key} [{span[0]},{span[1]}]",
+            )
+        self._preserve_rollout_trace(png_dir, key)
+        row = {
+            "route": job.route_key,
+            **{
+                name: route[name]
+                for name in ("anchors", "segment_start_ns", "segment_end_ns")
+                if name in route
+            },
+            **metrics,
+        }
+        if self.config.pass_condition is not None:
+            row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
+        if segments_file is not None:
+            segments_file.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
+            segments_file.flush()
+            if digest_file is not None:
+                side = tdigest_sidecar_row(row)
+                if side is not None:
+                    digest_file.write(json.dumps(side, default=float) + "\n")
+                    digest_file.flush()
+        result.rows.append(row)
+        segment_mp4 = self.out_dir / f"{key}.mp4"
+        if video is not None and video.exists():
+            segment_mp4.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(video), segment_mp4)
+            result.video_mp4s.append(segment_mp4)
+        elif any(png_dir.glob("*.png")):
+            build_mp4(png_dir, segment_mp4, self.config.fps)
+            result.video_mp4s.append(segment_mp4)
 
 
 def rollout_params_from_closed_loop_config(

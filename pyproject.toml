@@ -15,6 +15,7 @@ dependencies = [
     "rlvr",
     "scenario-generation",
     "scene-search",
+    "t4-e2e-devkit",
     "tag-toolkit",
 ]
 
@@ -65,6 +66,7 @@ scenario-generation = { workspace = true }
 scene-search = { workspace = true }
 guidance-gui = { workspace = true }
 tag-toolkit = { workspace = true }
+t4-e2e-devkit = { git = "https://github.com/tier4/e2e-devkit", rev = "3fdad588e3343285c89b199f7b734729c8f5dc02" }
 
 [tool.pytest.ini_options]
 markers = [
