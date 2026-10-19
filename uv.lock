@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-10-06T02:14:52.290732124Z"
+exclude-newer = "2026-10-12T05:43:01.019162042Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -391,6 +391,7 @@ dependencies = [
     { name = "rlvr" },
     { name = "scenario-generation" },
     { name = "scene-search" },
+    { name = "t4-e2e-devkit" },
     { name = "tag-toolkit" },
 ]
 
@@ -414,6 +415,7 @@ requires-dist = [
     { name = "rlvr", editable = "rlvr" },
     { name = "scenario-generation", editable = "scenario_generation" },
     { name = "scene-search", editable = "scene_search" },
+    { name = "t4-e2e-devkit", git = "https://github.com/tier4/e2e-devkit?rev=39be787662f0ec14a36700f5f5e36a4c6821cb88" },
     { name = "tag-toolkit", editable = "tag_toolkit" },
 ]
 
@@ -431,6 +433,20 @@ source = { registry = "https://pypi.flatt.tech/simple/" }
 sdist = { url = "https://pypi.flatt.tech/files/packages/96/8e/709914eb2b5749865801041647dc7f4e6d00b549cfe88b65ca192995f07c/distlib-0.4.0.tar.gz", hash = "sha256:feec40075be03a04501a973d81f633735b4b69f98b05450592310c0f401a4e0d", size = 614605, upload-time = "2025-07-17T16:52:00.465Z" }
 wheels = [
     { url = "https://pypi.flatt.tech/files/packages/33/6b/e0547afaf41bf2c42e52430072fa5658766e3d65bd4b03a563d1b6336f57/distlib-0.4.0-py2.py3-none-any.whl", hash = "sha256:9659f7d87e46584a30b5780e43ac7a2143098441670ff0a49d5f9034c54a6c16", size = 469047, upload-time = "2025-07-17T16:51:58.613Z" },
+]
+
+[[package]]
+name = "duckdb"
+version = "1.5.6"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/59/0b/d65ea3be00ea79aa276a8388bec588a9cbf409ce637c6d306e5316210d15/duckdb-1.5.6.tar.gz", hash = "sha256:166a91dbfacfc0c9f08cc76c0243cb6d3d4296bfab5bad72a3cfb63140a5b7c8", size = 18032957, upload-time = "2026-09-28T13:38:37.978Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/58/e1/5d05ecb59e3fd401414dacc9c969a326fe3a0b1eb07920058b656fe728d6/duckdb-1.5.6-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:64db8a6700e81fe419fba130d8f1780686ad40fbf2eb69f78d2a1533728a0549", size = 32758341, upload-time = "2026-09-28T13:37:14.588Z" },
+    { url = "https://pypi.flatt.tech/files/packages/0e/d0/a382d9677097a1493049ae38f8219d751db989bfc72bf3a3766dc5af038e/duckdb-1.5.6-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:d6d1eac4de11779bb249b89b0544916ad65751da031df5c5f6d779c85b753109", size = 17372329, upload-time = "2026-09-28T13:37:17.997Z" },
+    { url = "https://pypi.flatt.tech/files/packages/5c/dc/76577ce6520db9e4e8b33f90ec2f503cbf79652a1fd34e391b8043f921f2/duckdb-1.5.6-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:56355a543a79c7f4d8576d27edcbd9aaed19a562a0901188b021c10f4c818800", size = 15511297, upload-time = "2026-09-28T13:37:20.236Z" },
+    { url = "https://pypi.flatt.tech/files/packages/e0/3e/eeeef69e0c3cf3bb463b544435695647a4802437cfcc2b94035026bf5f84/duckdb-1.5.6-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:95a6b91bb9149950baeb5d02466c006550d0ea98b9d10f15f7d614a8eb32e174", size = 19428638, upload-time = "2026-09-28T13:37:22.436Z" },
+    { url = "https://pypi.flatt.tech/files/packages/58/05/4ed0a651d55c8cbf9f7e826cfa95e67c9955a5db22a0c7c0cc5378f4a90c/duckdb-1.5.6-cp310-cp310-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dbd348e9ebdc8b28f1f9930efb5a74a382063c35d9c43901075566fbae50ab5c", size = 21534632, upload-time = "2026-09-28T13:37:25.139Z" },
+    { url = "https://pypi.flatt.tech/files/packages/33/34/66f49f13f4286871e54b8d5478fb0b10e1f334f6ffe81536213e7fb55f09/duckdb-1.5.6-cp310-cp310-win_amd64.whl", hash = "sha256:f14551eef9180fc72869e2d9a2896410a8826169e22495e98a825abaa0eac1a7", size = 13178288, upload-time = "2026-09-28T13:37:27.578Z" },
 ]
 
 [[package]]
@@ -545,6 +561,23 @@ wheels = [
 [package.optional-dependencies]
 http = [
     { name = "aiohttp" },
+]
+
+[[package]]
+name = "geopandas"
+version = "1.1.4"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "pyogrio" },
+    { name = "pyproj" },
+    { name = "shapely" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/39/a9/0478b74a33aea66827c10baaf6025cb2a17e44b1c117533eecd3e977bb75/geopandas-1.1.4.tar.gz", hash = "sha256:06f2890a07e1a239047daa14b486a7c6ae5ce82dcf7405e13c46bf31f5d0dd66", size = 337445, upload-time = "2026-06-26T17:23:54.497Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/59/a8/bd530cc264e62ddbc1d1bb7225823992e6f2432c664693e9281bb6b9c359/geopandas-1.1.4-py3-none-any.whl", hash = "sha256:1a0c459cbdb1537cd154dafe6174be20d1760844b7f1c967dc8520b180f2e773", size = 343292, upload-time = "2026-06-26T17:23:53.112Z" },
 ]
 
 [[package]]
@@ -1131,6 +1164,18 @@ wheels = [
 ]
 
 [[package]]
+name = "omegaconf"
+version = "2.4.0"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "pyyaml" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/cc/10/1cabf3188a4d9684a06568c7fd76f9536eede625733c8399cf1f5337b83e/omegaconf-2.4.0.tar.gz", hash = "sha256:7e219a70bea371da250285b9c01c7db027bc421722799c2cc4ff14bc4a2a753b", size = 3544508, upload-time = "2026-10-09T12:44:02.326Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/4f/bd/0d9f8247b0819385213d09564eda5c52d3673313c2414d51f72883ec24cd/omegaconf-2.4.0-py3-none-any.whl", hash = "sha256:f141a664c777582405e3cc6e0545ecc79429e79f844995b1a6e71c35946a025c", size = 254152, upload-time = "2026-10-09T12:43:59.764Z" },
+]
+
+[[package]]
 name = "onnx"
 version = "1.21.0"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -1512,6 +1557,62 @@ source = { registry = "https://pypi.flatt.tech/simple/" }
 sdist = { url = "https://pypi.flatt.tech/files/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
 wheels = [
     { url = "https://pypi.flatt.tech/files/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
+]
+
+[[package]]
+name = "pyogrio"
+version = "0.13.0"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "certifi" },
+    { name = "numpy" },
+    { name = "packaging" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/de/3c/d2268615e8b749ba59f278b14a495883562e961fa3ad55a9def222bfbd4a/pyogrio-0.13.0.tar.gz", hash = "sha256:9614f27a1891113f80653e0b76b4233ea1fb3beeb1ac46d118ab22e1670f8f13", size = 313103, upload-time = "2026-06-26T15:30:17.375Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/7b/59/ae4bc3c5d798e301910820f0827e78c54dd56d52efd354bee92d0fc00fb8/pyogrio-0.13.0-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:588ea200bbefc3c6b33bdc3063491a7af4287747838f3b719347587063d9fc5d", size = 24709356, upload-time = "2026-06-26T15:29:08.341Z" },
+    { url = "https://pypi.flatt.tech/files/packages/87/c9/95ecd0a1c5c7bf8f0362664fa3df1071068c11ec6a5464fe3884ab59b738/pyogrio-0.13.0-cp310-cp310-macosx_12_0_x86_64.whl", hash = "sha256:ddbe22dd823bf4227ac12ab0b4f43ffdd430d4ed38dd5446d1f44dd50db157cf", size = 26128943, upload-time = "2026-06-26T15:29:12.046Z" },
+    { url = "https://pypi.flatt.tech/files/packages/33/da/350ac91aa0a3a5d1fcc979e229adbf900fc980d59a68d68fbd8e5ff693ce/pyogrio-0.13.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ffa3b91f4ac7518dbd9fc1294fa81df316ff5e5a67ae6d95fc5f7bb35b2acf10", size = 32572193, upload-time = "2026-06-26T15:29:15.929Z" },
+    { url = "https://pypi.flatt.tech/files/packages/45/4f/117f0634b34f8a94b63021ee36fdb5c7e4cf66bce44cd115b1177da8ea01/pyogrio-0.13.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:c6324969f234f57990e421e4dfd5b6de46e8112873ddf682596593bc26858cd0", size = 32058292, upload-time = "2026-06-26T15:29:19.84Z" },
+    { url = "https://pypi.flatt.tech/files/packages/70/5c/2718b1f413a069e4bbfde2b627c57af4b3ba909b50329968ab3ac45513e4/pyogrio-0.13.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:a878484387e422932236e8b8b30f4e5efb9c9880118f1c9759338a1519f5dd41", size = 33737903, upload-time = "2026-06-26T15:29:24.846Z" },
+    { url = "https://pypi.flatt.tech/files/packages/f4/21/4b1ee9f9778150a3e2d401b6633cae990dbacb7bfcbcd2c9302349be0bfa/pyogrio-0.13.0-cp310-cp310-win_amd64.whl", hash = "sha256:54761a92c74add8f02836e41b4cf721dac156bc752750b2be6459f3752ff82be", size = 23865436, upload-time = "2026-06-26T15:29:28.615Z" },
+    { url = "https://pypi.flatt.tech/files/packages/c0/89/76534ad8f01d952ad01002741f8cfac08024035a70952f190b4f7e22325c/pyogrio-0.13.0-cp311-abi3-macosx_12_0_arm64.whl", hash = "sha256:68e6bb9b8b14412311da69679333ad5408c0f9aa5b25d5837bbcba3dfa698109", size = 24666205, upload-time = "2026-06-26T15:29:32.214Z" },
+    { url = "https://pypi.flatt.tech/files/packages/39/58/af3b3a74c8b05ebf49b03303ee24024b9d0272de482867425c8dc93f2820/pyogrio-0.13.0-cp311-abi3-macosx_12_0_x86_64.whl", hash = "sha256:8823f91570c91e66e50cc573bc4722e925b84220ee0c7dc61532438d43c69a95", size = 26063477, upload-time = "2026-06-26T15:29:35.94Z" },
+    { url = "https://pypi.flatt.tech/files/packages/55/30/3e38d8532a33adf15c6465dcd8c1bb2a146dce0da3fd8ba0aa9ec9ba74e4/pyogrio-0.13.0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:9e84e7b09b073ee4cc8c35663afcf644b0c17db75ac72c7591dc3864252db461", size = 32246778, upload-time = "2026-06-26T15:29:40.185Z" },
+    { url = "https://pypi.flatt.tech/files/packages/26/96/888ea83c8d0f1e2cc732bea6be94ed0db784cacd99f0248333483be657b3/pyogrio-0.13.0-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:680842c88b5e678125edd13b15f7187ff3ce7630cadef538887edd3cbe801287", size = 31670710, upload-time = "2026-06-26T15:29:44.328Z" },
+    { url = "https://pypi.flatt.tech/files/packages/20/c2/247c150f5ca12f8593c20e39115db551b18de5c6cb383006de21b57399e4/pyogrio-0.13.0-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:220a988ce2a26591d6db5c775b07289d4f54cabdf274cc048f0e17a0b9d5be14", size = 33334097, upload-time = "2026-06-26T15:29:48.533Z" },
+    { url = "https://pypi.flatt.tech/files/packages/d2/ba/3757e312a98c428ac5d8b787f3608ae325174ebef6897930a42e21dd057a/pyogrio-0.13.0-cp311-abi3-win_amd64.whl", hash = "sha256:1b91f6d6e6757a6ea84b9459d24f479dcb52bbf4ebcdb16baf39e49d2836a1cf", size = 23824927, upload-time = "2026-06-26T15:29:52.493Z" },
+]
+
+[[package]]
+name = "pyproj"
+version = "3.7.1"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "certifi" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/67/10/a8480ea27ea4bbe896c168808854d00f2a9b49f95c0319ddcbba693c8a90/pyproj-3.7.1.tar.gz", hash = "sha256:60d72facd7b6b79853f19744779abcd3f804c4e0d4fa8815469db20c9f640a47", size = 226339, upload-time = "2025-02-16T04:28:46.621Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/25/a3/c4cd4bba5b336075f145fe784fcaf4ef56ffbc979833303303e7a659dda2/pyproj-3.7.1-cp310-cp310-macosx_13_0_x86_64.whl", hash = "sha256:bf09dbeb333c34e9c546364e7df1ff40474f9fddf9e70657ecb0e4f670ff0b0e", size = 6262524, upload-time = "2025-02-16T04:27:19.725Z" },
+    { url = "https://pypi.flatt.tech/files/packages/40/45/4fdf18f4cc1995f1992771d2a51cf186a9d7a8ec973c9693f8453850c707/pyproj-3.7.1-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:6575b2e53cc9e3e461ad6f0692a5564b96e7782c28631c7771c668770915e169", size = 4665102, upload-time = "2025-02-16T04:27:24.428Z" },
+    { url = "https://pypi.flatt.tech/files/packages/0c/d2/360eb127380106cee83569954ae696b88a891c804d7a93abe3fbc15f5976/pyproj-3.7.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:8cb516ee35ed57789b46b96080edf4e503fdb62dbb2e3c6581e0d6c83fca014b", size = 9432667, upload-time = "2025-02-16T04:27:27.04Z" },
+    { url = "https://pypi.flatt.tech/files/packages/76/a5/c6e11b9a99ce146741fb4d184d5c468446c6d6015b183cae82ac822a6cfa/pyproj-3.7.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1e47c4e93b88d99dd118875ee3ca0171932444cdc0b52d493371b5d98d0f30ee", size = 9259185, upload-time = "2025-02-16T04:27:30.35Z" },
+    { url = "https://pypi.flatt.tech/files/packages/41/56/a3c15c42145797a99363fa0fdb4e9805dccb8b4a76a6d7b2cdf36ebcc2a1/pyproj-3.7.1-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:3e8d276caeae34fcbe4813855d0d97b9b825bab8d7a8b86d859c24a6213a5a0d", size = 10469103, upload-time = "2025-02-16T04:27:33.542Z" },
+    { url = "https://pypi.flatt.tech/files/packages/ef/73/c9194c2802fefe2a4fd4230bdd5ab083e7604e93c64d0356fa49c363bad6/pyproj-3.7.1-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:f173f851ee75e54acdaa053382b6825b400cb2085663a9bb073728a59c60aebb", size = 10401391, upload-time = "2025-02-16T04:27:36.051Z" },
+    { url = "https://pypi.flatt.tech/files/packages/c5/1d/ce8bb5b9251b04d7c22d63619bb3db3d2397f79000a9ae05b3fd86a5837e/pyproj-3.7.1-cp310-cp310-win32.whl", hash = "sha256:f550281ed6e5ea88fcf04a7c6154e246d5714be495c50c9e8e6b12d3fb63e158", size = 5869997, upload-time = "2025-02-16T04:27:38.302Z" },
+    { url = "https://pypi.flatt.tech/files/packages/09/6a/ca145467fd2e5b21e3d5b8c2b9645dcfb3b68f08b62417699a1f5689008e/pyproj-3.7.1-cp310-cp310-win_amd64.whl", hash = "sha256:3537668992a709a2e7f068069192138618c00d0ba113572fdd5ee5ffde8222f3", size = 6278581, upload-time = "2025-02-16T04:27:41.051Z" },
+]
+
+[[package]]
+name = "pyquaternion"
+version = "0.9.9"
+source = { registry = "https://pypi.flatt.tech/simple/" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://pypi.flatt.tech/files/packages/7d/0d/3d092aa20efaedacb89c3221a92c6491be5b28f618a2c36b52b53e7446c2/pyquaternion-0.9.9.tar.gz", hash = "sha256:b1f61af219cb2fe966b5fb79a192124f2e63a3f7a777ac3cadf2957b1a81bea8", size = 15530, upload-time = "2020-10-05T01:31:30.327Z" }
+wheels = [
+    { url = "https://pypi.flatt.tech/files/packages/49/b3/d8482e8cacc8ea15a356efea13d22ce1c5914a9ee36622ba250523240bf2/pyquaternion-0.9.9-py3-none-any.whl", hash = "sha256:e65f6e3f7b1fdf1a9e23f82434334a1ae84f14223eee835190cd2e841f8172ec", size = 14361, upload-time = "2020-10-05T01:31:37.575Z" },
 ]
 
 [[package]]
@@ -1951,6 +2052,26 @@ dependencies = [
 sdist = { url = "https://pypi.flatt.tech/files/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://pypi.flatt.tech/files/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "t4-e2e-devkit"
+version = "0.3.1.dev62+g39be78766"
+source = { git = "https://github.com/tier4/e2e-devkit?rev=39be787662f0ec14a36700f5f5e36a4c6821cb88#39be787662f0ec14a36700f5f5e36a4c6821cb88" }
+dependencies = [
+    { name = "attrs" },
+    { name = "duckdb" },
+    { name = "geopandas" },
+    { name = "numpy" },
+    { name = "omegaconf" },
+    { name = "pillow" },
+    { name = "pyarrow" },
+    { name = "pyquaternion" },
+    { name = "scipy" },
+    { name = "shapely" },
+    { name = "torch" },
+    { name = "typing-extensions" },
+    { name = "zstandard" },
 ]
 
 [[package]]

@@ -901,7 +901,7 @@ def _score_turn_indicator(s: _SegState, idx: int) -> None:
     increments the fp pair, never both), so ``transition_total + fp_total`` across a run
     always equals the total number of scored steps.
     """
-    gt = int(np.asarray(s.tl.npz(idx)["turn_indicators"]).reshape(-1)[-1])
+    gt = s.tl.recorded_turn_indicator(idx)
     pred = int(s.last_turn_indicator)
     correct = pred == gt
     if gt != s.turn_indicator_prev_scored_gt:
@@ -2058,6 +2058,129 @@ def _draw_step(
     )
 
 
+class GTTracking(NamedTuple):
+    """One step's deviation from the recorded path, and the live-minus-recorded speed and accel with the recorded accel (None without a recorded segment)."""
+
+    deviation: GTDeviation
+    speed_diff: float | None
+    accel_diff: float | None
+    accel: float | None
+
+
+def score_gt_tracking(s: _SegState, idx: int) -> GTTracking:
+    """Score step ``s.k``'s deviation from the recorded path around frame ``idx`` and its speed and accel against the recording into the segment state."""
+    gt_dev = _gt_deviation_m(s.tl, s.live_pose[:2], s.live_pose[2], idx)
+    s.gt_dev_sum += gt_dev.dist_m
+    s.gt_dev_count += 1
+    if s.gt_devs is not None:
+        s.gt_devs[s.k] = gt_dev.dist_m
+    gt_va = _gt_speed_accel(s.tl, gt_dev)
+    if gt_va is None or s.gt_dvs is None:
+        return GTTracking(gt_dev, None, None, None)
+    # Pre-step pair: dyn.speed is this tick's speed, dyn.accel the accel that produced it.
+    gt_dv = float(s.dyn.speed) - gt_va[0]
+    gt_da = float(s.dyn.accel) - gt_va[1]
+    s.gt_dvs[s.k], s.gt_das[s.k] = gt_dv, gt_da
+    if s.gt_as is not None:
+        s.gt_as[s.k] = gt_va[1]
+    return GTTracking(gt_dev, gt_dv, gt_da, gt_va[1])
+
+
+def gt_deviation_viz(tl: RouteTimeline, gt_dev: GTDeviation, live_pose: np.ndarray):
+    """The recorded window, nearest recorded point and distance of ``gt_dev`` in the live-ego frame, as ``_draw_step`` draws them; None without a nearest point."""
+    if gt_dev.nearest_xy is None:
+        return None
+    window_xy = _world_plan_to_ego(
+        tl.poses[gt_dev.lo : gt_dev.hi, :2], tl.poses[gt_dev.lo : gt_dev.hi, 2], *live_pose
+    )[:, :2]
+    nearest_xy = _world_plan_to_ego(gt_dev.nearest_xy[None, :], np.zeros(1), *live_pose)[0, :2]
+    return window_xy, nearest_xy, gt_dev.dist_m
+
+
+def _rounded(value: float, digits: int) -> float | None:
+    """``value`` rounded, or None when it is not finite."""
+    return round(float(value), digits) if np.isfinite(value) else None
+
+
+def trace_start(s: _SegState) -> dict:
+    """The ``rollout.jsonl`` header of a segment."""
+    tl, start, end = s.tl, s.start, s.end
+    return {
+        "event": "start",
+        "start_frame_id": _frame_id(tl, start),
+        "end_frame_id": _frame_id(tl, max(start, end - 1)),
+        "start_route_index": int(start),
+        "end_route_index": int(end),
+        "goal_frame_id": _frame_id(tl, max(start, end - 1)),
+        "goal_idx": int(end - 1),
+        "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
+        "goal_reach_m": float(s.goal_reach_m),
+        "max_steps": int(s.max_steps),
+        "unstick_after": int(s.unstick_after),
+        "len_tl": int(len(tl)),
+    }
+
+
+def trace_terminated(s: _SegState) -> dict:
+    """The ``rollout.jsonl`` line that ends a segment."""
+    return {
+        "event": "terminated",
+        "k": s.k,
+        "reason": s.terminated,
+        "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
+        "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
+        "max_idx_reached": int(s.cursor.max_idx_reached),
+        "snap_count": int(s.snap_count),
+    }
+
+
+def trace_step(s: _SegState, idx: int, gt: GTTracking) -> dict:
+    """The ``rollout.jsonl`` line of step ``s.k``, scored on recorded frame ``idx``; the caller adds ``brake_accel_mps2`` after the advance."""
+    k = s.k
+    return {
+        "k": k,
+        "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+        "yaw": round(float(s.live_pose[2]), 4),
+        "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+        "speed": round(float(s.dyn.speed), 3),
+        "rec_frame_id": _frame_id(s.tl, idx),
+        "rec_idx": int(idx),
+        "max_idx_reached": int(s.cursor.max_idx_reached),
+        "stuck": int(s.stuck),
+        "ego_stuck": int(s.ego_stuck),
+        # Cursor's own state (normal/repeat) + the rollout's escalation counts
+        # (an expand/teleport this tick shows as a *_count delta on the next line).
+        "state": s.cursor.state,
+        "state_run_steps": int(s.cursor.state_run_steps),
+        "expand_count": int(s.expand_count),
+        "snap_count": int(s.snap_count),
+        "clearance_m": _rounded(s.clearances[k], 4),
+        "collision": bool(s.collisions[k]),
+        "collision_rear": bool(s.rear_collisions[k]),
+        "rb_dist_m": _rounded(s.rb_dists[k], 4),
+        "route_dist_m": _rounded(s.route_devs[k], 4),
+        "center_dev_m": _rounded(s.center_devs[k], 4),
+        "red_light_violation": bool(s.red_light[k]),
+        "gt_deviation_m": round(gt.deviation.dist_m, 3),
+        "gt_speed_diff_mps": None if gt.speed_diff is None else round(gt.speed_diff, 3),
+        "gt_accel_diff_mps2": None if gt.accel_diff is None else round(gt.accel_diff, 3),
+        # Recorded accel; with the diff it gives live accel for the 2x2 cells.
+        "gt_accel_mps2": None if gt.accel is None else round(gt.accel, 3),
+        # Resolved closed-loop turn indicator going into this tick, and the
+        # recorded GT at the same frame -- same values (and same read) the
+        # segment-level turn_indicator block and the PNG renderer use, so a
+        # transition/false-positive can be reconstructed post hoc from the trace.
+        "turn_indicator_pred": int(s.last_turn_indicator),
+        "turn_indicator_gt": s.tl.recorded_turn_indicator(idx),
+        # collision AND off the recorded GT path by > deviation_collision_thresh_m
+        # (see ``deviation_collision_block``); same per-step definition the
+        # segment-level "deviation_collision" metric rolls up from.
+        "deviation_collision": bool(
+            s.collisions[k] and gt.deviation.dist_m > s.deviation_collision_thresh_m
+        ),
+    }
+
+
 @torch.no_grad()
 def render_segment(
     model,
@@ -2235,44 +2358,13 @@ def render_segment(
         # Only a pool opened here gets shut down.
         nullcontext(draw_pool) if draw_pool is not None else render_pool(1) as draw,
     ):
-        dbg.write(
-            json.dumps(
-                {
-                    "event": "start",
-                    "start_frame_id": _frame_id(tl, start),
-                    "end_frame_id": _frame_id(tl, max(start, end - 1)),
-                    "start_route_index": int(start),
-                    "end_route_index": int(end),
-                    "goal_frame_id": _frame_id(tl, max(start, end - 1)),
-                    "goal_idx": int(end - 1),
-                    "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
-                    "goal_reach_m": float(s.goal_reach_m),
-                    "max_steps": int(cap),
-                    "unstick_after": int(s.unstick_after),
-                    "len_tl": int(len(tl)),
-                }
-            )
-            + "\n"
-        )
+        dbg.write(json.dumps(trace_start(s)) + "\n")
         while not s.done:
             k = s.k
             with timers("input_build"):
                 pre = _pre_step(s)
             if pre is None:
-                dbg.write(
-                    json.dumps(
-                        {
-                            "event": "terminated",
-                            "k": k,
-                            "reason": s.terminated,
-                            "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
-                            "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
-                            "max_idx_reached": int(s.cursor.max_idx_reached),
-                            "snap_count": int(s.snap_count),
-                        }
-                    )
-                    + "\n"
-                )
+                dbg.write(json.dumps(trace_terminated(s)) + "\n")
                 break
             np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
 
@@ -2292,22 +2384,9 @@ def render_segment(
             # from the live ego to a ±15 s window of recorded poses around the cursor's current frame
             # (see ``_gt_deviation_m``). Pure xy distance to the cursor frame would over-report drift
             # whenever the cursor is mid-repeat / mid-cooldown.
-            gt_dev = _gt_deviation_m(tl, s.live_pose[:2], s.live_pose[2], idx)
+            gt = score_gt_tracking(s, idx)
+            gt_dev = gt.deviation
             gt_deviation_m = gt_dev.dist_m
-            s.gt_dev_sum += gt_deviation_m
-            s.gt_dev_count += 1
-            if s.gt_devs is not None:
-                s.gt_devs[k] = gt_deviation_m
-            gt_va = _gt_speed_accel(tl, gt_dev)
-            gt_dv = gt_da = gt_a = None
-            if gt_va is not None and s.gt_dvs is not None:
-                # Pre-step pair: dyn.speed is this tick's speed, dyn.accel the accel that produced it.
-                gt_dv = float(s.dyn.speed) - gt_va[0]
-                gt_da = float(s.dyn.accel) - gt_va[1]
-                gt_a = gt_va[1]
-                s.gt_dvs[k], s.gt_das[k] = gt_dv, gt_da
-                if s.gt_as is not None:
-                    s.gt_as[k] = gt_va[1]
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
                 deviation_streak += 1
             else:
@@ -2344,56 +2423,7 @@ def render_segment(
 
             # Capture the pre-step pose used for scoring; write after advancing so this row
             # also carries the exact acceleration scored at step k.
-            trace_row = {
-                "k": k,
-                "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
-                "yaw": round(float(s.live_pose[2]), 4),
-                "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
-                "speed": round(float(s.dyn.speed), 3),
-                "rec_frame_id": _frame_id(tl, idx),
-                "rec_idx": int(idx),
-                "max_idx_reached": int(s.cursor.max_idx_reached),
-                "stuck": int(s.stuck),
-                "ego_stuck": int(s.ego_stuck),
-                # Cursor's own state (normal/repeat) + the rollout's escalation counts
-                # (an expand/teleport this tick shows as a *_count delta on the next line).
-                "state": s.cursor.state,
-                "state_run_steps": int(s.cursor.state_run_steps),
-                "expand_count": int(s.expand_count),
-                "snap_count": int(s.snap_count),
-                "clearance_m": round(float(s.clearances[k]), 4)
-                if np.isfinite(s.clearances[k])
-                else None,
-                "collision": bool(s.collisions[k]),
-                "collision_rear": bool(s.rear_collisions[k]),
-                "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
-                "route_dist_m": round(float(s.route_devs[k]), 4)
-                if np.isfinite(s.route_devs[k])
-                else None,
-                "center_dev_m": round(float(s.center_devs[k]), 4)
-                if np.isfinite(s.center_devs[k])
-                else None,
-                "red_light_violation": bool(s.red_light[k]),
-                "gt_deviation_m": round(gt_deviation_m, 3),
-                "gt_speed_diff_mps": round(gt_dv, 3) if gt_dv is not None else None,
-                "gt_accel_diff_mps2": round(gt_da, 3) if gt_da is not None else None,
-                # Recorded accel; with the diff it gives live accel for the 2x2 cells.
-                "gt_accel_mps2": round(gt_a, 3) if gt_a is not None else None,
-                # Resolved closed-loop turn indicator going into this tick, and the
-                # recorded GT at the same frame -- same values (and same read) the
-                # segment-level turn_indicator block and the PNG renderer use, so a
-                # transition/false-positive can be reconstructed post hoc from the trace.
-                "turn_indicator_pred": int(s.last_turn_indicator),
-                "turn_indicator_gt": int(
-                    np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
-                ),
-                # collision AND off the recorded GT path by > deviation_collision_thresh_m
-                # (see ``deviation_collision_block``); same per-step definition the
-                # segment-level "deviation_collision" metric rolls up from.
-                "deviation_collision": bool(
-                    s.collisions[k] and gt_deviation_m > s.deviation_collision_thresh_m
-                ),
-            }
+            trace_row = trace_step(s, idx, gt)
             # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
             # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
             # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
@@ -2459,23 +2489,7 @@ def render_segment(
                 and k % draw_every == 0
             ):
                 repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
-                gt_dev_viz = None
-                if gt_dev.nearest_xy is not None:
-                    window_xy = _world_plan_to_ego(
-                        tl.poses[gt_dev.lo : gt_dev.hi, :2],
-                        tl.poses[gt_dev.lo : gt_dev.hi, 2],
-                        s.live_pose[0],
-                        s.live_pose[1],
-                        s.live_pose[2],
-                    )[:, :2]
-                    nearest_xy = _world_plan_to_ego(
-                        gt_dev.nearest_xy[None, :],
-                        np.zeros(1),
-                        s.live_pose[0],
-                        s.live_pose[1],
-                        s.live_pose[2],
-                    )[0, :2]
-                    gt_dev_viz = (window_xy, nearest_xy, gt_deviation_m)
+                gt_dev_viz = gt_deviation_viz(tl, gt_dev, s.live_pose)
                 with timers("render_submit"):
                     pending.append(
                         draw.submit(
@@ -2493,9 +2507,7 @@ def render_segment(
                             reproducer_ego=repro_xyh,
                             gt_deviation_viz=gt_dev_viz,
                             turn_indicator_pred=int(s.last_turn_indicator),
-                            turn_indicator_gt=int(
-                                np.asarray(tl.npz(idx)["turn_indicators"]).reshape(-1)[-1]
-                            ),
+                            turn_indicator_gt=tl.recorded_turn_indicator(idx),
                         )
                     )
             snaps_before = s.snap_count
