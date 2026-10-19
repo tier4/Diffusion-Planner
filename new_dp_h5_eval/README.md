@@ -1,7 +1,9 @@
 # New DP native-H5 evaluation
 
 Evaluate a new-DP sampler ONNX using the shared open-loop metrics and closed-loop
-reproducer. The reader supports native H5 versions 4 and 5. Models receive native
+reproducer. The reader supports native H5 versions 4 and 5, including ML-Planner #88 packed shards (`frames_packed`
+and `packed_frame_layout`) and older per-tensor shards. Validation dataset 1.0.0
+uses the packed layout while keeping native H5 format version 5. Models receive native
 H5 tensors; the evaluator adapts lane geometry and ground truth for the shared
 scorers.
 

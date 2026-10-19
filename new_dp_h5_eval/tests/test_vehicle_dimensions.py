@@ -44,6 +44,7 @@ ERGA_SIM = [4.9901, 10.8812, 2.8736]
 
 
 _FIELD_SHAPES = {
+    "lane_traffic_light_past": (140, 31, 5),
     "ego_agent_past": (31, 6),
     "neighbor_agents_past": (320, 31, 4),
     "agent_shape": (320, 2),

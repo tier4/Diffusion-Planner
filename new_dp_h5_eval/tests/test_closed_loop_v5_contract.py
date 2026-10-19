@@ -154,3 +154,43 @@ def test_pose_and_indexed_reads(tmp_path, version):
     )
     with H5FrameIndex(index) as frames:
         assert frames.frame(0)["ego_agent_past"].shape == (31, 6)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_both_layouts_load_identical_route_and_index_frames(tmp_path, packed):
+    from new_dp_h5_eval.h5_layout import PackedLayout, create_packed_dataset
+
+    shard = tmp_path / "frames.h5"
+    _write_route(shard)
+    with h5py.File(shard, "r+") as file:
+        expected = {key: value[:] for key, value in file["frames"].items()}
+        if packed:
+            layout = PackedLayout.from_arrays(expected)
+            create_packed_dataset(file, layout, 4, {}, False)[:] = layout.pack(expected)
+            del file["frames"]
+    index = tmp_path / "index.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "h5_path": shard.name,
+                    "frame_index": i,
+                    "frame_time_ns": 1_000_000_000 + i * 100_000_000,
+                }
+                for i in range(4)
+            ]
+        ),
+        index,
+    )
+    with H5FrameIndex(index) as reader:
+        for i in range(4):
+            for key, values in expected.items():
+                np.testing.assert_array_equal(reader.frame(i)[key], values[i])
+        np.testing.assert_array_equal(reader.ego_shapes(shard), expected["ego_shape"])
+    route = NativeH5RouteTimeline(shard, frame_start=1, frame_stop=3)
+    try:
+        for key, values in expected.items():
+            np.testing.assert_array_equal(route.npz(0)[key], values[1])
+        np.testing.assert_array_equal(route.frame_indices, [1, 2])
+    finally:
+        route.close()
