@@ -13,14 +13,19 @@ Use the H5 manifests published by
 [validation-scenario-selector](https://github.com/tier4/validation-scenario-selector/tree/main/validation_dataset).
 They reference generated data on your server. Run the commands below from this
 repository root with a Python environment containing its evaluation dependencies.
-For the v0.0.2 release on Sakura:
+For the v1.0.0 candidate including the additional lap sites from selector #60 on Sakura:
 
 ```bash
-DATASET_ROOT=/mnt/storage_rdma/diffusion_planner/dataset/validation_dataset/generation_runs/v0.0.2_20261008
+DATASET_ROOT=/mnt/storage_rdma/diffusion_planner/dataset/validation_dataset/generation_runs/v1.0.0_20261019_pr60
 PYTHON=.venv/bin/python
+VEHICLE_PARAMS="$DATASET_ROOT/vehicle_parameters.json"
 MODEL=/path/to/ml_planner.onnx
 OUTPUT=/path/to/evaluation_results
 ```
+
+The candidate supplies `vehicle_parameters.json`, including the Komatsu
+`Mu1UupL2` project with the confirmed x2/J6 gen2 dimensions. Pass this file
+explicitly when the local meta-repository parameter table predates that project.
 
 ## Ego dimensions
 
@@ -45,7 +50,7 @@ PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.open_loop \
   "$DATASET_ROOT/scenario_based_open_loop/h5/manifest.json" \
   "$DATASET_ROOT/scenario_based_open_loop/h5/index.parquet" \
   "$MODEL" "$OUTPUT/open_loop" \
-  --provider CUDAExecutionProvider --no-visualization
+  --provider CUDAExecutionProvider --vehicle_params "$VEHICLE_PARAMS" --no-visualization
 ```
 
 Results include `summary.json` and per-sample scores under `details/`. Omit
@@ -68,6 +73,7 @@ PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.run_all_groups_closed
   --closed_loop_object_modes objects objects \
   --model_path "$MODEL" \
   --provider CUDAExecutionProvider \
+  --vehicle_params "$VEHICLE_PARAMS" \
   --out_root "$OUTPUT/closed_loop"
 ```
 
