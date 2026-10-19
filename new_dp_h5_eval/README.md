@@ -13,17 +13,17 @@ Use the H5 manifests published by
 [validation-scenario-selector](https://github.com/tier4/validation-scenario-selector/tree/main/validation_dataset).
 They reference generated data on your server. Run the commands below from this
 repository root with a Python environment containing its evaluation dependencies.
-For the v1.0.0 candidate including the additional lap sites from selector #60 on Sakura:
+For validation dataset v1.0.0 on Sakura:
 
 ```bash
-DATASET_ROOT=/mnt/storage_rdma/diffusion_planner/dataset/validation_dataset/generation_runs/v1.0.0_20261019_pr60
+DATASET_ROOT=/mnt/storage_rdma/diffusion_planner/dataset/validation_dataset/generation_runs/v1.0.0_20261019
 PYTHON=.venv/bin/python
 VEHICLE_PARAMS="$DATASET_ROOT/vehicle_parameters.json"
 MODEL=/path/to/ml_planner.onnx
 OUTPUT=/path/to/evaluation_results
 ```
 
-The candidate supplies `vehicle_parameters.json`, including the Komatsu
+The dataset supplies `vehicle_parameters.json`, including the Komatsu
 `Mu1UupL2` project with the confirmed x2/J6 gen2 dimensions. Pass this file
 explicitly when the local meta-repository parameter table predates that project.
 
