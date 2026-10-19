@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-10-12T03:44:48.794108496Z"
+exclude-newer = "2026-10-12T05:32:55.626790326Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -415,7 +415,7 @@ requires-dist = [
     { name = "rlvr", editable = "rlvr" },
     { name = "scenario-generation", editable = "scenario_generation" },
     { name = "scene-search", editable = "scene_search" },
-    { name = "t4-e2e-devkit", git = "https://github.com/tier4/e2e-devkit?rev=3fdad588e3343285c89b199f7b734729c8f5dc02" },
+    { name = "t4-e2e-devkit", git = "https://github.com/tier4/e2e-devkit?rev=e062e23e4f5e515d7ee31b6ab53bb734ec3d7859" },
     { name = "tag-toolkit", editable = "tag_toolkit" },
 ]
 
@@ -2056,8 +2056,8 @@ wheels = [
 
 [[package]]
 name = "t4-e2e-devkit"
-version = "0.3.1.dev58+g3fdad588e"
-source = { git = "https://github.com/tier4/e2e-devkit?rev=3fdad588e3343285c89b199f7b734729c8f5dc02#3fdad588e3343285c89b199f7b734729c8f5dc02" }
+version = "0.3.1.dev60+ge062e23e4"
+source = { git = "https://github.com/tier4/e2e-devkit?rev=e062e23e4f5e515d7ee31b6ab53bb734ec3d7859#e062e23e4f5e515d7ee31b6ab53bb734ec3d7859" }
 dependencies = [
     { name = "attrs" },
     { name = "duckdb" },
