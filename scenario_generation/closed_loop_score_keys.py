@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from scenario_generation.turn_interval import CLASS_NAMES
+
 # Resolve each key from a (segment or summary) dict -- closed_loop_eval's nested-metrics
 # categories (object/road_border/red_light_violation/strong_brake/reproducer) replaced the old
 # flat keys. mean_route_completion/n_segments_diverged have no nested category and stay flat.
@@ -21,6 +23,25 @@ SCORE_EXTRACTORS = {
         "false_positive_rate"
     ),
 }
+
+
+def _turn_interval_extractor(name: str, field: str):
+    # A per-group summary nests the stats under ``turn_indicator``; the cross-group aggregate
+    # row carries them flat as ``turn_indicator_interval_stats``.
+    def extract(d: dict):
+        stats = d.get("turn_indicator", {}).get("interval_stats") or d.get(
+            "turn_indicator_interval_stats"
+        )
+        return (stats or {}).get(name, {}).get(field)
+
+    return extract
+
+
+for _name in CLASS_NAMES:
+    for _field in ("accuracy_mean", "ttc_mean_s", "zero_rate"):
+        SCORE_EXTRACTORS[f"turn_interval_{_name}_{_field}"] = _turn_interval_extractor(
+            _name, _field
+        )
 
 
 def extract_score(d: dict, key: str):

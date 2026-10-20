@@ -278,6 +278,8 @@ class BatchedRollout:
                     ticks = self._score(step)
                 with self.timers("plan"):
                     plans, logits, adopt = self._plan(step, ticks)
+                for tick in ticks:
+                    _score_turn_indicator(tick.segment.state, tick.idx)
                 with self.timers("draw_submit"):
                     self._draw(step, ticks, plans, adopt)
                 speed = self.sim.speed.clone()
@@ -375,6 +377,7 @@ class BatchedRollout:
             turn = s.tl.recorded_turn_indicator(idx)
             s.last_turn_indicator = turn
             s.turn_indicator_prev_scored_gt = s.turn_indicator_prev_scored_pred = turn
+            s.turn_intervals.reset()
             s.prev_max_idx, s.stuck = idx, 0
             segment.reseed_turns = False
         s.k = int(state["ticks"][i])
@@ -409,7 +412,7 @@ class BatchedRollout:
         return Tick(row, segment, idx, np_dict, gt)
 
     def _plan(self, step: SimulatorStep, ticks: list[Tick]):
-        """Plan for the rows due for a replan, pass the plans through the optimizer when it is on, and score their turn indicators."""
+        """Plan for the rows due for a replan, pass the plans through the optimizer when it is on, and take their turn indicators."""
         rows = torch.nonzero(step.replan).flatten()
         if not len(rows):
             return None, None, None
@@ -431,7 +434,6 @@ class BatchedRollout:
             tick = by_row[row]
             s = tick.segment.state
             s.last_turn_indicator = codes[j]
-            _score_turn_indicator(s, tick.idx)
             if tick.segment.optimizer is not None:
                 with self.timers("plan_optimizer"):
                     plans[j], adopt[j] = self._optimize(

@@ -55,6 +55,7 @@ from scenario_generation.simulate import decode_turn_indicator, resolve_keep_tur
 from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.tools._heatmap_common import project_points_to_polyline
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
+from scenario_generation.turn_interval import TurnIntervalTracker, interval_stats
 
 DT = 0.1
 # Stuck speed gate (m/s): ego must be at or below this to accumulate stuck steps.
@@ -560,29 +561,31 @@ class _SegState:
     # (never reset on unstick teleport), like ``expand_count``/``snap_count``.
     turn_indicator_transition_correct: int = 0
     turn_indicator_transition_total: int = 0
-    # GT turn-indicator class at the PREVIOUS scored (real-inference) step, so a transition can
-    # be detected across scored steps rather than within one frame's own two-tick window (which
-    # misses a GT transition that happens entirely between two scored steps, e.g. under
-    # ``replan_interval > 1`` or a cursor skip/repeat). Seeded in ``_seed_state`` and re-seeded
-    # on an unstick teleport (see ``_advance_step``), so a teleport's environment jump is never
-    # itself counted as a transition.
+    # GT turn-indicator class at the PREVIOUS scored step, so a transition can be detected across
+    # steps rather than within one frame's own two-tick window (which misses a GT transition
+    # across a cursor skip/repeat). Seeded in ``_seed_state`` and re-seeded on an unstick
+    # teleport (see ``_advance_step``), so a teleport's environment jump is never itself counted
+    # as a transition.
     turn_indicator_prev_scored_gt: int = 0
     # Closed-loop turn-indicator SPURIOUS-TRANSITION ("false positive") counters: how often the
-    # model's own resolved prediction changes from ITS OWN previous scored prediction while GT
-    # held steady since the previous scored step. Mirrors turn_indicator_transition_*, but is
+    # model's own resolved prediction changes from ITS OWN previous prediction while GT
+    # held steady since the previous step. Mirrors turn_indicator_transition_*, but is
     # keyed off the model's own prior prediction (turn_indicator_prev_scored_pred), not GT --
     # comparing against GT's previous value would just remeasure transition_accuracy's
-    # complement. Gated on the SAME "GT unchanged since previous scored step" condition
+    # complement. Gated on the SAME "GT unchanged since previous step" condition
     # ``_score_turn_indicator`` already computes for the transition counters, so every scored
     # step falls into exactly one of {gt changed -> transition_total} or
     # {gt unchanged -> fp_total}, never both.
     turn_indicator_fp_count: int = 0
     turn_indicator_fp_total: int = 0
-    # Model's own RESOLVED prediction at the PREVIOUS scored (real-inference) step -- the
+    # Model's own RESOLVED prediction at the PREVIOUS scored step -- the
     # baseline turn_indicator_fp_count/total is measured against. Seeded in ``_seed_state`` and
     # re-seeded on an unstick teleport, exactly like ``turn_indicator_prev_scored_gt``, so a
     # teleport's environment jump is never itself counted as a spurious flip.
     turn_indicator_prev_scored_pred: int = 0
+    # Per-GT-interval turn-indicator accuracy / time-to-correct (see ``turn_interval``). Cut at an
+    # unstick teleport like the baselines above, so an interval never spans the environment jump.
+    turn_intervals: TurnIntervalTracker = field(default_factory=TurnIntervalTracker)
     # Per-step route deviation (m): nearest-segment distance from the live ego to the
     # route_lanes/lanes centerline polyline (see ``score_route_deviation_step``). Parallel to
     # ``clearances``/``gt_devs``; ``inf`` = unmeasured (no usable segment, or not yet scored).
@@ -861,19 +864,17 @@ def _hold_turn_indicator(s: _SegState) -> None:
     """Cached-plan step (``replan_interval`` > 1, no fresh inference): keep the 10 Hz turn
     history scrolling by re-appending the LAST decoded turn indicator, so the next replan
     sees the held signal as if the model had re-confirmed it every step. Touches only
-    ``turn_hist`` -- never the scoring accumulators or either ``prev_scored_*`` field
-    (including the spurious-transition FP counters), since no fresh prediction was made."""
+    ``turn_hist``; the held value is scored like any other step (``_score_turn_indicator``)."""
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
 def _score_turn_indicator(s: _SegState, idx: int) -> None:
-    """Closed-loop turn-indicator TRANSITION accuracy for one REAL inference step.
+    """Closed-loop turn-indicator scoring for ONE 10 Hz step, so it does not depend on
+    ``replan_interval``: the other metrics are scored every step too.
 
-    Called only right after resolving/appending the model's prediction (both in
-    ``render_segment`` and ``run_segments_batched``, always BEFORE that step's
-    ``_advance_step`` -- see the call sites) -- never after ``_hold_turn_indicator``,
-    since a held/cached-plan step made no fresh prediction and scoring it would conflate
-    "no chance to re-predict" with "was wrong".
+    Called every step right after the step's indicator is resolved -- a fresh prediction on an
+    inference step, the held last one in between (``_hold_turn_indicator``) -- and always BEFORE
+    that step's ``_advance_step`` (see the call sites).
 
     Compares the RESOLVED prediction (``s.last_turn_indicator``, already in {0,1,2,3}
     via ``resolve_keep_turn_indicator``) against the recorded GT at the same frame
@@ -883,23 +884,20 @@ def _score_turn_indicator(s: _SegState, idx: int) -> None:
 
     Only TRANSITIONS are accumulated: plain per-step accuracy is dominated by long
     stable KEEP/NONE periods and doesn't demonstrate correct indicator switching, so it
-    isn't tracked at all. "Changed" is read off ``s.turn_indicator_prev_scored_gt`` --
-    the GT at the PREVIOUS SCORED step, not this frame's own ``[-2]``/``[-1]`` window --
-    because scoring only happens on real inference steps; with ``replan_interval > 1``
-    or a cursor skip/repeat, a GT transition can occur entirely BETWEEN two scored
-    steps and never show up in either step's own one-tick-back window. The next scored
-    step is the model's first real chance to react to it, so that's where it's counted.
+    isn't tracked at all. "Changed" is read off ``s.turn_indicator_prev_scored_gt`` -- the GT
+    at the PREVIOUS step. A transition step counts correct when the prediction already equals
+    the new GT at that very frame (the model has not seen the change yet, so this is a lead
+    measure; the reaction time is ``turn_interval``'s time to correct).
 
     Also accumulates the SPURIOUS-TRANSITION ("false positive") counters
-    ``turn_indicator_fp_count``/``turn_indicator_fp_total``: on a scored step where GT did
-    NOT change since the previous scored step (the complement of the transition-accuracy
-    gate above), a "false positive" is a resolved prediction that changed from the model's
-    OWN previous scored prediction (``turn_indicator_prev_scored_pred``), not from GT -- GT
-    is steady by construction in this branch, so comparing against GT would just remeasure
-    the same population as an inverted transition metric. The two counter pairs are
-    mutually exclusive per scored step (one increments the transition pair, the other
-    increments the fp pair, never both), so ``transition_total + fp_total`` across a run
-    always equals the total number of scored steps.
+    ``turn_indicator_fp_count``/``turn_indicator_fp_total``: on a step where GT did NOT change
+    (the complement of the transition gate above), a "false positive" is a resolved prediction
+    that changed from the model's OWN previous prediction (``turn_indicator_prev_scored_pred``),
+    not from GT -- GT is steady by construction in this branch, so comparing against GT would
+    just remeasure the same population as an inverted transition metric. The two counter pairs
+    are mutually exclusive per step (one increments the transition pair, the other the fp pair,
+    never both), so ``transition_total + fp_total`` across a run always equals the number of
+    scored steps.
     """
     gt = s.tl.recorded_turn_indicator(idx)
     pred = int(s.last_turn_indicator)
@@ -912,6 +910,7 @@ def _score_turn_indicator(s: _SegState, idx: int) -> None:
         s.turn_indicator_fp_count += int(pred != s.turn_indicator_prev_scored_pred)
     s.turn_indicator_prev_scored_gt = gt
     s.turn_indicator_prev_scored_pred = pred
+    s.turn_intervals.observe(idx, pred)
 
 
 # GT-deviation lookup window: ±15 s of recorded trajectory around the cursor. Wide enough to
@@ -1305,6 +1304,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 # the environment jump itself as a (spurious) transition or false positive.
                 s.turn_indicator_prev_scored_gt = int(s.turn_hist[-1])
                 s.turn_indicator_prev_scored_pred = int(s.turn_hist[-1])
+                s.turn_intervals.reset()
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
@@ -1501,11 +1501,15 @@ def deviation_collision_block(collisions: np.ndarray, gt_devs: np.ndarray, thres
 
 
 def turn_indicator_block(
-    transition_correct: int, transition_total: int, fp_count: int, fp_total: int
+    transition_correct: int,
+    transition_total: int,
+    fp_count: int,
+    fp_total: int,
+    intervals: list | None = None,
 ) -> dict:
     """The ``turn_indicator`` segment-row block: closed-loop turn-indicator TRANSITION
-    accuracy AND spurious-transition ("false positive") rate, both scored only on real
-    inference steps (see ``_score_turn_indicator``). Plain accumulators, like ``reproducer``
+    accuracy AND spurious-transition ("false positive") rate, both scored on every 10 Hz
+    step (see ``_score_turn_indicator``). Plain accumulators, like ``reproducer``
     -- both ratios are computed at aggregate time, not here, so this stays summable across
     segments without re-deriving a rate.
 
@@ -1516,12 +1520,18 @@ def turn_indicator_block(
     transitions/flips are tracked (no plain per-step accuracy): it's what actually
     demonstrates correct indicator switching vs. spurious switching, unlike per-step
     accuracy which is dominated by long stable KEEP/NONE periods.
+
+    ``intervals`` are the GT-interval rows (see ``turn_interval``); ``interval_stats``
+    is their per-class summary, summable across segments through its ``*_sum``/``*_count`` fields.
     """
+    rows = [list(r) for r in (intervals or [])]
     return {
         "transition_correct": int(transition_correct),
         "transition_total": int(transition_total),
         "fp_count": int(fp_count),
         "fp_total": int(fp_total),
+        "intervals": rows,
+        "interval_stats": interval_stats(rows),
     }
 
 
@@ -1592,6 +1602,7 @@ def _finalize(s: _SegState) -> dict:
             s.turn_indicator_transition_total,
             s.turn_indicator_fp_count,
             s.turn_indicator_fp_total,
+            s.turn_intervals.rows(s.tl.recorded_turn_indicator),
         ),
         "reproducer": {
             "expand_count": int(s.expand_count),
@@ -2456,12 +2467,12 @@ def render_segment(
                     plan_world, plan_k = fresh, k
                 pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
                 _feed_turn_indicator(s, outputs)
-                _score_turn_indicator(s, idx)
                 offset = k - plan_k
             else:
                 # No fresh inference this step: hold the last decoded turn indicator so the
                 # 10 Hz turn_indicators history keeps scrolling with the same signal.
                 _hold_turn_indicator(s)
+            _score_turn_indicator(s, idx)
             if offset > 0:
                 # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
                 off = min(offset, len(plan_world[0]) - 1)
