@@ -53,7 +53,7 @@ def test_metric_view_uses_native_shape_and_label_without_broadcast_guessing():
     np.testing.assert_array_equal(neighbors[:, 0, 6:8], frame["agent_shape"])
     np.testing.assert_array_equal(neighbors[:, -1, 8:11], frame["agent_label"])
     np.testing.assert_array_equal(neighbors[..., 4:6], 0)
-    np.testing.assert_array_equal(view["lanes"][0, 0], [1, 2, 0, 0, 3, 4, 5, 6, 0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(view["lanes"][0, 0], [1, 2, 0, 0, 3, 4, 5, 6])
     assert view["ego_agent_future"].shape == (80, 4)
 
 

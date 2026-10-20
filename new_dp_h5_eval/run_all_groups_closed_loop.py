@@ -15,7 +15,6 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
 
 import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
@@ -126,7 +125,7 @@ def _load_groups(manifest: Path) -> dict[str, list[dict]]:
             relative_id = os.path.relpath(resolved_path, manifest.parent.resolve())
             path_id = hashlib.sha1(relative_id.encode()).hexdigest()[:12]
             route["route_id"] = (
-                f"{quote(str(group_name), safe='')}__{resolved_path.parent.name}__{path_id}"
+                f"{group_name}__{resolved_path.parent.name}__{path_id}"
                 f"__{route.get('frame_start', 0)}_{route.get('frame_stop', 'end')}"
             )
             routes.append(route)

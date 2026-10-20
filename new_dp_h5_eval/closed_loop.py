@@ -35,7 +35,6 @@ from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.transforms import yaw_from_quat
 
-from .h5_layout import H5Frames
 from .model import (
     NewDpOnnxRunner,
     decode_onnx_outputs,
@@ -74,7 +73,6 @@ class NativeH5RouteTimeline(RouteTimeline):
                 raise ValueError(f"unexpected H5 format: {self.h5_path}")
             if int(self._h5.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
                 raise ValueError(f"unsupported H5 format version: {self.h5_path}")
-            self._frames = H5Frames(self._h5)
             metadata = self._h5["metadata"]
             format_version = int(self._h5.attrs["format_version"])
             required = (
@@ -87,7 +85,7 @@ class NativeH5RouteTimeline(RouteTimeline):
                 raise ValueError(
                     f"closed-loop H5 missing pose metadata {sorted(missing)}: {self.h5_path}"
                 )
-            missing = set(MODEL_INPUT_NAMES).difference(self._frames.keys())
+            missing = set(MODEL_INPUT_NAMES).difference(self._h5["frames"].keys())
             if missing:
                 raise ValueError(
                     f"closed-loop H5 missing model fields {sorted(missing)}: {self.h5_path}"
@@ -109,7 +107,7 @@ class NativeH5RouteTimeline(RouteTimeline):
                     raise ValueError(f"closed-loop H5 has no project_id attribute: {self.h5_path}")
                 self.project_id = str(project_id)
                 self.sim_ego_shape = sim_ego_shape(
-                    self._frames.tensor("ego_shape", start, stop),
+                    self._h5["frames"]["ego_shape"][start:stop],
                     str(project_id),
                     vehicle_params,
                     source=str(self.h5_path),
@@ -186,11 +184,11 @@ class NativeH5RouteTimeline(RouteTimeline):
                 return cached
         row = int(self._rows[idx])
         with self.timers("timeline_load_h5"):
-            frames = self._frames
+            frames = self._h5["frames"]
             missing = set(MODEL_INPUT_NAMES).difference(frames.keys())
             if missing:
                 raise ValueError(f"native H5 missing model fields: {sorted(missing)}")
-            data = frames.frame(row)
+            data = {key: np.asarray(value[row]) for key, value in frames.items()}
         with self._cache_lock:
             self._npz_cache[idx] = data
             self._npz_cache.move_to_end(idx)
