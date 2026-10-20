@@ -1,7 +1,9 @@
 # New DP native-H5 evaluation
 
 Evaluate a new-DP sampler ONNX using the shared open-loop metrics and closed-loop
-reproducer. The reader supports native H5 versions 4 and 5. Models receive native
+reproducer. The reader supports native H5 versions 4 and 5, including ML-Planner #88 packed shards (`frames_packed`
+and `packed_frame_layout`) and older per-tensor shards. Validation dataset 1.0.0
+uses the packed layout while keeping native H5 format version 5. Models receive native
 H5 tensors; the evaluator adapts lane geometry and ground truth for the shared
 scorers.
 
@@ -11,14 +13,19 @@ Use the H5 manifests published by
 [validation-scenario-selector](https://github.com/tier4/validation-scenario-selector/tree/main/validation_dataset).
 They reference generated data on your server. Run the commands below from this
 repository root with a Python environment containing its evaluation dependencies.
-For the v0.0.2 release on Sakura:
+For validation dataset v1.0.0 on Sakura:
 
 ```bash
-DATASET_ROOT=/mnt/storage_rdma/diffusion_planner/dataset/validation_dataset/generation_runs/v0.0.2_20261008
+DATASET_ROOT=/mnt/storage_rdma/diffusion_planner/dataset/validation_dataset/generation_runs/v1.0.0_20261019
 PYTHON=.venv/bin/python
+VEHICLE_PARAMS="$DATASET_ROOT/vehicle_parameters.json"
 MODEL=/path/to/ml_planner.onnx
 OUTPUT=/path/to/evaluation_results
 ```
+
+The dataset supplies `vehicle_parameters.json`, including the Komatsu
+`Mu1UupL2` project with the confirmed x2/J6 gen2 dimensions. Pass this file
+explicitly when the local meta-repository parameter table predates that project.
 
 ## Ego dimensions
 
@@ -43,7 +50,7 @@ PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.open_loop \
   "$DATASET_ROOT/scenario_based_open_loop/h5/manifest.json" \
   "$DATASET_ROOT/scenario_based_open_loop/h5/index.parquet" \
   "$MODEL" "$OUTPUT/open_loop" \
-  --provider CUDAExecutionProvider --no-visualization
+  --provider CUDAExecutionProvider --vehicle_params "$VEHICLE_PARAMS" --no-visualization
 ```
 
 Results include `summary.json` and per-sample scores under `details/`. Omit
@@ -66,6 +73,7 @@ PYTHONPATH=.:diffusion_planner "$PYTHON" -m new_dp_h5_eval.run_all_groups_closed
   --closed_loop_object_modes objects objects \
   --model_path "$MODEL" \
   --provider CUDAExecutionProvider \
+  --vehicle_params "$VEHICLE_PARAMS" \
   --out_root "$OUTPUT/closed_loop"
 ```
 

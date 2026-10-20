@@ -10,6 +10,7 @@ import hdf5plugin  # noqa: F401 - registers the zstd HDF5 filter
 import numpy as np
 import pyarrow.parquet as pq
 
+from .h5_layout import H5Frames
 from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 
 
@@ -89,11 +90,11 @@ class H5FrameIndex:
         frame_index = int(row["frame_index"])
         if not 0 <= frame_index < int(file.attrs["num_frames"]):
             raise IndexError(f"frame_index {frame_index} outside {path}")
-        frames = file["frames"]
+        frames = H5Frames(file)
         missing = sorted(set(MODEL_INPUT_NAMES).difference(frames.keys()))
         if missing:
             raise ValueError(f"H5 frame is missing native model fields: {missing} ({path})")
-        result = {key: np.asarray(value[frame_index]) for key, value in frames.items()}
+        result = frames.frame(frame_index)
         neighbors = result["neighbor_agents_past"]
         if result["agent_shape"].shape != (neighbors.shape[0], 2):
             raise ValueError("agent_shape must match neighbor_agents_past slots")
@@ -118,7 +119,7 @@ class H5FrameIndex:
 
     def ego_shapes(self, path: Path) -> np.ndarray:
         """Every frame's native ``ego_shape`` row of a shard returned by ``shard_path``."""
-        return np.asarray(self._open(path)["frames"]["ego_shape"])
+        return H5Frames(self._open(path)).tensor("ego_shape")
 
     def _open(self, path: Path) -> h5py.File:
         cached = self._files.pop(path, None)
@@ -132,7 +133,7 @@ class H5FrameIndex:
         if int(file.attrs.get("format_version", -1)) not in H5_FORMAT_VERSIONS:
             file.close()
             raise ValueError(f"Unsupported H5 format version: {path}")
-        if "frames" not in file or "num_frames" not in file.attrs:
+        if not {"frames", "frames_packed"}.intersection(file) or "num_frames" not in file.attrs:
             file.close()
             raise ValueError(f"Incomplete native H5 shard: {path}")
         self._files[path] = file
