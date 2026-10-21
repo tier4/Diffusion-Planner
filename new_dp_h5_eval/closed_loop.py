@@ -162,7 +162,7 @@ class NativeH5RouteTimeline(RouteTimeline):
         self.kdtree = cKDTree(self.poses[:, :2])
         self.speeds = self._compute_native_speeds()
         self._turn_indicators = np.asarray(
-            self._h5["frames"]["turn_indicators"][start:stop, -1], dtype=np.int64
+            self._frames.tensor("turn_indicators", start, stop)[:, -1], dtype=np.int64
         )
         self._npz_cache: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
         self._npz_cache_max = 128
