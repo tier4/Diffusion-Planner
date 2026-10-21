@@ -29,6 +29,7 @@ from scenario_generation.plan_optimizer import PlanOptimizerConfig
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import GT_ACCEL_QUADS, GT_DIFF_BIN, render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
+from scenario_generation.turn_interval import format_interval_stats, interval_stats
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -441,6 +442,7 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"turn_indicator transition accuracy: "
         f"{ti['transition_correct']}/{ti['transition_total']} ({ti_acc_str})",
         f"turn_indicator false positive rate: {ti['fp_count']}/{ti['fp_total']} ({ti_fp_str})",
+        f"turn_indicator per GT interval: {format_interval_stats(ti['interval_stats'])}",
         f"mean gt_deviation={summary['mean_gt_deviation_m']:.3f} m  "
         f"mean route_deviation={summary['mean_route_deviation_m']:.3f} m "
         f"(unmeasured {summary['route_deviation_unmeasured_rate']:.1%})  "
@@ -563,6 +565,10 @@ def aggregate(
     )
     turn_fp_count = sum(int(_require_block(r, "turn_indicator")["fp_count"]) for r in rows)
     turn_fp_total = sum(int(_require_block(r, "turn_indicator")["fp_total"]) for r in rows)
+    # Pool the per-segment interval rows (not the segment means): one mean over all intervals.
+    turn_interval_stats = interval_stats(
+        [iv for r in rows for iv in _require_block(r, "turn_indicator").get("intervals", [])]
+    )
 
     expand = sum(int(_require_block(r, "reproducer")["expand_count"]) for r in rows)
     snap = sum(int(_require_block(r, "reproducer")["snap_count"]) for r in rows)
@@ -600,6 +606,7 @@ def aggregate(
             # None (not 0.0) when no GT-steady scored step ever occurred: a silent 0.0 would
             # misread as "never flips spuriously" rather than "nothing to measure".
             "false_positive_rate": ((turn_fp_count / turn_fp_total) if turn_fp_total > 0 else None),
+            "interval_stats": turn_interval_stats,
         },
         "terminated_counts": term_counts,
         "reproducer": {

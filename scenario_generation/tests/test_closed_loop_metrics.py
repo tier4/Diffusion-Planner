@@ -422,13 +422,17 @@ def test_aggregate_missing_category_fails():
 
 
 def test_turn_indicator_block():
-    block = turn_indicator_block(1, 2, 0, 3)
+    block = turn_indicator_block(1, 2, 0, 3, [[1, 4, 2, 0.1, 5]])
+    stats = block.pop("interval_stats")
     assert block == {
         "transition_correct": 1,
         "transition_total": 2,
         "fp_count": 0,
         "fp_total": 3,
+        "intervals": [[1, 4, 2, 0.1, 5]],
     }
+    assert stats["left"]["count"] == 1 and stats["left"]["accuracy_mean"] == 0.5
+    assert stats["none"]["accuracy_mean"] is None
 
 
 def test_aggregate_turn_indicator_zero_total_accuracy_is_na():

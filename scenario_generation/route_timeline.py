@@ -305,8 +305,17 @@ class RouteTimeline:
         return data
 
     def recorded_turn_indicator(self, idx: int) -> int:
-        """The recorded turn indicator of frame ``idx``."""
-        return int(np.asarray(self.npz(idx)["turn_indicators"]).reshape(-1)[-1])
+        """The recorded turn indicator of frame ``idx``.
+
+        Scored for every frame of a route (``turn_interval`` reads them all at the end), so an
+        uncached frame loads ONLY that key and is not inserted into the cache, like
+        ``neighbor_last``."""
+        with self._cache_lock:
+            cached = self._npz_cache.get(idx)
+        if cached is not None:
+            return int(np.asarray(cached["turn_indicators"]).reshape(-1)[-1])
+        with np.load(self.npz_paths[idx], allow_pickle=True) as z:
+            return int(np.asarray(z["turn_indicators"]).reshape(-1)[-1])
 
     def neighbor_last(self, idx: int) -> np.ndarray:
         """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, 11)) for a frame.

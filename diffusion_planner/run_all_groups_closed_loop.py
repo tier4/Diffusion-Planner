@@ -30,6 +30,7 @@ from diffusion_planner.utils import ddp
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
 from scenario_generation.plan_optimizer import PlanOptimizerConfig
+from scenario_generation.turn_interval import pool_interval_stats
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
 )
@@ -385,6 +386,10 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
         # silent 0.0 would misread as "never flips spuriously" rather than "nothing to measure".
         agg["turn_indicator_false_positive_rate"] = (
             (_ti_fp_count / _ti_fp_total) if _ti_fp_total else None
+        )
+
+        agg["turn_indicator_interval_stats"] = pool_interval_stats(
+            [s.get("turn_indicator", {}).get("interval_stats") for s in summaries.values()]
         )
 
         gt_speed = _pool_group_gt_speed(list(summaries.values()))

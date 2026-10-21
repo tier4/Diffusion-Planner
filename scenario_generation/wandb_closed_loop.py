@@ -35,8 +35,21 @@ import wandb
 
 from scenario_generation.closed_loop_score_keys import extract_score
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
+from scenario_generation.turn_interval import CLASS_NAMES, pool_interval_stats
 
 # (display column name, source key in a per-group summary dict)
+_TURN_INTERVAL_METRICS = (
+    ("accuracy_mean", "accuracy"),
+    ("ttc_mean_s", "time to correct (s)"),
+    ("zero_rate", "zero-accuracy rate"),
+)
+_TURN_INTERVAL_COLUMNS = [
+    (f"Turn indicator {name} interval {label}", f"turn_interval_{name}_{metric}")
+    for name in CLASS_NAMES
+    for metric, label in _TURN_INTERVAL_METRICS
+]
+_TURN_INTERVAL_KEYS = tuple(key for _, key in _TURN_INTERVAL_COLUMNS)
+
 _ABS_COLUMNS = [
     ("Group", "group"),
     ("Segments", "n_segments"),
@@ -60,6 +73,7 @@ _ABS_COLUMNS = [
     ("Rear collisions", "total_rear_collision_events"),
     ("Turn indicator transition accuracy (%)", "turn_indicator_transition_accuracy"),
     ("Turn indicator false positive rate (%)", "turn_indicator_false_positive_rate"),
+    *_TURN_INTERVAL_COLUMNS,
 ]
 
 _LANE_GEOMETRY_COLUMN_KEYS = (
@@ -93,6 +107,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Rear collisions / 1k steps", "total_rear_collision_events"),
     ("Turn indicator transition accuracy (%)", "turn_indicator_transition_accuracy"),
     ("Turn indicator false positive rate (%)", "turn_indicator_false_positive_rate"),
+    *_TURN_INTERVAL_COLUMNS,
 ]
 
 
@@ -147,6 +162,10 @@ def _abs_value(source_key: str, summary: dict):
         # misread as "never flips spuriously".
         val = summary[source_key] if source_key in summary else extract_score(summary, source_key)
         return float(val) if isinstance(val, (int, float)) else None
+    if source_key in _TURN_INTERVAL_KEYS:
+        # None (no interval of that class was measured) becomes a blank cell.
+        val = extract_score(summary, source_key)
+        return float(val) if isinstance(val, (int, float)) else None
     if source_key in _LANE_GEOMETRY_COLUMN_KEYS:
         dev = summary.get(source_key)
         return float(dev) if dev is not None and math.isfinite(float(dev)) else None
@@ -170,6 +189,7 @@ def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
         "mean_gt_deviation_m",  # already a per-step mean
         "turn_indicator_transition_accuracy",  # already a ratio
         "turn_indicator_false_positive_rate",  # already a ratio
+        *_TURN_INTERVAL_KEYS,  # already per-interval means / rates
         *_LANE_GEOMETRY_COLUMN_KEYS,  # already per-step means / rates
     ):
         return _abs_value(source_key, summary)
@@ -255,6 +275,10 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     ti_fp_total = sum(int(s.get("turn_indicator", {}).get("fp_total", 0) or 0) for s in values)
     # None (not 0.0) when no GT-steady scored step was ever observed across any group.
     agg["turn_indicator_false_positive_rate"] = (ti_fp_count / ti_fp_total) if ti_fp_total else None
+    # Pooled over intervals through the summable per-class sums, not a mean of group means.
+    agg["turn_indicator_interval_stats"] = pool_interval_stats(
+        [s.get("turn_indicator", {}).get("interval_stats") for s in values]
+    )
     return agg
 
 
