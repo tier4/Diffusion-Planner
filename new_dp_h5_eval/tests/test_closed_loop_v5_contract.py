@@ -163,6 +163,7 @@ def test_both_layouts_load_identical_route_and_index_frames(tmp_path, packed):
     shard = tmp_path / "frames.h5"
     _write_route(shard)
     with h5py.File(shard, "r+") as file:
+        file["frames"]["turn_indicators"][:, 0] = [1, 2, 3, 0]
         expected = {key: value[:] for key, value in file["frames"].items()}
         if packed:
             layout = PackedLayout.from_arrays(expected)
@@ -192,6 +193,7 @@ def test_both_layouts_load_identical_route_and_index_frames(tmp_path, packed):
         for key, values in expected.items():
             np.testing.assert_array_equal(route.npz(0)[key], values[1])
         np.testing.assert_array_equal(route.frame_indices, [1, 2])
+        assert [route.recorded_turn_indicator(i) for i in range(2)] == [2, 3]
     finally:
         route.close()
 
