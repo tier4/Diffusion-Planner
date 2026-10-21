@@ -10,7 +10,7 @@ with one dataset per key) still load.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
@@ -146,3 +146,17 @@ class H5Frames:
             start:stop, self.layout.offsets[i] : self.layout.offsets[i + 1]
         ]
         return rows.reshape((len(rows), *self.layout.shapes[i]))
+
+    def tensors(self, keys: Iterable[str], start: int = 0, stop: int | None = None):
+        """Tensors `keys` of frames `start:stop`, as views into one read of the packed rows."""
+        if self.layout is None:
+            return {key: np.asarray(self.file["frames"][key][start:stop]) for key in keys}
+        rows = self.file[PACKED_DATASET][start:stop]
+        offsets = self.layout.offsets
+        result = {}
+        for key in keys:
+            i = self.layout.keys.index(key)
+            result[key] = rows[:, offsets[i] : offsets[i + 1]].reshape(
+                (len(rows), *self.layout.shapes[i])
+            )
+        return result

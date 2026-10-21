@@ -65,6 +65,7 @@ from .closed_loop import (
     NativeH5RouteTimeline,
     TorchNativeNormalizer,
 )
+from .h5_layout import H5Frames
 from .metric_compat import legacy_lanes, legacy_route_lanes
 from .schema import MODEL_INPUT_NAMES
 
@@ -141,16 +142,15 @@ class FrameReader:
     def __init__(self, segments: list[tuple[str, int, bool]]) -> None:
         """Bind ``(h5_path, first H5 row, drop_objects)`` per segment."""
         self.segments = segments
-        self.handles: dict[str, h5py.File] = {}
+        self.handles: dict[str, H5Frames] = {}
 
     def __call__(self, segment: int, start: int, stop: int) -> dict[str, np.ndarray]:
         """Read frames ``start:stop`` of ``segment``."""
         path, first, drop = self.segments[segment]
         if path not in self.handles:
-            self.handles[path] = h5py.File(path, "r")
-        frames = self.handles[path]["frames"]
-        rows = slice(first + start, first + stop)
-        out = {key: np.asarray(frames[key][rows], dtype=np.float32) for key in MODEL_INPUT_NAMES}
+            self.handles[path] = H5Frames(h5py.File(path, "r"))
+        frames = self.handles[path].tensors(MODEL_INPUT_NAMES, first + start, first + stop)
+        out = {key: np.asarray(value, dtype=np.float32) for key, value in frames.items()}
         if drop:
             for key in OBJECT_KEYS:
                 out[key] = np.zeros_like(out[key])
