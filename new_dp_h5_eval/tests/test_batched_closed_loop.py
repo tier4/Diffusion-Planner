@@ -1,6 +1,7 @@
 """The batched closed-loop backend reproduces the reproducer's rollout, scoring and trace on a recorded route."""
 
 import json
+import shutil
 from dataclasses import replace
 
 import h5py
@@ -10,8 +11,10 @@ import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 
 from new_dp_h5_eval.batched_closed_loop import (
+    OBJECT_KEYS,
     VIDEO_NAME,
     BatchedNativeH5Evaluation,
+    FrameReader,
     run_batched,
     simulator_config,
 )
@@ -20,6 +23,7 @@ from new_dp_h5_eval.closed_loop import (
     model_args,
     rollout_params_from_closed_loop_config,
 )
+from new_dp_h5_eval.h5_layout import PackedLayout, create_packed_dataset
 from new_dp_h5_eval.schema import H5_FORMAT, MODEL_INPUT_NAMES
 from new_dp_h5_eval.vehicle import load_vehicle_params
 from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig, FullRouteRouteJob
@@ -235,6 +239,54 @@ def test_batched_rollout_reproduces_the_reproducer(
             assert a[key] == (
                 pytest.approx(value, abs=2e-3) if isinstance(value, (float, list)) else value
             ), (e.get("k"), key)
+
+
+def _pack(path, packed_path) -> None:
+    """Copy the shard at ``path`` to ``packed_path`` with its frames as packed rows."""
+    shutil.copy(path, packed_path)
+    with h5py.File(packed_path, "r+") as file:
+        frames = {name: values[:] for name, values in file["frames"].items()}
+        layout = PackedLayout.from_arrays(frames)
+        create_packed_dataset(file, layout, FRAMES, {}, False)[:] = layout.pack(frames)
+        del file["frames"]
+
+
+@pytest.mark.parametrize("drop_objects", [False, True])
+def test_frame_reader_reads_segment_rows_of_both_layouts(tmp_path, drop_objects):
+    """The reader returns float32 rows ``first + start:first + stop`` of every model input from a packed or per-tensor shard, with the objects zeroed for a no-object segment."""
+    rng = np.random.default_rng(0)
+    frames = {
+        name: rng.standard_normal((FRAMES, *shape)).astype(np.float32)
+        for name, shape in SHAPES.items()
+    }
+    per_tensor = tmp_path / "per_tensor.h5"
+    with h5py.File(per_tensor, "w") as file:
+        file.attrs["num_frames"] = FRAMES
+        for name, values in frames.items():
+            file.create_dataset(f"frames/{name}", data=values)
+    packed = tmp_path / "packed.h5"
+    _pack(per_tensor, packed)
+    for path in (per_tensor, packed):
+        out = FrameReader([(str(path), 5, drop_objects)])(0, 3, 40)
+        assert list(out) == list(MODEL_INPUT_NAMES)
+        for key, values in out.items():
+            expected = frames[key][8:45]
+            if drop_objects and key in OBJECT_KEYS:
+                expected = np.zeros_like(expected)
+            assert values.dtype == np.float32, (path.name, key)
+            np.testing.assert_array_equal(values, expected, err_msg=f"{path.name} {key}")
+
+
+def test_packed_frames_roll_out_like_per_tensor_frames(route, tmp_path):
+    """A shard storing its frames as packed rows gives, in the reproducer and in the batched backend, the metrics and trace of the same frames stored per tensor."""
+    path, vehicles, params = route
+    packed = tmp_path / "packed.h5"
+    _pack(path, packed)
+    planner = StraightPlanner(5.0)
+    for name, run in (("canonical", _canonical), ("batched", _batched)):
+        expected = run(path, vehicles, params, planner, tmp_path / name / "per_tensor")
+        actual = run(packed, vehicles, params, planner, tmp_path / name / "packed")
+        assert actual == expected, name
 
 
 def test_a_route_too_short_for_a_segment_is_skipped_like_the_reproducer(route, tmp_path):
