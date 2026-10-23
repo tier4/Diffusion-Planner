@@ -90,8 +90,10 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
             self.scenario_vehicle_yield_horizon_seconds = 5.0
             self.scenario_vehicle_yield_maximum_forward_progress_m = 0.5
             self.scenario_temporal_stop_horizon_seconds = 8.0
+            self.scenario_temporal_stop_stopping_deceleration_mps2 = 1.0
             self.scenario_obstacle_stop_tolerance_m = 0.5
             self.scenario_traffic_light_stop_horizon_seconds = 8.0
+            self.scenario_traffic_light_stop_stopping_deceleration_mps2 = 1.0
             self.scenario_arrival_position_tolerance_m = 2.0
             self.scenario_arrival_heading_tolerance_deg = 10.0
             self.scenario_lane_change_horizon_seconds = 8.0
@@ -108,9 +110,9 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
         "object_avoidance": {},
         "pedestrian_yield": {"horizon_seconds": 5.0, "maximum_forward_progress_m": 0.5},
         "vehicle_yield": {"horizon_seconds": 5.0, "maximum_forward_progress_m": 0.5},
-        "temporal_stop": {"horizon_seconds": 8.0},
+        "temporal_stop": {"horizon_seconds": 8.0, "stopping_deceleration_mps2": 1.0},
         "obstacle_stop": {"tolerance_m": 0.5},
-        "traffic_light_stop": {"horizon_seconds": 8.0},
+        "traffic_light_stop": {"horizon_seconds": 8.0, "stopping_deceleration_mps2": 1.0},
         "lane_change": {
             "horizon_seconds": 8.0,
             "minimum_lateral_shift_m": 1.0,

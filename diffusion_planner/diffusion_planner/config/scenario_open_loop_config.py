@@ -38,8 +38,10 @@ class ScenarioOpenLoopConfig:
     scenario_vehicle_yield_horizon_seconds: float = 5.0
     scenario_vehicle_yield_maximum_forward_progress_m: float = 0.5
     scenario_temporal_stop_horizon_seconds: float = 8.0
+    scenario_temporal_stop_stopping_deceleration_mps2: float = 1.0
     scenario_obstacle_stop_tolerance_m: float = 0.5
     scenario_traffic_light_stop_horizon_seconds: float = 8.0
+    scenario_traffic_light_stop_stopping_deceleration_mps2: float = 1.0
     scenario_lane_change_horizon_seconds: float = 8.0
     scenario_lane_change_minimum_lateral_shift_m: float = 1.0
     scenario_lane_change_chain_tolerance_m: float = 1.0

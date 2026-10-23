@@ -257,11 +257,17 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_temporal_stop_horizon_seconds=getattr(
                     config_obj, "scenario_temporal_stop_horizon_seconds", 8.0
                 ),
+                scenario_temporal_stop_stopping_deceleration_mps2=getattr(
+                    config_obj, "scenario_temporal_stop_stopping_deceleration_mps2", 1.0
+                ),
                 scenario_obstacle_stop_tolerance_m=getattr(
                     config_obj, "scenario_obstacle_stop_tolerance_m", 0.5
                 ),
                 scenario_traffic_light_stop_horizon_seconds=getattr(
                     config_obj, "scenario_traffic_light_stop_horizon_seconds", 8.0
+                ),
+                scenario_traffic_light_stop_stopping_deceleration_mps2=getattr(
+                    config_obj, "scenario_traffic_light_stop_stopping_deceleration_mps2", 1.0
                 ),
                 scenario_lane_change_horizon_seconds=getattr(
                     config_obj, "scenario_lane_change_horizon_seconds", 8.0

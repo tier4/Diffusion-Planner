@@ -3,8 +3,11 @@
 Shared by the ``temporal_stop`` and ``traffic_light_stop`` scenario labels. The scene is
 anchored around where the ego starts braking for a stop line (a stop sign, or a red signal
 that stays red through the horizon), so the ego is usually still moving at the anchor. A
-sample passes when, within ``horizon_seconds``, the predicted ego comes to a sustained stop
-and its front never goes past the stop line.
+sample passes when its front never goes past the stop line within ``horizon_seconds`` and it
+either comes to a sustained stop by then or can still stop before the line from its speed at
+the horizon at ``stopping_deceleration_mps2``. Human drivers often creep up to the line and
+stop just after the horizon; a prediction that goes on unbraked towards a far line does not
+have the distance to stop and still fails.
 
 The stop line is the nearest one ahead of the ego that crosses the current, connected chain
 of route-lane centerlines (see ``planner_metrics/stop_overshoot.py``); positions are compared
@@ -101,8 +104,10 @@ def evaluate_stop_line_with_details(
 ) -> MetricEvaluation:
     """Evaluate stopping before the stop line and return per-sample diagnostic details.
 
-    A sample passes when, within ``horizon_seconds``, the prediction holds a sustained stop
-    (speed at or below 0.5 m/s for 0.5 s) and the ego front never reaches the stop line. The
+    A sample passes when the ego front never reaches the stop line within ``horizon_seconds``
+    and, by then, the prediction either holds a sustained stop (speed at or below 0.5 m/s for
+    0.5 s) or can still stop before the line: the front's distance to the line at the horizon
+    is at least ``v ** 2 / (2 * stopping_deceleration_mps2)`` for the speed ``v`` there. The
     front is ``ego_base_link_to_front`` ahead of the rear axle along the heading; data without
     it (NPZ) falls back to ``wheel_base / 2 + length / 2``, the front of the ego box of
     ``planner_metrics.geometry``, which assumes equal overhangs.
@@ -110,6 +115,9 @@ def evaluate_stop_line_with_details(
     if ego_trajs.ndim != 3 or ego_trajs.shape[-1] < 4:
         raise ValueError(f"ego_trajs must have shape (N, T, D>=4), got {tuple(ego_trajs.shape)}")
     horizon_seconds = float(parameters["horizon_seconds"])
+    deceleration = float(parameters["stopping_deceleration_mps2"])
+    if deceleration <= 0:
+        raise ValueError("stop_line stopping_deceleration_mps2 must be positive")
     steps = resolve_horizon_steps(
         horizon_seconds,
         ego_trajs.shape[1],
@@ -131,10 +139,15 @@ def evaluate_stop_line_with_details(
     crossed = np.zeros(batch_size, dtype=bool)
     stop_line_distance = np.full(batch_size, np.nan)
     front_margin = np.full(batch_size, np.nan)
+    can_stop = np.zeros(batch_size, dtype=bool)
+    end_speed = np.full(batch_size, np.nan)
+    end_gap = np.full(batch_size, np.nan)
 
     for index in range(batch_size):
         trajectory = ego_trajs[index, :steps].detach().cpu().numpy().astype(float)
-        stopped[index] = _has_sustained_stop(_speed_mps(trajectory[:, :2]))
+        speed = _speed_mps(trajectory[:, :2])
+        stopped[index] = _has_sustained_stop(speed)
+        end_speed[index] = speed[-1]
         try:
             segments = _current_route_segments(_sample_lanes(lanes, index))
         except ValueError:  # no usable route centerline, so no stop line on the route either
@@ -152,13 +165,16 @@ def evaluate_stop_line_with_details(
         line_s = _stop_line_s(_stop_line_polylines(data, index), segments, ego_s)
         if np.isnan(line_s):
             continue
-        margin = line_s - _project_along_route(front, segments).max()
+        front_s = _project_along_route(front, segments)
+        margin = line_s - front_s.max()
+        end_gap[index] = line_s - front_s[-1]
+        can_stop[index] = end_gap[index] >= end_speed[index] ** 2 / (2 * deceleration)
         stop_line_found[index] = True
         crossed[index] = margin < 0
         stop_line_distance[index] = line_s - ego_s
         front_margin[index] = margin
 
-    passed = stop_line_found & stopped & ~crossed
+    passed = stop_line_found & ~crossed & (stopped | can_stop)
 
     def tensor(values: np.ndarray) -> torch.Tensor:
         return torch.as_tensor(values, dtype=ego_trajs.dtype, device=ego_trajs.device)
@@ -173,6 +189,10 @@ def evaluate_stop_line_with_details(
                 "min_front_to_stop_line_m": tensor(front_margin),
                 "crossed_stop_line": tensor(crossed),
                 "predicted_sustained_stop": tensor(stopped),
+                "speed_at_horizon_mps": tensor(end_speed),
+                "front_to_stop_line_at_horizon_m": tensor(end_gap),
+                "stopping_distance_m": tensor(end_speed**2 / (2 * deceleration)),
+                "can_stop_before_line": tensor(can_stop),
             }
         },
     )
