@@ -127,9 +127,10 @@ def sim_ego_shape(
 ) -> np.ndarray:
     """Return ``[wheelbase, length, width]`` for native ``[base_link_to_front, length, width]``.
 
-    ``native_shapes`` holds the shard's per-frame ``ego_shape`` rows. Every row must match the
-    project's table entry, so a shard converted with other dimensions fails here instead of
-    being scored with a wrong footprint.
+    ``native_shapes`` holds the shard's per-frame ``ego_shape`` rows, with H5 format 6's fourth
+    ``wheel_base`` column when present. Every row must match the project's table entry, so a
+    shard converted with other dimensions fails here instead of being scored with a wrong
+    footprint.
     """
     vehicle = vehicles.get(project_id)
     if vehicle is None:
@@ -137,14 +138,21 @@ def sim_ego_shape(
             f"{source}: project_id {project_id!r} has no ego dimensions in the vehicle params "
             f"(known: {', '.join(sorted(vehicles))}); pass --vehicle_params with an entry for it"
         )
-    rows = np.asarray(native_shapes, dtype=np.float64).reshape(-1, 3)
-    expected = np.array([vehicle.base_link_to_front, vehicle.length, vehicle.width])
+    native_shapes = np.asarray(native_shapes, dtype=np.float64)
+    columns = native_shapes.shape[-1]
+    if columns not in (3, 4):
+        raise ValueError(f"{source}: ego_shape has {columns} columns; expected 3 or 4")
+    rows = native_shapes.reshape(-1, columns)
+    names = ["base_link_to_front", "length", "width", "wheel_base"][:columns]
+    expected = np.array(
+        [vehicle.base_link_to_front, vehicle.length, vehicle.width, vehicle.wheel_base][:columns]
+    )
     bad = ~np.all(np.abs(rows - expected) <= _SHAPE_ATOL_M, axis=1)
     if bad.any():
         first = int(np.flatnonzero(bad)[0])
         raise ValueError(
             f"{source}: ego_shape row {first} is {rows[first].tolist()}, but project "
-            f"{project_id!r} has [base_link_to_front, length, width] = {expected.tolist()} in the "
+            f"{project_id!r} has [{', '.join(names)}] = {expected.tolist()} in the "
             f"vehicle params; the shard and the vehicle params disagree"
         )
     return np.array([vehicle.wheel_base, vehicle.length, vehicle.width], dtype=np.float32)

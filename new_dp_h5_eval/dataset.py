@@ -10,6 +10,7 @@ import hdf5plugin  # noqa: F401 - registers the zstd HDF5 filter
 import numpy as np
 import pyarrow.parquet as pq
 
+from .ego_layout import FORMAT5_EGO_STATE_DIM, to_format5_layout
 from .h5_layout import H5Frames
 from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 
@@ -84,6 +85,7 @@ class H5FrameIndex:
         raise FileNotFoundError(f"Native H5 shard not found for {value}; tried: {listed}")
 
     def frame(self, index: int) -> dict[str, np.ndarray]:
+        """Frame ``index`` in the format-5 ego layout (see ``ego_layout``)."""
         row = self.rows[index]
         path = self._resolve_h5_path(row["h5_path"])
         file = self._open(path)
@@ -94,13 +96,13 @@ class H5FrameIndex:
         missing = sorted(set(MODEL_INPUT_NAMES).difference(frames.keys()))
         if missing:
             raise ValueError(f"H5 frame is missing native model fields: {missing} ({path})")
-        result = frames.frame(frame_index)
+        result = to_format5_layout(frames.frame(frame_index))
         neighbors = result["neighbor_agents_past"]
         if result["agent_shape"].shape != (neighbors.shape[0], 2):
             raise ValueError("agent_shape must match neighbor_agents_past slots")
         if result["agent_label"].shape != (neighbors.shape[0], 3):
             raise ValueError("agent_label must match neighbor_agents_past slots")
-        if result["ego_agent_past"].shape[-1] != 6 or neighbors.shape[-1] != 4:
+        if result["ego_agent_past"].shape[-1] != FORMAT5_EGO_STATE_DIM or neighbors.shape[-1] != 4:
             raise ValueError("unexpected native ego/neighbor feature width")
         return result
 
@@ -118,7 +120,10 @@ class H5FrameIndex:
         return str(project_id)
 
     def ego_shapes(self, path: Path) -> np.ndarray:
-        """Every frame's native ``ego_shape`` row of a shard returned by ``shard_path``."""
+        """Every frame's native ``ego_shape`` row of a shard returned by ``shard_path``.
+
+        Format 6 rows carry a fourth ``wheel_base`` column, which ``sim_ego_shape`` checks.
+        """
         return H5Frames(self._open(path)).tensor("ego_shape")
 
     def _open(self, path: Path) -> h5py.File:

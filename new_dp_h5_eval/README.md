@@ -1,7 +1,7 @@
 # New DP native-H5 evaluation
 
 Evaluate a new-DP sampler ONNX using the shared open-loop metrics and closed-loop
-reproducer. The reader supports native H5 versions 4 and 5, including ML-Planner #88 packed shards (`frames_packed`
+reproducer. The reader supports native H5 versions 4, 5 and 6, including ML-Planner #88 packed shards (`frames_packed`
 and `packed_frame_layout`) and older per-tensor shards. Validation dataset 1.0.0
 uses the packed layout while keeping native H5 format version 5. Models receive native
 H5 tensors; the evaluator adapts lane geometry and ground truth for the shared
@@ -38,6 +38,26 @@ Both runners therefore read each shard's `project_id` and take the wheelbase fro
 `dataset/data_converter_param.json`, the table both dataset converters read; pass it
 explicitly when this repository is checked out on its own. A shard whose `ego_shape` does not
 match its project's entry is rejected. The model input keeps the native `ego_shape`.
+
+## H5 format 6 and steering-input models
+
+H5 format 6 inserts `steering_tire_angle` before `yaw_rate` in `ego_agent_past` /
+`ego_agent_future` and appends `wheel_base` to `ego_shape`. The evaluator reads every frame
+in the format-5 layout and keeps the two extra values aside (`new_dp_h5_eval/ego_layout.py`),
+and the format-6 `wheel_base` is checked against `--vehicle_params` like the rest of
+`ego_shape`.
+
+The model's layout is read from its ONNX `ego_agent_past` / `ego_shape` widths. Models with
+`(31, 6)` / `3` (every model trained after ML-Planner #98, which drops the two values before
+the model) run on format 4, 5 and 6 data. Steering-input models with `(31, 7)` / `4` need the
+recorded steering angle, so they run only on format 6 data; format 5 data is refused rather
+than given an estimated angle.
+
+In closed loop the steering history starts from the recording; each simulated step appends
+the MPC tracker's steering, or, for a placed (perfect-tracking) ego, the kinematic-bicycle
+angle `atan(wheel_base * yaw_rate / speed)`, held below 0.5 m/s. Format 6 closed loop runs on
+the per-segment backend only: the batched backend's devkit simulator rebuilds the ego history
+from the format-5 columns, so it refuses format 6 routes.
 
 ## Open-loop
 
@@ -87,7 +107,8 @@ Closed-loop data must declare a 0.1 s frame interval and have strictly increasin
 timestamps. The reader retains timestamp jitter and gaps without inserting
 frames; dataset generation determines which recordings are usable. Version 4
 poses use `ego_x,ego_y,ego_yaw`; version 5 uses map-frame
-`x,y,z,qx,qy,qz,qw`, from which the evaluator derives planar position and yaw.
+`x,y,z,qx,qy,qz,qw`, from which the evaluator derives planar position and yaw, and version 6
+keeps that pose metadata.
 
 ## Recompute pass fields
 

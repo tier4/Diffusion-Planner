@@ -35,6 +35,7 @@ from scenario_generation.reproducer_rollout import DT, render_segment
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.transforms import yaw_from_quat
 
+from .ego_layout import STEERING_KEYS, to_format5_layout
 from .h5_layout import H5Frames
 from .model import (
     NewDpOnnxRunner,
@@ -77,6 +78,7 @@ class NativeH5RouteTimeline(RouteTimeline):
             self._frames = H5Frames(self._h5)
             metadata = self._h5["metadata"]
             format_version = int(self._h5.attrs["format_version"])
+            self.format_version = format_version
             required = (
                 {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
                 if format_version == 4
@@ -190,7 +192,7 @@ class NativeH5RouteTimeline(RouteTimeline):
             missing = set(MODEL_INPUT_NAMES).difference(frames.keys())
             if missing:
                 raise ValueError(f"native H5 missing model fields: {sorted(missing)}")
-            data = frames.frame(row)
+            data = to_format5_layout(frames.frame(row))
         with self._cache_lock:
             self._npz_cache[idx] = data
             self._npz_cache.move_to_end(idx)
@@ -273,7 +275,12 @@ class ReproducerOnnxModel:
         noise = seeded_initial_noise(seeds)
         self.calls += batch
         feed["initial_noise"] = noise
-        trajectory, logits3 = self.runner.session.run(None, feed)
+        extras = (
+            {key: data[key].detach().cpu().numpy() for key in STEERING_KEYS}
+            if all(key in data for key in STEERING_KEYS)
+            else None
+        )
+        trajectory, logits3 = self.runner.run(feed, extras)
         trajectory, logits3 = decode_onnx_outputs(trajectory, logits3, batch_size=batch)
         outputs = {
             "prediction": torch.from_numpy(trajectory).to(device),

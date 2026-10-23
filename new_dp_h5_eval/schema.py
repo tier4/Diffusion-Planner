@@ -26,7 +26,9 @@ MODEL_INPUT_NAMES = (
 )
 
 H5_FORMAT = "diffusion_planner_frame_dataset"
-H5_FORMAT_VERSIONS = frozenset({4, 5})
+# Format 6 changes the ego tensor widths; frames are read in the format-5 layout
+# (``ego_layout.to_format5_layout``).
+H5_FORMAT_VERSIONS = frozenset({4, 5, 6})
 
 NUM_AGENTS = 321
 FUTURE_STEPS = 80
