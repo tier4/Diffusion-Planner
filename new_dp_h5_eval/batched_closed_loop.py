@@ -220,6 +220,15 @@ class BatchedRollout:
         timers: Timers,
     ) -> None:
         """Build the episodes of ``segments`` and the simulator that replays them."""
+        newer = sorted(
+            {str(s.timeline.h5_path) for s in segments if s.timeline.format_version >= 6}
+        )
+        if newer:
+            # The devkit simulator rebuilds the ego history from the format-5 columns.
+            raise ValueError(
+                "the batched closed-loop backend replays H5 format 5 or older; use the "
+                f"per-segment backend for format 6: {newer[:3]}"
+            )
         self.model = model
         self.segments = segments
         self.params = params

@@ -8,6 +8,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
+from .ego_layout import STEERING_KEYS, model_takes_steering, to_model_feed
 from .schema import (
     INITIAL_NOISE_SHAPE,
     MODEL_INPUT_NAMES,
@@ -109,6 +110,15 @@ class NewDpOnnxRunner:
             raise ValueError(
                 f"ONNX input mismatch; missing={expected - actual}, extra={actual - expected}"
             )
+        # Format-5 or format-6 ego inputs; frames always come in the format-5 layout.
+        self.takes_steering = model_takes_steering(self.session)
+
+    def run(
+        self, feed: dict[str, np.ndarray], extras: dict[str, np.ndarray] | None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Run a normalized format-5 ``feed`` (with ``initial_noise``), adding ``extras``'
+        steering and wheel base for a format-6 model."""
+        return self.session.run(None, to_model_feed(feed, extras, self.takes_steering))
 
     def predict(
         self, frames: list[dict[str, np.ndarray]], seeds: list[int]
@@ -121,5 +131,10 @@ class NewDpOnnxRunner:
             for key in MODEL_INPUT_NAMES
         }
         feed["initial_noise"] = seeded_initial_noise(seeds)
-        trajectory, turn_logits = self.session.run(None, feed)
+        extras = (
+            {key: np.stack([f[key] for f in frames]) for key in STEERING_KEYS}
+            if all(key in f for f in frames for key in STEERING_KEYS)
+            else None
+        )
+        trajectory, turn_logits = self.run(feed, extras)
         return decode_onnx_outputs(trajectory, turn_logits, batch_size=len(frames))
