@@ -23,6 +23,9 @@ _METRIC_SCENE_FIELDS = (
     "neighbor_agents_future",
     "neighbor_agents_past",
     "ego_shape",
+    "ego_base_link_to_front",
+    "stop_lines",
+    "line_strings",
 )
 
 

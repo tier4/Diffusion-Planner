@@ -33,15 +33,16 @@ DRAW_QUEUE_PER_WORKER = 4
 DEFAULT_PARAMETERS = {
     "arrival": {"position_tolerance_m": 2.0, "heading_tolerance_deg": 10.0},
     "centerline": {"horizon_seconds": 8.0},
-    "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
-    "traffic_light_go": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
+    "departure": {"horizon_seconds": 5.0, "minimum_displacement_m": 4.0},
+    "traffic_light_go": {"horizon_seconds": 5.0, "minimum_displacement_m": 4.0},
+    "pull_out": {"horizon_seconds": 5.0, "minimum_displacement_m": 4.0},
     "simple_turn": {"horizon_seconds": 8.0},
     "object_avoidance": {},
-    "pedestrian_yield": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
-    "vehicle_yield": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
-    "temporal_stop": {"horizon_seconds": 3.0, "maximum_forward_progress_m": 0.5},
+    "pedestrian_yield": {"horizon_seconds": 5.0, "maximum_forward_progress_m": 0.5},
+    "vehicle_yield": {"horizon_seconds": 5.0, "maximum_forward_progress_m": 0.5},
+    "temporal_stop": {"horizon_seconds": 8.0},
     "obstacle_stop": {"tolerance_m": 0.5},
-    "traffic_light_stop": {"tolerance_m": 0.5},
+    "traffic_light_stop": {"horizon_seconds": 8.0},
     "lane_change": {
         "horizon_seconds": 8.0,
         "minimum_lateral_shift_m": 1.0,
@@ -55,7 +56,8 @@ def metric_view(frame: dict[str, np.ndarray], ego_shape: np.ndarray) -> dict[str
 
     Every value comes directly from a native field, except ``ego_shape``: the scorers read
     ``[wheelbase, length, width]``, not the frame's native ``[base_link_to_front, length,
-    width]``, so the caller passes the scoring shape from ``vehicle.sim_ego_shape``. The
+    width]``, so the caller passes the scoring shape from ``vehicle.sim_ego_shape``; the native
+    ``base_link_to_front`` is kept as ``ego_base_link_to_front`` for the stop-line front. The
     packed neighbor tensor is never returned to the model; columns unused by metrics remain
     zero.
     """
@@ -81,7 +83,10 @@ def metric_view(frame: dict[str, np.ndarray], ego_shape: np.ndarray) -> dict[str
         "neighbor_agents_future": frame["neighbor_agents_future"],
         "neighbor_agents_past": packed,
         "ego_shape": ego_shape,
+        "ego_base_link_to_front": np.asarray(frame["ego_shape"][0], dtype=np.float32),
     }
+    if "stop_lines" in frame:
+        raw["stop_lines"] = frame["stop_lines"]
     return {key: torch.from_numpy(value) for key, value in raw.items()}
 
 
